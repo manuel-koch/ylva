@@ -196,6 +196,7 @@ pub enum SlashOverlay {
     },
     /// `/models` was submitted and the provider's list is being fetched.
     LoadingModels,
+    SessionPicker(super::SessionPicker),
     /// `/models` returned; the user picks the model to switch to. `choices`
     /// always holds the full fetched catalog — narrowing by `filter` only
     /// changes which indices are *displayed/selectable*, so an in-progress
@@ -287,6 +288,17 @@ pub(crate) fn slash_overlay_text_rows(overlay: &SlashOverlay) -> Vec<String> {
             .map(|info| format!("{:<8} {}", info.name, info.description))
             .collect(),
         SlashOverlay::LoadingModels => vec!["Loading models…".to_string()],
+        SlashOverlay::SessionPicker(picker) => {
+            if picker.choices.is_empty() {
+                vec![picker.status()]
+            } else {
+                picker
+                    .choices
+                    .iter()
+                    .map(|choice| format!("{}  {}", choice.last_used_at, choice.title))
+                    .collect()
+            }
+        }
         SlashOverlay::ModelPicker {
             choices, filter, ..
         } => {
@@ -382,7 +394,10 @@ impl AppState {
             }
             return;
         }
-        if matches!(self.slash_overlay, SlashOverlay::LoadingModels) {
+        if matches!(
+            self.slash_overlay,
+            SlashOverlay::LoadingModels | SlashOverlay::SessionPicker(_)
+        ) {
             return;
         }
         let suggestions = slash_command_suggestions(draft);
@@ -439,6 +454,11 @@ impl AppState {
         match &mut self.slash_overlay {
             SlashOverlay::Suggestions { choices, selected } => {
                 move_selection(selected, choices.len(), delta);
+            }
+            SlashOverlay::SessionPicker(picker) => {
+                if picker.phase == super::SessionPickerPhase::Ready {
+                    picker.move_selection(delta);
+                }
             }
             SlashOverlay::ModelPicker {
                 choices,

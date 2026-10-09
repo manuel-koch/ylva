@@ -46,6 +46,7 @@ use crate::tui_render_state::TuiState;
 mod effects;
 mod input;
 mod models;
+mod sessions;
 mod terminal;
 mod updates;
 
@@ -55,6 +56,7 @@ use models::{
     abort_pending_model_list, apply_model_list_result, resume_interrupted_model_list,
     start_model_list, wait_for_model_list, PendingModelList,
 };
+use sessions::{picker_mut, selection_error, SessionResult, SessionTasks};
 use terminal::{initialize_terminal, install_sigint_relay, set_terminal_title, TerminalTitleGuard};
 use updates::{app_state_to_tui_state, prepare_child_replay_effects, process_one_update};
 
@@ -181,6 +183,8 @@ struct TuiRuntime {
     update_rx: mpsc::UnboundedReceiver<SessionTitleUpdate>,
     display_metadata: TuiDisplayMetadata,
     input_history_limit: usize,
+    exit_snapshot: Option<crate::app::SessionExitHandle>,
+    unactivated_clones: Arc<std::sync::Mutex<Vec<uuid::Uuid>>>,
 }
 
 impl TuiRuntime {
@@ -191,6 +195,8 @@ impl TuiRuntime {
             update_rx,
             display_metadata: TuiDisplayMetadata::default(),
             input_history_limit: ProfileConfig::default().input_history_limit,
+            exit_snapshot: None,
+            unactivated_clones: Arc::default(),
         }
     }
 }
@@ -230,13 +236,16 @@ where
         update_rx: mut title_update_rx,
         display_metadata,
         input_history_limit,
+        exit_snapshot,
+        unactivated_clones,
     } = tui_runtime;
+    let mut exit_guard = agent.exit_guard(exit_snapshot);
     let mut state = AppState::new();
     state.display_metadata = display_metadata;
     state.enable_render_cache();
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
-    let replay_store = agent.store();
+    let mut replay_store = agent.store();
     if let Some(store) = replay_store.as_ref() {
         // One read rebuilds both the transcript and the compaction marker's
         // position; a snapshot written before the transcript-relative
@@ -278,8 +287,8 @@ where
             }
         }
     }
-    let cmd_tx = agent.command_sender();
-    let engine = agent.engine();
+    let mut cmd_tx = agent.command_sender();
+    let mut engine = agent.engine();
     state.engine_display = agent.engine_display_info();
     // Sorted once here so `/tools` output is stable — the registry is a
     // `HashMap`, whose iteration order is not.
@@ -292,10 +301,11 @@ where
     let mut mouse_drag = MouseDrag::default();
     let mut pending_run_ids = PendingRunIds::default();
     let mut pending_model_list: Option<PendingModelList> = None;
+    let mut session_tasks = SessionTasks::new();
     let mut title_updates_open = true;
     let mut active_title_session_id = replay_store.as_ref().map(|store| store.session_id());
 
-    let handle = agent.run();
+    let mut handle = Some(agent.run());
 
     if let Some(title_driver) = &title_driver {
         title_driver.trigger(&agent);
@@ -304,6 +314,7 @@ where
     let mut spinner_tick = tokio::time::interval(SPINNER_TICK_INTERVAL);
     spinner_tick.tick().await;
 
+    let event_loop_result: anyhow::Result<()> = async {
     if let Some(prompt) = initial_prompt {
         if !prompt.is_empty() {
             state.push_user_bubble(prompt.clone(), UserMessageState::Sent);
@@ -313,6 +324,7 @@ where
     }
 
     loop {
+        replay_store = agent.store();
         draw_frame(terminal, &mut state, &mut textarea, &agent, mouse_pos)?;
 
         let textarea_ctx = TextareaContext {
@@ -323,6 +335,111 @@ where
         };
 
         select! {
+            session_result = session_tasks.receiver.recv() => {
+                let Some(session_result) = session_result else { continue };
+                match session_result {
+                    SessionResult::Listed { session_id, picker_id, result } => {
+                        if agent.store().map(|store| store.session_id()) != Some(session_id) {
+                            continue;
+                        }
+                        match result {
+                            Ok((choices, diagnostics)) => {
+                                if let Some(picker) = picker_mut(&mut state, picker_id) {
+                                    picker.choices = choices;
+                                    picker.phase = crate::tui_reducer_state::SessionPickerPhase::Ready;
+                                    if !diagnostics.is_empty() {
+                                        picker.error = Some(diagnostics.join("; "));
+                                    }
+                                    for diagnostic in diagnostics {
+                                        tracing::warn!(%diagnostic, "session picker listing diagnostic");
+                                    }
+                                }
+                            }
+                            Err(error) => selection_error(&mut state, picker_id, error.to_string()),
+                        }
+                    }
+                    SessionResult::Prepared { session_id, picker_id, created_clone, result } => {
+                        let current = agent.store().map(|store| store.session_id()) == Some(session_id);
+                        let wanted = current && picker_mut(&mut state, picker_id)
+                            .is_some_and(|picker| picker.phase == crate::tui_reducer_state::SessionPickerPhase::Preparing);
+                        match result {
+                            Ok(mut prepared) if wanted => {
+                                abort_pending_model_list(&mut pending_model_list);
+                                let shutdown = async {
+                                    cmd_tx.send(AgentCommand::Shutdown).await?;
+                                    let mut old_handle = handle.take().expect("active runtime");
+                                    // Drain old updates while joining so its bounded UI channel cannot deadlock shutdown.
+                                    loop {
+                                        select! {
+                                            context = &mut old_handle => { drop(context??); break; }
+                                            Some(_) = ui_rx.recv() => {}
+                                        }
+                                    }
+                                    anyhow::Ok(())
+                                }.await;
+                                if let Err(error) = shutdown {
+                                    if let Some(clone_id) = created_clone {
+                                        report_unactivated_clone(&mut state, &unactivated_clones, clone_id);
+                                    }
+                                    return Err(error);
+                                }
+                                agent = prepared.agent;
+                                ui_rx = prepared.updates;
+                                cmd_tx = agent.command_sender();
+                                engine = agent.engine();
+                                exit_guard.current_store = agent.current_store_handle();
+                                let display_metadata = state.display_metadata.clone();
+                                state = AppState::new();
+                                state.display_metadata = display_metadata;
+                                state.enable_render_cache();
+                                state.replay_compaction_boundary = prepared.transcript.compaction_transcript_boundary;
+                                state.replay_messages(&prepared.transcript.messages, &prepared.child_runs, state.replay_compaction_boundary);
+                                state.prepend_input_history(std::mem::take(&mut prepared.input_history));
+                                state.engine_display = agent.engine_display_info();
+                                state.available_tool_names = agent.registry().names();
+                                state.available_tool_names.sort();
+                                pending_run_ids = PendingRunIds::default();
+                                mouse_drag = MouseDrag::default();
+                                input::clear_textarea(&mut textarea);
+                                replay_store = agent.store();
+                                active_title_session_id = replay_store.as_ref().map(|store| store.session_id());
+                                if let Some(store) = replay_store.as_ref() {
+                                    let configuration = engine.config();
+                                    store.record_model_changed(&configuration.provider_connection, &configuration.model);
+                                    if let Err(error) = set_terminal_title(Some(&store.title())) {
+                                        tracing::warn!(%error, "could not set activated session title");
+                                    }
+                                    tracing::info!(session_id = %store.session_id(), cloned = created_clone.is_some(), "session activated");
+                                }
+                                handle = Some(agent.run());
+                                if let Some(driver) = &title_driver { driver.trigger(&agent); }
+                            }
+                            result => {
+                                let newer_preparation = [
+                                    Some(&state.slash_overlay),
+                                    state.pending_input_snapshot.as_ref().map(|snapshot| &snapshot.slash_overlay),
+                                ].into_iter().flatten().any(|overlay| matches!(
+                                    overlay, SlashOverlay::SessionPicker(picker)
+                                    if picker.phase == crate::tui_reducer_state::SessionPickerPhase::Preparing && picker.identity != picker_id
+                                ));
+                                if current && !newer_preparation
+                                {
+                                    if let Err(error) = cmd_tx.try_send(AgentCommand::CancelSessionSwitch) {
+                                        tracing::warn!(%error, "could not release session replacement barrier");
+                                        state.push_notice(format!("Could not release session replacement barrier: {error}"));
+                                    }
+                                }
+                                if let Err(error) = result {
+                                    if wanted { selection_error(&mut state, picker_id, error.to_string()); }
+                                }
+                                if let Some(clone_id) = created_clone {
+                                    report_unactivated_clone(&mut state, &unactivated_clones, clone_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             title_update = title_update_rx.recv(), if title_updates_open => {
                 match title_update {
                     Some(update) if active_title_session_id == Some(update.session_id) => {
@@ -440,6 +557,26 @@ where
                         started_model_list = true;
                     }
                 }
+                    let (session_effects, immediate_slash_effects): (Vec<_>, Vec<_>) =
+                        immediate_slash_effects.into_iter().partition(|effect| matches!(
+                            effect, Effect::ListSessions | Effect::SelectSession { .. } | Effect::CancelSessionSelection
+                        ));
+                    for effect in session_effects {
+                        match effect {
+                            Effect::ListSessions => session_tasks.list(&mut state, agent.store()),
+                            Effect::SelectSession { source_id, action } => {
+                                session_tasks.prepare(&mut state, source_id, action, &agent, title_driver.as_ref());
+                            }
+                            Effect::CancelSessionSelection => {
+                                session_tasks.cancel();
+                                if let Err(error) = cmd_tx.try_send(AgentCommand::CancelSessionSwitch) {
+                                    tracing::warn!(%error, "could not cancel session replacement");
+                                    state.push_notice(format!("Could not cancel session replacement: {error}"));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 let clear_conversation_requested = immediate_slash_effects
                     .iter()
                     .any(|effect| matches!(effect, Effect::ClearConversation));
@@ -558,11 +695,54 @@ where
         }
     }
 
+    Ok(())
+    }.await;
+
     abort_pending_model_list(&mut pending_model_list);
+    {
+        let finishing = session_tasks.finish();
+        tokio::pin!(finishing);
+        loop {
+            select! {
+                () = &mut finishing => break,
+                Some(_) = ui_rx.recv() => {}
+            }
+        }
+    }
+    while let Ok(result) = session_tasks.receiver.try_recv() {
+        if let SessionResult::Prepared {
+            created_clone: Some(clone_id),
+            ..
+        } = result
+        {
+            report_unactivated_clone(&mut state, &unactivated_clones, clone_id);
+        }
+    }
     drop(cmd_tx);
     drop(agent);
-    handle.await??;
+    if let Some(mut handle) = handle {
+        loop {
+            select! {
+                result = &mut handle => { result??; break; }
+                Some(_) = ui_rx.recv() => {}
+            }
+        }
+    }
+    event_loop_result?;
     Ok(app_state_to_tui_state(state))
+}
+
+fn report_unactivated_clone(
+    state: &mut AppState,
+    unactivated_clones: &Arc<std::sync::Mutex<Vec<uuid::Uuid>>>,
+    clone_id: uuid::Uuid,
+) {
+    tracing::warn!(%clone_id, "clone created but not activated");
+    state.push_notice(format!("Clone created but not activated: {clone_id}"));
+    unactivated_clones
+        .lock()
+        .expect("clone notice mutex")
+        .push(clone_id);
 }
 
 /// Returns the footer hint string when a double-press confirm is pending.
@@ -688,18 +868,20 @@ impl App for TuiApp {
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;
-        let _exit_guard = agent.exit_guard(self.exit_snapshot);
+        let configuration_factory = Arc::new(self.factory.without_store());
+        drop(self.factory);
         let initial_session_title = agent.store().map(|store| store.title());
         set_terminal_title(initial_session_title.as_deref())?;
         let (title_update_tx, title_update_rx) = mpsc::unbounded_channel();
         let title_driver = Some(TitleDriver {
-            factory: Arc::clone(&self.factory),
+            factory: configuration_factory,
             profile: self.profile.clone(),
             attempt: TitleAttempt::default(),
             title_update_tx,
         });
 
-        run_tui_with_title(
+        let unactivated_clones = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = run_tui_with_title(
             &mut terminal,
             agent,
             ui_rx,
@@ -711,10 +893,22 @@ impl App for TuiApp {
                 update_rx: title_update_rx,
                 display_metadata: self.display_metadata,
                 input_history_limit: self.profile.input_history_limit,
+                exit_snapshot: self.exit_snapshot,
+                unactivated_clones: unactivated_clones.clone(),
             },
         )
-        .await
-        .map(|_| 0u8)
+        .await;
+        drop(terminal);
+        drop(_guard);
+        drop(_terminal_title_guard);
+        for clone_id in unactivated_clones
+            .lock()
+            .expect("clone notice mutex")
+            .iter()
+        {
+            eprintln!("Clone created but not activated: {clone_id}");
+        }
+        result.map(|_| 0u8)
     }
 }
 

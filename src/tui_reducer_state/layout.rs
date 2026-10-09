@@ -91,6 +91,8 @@ impl HelpPopupLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SlashOverlayLayout {
     pub content_area: Rect,
+    pub resume_action: Rect,
+    pub clone_action: Rect,
     /// Absolute row in the overlay's content list corresponding to the first
     /// row currently rendered in `content_area`.
     pub first_visible_row: usize,

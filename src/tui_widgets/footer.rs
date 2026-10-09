@@ -36,6 +36,18 @@ const CLARIFY_FRAMES: &[char] = &[
     '?', '?', '?', '?', '?', '?', '?', '¿', '¿', '¿', '¿', '¿', '¿', '¿',
 ];
 
+const SESSION_PICKER_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("↑/↓", "select"),
+    FooterHint::key("←/→", "resume/clone"),
+    FooterHint::key("enter", "confirm"),
+    FooterHint::key("esc", "cancel"),
+];
+
+const SESSION_PICKER_PENDING_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("esc", "cancel"),
+    FooterHint::key("F1", "help"),
+];
+
 pub(super) struct FooterHint {
     key: Option<&'static str>,
     description: &'static str,
@@ -137,6 +149,13 @@ pub(super) fn footer_keybinding_hints(
         SlashOverlay::Suggestions { .. } => SUGGESTION_FOOTER_HINTS,
         SlashOverlay::LoadingModels => LOADING_MODELS_FOOTER_HINTS,
         SlashOverlay::ModelPicker { .. } => MODEL_PICKER_FOOTER_HINTS,
+        SlashOverlay::SessionPicker(picker) => {
+            if picker.phase == crate::tui_reducer_state::SessionPickerPhase::Ready {
+                SESSION_PICKER_FOOTER_HINTS
+            } else {
+                SESSION_PICKER_PENDING_FOOTER_HINTS
+            }
+        }
         SlashOverlay::Hidden => {
             let in_child_view = state.child_view.child_view_bubble.is_some();
             let parent_agent_is_busy = state.parent_agent_mode != AgentMode::Idle;

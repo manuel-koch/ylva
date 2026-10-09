@@ -13,8 +13,25 @@
 // limitations under the License.
 
 use super::*;
+use crate::agent::protocol::agent_command_name;
 
 impl RunState {
+    async fn reset_compaction(&mut self) {
+        let manual_pending = self.compaction.trigger() == compaction::CompactionTrigger::Manual
+            && self.compaction.summary_pending();
+        let request_id = self.compaction.request_id();
+        self.compaction.reset().await;
+        if manual_pending {
+            compaction_updates::report_manual_compaction_notice(
+                &self.ui_tx,
+                self.own_run_id,
+                request_id,
+                "Manual context compaction cancelled; the model view is unchanged.",
+            )
+            .await;
+        }
+    }
+
     pub(super) async fn handle_command(&mut self, cmd: Option<AgentCommand>) -> LoopControl {
         let Some(cmd) = cmd else {
             // AgentLoop dropped → cmd_tx closed → clean shutdown:
@@ -27,7 +44,93 @@ impl RunState {
             self.current_cancel.is_some(),
             self.current_tool_cancel.is_some(),
         );
+        if self.session_switch_frozen
+            && matches!(
+                &cmd,
+                AgentCommand::Prompt(_)
+                    | AgentCommand::ClearContext
+                    | AgentCommand::Compact
+                    | AgentCommand::RecordModelChanged { .. }
+            )
+        {
+            tracing::warn!(
+                command = agent_command_name(&cmd),
+                "agent mutation rejected by session replacement barrier"
+            );
+            let _ = self
+                .ui_tx
+                .send(UiUpdate::Notice {
+                    text: "Session switch in progress; this command was not accepted.".to_string(),
+                    run_id: self.own_run_id,
+                })
+                .await;
+            return LoopControl::PollAgain;
+        }
         match cmd {
+            AgentCommand::PrepareSessionSwitch { reply } => {
+                let accepted = self.session_switch_quiescent();
+                if accepted {
+                    self.session_switch_frozen = true;
+                }
+                tracing::debug!(accepted, "session replacement barrier checked");
+                reply.send(accepted);
+                return LoopControl::PollAgain;
+            }
+            AgentCommand::CancelSessionSwitch => {
+                self.session_switch_frozen = false;
+                return LoopControl::PollAgain;
+            }
+            AgentCommand::Shutdown => {
+                if self.session_switch_frozen && self.session_switch_quiescent() {
+                    return LoopControl::Finished;
+                }
+                tracing::warn!("shutdown rejected without a quiescent session replacement barrier");
+                return LoopControl::PollAgain;
+            }
+            AgentCommand::Compact => {
+                if self.is_child {
+                    let _ = self
+                        .ui_tx
+                        .send(UiUpdate::Notice {
+                            text: "Manual compaction is available only in the root conversation."
+                                .to_string(),
+                            run_id: self.own_run_id,
+                        })
+                        .await;
+                    return LoopControl::PollAgain;
+                }
+                let outcome = self.compaction.schedule_manual_summary(
+                    &self.context,
+                    self.engine.as_ref(),
+                    self.generation,
+                );
+                let (text, request_id) = match &outcome {
+                    compaction::ManualCompactionSchedule::Started { request_id } => {
+                        ("Started manual context compaction.", Some(*request_id))
+                    }
+                    compaction::ManualCompactionSchedule::AlreadyPending { request_id } => (
+                        "Already compacting; no additional summary was queued.",
+                        *request_id,
+                    ),
+                    compaction::ManualCompactionSchedule::NothingEligible => (
+                        "Nothing eligible for manual compaction; the latest task is retained.",
+                        None,
+                    ),
+                    compaction::ManualCompactionSchedule::Unavailable => (
+                        "Manual compaction is unavailable for this conversation.",
+                        None,
+                    ),
+                };
+                tracing::info!(?request_id, ?outcome, "manual compaction command evaluated");
+                compaction_updates::report_manual_compaction_notice(
+                    &self.ui_tx,
+                    self.own_run_id,
+                    request_id,
+                    text,
+                )
+                .await;
+                return LoopControl::PollAgain;
+            }
             AgentCommand::Prompt(text) => {
                 if text.is_empty() {
                     return LoopControl::PollAgain;
@@ -271,7 +374,7 @@ impl RunState {
                 }
             }
             AgentCommand::Stop { reason } => {
-                self.compaction.reset().await;
+                self.reset_compaction().await;
                 if let Some(manager) = self.child_agent_manager.as_mut() {
                     let cancelled_spawns = manager.cancel_all();
                     let cancelled_count = cancelled_spawns.len();
@@ -467,7 +570,7 @@ impl RunState {
                 // the conversation being cleared; its result
                 // must never shape the replacement's model
                 // view. Abort the request and clear its activity.
-                self.compaction.reset().await;
+                self.reset_compaction().await;
                 self.pending_steers.clear();
                 self.pending_tools.clear();
                 if let Some(cancel_token) = self.current_cancel.take() {

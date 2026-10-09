@@ -48,6 +48,8 @@ Ylva is highly customizable to adapt to user needs.
 - [x] Slash commands in TUI
   - [x] `/models` to switch named engines or provider-catalog models
   - [x] `/clear` to clear/reset current session
+  - [x] `/session` to resume or clone a recent root session without exiting
+  - [x] `/compact` to manually summarize the root model view, retaining the transcript
 - [ ] Tracking billed token usage and cost totals in current context (an
       approximate context-size readout is already shown in the TUI footer)
 - [x] Session / context compaction

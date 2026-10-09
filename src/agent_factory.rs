@@ -57,6 +57,39 @@ pub struct AgentFactory {
     system_prompt: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct RootAgentTypeSelection {
+    pub agent_type: String,
+    pub override_changes_active_type: bool,
+}
+
+pub fn select_root_agent_type(
+    explicit_agent_type: Option<&str>,
+    stored_agent_type: Option<&str>,
+    resumed: bool,
+    profile: &ProfileConfig,
+) -> Result<RootAgentTypeSelection, String> {
+    let mut available: Vec<_> = profile.agents.keys().map(String::as_str).collect();
+    available.sort_unstable();
+    let available = available.join(", ");
+    let agent_type = explicit_agent_type
+        .or(stored_agent_type)
+        .unwrap_or(crate::DEFAULT_PROFILE_NAME);
+    if !profile.agents.contains_key(agent_type) {
+        return Err(if explicit_agent_type.is_some() {
+            format!("unknown agent type '{agent_type}' selected by --agent; available types: {available}")
+        } else {
+            format!("session stored agent type '{agent_type}' is not configured in the selected profile; pass --agent <type> to choose one of: {available}")
+        });
+    }
+    Ok(RootAgentTypeSelection {
+        agent_type: agent_type.to_string(),
+        override_changes_active_type: resumed
+            && explicit_agent_type.is_some()
+            && agent_type != stored_agent_type.unwrap_or(crate::DEFAULT_PROFILE_NAME),
+    })
+}
+
 impl AgentFactory {
     pub fn new(engines: HashMap<String, Arc<dyn Engine>>) -> Self {
         AgentFactory {
@@ -194,6 +227,42 @@ impl AgentFactory {
     pub fn with_store(mut self, store: Store) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// Configuration owner for future roots, without retaining a session lock.
+    pub fn without_store(&self) -> Self {
+        Self {
+            engines: self.engines.clone(),
+            auto_approve: self.auto_approve.clone(),
+            allowed_tools: self.allowed_tools.clone(),
+            store: None,
+            system_prompt: self.system_prompt.clone(),
+        }
+    }
+
+    /// Build an isolated configured runtime for an explicitly opened root store.
+    pub fn create_root_for_store(
+        &self,
+        profile: &ProfileConfig,
+        agent_type: &str,
+        store: Store,
+    ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
+        let engines = self
+            .engines
+            .iter()
+            .map(|(name, engine)| Ok((name.clone(), engine.configured_copy()?)))
+            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+        Self::build(
+            &engines,
+            &self.allowed_tools,
+            &self.auto_approve,
+            profile,
+            agent_type,
+            Role::Root,
+            Some(store),
+            self.system_prompt.clone(),
+            None,
+        )
     }
 
     /// Set the initial system message for root agents built by this factory.
@@ -1409,6 +1478,43 @@ mod tests {
             })
             .collect();
         AgentFactory::new(engines)
+    }
+
+    #[test]
+    fn selected_root_runtime_uses_configured_engines_without_mutating_old_runtime() {
+        crate::test_support::run_locked(async {
+            let profile = two_engine_profile();
+            let factory = factory_for_two_engine_profile(&profile);
+            let (old_root, _) = factory.create(&profile, "default", Role::Root).unwrap();
+            let old_engine = old_root.engine();
+            old_engine.switch_model("live-model").unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::create(
+                directory.path(),
+                directory.path(),
+                uuid::Uuid::new_v4(),
+                "mock",
+                "persisted-model",
+                Some("default"),
+            )
+            .unwrap();
+            let (new_root, _) = factory
+                .without_store()
+                .create_root_for_store(&profile, "default", store)
+                .unwrap();
+            assert_eq!(new_root.engine().config().model, "main-model");
+            assert_eq!(old_engine.config().model, "live-model");
+            new_root.engine().switch_model("target-live-model").unwrap();
+            assert_eq!(old_engine.config().model, "live-model");
+            assert_eq!(
+                factory
+                    .engine(&profile.default_engine)
+                    .unwrap()
+                    .config()
+                    .model,
+                "live-model"
+            );
+        });
     }
 
     #[test]

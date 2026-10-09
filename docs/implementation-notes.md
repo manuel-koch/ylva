@@ -7,6 +7,35 @@ brief and link to user-facing docs rather than repeat their contracts.
 
 ## Session lifecycle ownership
 
+`tui_driver/sessions.rs` owns blocking discovery/preparation tasks, scoped by
+initiating root and picker IDs. The pure `SessionPicker` holds typed
+Resume/Clone action and Loading/Ready/Preparing state. Results can update a
+parked input snapshot during approvals; stale results cannot publish.
+Durable clone outcomes survive cancellation and are explicitly reported.
+Preparation freezes mutations through the outer loop's authoritative
+`PrepareSessionSwitch` barrier and rechecks quiescence before publication.
+Publication joins the old loop, replaces channels/engine/tools and replay,
+retargets the exit guard, and drops obsolete stores. Child drill-in consults
+the current store, including after `/clear`, rather than a startup capture.
+
+`agent_factory::select_root_agent_type` is shared by startup and picker
+selection; only startup supplies an explicit override. `create_root_for_store`
+uses independent configured engine copies and an explicit target store.
+The TUI retains a storeless configuration factory so it does not pin the
+startup session lock after replacement; provider connection limiters remain
+shared.
+
+Manual compaction is a typed outer-loop command. Its boundary selector
+advances only through a completed prefix before the latest explicit task.
+Trigger provenance distinguishes manual failures from automatic fallback;
+manual candidates are estimated before mutating/persisting the live view and
+must strictly reduce it. Summary outcomes retain generation/request identity
+and apply at the existing safe boundaries. Request IDs remain internal to
+runtime/activity updates and structured diagnostics; user-facing manual
+compaction notices omit them. Presenter child-view handling
+rejects manual compaction before ordinary child Enter suppression, never
+forwarding it to a child or hidden root.
+
 `session_command.rs` dispatches provider-independent nested clap commands before
 profile/provider initialization or stdin consumption. Its CLI listing projection
 keeps the library's descending order while using last-use timestamps: roots and

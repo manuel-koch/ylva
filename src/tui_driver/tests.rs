@@ -30,6 +30,7 @@ use crate::tui_reducer_state::InputEvent;
 mod effects;
 mod input;
 mod models;
+mod sessions;
 mod terminal;
 mod updates;
 
@@ -247,6 +248,8 @@ async fn tui_triggers_title_generation_when_stream_done_is_drained() {
             update_rx: title_update_rx,
             display_metadata: TuiDisplayMetadata::default(),
             input_history_limit: ProfileConfig::default().input_history_limit,
+            exit_snapshot: None,
+            unactivated_clones: Arc::default(),
         },
     )
     .await;
@@ -339,6 +342,8 @@ async fn tui_loads_prior_session_user_messages_into_input_history() {
             update_rx: title_update_rx,
             display_metadata: TuiDisplayMetadata::default(),
             input_history_limit: 1,
+            exit_snapshot: None,
+            unactivated_clones: Arc::default(),
         },
     )
     .await

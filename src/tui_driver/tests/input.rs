@@ -677,16 +677,6 @@ fn command_suggestions_navigate_with_up_and_down_and_tab_completes_the_selection
 
     presenter::update(
         &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
-        &textarea,
-    );
-    assert_eq!(
-        state.selected_slash_command().map(|command| command.name),
-        Some("/tools")
-    );
-
-    presenter::update(
-        &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Up))),
         &textarea,
     );

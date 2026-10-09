@@ -192,6 +192,7 @@ pub(super) fn scroll_input_at_mouse(
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
     ) && state.layout.input_area.contains(mouse.column, mouse.row)
         && !matches!(state.focus, Focus::HelpPopup)
+        && !matches!(state.slash_overlay, SlashOverlay::SessionPicker(_))
     {
         let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
             -1i16

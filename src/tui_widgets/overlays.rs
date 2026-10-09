@@ -34,6 +34,10 @@ use crate::tui_reducer_state::{
 
 use super::chat::{apply_selection_highlight_to_line, render_chat_scrollbar};
 
+const SESSION_RESUME_BUTTON_LABEL: &str = " Resume ";
+const SESSION_CLONE_BUTTON_LABEL: &str = " Clone ";
+const SESSION_ACTION_BUTTON_GAP: &str = "  ";
+
 /// Draw the slash-command overlay as a floating panel whose bottom edge sits
 /// directly above the input box, so the list grows upward over the
 /// conversation instead of pushing the input around while the user types.
@@ -53,6 +57,10 @@ pub(super) fn draw_slash_overlay(
         SlashOverlay::LoadingModels => {
             ("Models  (querying provider connections…)".to_string(), None)
         }
+        SlashOverlay::SessionPicker(picker) => (
+            "Sessions".to_string(),
+            picker.selected().map(|_| picker.selected),
+        ),
         SlashOverlay::ModelPicker {
             choices,
             filter,
@@ -66,7 +74,19 @@ pub(super) fn draw_slash_overlay(
             }
         }
     };
-    let entries = slash_overlay_text_rows(overlay);
+    let entries = if let SlashOverlay::SessionPicker(picker) = overlay {
+        if picker.choices.is_empty() {
+            vec![picker.status()]
+        } else {
+            picker
+                .choices
+                .iter()
+                .map(|choice| session_row(choice, usize::from(input_area.width.saturating_sub(5))))
+                .collect()
+        }
+    } else {
+        slash_overlay_text_rows(overlay)
+    };
     if entries.is_empty() || input_area.width < 4 || input_area.y < 3 {
         return;
     }
@@ -86,18 +106,58 @@ pub(super) fn draw_slash_overlay(
     // Cap the panel at half the space above the input so a provider with
     // hundreds of models cannot hide the conversation entirely.
     let max_content_height = (input_area.y.saturating_sub(1) / 2).max(1);
-    let detail_lines = model_picker_detail_lines(
-        overlay,
-        engine_display,
-        input_area.width.saturating_sub(4) as usize,
-        max_content_height,
-    );
+    let detail_lines = if let SlashOverlay::SessionPicker(picker) = overlay {
+        let mut details = Vec::new();
+        if input_area.y >= 4 {
+            let button_style = |action| {
+                if picker.action == action {
+                    Style::default()
+                        .fg(LIST_SELECTION_FOREGROUND_COLOR)
+                        .bg(LIST_SELECTION_BACKGROUND_COLOR)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(LIST_TEXT_COLOR).bg(MUTED_TEXT_COLOR)
+                }
+            };
+            details.push(Line::from(vec![
+                Span::styled(
+                    SESSION_RESUME_BUTTON_LABEL,
+                    button_style(crate::tui_reducer_state::SessionAction::Resume),
+                ),
+                Span::raw(SESSION_ACTION_BUTTON_GAP),
+                Span::styled(
+                    SESSION_CLONE_BUTTON_LABEL,
+                    button_style(crate::tui_reducer_state::SessionAction::Clone),
+                ),
+            ]));
+            let status = picker.status();
+            if !picker.choices.is_empty() && !status.is_empty() {
+                details.push(Line::from(status));
+            }
+        }
+        details
+    } else {
+        model_picker_detail_lines(
+            overlay,
+            engine_display,
+            input_area.width.saturating_sub(4) as usize,
+            max_content_height,
+        )
+    };
     let detail_height = detail_lines.len() as u16;
-    let detail_separator_height = u16::from(detail_height > 0);
+    let detail_separator_height =
+        u16::from(detail_height > 0 && !matches!(overlay, SlashOverlay::SessionPicker(_)));
     let list_max_height = max_content_height
         .saturating_sub(detail_height + detail_separator_height)
         .max(1);
-    let content_height = (rows.len() as u16).min(list_max_height);
+    let mut content_height = (rows.len() as u16).min(list_max_height);
+    if matches!(overlay, SlashOverlay::SessionPicker(_)) {
+        content_height = content_height.min(
+            input_area
+                .y
+                .saturating_sub(detail_height + detail_separator_height + 2),
+        );
+    }
     let panel_height = content_height + detail_height + detail_separator_height + 2;
     let panel_area = Rect {
         x: input_area.x,
@@ -111,7 +171,9 @@ pub(super) fn draw_slash_overlay(
     // highlighted row is already visible. This prevents a mouse click from
     // repositioning the popup unnecessarily.
     let selected_row = selected.and_then(|selected| match overlay {
-        SlashOverlay::Suggestions { .. } => rows.iter().position(|row| *row == Some(selected)),
+        SlashOverlay::Suggestions { .. } | SlashOverlay::SessionPicker(_) => {
+            rows.iter().position(|row| *row == Some(selected))
+        }
         SlashOverlay::ModelPicker { .. } => rows
             .iter()
             .enumerate()
@@ -225,6 +287,25 @@ pub(super) fn draw_slash_overlay(
             Paragraph::new(detail_lines).style(Style::default().fg(MUTED_TEXT_COLOR)),
             details_area,
         );
+        if matches!(overlay, SlashOverlay::SessionPicker(_)) {
+            let resume_width = SESSION_RESUME_BUTTON_LABEL.len() as u16;
+            let clone_offset = resume_width + SESSION_ACTION_BUTTON_GAP.len() as u16;
+            overlay_layout.resume_action = Rect::new(
+                details_area.x,
+                details_area.y,
+                details_area.width.min(resume_width),
+                1,
+            );
+            overlay_layout.clone_action = Rect::new(
+                details_area.x.saturating_add(clone_offset),
+                details_area.y,
+                details_area
+                    .width
+                    .saturating_sub(clone_offset)
+                    .min(SESSION_CLONE_BUTTON_LABEL.len() as u16),
+                1,
+            );
+        }
     }
 
     if rows.len() > content_height as usize {
@@ -238,6 +319,28 @@ pub(super) fn draw_slash_overlay(
             CHAT_SCROLLBAR_COLOR,
         );
     }
+}
+
+fn session_row(choice: &crate::tui_reducer_state::SessionChoice, width: usize) -> String {
+    let prefix = format!("{}  ", choice.last_used_at);
+    let title_width = width.saturating_sub(Span::raw(&prefix).width());
+    if Span::raw(&choice.title).width() <= title_width {
+        return format!("{prefix}{}", choice.title);
+    }
+    if title_width == 0 {
+        return prefix;
+    }
+    let mut title = String::new();
+    let mut used = 0;
+    for character in choice.title.chars() {
+        let character_width = Span::raw(character.to_string()).width();
+        if used + character_width >= title_width {
+            break;
+        }
+        title.push(character);
+        used += character_width;
+    }
+    format!("{prefix}{title}…")
 }
 
 fn model_picker_detail_lines(

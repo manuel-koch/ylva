@@ -15,6 +15,107 @@
 use super::*;
 
 #[test]
+fn manual_boundary_retains_the_latest_explicit_task_and_never_repeats_a_summary() {
+    let mut context = Context::new();
+    assert_eq!(context.manual_summary_boundary(), None);
+    context.push_user("first task".to_string());
+    context.push_assistant("first answer".to_string(), AssistantStatus::Complete);
+    assert_eq!(context.manual_summary_boundary(), None);
+    let boundary = context.messages().len();
+    context.push_user("latest task".to_string());
+    context.push_implicit_user("not an explicit task".to_string());
+    context.push_assistant("latest answer".to_string(), AssistantStatus::Complete);
+    assert_eq!(context.manual_summary_boundary(), Some(boundary));
+    assert!(context.set_compaction(compaction::CompactionSnapshot {
+        boundary,
+        summary: "earlier task".to_string(),
+    }));
+    assert_eq!(context.manual_summary_boundary(), None);
+    context.push_user("another task".to_string());
+    let next_boundary = context.manual_summary_boundary().expect("new source");
+    assert!(next_boundary > boundary);
+    let source = context.summary_source(next_boundary);
+    assert_eq!(source[0], context.compaction().unwrap().summary_message());
+    assert!(source.iter().any(|message| matches!(
+        message, Message::User { content, kind: UserMessageKind::Explicit }
+            if content == "latest task"
+    )));
+}
+
+#[test]
+fn manual_boundary_never_splits_an_open_tool_group_even_across_a_new_task() {
+    let mut context = Context::new();
+    context.push_user("first task".to_string());
+    let safe_boundary = context.messages().len();
+    let call_id = Uuid::new_v4();
+    context.push_assistant_tool_call(
+        String::new(),
+        AssistantStatus::Complete,
+        vec![ToolCallRequest {
+            id: call_id,
+            name: "read".to_string(),
+            arguments: Value::Null,
+            persisted_title_arguments: Vec::new(),
+        }],
+    );
+    context.push_user("latest task".to_string());
+    assert_eq!(context.manual_summary_boundary(), Some(safe_boundary));
+    context.push_tool_error(
+        call_id,
+        "read".to_string(),
+        "completed".to_string(),
+        None,
+        Duration::ZERO,
+        vec![],
+    );
+    assert_eq!(context.manual_summary_boundary(), Some(safe_boundary));
+    let complete_boundary = context.messages().len();
+    context.push_user("new latest task".to_string());
+    assert_eq!(context.manual_summary_boundary(), Some(complete_boundary));
+}
+
+#[test]
+fn manual_candidate_estimate_is_pure_exact_and_rejects_unsafe_cuts() {
+    let mut context = Context::new();
+    context.push_user("old task ".repeat(200));
+    context.push_assistant("old answer ".repeat(200), AssistantStatus::Complete);
+    let boundary = context.messages().len();
+    context.push_user("retained task".to_string());
+    let snapshot = compaction::CompactionSnapshot {
+        boundary,
+        summary: "old work".to_string(),
+    };
+    let before = context.model_messages();
+    let estimate = context
+        .manual_compaction_estimate(&snapshot, &compaction_test_tools())
+        .expect("valid cut");
+    assert_eq!(context.model_messages(), before);
+    assert!(context.compaction().is_none());
+    assert!(!context.projection_dirty);
+    context.push_implicit_user("a concurrently added tail".to_string());
+    let estimate_with_tail = context
+        .manual_compaction_estimate(&snapshot, &compaction_test_tools())
+        .expect("tail additions do not invalidate a safe cut");
+    assert!(estimate_with_tail > estimate);
+    assert!(context.set_compaction(snapshot.clone()));
+    assert_eq!(
+        context.estimated_model_tokens(&compaction_test_tools(), test_engine().as_ref()),
+        estimate_with_tail,
+    );
+    assert_eq!(context.manual_compaction_estimate(&snapshot, &[]), None);
+    assert_eq!(
+        context.manual_compaction_estimate(
+            &compaction::CompactionSnapshot {
+                boundary: context.messages().len(),
+                summary: "unsafe".to_string(),
+            },
+            &[],
+        ),
+        None
+    );
+}
+
+#[test]
 fn recovery_budgets_markers_utf8_envelopes_and_a_shrunken_window() {
     let mut context = Context::new();
     context.push_user("retain the task".to_string());

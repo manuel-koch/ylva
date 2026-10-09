@@ -14,6 +14,197 @@
 
 use super::*;
 
+#[test]
+fn quiescent_root_shutdown_returns_context_even_after_a_provider_failure() {
+    crate::test_support::run_locked(async {
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(FailingProvider),
+            test_engine().config(),
+        ));
+        let (mut agent_loop, mut updates) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt("failed task".to_string()))
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(update) = updates.recv().await {
+                if matches!(update, UiUpdate::Error { run_id: None, .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("provider failure must become visible");
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        agent_loop
+            .send_command(AgentCommand::PrepareSessionSwitch {
+                reply: reply.into(),
+            })
+            .await;
+        assert!(receiver.await.expect("quiescent after failure"));
+        agent_loop.send_command(AgentCommand::Shutdown).await;
+        let context = handle
+            .await
+            .expect("join")
+            .expect("root shutdown is not a turn result");
+        assert!(matches!(
+            context.messages().last(),
+            Some(Message::User { content, .. }) if content == "failed task"
+        ));
+    });
+}
+
+#[test]
+fn manual_runtime_outcomes_preserve_transcript_and_refresh_only_accepted_views() {
+    crate::test_support::run_locked(async {
+        for (summary, expected_notice, should_apply) in [
+            (
+                "short summary".to_string(),
+                "Manual context compaction completed.",
+                true,
+            ),
+            (
+                "growing summary ".repeat(4_000),
+                "No reduction from manual compaction",
+                false,
+            ),
+            (String::new(), "Manual context compaction failed:", false),
+        ] {
+            let directory = tempfile::tempdir_in(".").expect("project-local store");
+            let store = crate::store::Store::create(
+                &directory.path().join("chats"),
+                directory.path(),
+                Uuid::new_v4(),
+                "mock",
+                "test-model",
+                None,
+            )
+            .expect("store");
+            let original_messages = vec![
+                Message::User {
+                    content: "older explicit task ".repeat(500),
+                    kind: UserMessageKind::Explicit,
+                },
+                Message::Assistant {
+                    content: "older completed answer ".repeat(500),
+                    status: AssistantStatus::Complete,
+                    tool_calls: vec![],
+                },
+                Message::User {
+                    content: "latest task stays verbatim".to_string(),
+                    kind: UserMessageKind::Explicit,
+                },
+            ];
+            for message in &original_messages {
+                store.record_message(message);
+            }
+            store.flush().await;
+            let persisted_before = std::fs::read(store.path()).expect("transcript before");
+            let conversation_engine = test_engine();
+            let summary_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::new(vec![summary], Duration::ZERO)),
+                conversation_engine.config(),
+            ));
+            let (mut agent_loop, mut updates) =
+                AgentLoop::new(conversation_engine, Arc::new(ToolRegistry::new()));
+            agent_loop = agent_loop
+                .with_store(store.clone())
+                .with_compaction_engine(summary_engine);
+            let handle = agent_loop.run();
+            agent_loop.send_command(AgentCommand::Compact).await;
+            let mut reported_updates = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let update = updates.recv().await.expect("runtime update");
+                    let terminal = matches!(
+                        &update,
+                        UiUpdate::Notice { text, run_id: None }
+                            if text.starts_with(expected_notice)
+                    );
+                    reported_updates.push(update);
+                    if terminal {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("manual operation must finish visibly");
+            let (reply, receiver) = tokio::sync::oneshot::channel();
+            agent_loop
+                .send_command(AgentCommand::PrepareSessionSwitch {
+                    reply: reply.into(),
+                })
+                .await;
+            assert!(receiver.await.expect("replacement barrier"));
+            agent_loop.send_command(AgentCommand::Shutdown).await;
+            let context = handle.await.expect("loop join").expect("clean shutdown");
+            while let Ok(update) = updates.try_recv() {
+                reported_updates.push(update);
+            }
+            assert_eq!(
+                &context.messages()[context.leading_system_len()..],
+                original_messages
+            );
+            assert_eq!(context.compaction().is_some(), should_apply);
+            assert_eq!(
+                reported_updates.iter().any(|update| matches!(
+                    update,
+                    UiUpdate::CompactionApplied { run_id: None, .. }
+                )),
+                should_apply
+            );
+            assert_eq!(
+                reported_updates.iter().any(|update| matches!(
+                    update,
+                    UiUpdate::ContextUsage {
+                        source: ContextUsageSource::ModelView,
+                        ..
+                    }
+                )),
+                should_apply
+            );
+            let request_id = reported_updates
+                .iter()
+                .find_map(|update| match update {
+                    UiUpdate::CompactionActivity {
+                        run_id: None,
+                        request_id,
+                        active: true,
+                    } => Some(*request_id),
+                    _ => None,
+                })
+                .expect("scoped activity");
+            assert!(reported_updates.iter().any(|update| matches!(
+                update,
+                UiUpdate::Notice { text, run_id: None }
+                    if text.starts_with(expected_notice)
+            )));
+            for update in &reported_updates {
+                if let UiUpdate::Notice { text, .. } = update {
+                    assert!(!text.contains(&request_id.to_string()));
+                    assert!(!text.contains("[compaction request"));
+                }
+            }
+            store.flush().await;
+            let replay = crate::store::Store::read_session_state(store.path()).expect("replay");
+            assert_eq!(replay.messages, original_messages);
+            assert_eq!(replay.compaction.is_some(), should_apply);
+            if should_apply {
+                assert!(matches!(
+                    context.model_messages().last(),
+                    Some(Message::User { content, kind: UserMessageKind::Explicit })
+                        if content == "latest task stays verbatim"
+                ));
+            } else {
+                assert_eq!(
+                    std::fs::read(store.path()).expect("unmodified persisted bytes"),
+                    persisted_before
+                );
+            }
+        }
+    });
+}
+
 #[tokio::test]
 async fn compaction_marker_emission_preserves_the_owning_run() {
     let (ui_tx, mut ui_rx) = mpsc::channel(4);

@@ -94,6 +94,23 @@ conversation. The original draft returns after all approvals are resolved.
 | any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices by engine name, provider connection, or model ID; no re-query |
 | `enter` | `/models` picker open | Activate the highlighted named engine's current Engine runtime selection, or route a raw catalog model by provider connection; apply only an edited named-engine reasoning effort and clear the input |
 | `esc` | `/models` picker open | Cancel without switching and clear the input |
+| `↑` / `↓`, page keys, mouse wheel | `/session` picker ready | Move the highlighted session |
+| `←` / `→` | `/session` picker ready | Select Resume / Clone; every new open defaults to Resume |
+| `left-click` on action | `/session` picker ready | Choose Resume or Clone without activating |
+| `left-click` on row | `/session` picker ready | Highlight only; `enter` confirms |
+| `enter` | `/session` picker ready | Resume the highlighted root or activate a new clone; reject while root/subagent/compaction work remains |
+| `esc` | `/session` loading or preparing | Cancel before activation and clear the draft; a durable clone is retained with an ID-bearing notice |
+| ordinary typing/paste | `/session` picker open | Ignored, never submitted as a prompt |
+| `/compact`, then `enter` | Root view | Snapshot a useful older completed prefix; retain the latest explicit task and following tail |
+| `/compact`, then `enter` | Subagent view | Show an explicit root-only refusal; do not compact the hidden root |
+
+During session preparation, rendering, help, interrupt, and quit remain
+available; prompt submission and `/models`, `/clear`, `/compact` are blocked.
+Session-picker keybinding hints appear only in the TUI footer. Resume/Clone
+buttons highlight the chosen action; clicking selects without activating.
+Approval/clarify UI temporarily owns input over an open picker, then restores
+the picker. Cancelled preparation cannot publish late. A clone already created
+is kept and its ID is shown, including after terminal restoration on quit.
 
 Only a second press of the *same* key confirms a pending double-press action.
 Pressing the other key instead starts that key's own fresh confirm window

@@ -136,7 +136,7 @@ intact.
 - `--conversation-id <uuid> --clone` starts a **new** session that replays
   an existing one: the source file is left byte-for-byte unchanged, the clone
   gets its own session id with a `cloned_from` link in its header, and all new
-  writes go to the clone. Only top-level sessions can be cloned, and a source
+  writes go to the clone. Only root sessions can be cloned, and a source
   another Ylva process holds open fails cleanly without creating anything.
   See the [clone contract](persistence.md#clone-contract).
 - `--conversation-id <uuid>` re-attaches an existing session, replays its
@@ -900,7 +900,7 @@ for the full mechanics.
 - **Input history:** `↑` on the first line loads the previous sent message
   (draft is saved); `↓` restores it; any edit while browsing copies the entry
   to a fresh draft. History includes explicit user messages from prior
-  top-level sessions in the same project, ordered oldest to newest, up to the
+  root sessions in the same project, ordered oldest to newest, up to the
   configured `input_history_limit` (default `50`); child-agent prompts are
   excluded, and duplicate prompts are collapsed by exact text with the newest
   occurrence retained.
@@ -1141,3 +1141,55 @@ and clears the input; `Esc` cancels and clears it too.
 | `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights); page keys move by a page; `←`/`→` cycle reasoning effort when available; `Enter` confirms; `Esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/tools` | Lists the tools the running agent may call, as resolved for its agent type. | Transient |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |
+| `/session` | Opens the recent-session picker in either conversation view. Select Resume or Clone, then confirm a root session. | Transient; activation and subsequent work use the selected persisted identity |
+| `/compact` | Requests a useful completed-prefix summary in the root conversation, regardless of automatic thresholds. | Transient outcomes; an applied summary is persisted |
+
+`/session` and `/compact` are TUI-only; they do not change headless CLI parsing
+or session maintenance commands. The session picker is available only within
+a running TUI, not at startup.
+
+`/session` lists recent **root sessions** in the active store's
+launch-directory group, excluding the active session and subagent transcripts.
+It includes archives, clones, and empty sessions.
+Newest persisted activity comes first, with descending UUID as the tie-breaker.
+Rows show local date/time with a UTC offset before the sanitized title;
+empty titles display `Untitled`. The fixed limit adds no configuration key.
+Browsing is allowed while busy, but activation requires root work, queued
+steers, queued/running subagents, and running/pending compaction to be quiescent.
+
+The popup title is `Sessions`; styled Resume/Clone buttons highlight the selected
+action. Keybinding hints appear only in the TUI footer. The popup shows status
+or errors only when relevant, without repeating footer controls.
+Each open starts in **Resume**. `Left`/`Right` or clicking the action selects
+Resume/Clone; arrows, page keys, and wheel navigate; clicking a row only
+highlights it. `Enter` confirms. Loading and `Resuming`/`Cloning` remain
+responsive to cancellation and quit; other mutations are blocked during
+preparation. `Esc` dismisses and clears the draft without changing the
+conversation. Selection errors keep the picker, chosen action, and old view.
+Cancelled or superseded results never activate a target.
+
+Activation restores the stored root agent type (`default` for legacy sessions)
+and constructs fresh conversation engines from that type's **current profile**
+configuration. The profile and workspace stay unchanged; launch `--agent` and
+the previous session's live `/models` selection do not override this operation.
+Missing types, locked/missing/invalid sources, and preparation failures are
+explicit errors, not fresh-session fallbacks. Resume hydrates without
+duplicating messages; Clone uses the existing [clone contract](persistence.md#clone-contract).
+A clone durably created before cancellation or activation failure is retained
+and reported as `Clone created but not activated: <id>`, including after
+terminal restoration on quit.
+
+`/compact` refuses explicitly from every subagent view. It immediately
+snapshots an eligible completed prefix, even while the root is busy, retaining
+the latest explicit task and every subsequent message verbatim. Queued steers
+are not yet part of that snapshot. An unchanged/one-task/empty context produces
+a no-op notice; an already-pending summary produces `Already compacting` without
+queueing another pass or restarting its deadline.
+The agent type's resolved compaction engine, prompt, capacity warnings, and
+timeout still apply. At a safe boundary, application requires strictly lower
+model-view token estimates and intact task/tool-pair boundaries. Failure,
+timeout, empty summaries, and `No reduction` leave the view unchanged and
+do not themselves trigger lossy fallback. Independent request-pressure recovery
+and automatic subagent compaction are unchanged. Original messages and tool
+bubbles remain browsable, including after resume, with the persisted marker
+and refreshed footer estimate.

@@ -106,6 +106,25 @@ fn help_sections() -> Vec<HelpSection> {
             entries: vec![],
         },
         HelpSection {
+            heading: "Slash commands",
+            entries: crate::slash_command::SLASH_COMMANDS
+                .iter()
+                .map(|command| help_entry(command.name, command.description))
+                .collect(),
+        },
+        HelpSection {
+            heading: "Session picker",
+            entries: vec![
+                help_entry("↑ / ↓, page keys, wheel", "Select a root session"),
+                help_entry("← / →, action click", "Choose Resume / Clone"),
+                help_entry(
+                    "enter",
+                    "Confirm when root/subagent/compaction work is idle",
+                ),
+                help_entry("esc", "Cancel; retain and report any created clone"),
+            ],
+        },
+        HelpSection {
             heading: "Build",
             entries: vec![],
         },

@@ -41,6 +41,7 @@ mod input_history;
 mod layout;
 mod model_picker;
 mod selection;
+mod session_picker;
 
 pub use conversation::{
     project_messages, result_section_ids, ActiveSubagentCounts, BubbleExpansionTarget, ChatEntry,
@@ -59,6 +60,7 @@ pub(crate) use model_picker::{
 };
 pub use model_picker::{InputSnapshot, ModelChoice, SlashOverlay};
 pub use selection::{BannerDragSelection, ChatSelection};
+pub use session_picker::{SessionAction, SessionChoice, SessionPicker, SessionPickerPhase};
 
 // ─── Shared TUI constants ────────────────────────────────────────────────────
 

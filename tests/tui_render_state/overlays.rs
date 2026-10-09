@@ -14,6 +14,292 @@
 
 use super::*;
 
+#[test]
+fn session_picker_renders_actions_timestamps_and_elided_titles_on_small_terminals() {
+    use ylva::tui_reducer_state::{
+        SessionAction, SessionChoice, SessionPicker, SessionPickerPhase, SlashOverlay,
+    };
+    for (width, height) in [(120, 40), (60, 15), (30, 9), (10, 6)] {
+        let mut state = ylva::AppState::new();
+        let mut picker = SessionPicker::loading();
+        picker.phase = SessionPickerPhase::Ready;
+        picker.action = SessionAction::Clone;
+        picker.choices = vec![SessionChoice {
+            session_id: uuid::Uuid::new_v4(),
+            title: "Long safe 日本語 title ".repeat(20),
+            last_used_at: "2026-01-01 12:00:00 +01:00".into(),
+        }];
+        state.slash_overlay = SlashOverlay::SessionPicker(picker);
+        let buffer = render_offline(&mut state, width, height);
+        let text = rendered_text(&buffer);
+        if width >= 30 {
+            assert_eq!(text.matches("Resume").count(), 1, "{text}");
+            assert_eq!(text.matches("Clone").count(), 1, "{text}");
+            assert!(!text.contains("[x]"), "{text}");
+            assert!(!text.contains("[ ]"), "{text}");
+            assert!(text.contains("2026-01-01"), "{text}");
+            let layout = state.layout.slash_overlay;
+            assert_eq!(layout.resume_action.width, " Resume ".len() as u16);
+            assert_eq!(layout.clone_action.width, " Clone ".len() as u16);
+            assert_ne!(
+                buffer[(layout.resume_action.x, layout.resume_action.y)].bg,
+                buffer[(layout.clone_action.x, layout.clone_action.y)].bg
+            );
+            let popup_rows = text
+                .lines()
+                .skip(usize::from(layout.content_area.y.saturating_sub(1)))
+                .take(usize::from(
+                    layout.clone_action.y.saturating_sub(layout.content_area.y) + 3,
+                ))
+                .collect::<Vec<_>>();
+            assert!(popup_rows[0].contains("Sessions"), "{text}");
+            assert!(!popup_rows[0].contains("Resume"), "{text}");
+            assert!(
+                popup_rows
+                    .iter()
+                    .all(|row| !row.contains("enter") && !row.contains("esc")),
+                "{text}"
+            );
+        }
+        if width >= 60 {
+            assert!(text.contains("+01:00"), "{text}");
+            assert!(text.contains('…'), "{text}");
+            assert_eq!(text.matches("enter confirm").count(), 1, "{text}");
+            assert_eq!(text.matches("esc cancel").count(), 1, "{text}");
+        }
+    }
+}
+
+#[test]
+fn session_picker_buttons_use_rendered_hit_targets_without_activating() {
+    use ylva::tui_reducer_state::{
+        Effect, InputEvent, SessionAction, SessionChoice, SessionPicker, SessionPickerPhase,
+        SlashOverlay,
+    };
+    let textarea = ylva::TextareaContext {
+        is_empty: true,
+        text: String::new(),
+        cursor_row: 0,
+        cursor_row_is_last: true,
+    };
+    for (width, height) in [(120, 40), (60, 15), (30, 9)] {
+        let mut state = ylva::AppState::new();
+        let mut picker = SessionPicker::loading();
+        picker.phase = SessionPickerPhase::Ready;
+        let session_id = uuid::Uuid::new_v4();
+        picker.choices.push(SessionChoice {
+            session_id,
+            title: "target".into(),
+            last_used_at: "date".into(),
+        });
+        state.slash_overlay = SlashOverlay::SessionPicker(picker);
+        for action in [SessionAction::Clone, SessionAction::Resume] {
+            render_offline(&mut state, width, height);
+            let layout = state.layout.slash_overlay;
+            let button = match action {
+                SessionAction::Resume => layout.resume_action,
+                SessionAction::Clone => layout.clone_action,
+            };
+            assert!(button.width > 0);
+            let effects = ylva::presenter::update(
+                &mut state,
+                ylva::TuiEvent::Mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: button.x,
+                    row: button.y,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &textarea,
+            );
+            assert!(effects.is_empty());
+            let SlashOverlay::SessionPicker(picker) = &state.slash_overlay else {
+                panic!()
+            };
+            assert_eq!(picker.action, action);
+            assert_eq!(
+                ylva::presenter::update(
+                    &mut state,
+                    ylva::TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
+                        KeyCode::Enter,
+                        KeyModifiers::NONE
+                    ))),
+                    &textarea
+                ),
+                vec![Effect::SelectSession {
+                    source_id: session_id,
+                    action
+                }]
+            );
+        }
+    }
+}
+
+#[test]
+fn session_picker_status_and_errors_are_shown_once_without_popup_keybindings() {
+    use ylva::tui_reducer_state::{SessionChoice, SessionPicker, SessionPickerPhase, SlashOverlay};
+    for (phase, empty, error, expected) in [
+        (
+            SessionPickerPhase::Loading,
+            true,
+            None,
+            "Loading sessions...",
+        ),
+        (SessionPickerPhase::Preparing, false, None, "Resuming..."),
+        (
+            SessionPickerPhase::Ready,
+            true,
+            None,
+            "No other root sessions.",
+        ),
+        (
+            SessionPickerPhase::Ready,
+            false,
+            Some("Selection failed"),
+            "Selection failed",
+        ),
+    ] {
+        for (width, height) in [(120, 40), (60, 15), (30, 9)] {
+            let mut state = ylva::AppState::new();
+            let mut picker = SessionPicker::loading();
+            picker.phase = phase;
+            picker.error = error.map(str::to_string);
+            if !empty {
+                picker.choices.push(SessionChoice {
+                    session_id: uuid::Uuid::new_v4(),
+                    title: "target".into(),
+                    last_used_at: "date".into(),
+                });
+            }
+            state.slash_overlay = SlashOverlay::SessionPicker(picker);
+            let text = rendered_text(&render_offline(&mut state, width, height));
+            assert_eq!(text.matches(expected).count(), 1, "{text}");
+            assert!(
+                !text.contains("Esc cancels") && !text.contains("Enter confirms"),
+                "{text}"
+            );
+            assert!(!text.contains("loading models"), "{text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn typed_manual_compaction_preserves_persisted_transcript_and_replays_marker() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ylva::Store::create(
+        directory.path(),
+        directory.path(),
+        uuid::Uuid::new_v4(),
+        "mock",
+        "test",
+        Some("default"),
+    )
+    .unwrap();
+    let (backend, last_buffer, _) = InspectableTestBackend::new(140, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let conversation = Arc::new(EngineImpl::new(
+        Arc::new(MockProvider::new(
+            vec!["completed answer".into()],
+            Duration::ZERO,
+        )),
+        common::test_engine_config(),
+    ));
+    let summary = Arc::new(EngineImpl::new(
+        Arc::new(MockProvider::new(
+            vec!["Short factual summary.".into()],
+            Duration::ZERO,
+        )),
+        common::test_engine_config(),
+    ));
+    let (agent, updates) = AgentLoop::new(conversation, Arc::new(ToolRegistry::new()));
+    let agent = agent
+        .with_compaction_engine(summary)
+        .with_store(store.clone());
+    let (actions, action_rx) = mpsc::channel(64);
+    let run = tokio::spawn(async move {
+        tui_driver::run_tui(
+            &mut terminal,
+            agent,
+            updates,
+            None,
+            action_rx,
+            &mut NoopClipboard,
+        )
+        .await
+        .unwrap()
+    });
+    type_and_enter(&actions, &"Older useful fact. ".repeat(30)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            store.flush().await;
+            if ylva::Store::read_messages(store.path()).unwrap().len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    type_and_enter(&actions, "Latest explicit task must remain verbatim").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            store.flush().await;
+            if ylva::Store::read_messages(store.path()).unwrap().len() == 4 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let original = ylva::Store::read_messages(store.path()).unwrap();
+    type_and_enter(&actions, "/compact").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let text = rendered_text(&last_buffer.lock().unwrap());
+            if text.contains("messages summarized") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("manual compaction marker should render");
+    drop(actions);
+    let state = run.await.unwrap();
+    store.flush().await;
+    let persisted = ylva::Store::read_session_state(store.path()).unwrap();
+    assert_eq!(persisted.messages, original);
+    assert_eq!(persisted.compaction_transcript_boundary, Some(2));
+    assert_eq!(
+        persisted
+            .events
+            .iter()
+            .filter(|event| matches!(event, ylva::StoreEvent::Compaction { .. }))
+            .count(),
+        1
+    );
+    assert!(state.chat_entries.iter().any(|entry| matches!(
+        entry,
+        ChatEntry::CompactionMarker {
+            summarized_messages: 2
+        }
+    )));
+    let mut replay = ylva::AppState::new();
+    replay.replay_messages(
+        &persisted.messages,
+        &[],
+        persisted.compaction_transcript_boundary,
+    );
+    assert!(replay.chat_entries.iter().any(|entry| matches!(
+        entry,
+        ChatEntry::CompactionMarker {
+            summarized_messages: 2
+        }
+    )));
+}
+
 #[tokio::test]
 async fn compaction_capacity_warning_is_rendered_at_startup_before_any_prompt() {
     let (backend, last_buffer, _) = InspectableTestBackend::new(120, 40);

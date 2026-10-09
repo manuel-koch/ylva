@@ -15,6 +15,66 @@
 use super::*;
 
 #[test]
+fn session_picker_mouse_selects_actions_and_rows_without_confirmation() {
+    use crate::tui_reducer_state::{
+        SessionAction, SessionChoice, SessionPicker, SessionPickerPhase,
+    };
+    let mut picker = SessionPicker::loading();
+    picker.phase = SessionPickerPhase::Ready;
+    picker.choices = (0..3)
+        .map(|index| SessionChoice {
+            session_id: Uuid::from_u128(index),
+            title: "title".into(),
+            last_used_at: "date".into(),
+        })
+        .collect();
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::SessionPicker(picker);
+    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(0, 4, 40, 3);
+    state.layout.slash_overlay.resume_action = ratatui::layout::Rect::new(0, 8, 10, 1);
+    state.layout.slash_overlay.clone_action = ratatui::layout::Rect::new(14, 8, 9, 1);
+    for (column, row, kind) in [
+        (
+            15,
+            8,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        ),
+        (
+            2,
+            6,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        ),
+        (2, 6, MouseEventKind::ScrollUp),
+    ] {
+        let mouse = crossterm::event::MouseEvent {
+            column,
+            row,
+            kind,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea()).is_empty());
+    }
+    let SlashOverlay::SessionPicker(picker) = &mut state.slash_overlay else {
+        panic!()
+    };
+    assert_eq!(picker.action, SessionAction::Clone);
+    assert_eq!(picker.selected, 1);
+    picker.phase = SessionPickerPhase::Preparing;
+    let mouse = crossterm::event::MouseEvent {
+        column: 2,
+        row: 8,
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea()).is_empty());
+    let SlashOverlay::SessionPicker(picker) = &state.slash_overlay else {
+        panic!()
+    };
+    assert_eq!(picker.action, SessionAction::Clone);
+    assert_eq!(picker.selected, 1);
+}
+
+#[test]
 fn clarify_choice_click_fills_textarea() {
     let mut state = AppState::new();
     state.mode = TuiMode::ClarifyPending {
@@ -548,6 +608,7 @@ fn slash_overlay_drag_uses_the_scrolled_content_row() {
     state.layout.slash_overlay = crate::tui_reducer_state::SlashOverlayLayout {
         content_area: ratatui::layout::Rect::new(1, 5, 37, 2),
         first_visible_row: 1,
+        ..Default::default()
     };
 
     update(

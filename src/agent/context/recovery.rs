@@ -15,6 +15,23 @@
 use super::*;
 
 impl Context {
+    /// Advance as far as safely possible without summarizing the latest task.
+    /// The advancing cut excludes unchanged summaries and recovery handoffs.
+    pub(crate) fn manual_summary_boundary(&self) -> Option<usize> {
+        let latest_task = self.messages.iter().rposition(|message| {
+            matches!(
+                message,
+                Message::User {
+                    kind: UserMessageKind::Explicit,
+                    ..
+                }
+            )
+        })?;
+        compaction::safe_boundaries_from(&self.messages, self.model_view_start())
+            .into_iter()
+            .rfind(|boundary| *boundary > self.model_view_start() && *boundary <= latest_task)
+    }
+
     /// Oldest-first token budget the prefix a new summary must cover so the
     /// model view lands at `target_tokens`: the smallest prefix (counted from
     /// the first message in the visible tail) whose removal

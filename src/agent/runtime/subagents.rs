@@ -19,6 +19,10 @@ impl RunState {
         &mut self,
         finish_result: crate::child_agent_manager::FinishResult,
     ) -> LoopControl {
+        if self.session_switch_frozen {
+            tracing::debug!("ignoring child completion while session replacement is frozen");
+            return LoopControl::PollAgain;
+        }
         // The tool-calling wire protocol allows exactly one
         // `role:"tool"` response per `tool_call_id`; that slot
         // was already spent on `spawn_subagent`'s immediate

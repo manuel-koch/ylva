@@ -20,6 +20,10 @@ impl RunState {
         event_generation: u64,
         event: AgentEvent,
     ) -> LoopControl {
+        if self.session_switch_frozen {
+            tracing::debug!("ignoring agent event while session replacement is frozen");
+            return LoopControl::PollAgain;
+        }
         if event_generation != self.generation {
             tracing::debug!(
                 event_generation,
@@ -32,6 +36,7 @@ impl RunState {
         }
         match event {
             AgentEvent::StreamDone { partial } => {
+                self.current_cancel = None;
                 self.context
                     .push_assistant(partial, AssistantStatus::Complete);
                 // Signal the driver only after the completed

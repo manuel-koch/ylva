@@ -33,9 +33,47 @@ pub enum AgentMode {
     Aborting,
 }
 
+/// A clonable, single-use reply for the runtime's session replacement barrier.
+/// Equality compares the reply identity, not whether it has already been sent.
+#[derive(Debug, Clone)]
+pub struct SessionSwitchReply(Arc<Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>);
+
+impl From<tokio::sync::oneshot::Sender<bool>> for SessionSwitchReply {
+    fn from(sender: tokio::sync::oneshot::Sender<bool>) -> Self {
+        Self(Arc::new(Mutex::new(Some(sender))))
+    }
+}
+
+impl PartialEq for SessionSwitchReply {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for SessionSwitchReply {}
+
+impl SessionSwitchReply {
+    pub(super) fn send(self, accepted: bool) {
+        if let Some(sender) = self.0.lock().expect("session switch reply poisoned").take() {
+            let _ = sender.send(accepted);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {
     Prompt(String),
+    /// Summarize a completed prefix while retaining the latest explicit task.
+    Compact,
+    /// Freeze mutations if the receiving root runtime is authoritatively idle.
+    /// Repeating this command rechecks quiescence while keeping the freeze.
+    PrepareSessionSwitch {
+        reply: SessionSwitchReply,
+    },
+    /// Release a previously accepted replacement barrier.
+    CancelSessionSwitch,
+    /// Exit only after an accepted replacement barrier remains quiescent.
+    Shutdown,
     Stop {
         reason: String,
     },
@@ -90,6 +128,10 @@ pub enum AgentCommand {
 pub(super) fn agent_command_name(command: &AgentCommand) -> &'static str {
     match command {
         AgentCommand::Prompt(_) => "prompt",
+        AgentCommand::Compact => "compact",
+        AgentCommand::PrepareSessionSwitch { .. } => "prepare_session_switch",
+        AgentCommand::CancelSessionSwitch => "cancel_session_switch",
+        AgentCommand::Shutdown => "shutdown",
         AgentCommand::Stop { .. } => "stop",
         AgentCommand::ApproveTool { .. } => "approve_tool",
         AgentCommand::DenyTool { .. } => "deny_tool",
@@ -175,7 +217,12 @@ pub(super) fn log_agent_command(
                 "agent command received"
             );
         }
-        AgentCommand::AbortClarify | AgentCommand::ClearContext => {
+        AgentCommand::AbortClarify
+        | AgentCommand::ClearContext
+        | AgentCommand::Compact
+        | AgentCommand::PrepareSessionSwitch { .. }
+        | AgentCommand::CancelSessionSwitch
+        | AgentCommand::Shutdown => {
             tracing::debug!(
                 command = command_name,
                 ?mode,

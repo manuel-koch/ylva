@@ -139,6 +139,9 @@ fn keyboard_main(
     if matches!(state.mode, TuiMode::ClarifyPending { .. }) {
         return keyboard_clarify(state, event, textarea);
     }
+    if matches!(state.slash_overlay, SlashOverlay::SessionPicker(_)) {
+        return keyboard_session_picker(state, event);
+    }
     match event {
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
@@ -386,7 +389,13 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
 /// already-fetched catalog live instead of being silently dropped. None of
 /// these commands commits a user bubble: a command is an instruction to the
 /// TUI, not a turn in the conversation.
-fn slash_command_effects(invocation: SlashCommandInvocation) -> Vec<Effect> {
+fn slash_command_effects(state: &mut AppState, invocation: SlashCommandInvocation) -> Vec<Effect> {
+    if matches!(state.active_view, ConversationView::Child { .. })
+        && invocation.command == SlashCommand::Compact
+    {
+        state.push_notice("Manual compaction is available only in the root conversation.".into());
+        return vec![Effect::ClearTextarea];
+    }
     match invocation.command {
         SlashCommand::Models => {
             let filter = invocation.argument;
@@ -398,6 +407,50 @@ fn slash_command_effects(invocation: SlashCommandInvocation) -> Vec<Effect> {
         }
         SlashCommand::Tools => vec![Effect::ClearTextarea, Effect::ShowTools],
         SlashCommand::Clear => vec![Effect::ClearTextarea, Effect::ClearConversation],
+        SlashCommand::Session => vec![Effect::ClearTextarea, Effect::ListSessions],
+        SlashCommand::Compact => vec![Effect::ClearTextarea, Effect::Compact],
+    }
+}
+
+fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
+    match event {
+        InputEvent::Escape => {
+            state.slash_overlay = SlashOverlay::Hidden;
+            vec![Effect::CancelSessionSelection, Effect::ClearTextarea]
+        }
+        InputEvent::CtrlC => handle_ctrl_c_generic(state, true),
+        InputEvent::SigInt => vec![Effect::StopAgent],
+        InputEvent::ShowHelp => {
+            state.focus = Focus::HelpPopup;
+            vec![]
+        }
+        InputEvent::KeyInput(key) => {
+            let SlashOverlay::SessionPicker(picker) = &mut state.slash_overlay else {
+                return vec![];
+            };
+            if picker.phase != crate::tui_reducer_state::SessionPickerPhase::Ready {
+                return vec![];
+            }
+            match key.code {
+                KeyCode::Up => picker.move_selection(-1),
+                KeyCode::Down => picker.move_selection(1),
+                KeyCode::PageUp => picker.move_selection(-SLASH_OVERLAY_PAGE_SIZE),
+                KeyCode::PageDown => picker.move_selection(SLASH_OVERLAY_PAGE_SIZE),
+                KeyCode::Left => picker.action = crate::tui_reducer_state::SessionAction::Resume,
+                KeyCode::Right => picker.action = crate::tui_reducer_state::SessionAction::Clone,
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    if let Some(choice) = picker.selected() {
+                        return vec![Effect::SelectSession {
+                            source_id: choice.session_id,
+                            action: picker.action,
+                        }];
+                    }
+                }
+                _ => {}
+            }
+            vec![]
+        }
+        InputEvent::Paste(_) => vec![],
     }
 }
 
@@ -431,10 +484,13 @@ fn handle_key_main(
             KeyCode::Enter if key_event.modifiers.is_empty() => {
                 if let Some(command) = state.selected_slash_command().map(|info| info.command) {
                     state.slash_overlay = SlashOverlay::Hidden;
-                    return slash_command_effects(SlashCommandInvocation {
-                        command,
-                        argument: None,
-                    });
+                    return slash_command_effects(
+                        state,
+                        SlashCommandInvocation {
+                            command,
+                            argument: None,
+                        },
+                    );
                 }
             }
             _ => {}
@@ -495,6 +551,15 @@ fn handle_key_main(
         }
 
         KeyCode::Enter => {
+            if let Some(invocation) = parse_slash_command_invocation(&textarea.text) {
+                if matches!(
+                    invocation.command,
+                    SlashCommand::Session | SlashCommand::Compact
+                ) {
+                    state.slash_overlay = SlashOverlay::Hidden;
+                    return slash_command_effects(state, invocation);
+                }
+            }
             // Viewing a subagent's drill-in transcript: the child
             // conversation doesn't accept input (only one agent loop is
             // driven at a time), and silently steering the *root* agent
@@ -515,7 +580,7 @@ fn handle_key_main(
             // indented line stays ordinary chat.
             if let Some(invocation) = parse_slash_command_invocation(raw_text) {
                 state.slash_overlay = SlashOverlay::Hidden;
-                return slash_command_effects(invocation);
+                return slash_command_effects(state, invocation);
             }
             let text = dedent(raw_text);
             let mode_is_idle = matches!(state.mode, TuiMode::Idle);

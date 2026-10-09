@@ -20,7 +20,7 @@ surface.
 | `--log-format <format>` | enum | `text`, `json` | `text` | Output format. `text` is human-readable; `json` produces JSONL (one JSON object per line). |
 | `--agent <type>` | string | any agent type available in the selected profile | see below | Root agent type to run as. On a fresh session it defaults to `default`; on a resume it defaults to the type the session last stored. An explicit value always wins and becomes the latest stored selection, so later resumes without the flag continue under it. A type that is absent from the selected profile is a startup error (exit code `2`), unless the flag explicitly names an available type that resolves a stale stored name. See [Resuming a session](#resuming-a-session). |
 | `--conversation-id <uuid>` | uuid | any persisted session id | *none* | Resume the named session: its `.jsonl` file is re-attached for append instead of a fresh session being started. An unknown id is a hard error (exit code `2`) — never a silent fresh session. With `--clone` it names the session to copy instead. See `docs/persistence.md`. |
-| `--clone` | none | — | — | Copy the session named by `--conversation-id` into a **brand-new** session instead of resuming it: the source's full logical event stream is replayed into the new file, the source file stays byte-for-byte unchanged, and all new writes go to the clone. Requires `--conversation-id <uuid>` (exit code `2` without it), and the source must be a top-level session that no other Ylva process holds open — a child transcript or a locked source is a hard error (exit code `2`) that creates nothing. See [Clone contract](persistence.md#clone-contract). |
+| `--clone` | none | — | — | Copy the session named by `--conversation-id` into a **brand-new** session instead of resuming it: the source's full logical event stream is replayed into the new file, the source file stays byte-for-byte unchanged, and all new writes go to the clone. Requires `--conversation-id <uuid>` (exit code `2` without it), and the source must be a root session that no other Ylva process holds open — a child transcript or a locked source is a hard error (exit code `2`) that creates nothing. See [Clone contract](persistence.md#clone-contract). |
 | `--auto-approve-read` | none | — | — | Skip the human-approval prompt for `read` tool calls. |
 | `--auto-approve-write` | none | — | — | Skip the human-approval prompt for `write` tool calls. |
 | `--auto-approve-glob` | none | — | — | Skip the human-approval prompt for `glob` tool calls. |
@@ -129,6 +129,8 @@ For locking, archive recovery and platform constraints, see
 
 ## Resuming a session
 
+Launches start a fresh session unless `--conversation-id` or `--clone` is supplied.
+
 On exit — success, error, or an unrecognized-tool/provider failure, as long as
 a session was persisted — Ylva prints the session id and a ready-to-paste
 command to stderr:
@@ -153,6 +155,9 @@ When the run used an explicit `--profile <name>`, the hint includes it too
 needs no flag to resume with the same configuration). See
 `docs/persistence.md` for how `--conversation-id` re-attaches the session
 file, and `--clone` starts a copy of it instead.
+
+For resume or clone within a running TUI, see
+[`/session`](features.md#slash-commands).
 
 ## Prompt resolution
 

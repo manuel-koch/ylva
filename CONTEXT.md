@@ -217,6 +217,10 @@ delegated subagents.
 The persisted record of one conversation run, including its messages and
 delegation events.
 
+**Root session**:
+A session owned by a root agent, distinct from a subagent's persisted transcript.
+_Avoid_: top-level session
+
 **Conversation ID**:
 The identifier used to reopen a persisted session for continuation.
 
@@ -235,5 +239,5 @@ _Avoid_: copied child history
 A new session that replays another session's logical events under its own
 session ID, linked back by `cloned_from`. The source file is only read — it
 is never repaired, appended to, or rewritten — and all new writes go to the
-clone. Only top-level sessions can be cloned.
+clone. Only root sessions can be cloned.
 _Avoid_: copy, fork, duplicate

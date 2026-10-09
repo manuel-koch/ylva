@@ -15,6 +15,140 @@
 use super::*;
 
 #[test]
+fn session_and_compact_commands_never_submit_prompts_in_either_view() {
+    for child in [false, true] {
+        for command in ["/session", "/compact"] {
+            for suggestions in [false, true] {
+                let mut state = AppState::new();
+                if child {
+                    let run_id = tracked_child(&mut state);
+                    state.switch_to_child_view(run_id);
+                }
+                let textarea = TextareaContext {
+                    text: if suggestions {
+                        command[..3].into()
+                    } else {
+                        format!("{command} \n")
+                    },
+                    ..empty_textarea()
+                };
+                if suggestions {
+                    state.refresh_slash_overlay(&textarea.text);
+                }
+                let effects = update(
+                    &mut state,
+                    TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+                    &textarea,
+                );
+                assert!(!effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::SubmitPrompt { .. })));
+                if command == "/session" {
+                    assert!(effects.contains(&Effect::ListSessions));
+                } else if child {
+                    assert!(!effects.contains(&Effect::Compact));
+                    assert!(state.chat_entries.iter().any(|entry| matches!(entry,
+                        ChatEntry::Notice { text } if text.contains("only in the root"))));
+                } else {
+                    assert!(effects.contains(&Effect::Compact));
+                }
+                assert!(state.queued_steer_texts.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_session_picker_enter_does_not_dispatch_and_escape_cancels_loading() {
+    use crate::tui_reducer_state::{SessionPicker, SessionPickerPhase};
+    for phase in [
+        SessionPickerPhase::Loading,
+        SessionPickerPhase::Ready,
+        SessionPickerPhase::Preparing,
+    ] {
+        let mut picker = SessionPicker::loading();
+        picker.phase = phase;
+        let mut state = AppState::new();
+        state.slash_overlay = SlashOverlay::SessionPicker(picker);
+        assert!(update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &empty_textarea()
+        )
+        .is_empty());
+        assert_eq!(
+            update(
+                &mut state,
+                TuiEvent::Input(InputEvent::Escape),
+                &empty_textarea()
+            ),
+            vec![Effect::CancelSessionSelection, Effect::ClearTextarea]
+        );
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+    }
+}
+
+#[test]
+fn session_picker_owns_keyboard_action_selection_confirmation_and_cancellation() {
+    use crate::tui_reducer_state::{
+        SessionAction, SessionChoice, SessionPicker, SessionPickerPhase,
+    };
+    let mut picker = SessionPicker::loading();
+    let source_id = Uuid::new_v4();
+    picker.choices = vec![SessionChoice {
+        session_id: source_id,
+        title: "Untitled".into(),
+        last_used_at: "date".into(),
+    }];
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::SessionPicker(picker);
+    for event in [
+        InputEvent::Paste("ordinary prompt".into()),
+        InputEvent::KeyInput(key_event(KeyCode::Enter)),
+    ] {
+        assert!(update(&mut state, TuiEvent::Input(event), &empty_textarea()).is_empty());
+    }
+    let SlashOverlay::SessionPicker(picker) = &mut state.slash_overlay else {
+        panic!()
+    };
+    picker.phase = SessionPickerPhase::Ready;
+    for code in [
+        KeyCode::Right,
+        KeyCode::Down,
+        KeyCode::PageDown,
+        KeyCode::Char('x'),
+    ] {
+        assert!(update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(code))),
+            &empty_textarea()
+        )
+        .is_empty());
+    }
+    assert_eq!(
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &empty_textarea()
+        ),
+        vec![Effect::SelectSession {
+            source_id,
+            action: SessionAction::Clone
+        }]
+    );
+    assert_eq!(
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &empty_textarea()
+        ),
+        vec![Effect::CancelSessionSelection, Effect::ClearTextarea]
+    );
+    assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+    assert_eq!(SessionPicker::loading().action, SessionAction::Resume);
+}
+
+#[test]
 fn model_picker_pages_selection_with_page_keys() {
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {

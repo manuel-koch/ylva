@@ -193,7 +193,11 @@ pub(super) fn route_mouse(
                 } else {
                     state.help_scroll_down(1);
                 }
-            } else if matches!(state.slash_overlay, SlashOverlay::ModelPicker { .. }) {
+            } else if matches!(
+                state.slash_overlay,
+                SlashOverlay::ModelPicker { .. } | SlashOverlay::SessionPicker(_)
+            ) && !matches!(state.focus, Focus::ToolApproval { .. })
+            {
                 state.move_slash_selection(if scroll_up { -1 } else { 1 });
             } else if in_clarify_banner {
                 if scroll_up {
@@ -252,6 +256,30 @@ pub(super) fn route_mouse(
             // drag. Model-picker clicks also change the highlight only;
             // confirmation remains an explicit Enter action.
             if state.slash_overlay.is_visible() {
+                if let SlashOverlay::SessionPicker(picker) = &mut state.slash_overlay {
+                    if picker.phase == crate::tui_reducer_state::SessionPickerPhase::Ready {
+                        if state
+                            .layout
+                            .slash_overlay
+                            .resume_action
+                            .contains((column, row).into())
+                        {
+                            picker.action = crate::tui_reducer_state::SessionAction::Resume;
+                        } else if state
+                            .layout
+                            .slash_overlay
+                            .clone_action
+                            .contains((column, row).into())
+                        {
+                            picker.action = crate::tui_reducer_state::SessionAction::Clone;
+                        } else if let Some(index) = state.layout.slash_overlay.row_at(column, row) {
+                            if index < picker.choices.len() {
+                                picker.selected = index;
+                            }
+                        }
+                    }
+                    return vec![];
+                }
                 if let Some(overlay_row) = state.layout.slash_overlay.row_at(column, row) {
                     state.slash_overlay_drag_start = Some((column, row));
                     state.slash_overlay_drag_end = Some((column, row));

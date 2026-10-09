@@ -1,12 +1,12 @@
 # Slash commands in TUI
 
-The `/models`, `/tools`, and `/clear` commands are implemented. A child
-conversation can already be opened by double-clicking its `spawn_subagent`
-bubble; the proposed `/agent` command would add an aggregate run list, not the
-basic drill-in. Session resume still uses explicit `--conversation-id`; there
-is no `/session` picker. These additions remain deferred.
-
 ## /agent
+
+A child conversation can already be opened by double-clicking its `spawn_subagent`
+bubble; the proposed `/agent` command would add an aggregate run list, not the
+basic drill-in. The implemented commands are documented in
+[features](../features.md#slash-commands). Only the proposals below remain
+deferred.
 
 Using `/agent` to show overlay of all (sub) agents that are avail in current
 session and what their status is ( running / done / error ).
@@ -26,21 +26,6 @@ For every agent show info:
 - title/label ( elided if too long, ensure the other info can be displayed )
 - result (sucess/error), if avail
 - elapsed run duration ( counting up while the run is in progress )
-
-## /session
-
-Show recent x sessions in a popup list to let other choose one to resume a session.
-
-Display the following info for each session:
-
-- date/time of last usage ( derived from the last message in conversation )
-- title
-
-Sort sessions by descending last-used timestamp ( i.e. newest first ).
-
-## /compact
-
-Trigger conversation compaction for current agent conversation.
 
 ## /status
 

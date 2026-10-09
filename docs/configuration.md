@@ -102,7 +102,7 @@ engine = "ollama/local"
 | `utility_engine` | string (optional) | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent. |
 | `default_model` | string (optional) | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Syntax-highlighting theme. Defaults to `dark`. See [features — rendering](./features.md#tui-architecture). |
-| `input_history_limit` | number | Maximum number of explicit messages from prior top-level sessions loaded into TUI input history. Defaults to `50`; `0` disables prior-session history. |
+| `input_history_limit` | number | Maximum number of explicit messages from prior root sessions loaded into TUI input history. Defaults to `50`; `0` disables prior-session history. |
 | `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
 | `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind; its endpoint and credentials belong to this connection. |
 | `[engines.<name>]` | table | A named engine — see [Engine configuration](#engine-configuration) below. |
@@ -128,6 +128,9 @@ When the root agent changes its active provider connection or model through
 `/models`, a child spawned afterwards that resolves the same named engine uses
 that active engine. A child whose agent configuration names a different engine
 uses that named engine instead of inheriting the root's active selection.
+
+For how TUI `/session` and `/compact` use the current profile and per-agent
+settings, see [slash commands](features.md#slash-commands).
 
 An engine's `provider_connection` refers to the map key under
 `[provider_connections.*]`; the connection's `provider` field is the

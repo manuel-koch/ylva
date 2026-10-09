@@ -61,7 +61,7 @@ policy.
 
 ### Confirmed session-picker policy
 
-- List up to 32 other top-level sessions in the active store's project group;
+- List up to 32 root sessions in the active store's project group;
   include archives and clones, exclude subagent transcripts and the active root.
   The limit is fixed, not a profile setting. Use the shared persisted-activity
   timestamp and its existing UUID tie-breaker, not last-message-only time.
@@ -130,19 +130,19 @@ renumbered. Each step includes its focused verification; update the relevant
 documentation alongside behavior changes, with the final documentation pass in
 step 10. Do not stage or commit without explicit consent.
 
-1. [ ] Establish the focused baseline and owner-local fixtures for the confirmed
+1. [x] Establish the focused baseline and owner-local fixtures for the confirmed
    contract. Start by opening `src/slash_command.rs`; the first baseline is
    `cargo test --lib slash_command::tests`. Recheck
    `docs/architecture-design-records/` before implementation. Use existing mock
    engines and temporary stores for red/green feature assertions in later steps.
-2. [ ] Add no-argument `Session` and `Compact` entries in
+2. [x] Add no-argument `Session` and `Compact` entries in
    `src/slash_command.rs`. Extend command-to-effect translation in
    `src/presenter/keyboard.rs` and the typed effect surface in
    `src/tui_reducer_state/events.rs`. Do not send either command as a prompt.
    Test exact names, suggestions, partial-command Enter, Tab, trailing
    whitespace, rejected arguments, leading-space ordinary chat, and the
    shared `/c` prefix without changing `/clear` behavior.
-3. [ ] Implement the session-picker state alongside `SlashOverlay` and
+3. [x] Implement the session-picker state alongside `SlashOverlay` and
    owner-local state tests under `src/tui_reducer_state/`. Load candidates from
    the active store's `chats_root()` and `project_key()` using
    `Store::list_sessions_with_diagnostics`. Apply the settled root/current
@@ -151,7 +151,7 @@ step 10. Do not stage or commit without explicit consent.
    the UI event loop. Test empty lists, untitled/duplicate titles, offset-aware
    timestamp ordering, ties, archives, and exclusion before truncating. A fixture
    with more than 32 eligible roots must return exactly the newest 32.
-4. [ ] Wire asynchronous picker loading and result handling in
+4. [x] Wire asynchronous picker loading and result handling in
    `src/tui_driver.rs` and its effect owner; add a driver-local session owner
    module only if needed to keep responsibilities separate. Tag load results
    with the initiating session/picker identity so cancel, `/clear`, and a newer
@@ -173,7 +173,7 @@ step 10. Do not stage or commit without explicit consent.
    by keyboard/mouse, default restoration on reopen, and action retention after
    a failed selection. Check the displayed action agrees with the dispatched
    effect; modified Enter is not a required clone control.
-5. [ ] Add explicit root-session replacement orchestration to `TuiApp` and the
+5. [x] Add explicit root-session replacement orchestration to `TuiApp` and the
    driver. Expose a factory construction path that takes a target store and
    resolved root agent type without retaining the startup store as a hidden
    owner. Extract reusable root-agent selection from `src/main.rs` into a
@@ -214,7 +214,7 @@ step 10. Do not stage or commit without explicit consent.
    failure, cancellation before and after creation, activation failure after
    creation, and one clone per explicit confirmation. Assert failed source
    validation creates no session.
-6. [ ] Complete successful-switch publication atomically from the user's
+6. [x] Complete successful-switch publication atomically from the user's
    perspective: replace the agent, receiver, sender, engine handle, available
    tools, and displayed metadata; rebuild transcript/child lifecycle replay,
    compaction marker, input history, and view/cache state using the existing
@@ -237,7 +237,7 @@ step 10. Do not stage or commit without explicit consent.
    Route created-but-not-activated notices to the still-active TUI even after
    picker dismissal; on quit, report that clone ID after terminal restoration
    without replacing the exit identity of the session that was actually active.
-7. [ ] Add a typed manual-compaction command and explicit scheduling outcomes
+7. [x] Add a typed manual-compaction command and explicit scheduling outcomes
    in `src/agent/protocol.rs`, `src/agent/runtime/commands.rs`, and
    `src/agent/compaction.rs`. Reuse the existing summary request builder,
    engine/prompt/timeout resolution, outcome channel, and safe application
@@ -261,21 +261,22 @@ step 10. Do not stage or commit without explicit consent.
    compare estimates against the same current transcript/tail and tool schemas,
    and require strictly positive savings. Test zero savings, growth, concurrent
    tail additions, and absence of compaction events on rejection.
-8. [ ] Route root-view `/compact` through the presenter and driver effect to
+8. [x] Route root-view `/compact` through the presenter and driver effect to
    the root command channel. Explicitly reject it in every subagent view,
    whether live, queued, finished, or replay-only; do not send `ForChild` or
    compact the hidden root. Handle exact typed commands and suggestion Enter
    consistently before ordinary child-view Enter suppression; allow `/session`
    there without accidentally enabling ordinary child prompts or changing
-   existing child behavior for other commands. Carry root request identity
-   through visible acceptance/no-op/duplicate/failure notices, activity,
-   application, and refreshed context estimates. Surface command-channel
+   existing child behavior for other commands. Keep root request identity
+   internal to runtime/activity updates and structured diagnostics, not in
+   visible acceptance/no-op/duplicate/failure notices. Preserve scoped
+   application and refreshed context estimates. Surface command-channel
    delivery errors instead of implying acceptance. Test view changes during
    compaction, busy safe application, stop/clear/session replacement, and late
    outcomes. Preserve automatic child compaction and approval/clarify routing.
-9. [ ] Add assembled regression coverage in
+9. [x] Add assembled regression coverage in
    `tests/tui_render_state/overlays.rs`,
-   `tests/tui_render_state/subagents.rs`, and the appropriate existing agent,
+   `tests/tui_render_state/subagent_views.rs`, and the appropriate existing agent,
    factory, store, and driver owner-local suites. Drive commands through
    textarea/suggestions rather than testing only helper calls. Use temporary
    stores and mock engines, drain bounded UI channels concurrently, and wait
@@ -286,21 +287,25 @@ step 10. Do not stage or commit without explicit consent.
    explicit notice when creation already succeeded. Keep `tests/session_commands.rs` and
    `tests/store_persistence_e2e.rs` behavior unchanged; export necessary
    library surfaces through `src/lib.rs`, not the binary.
-10. [ ] Finish documentation reconciliation in `README.md`,
+10. [x] Finish documentation reconciliation in `README.md`,
     `docs/features.md`, `docs/keybindings.md`, `docs/persistence.md`,
     `docs/implementation-notes.md`, `docs/configuration.md`,
     `docs/cli-options.md`, and `docs/ideas/slash-commands.md`. Describe the
     settled picker eligibility/limit/timestamp and cancellation policies,
     same-process resume/clone/type/engine selection, root-only manual compaction,
     failure/no-reduction behavior, and keyboard/mouse controls.
-    Keep fresh-start/no-startup-picker and CLI contracts explicit. Remove only
+    Keep fresh-start/no-startup-picker and CLI contracts explicit. Keep
+    `docs/cli-options.md` focused on launch options with a short `/session`
+    cross-reference and `docs/configuration.md` focused on configuration with
+    a short slash-command cross-reference; document TUI slash-command behavior
+    in `docs/features.md` and controls in `docs/keybindings.md`. Remove only
     the implemented `/session` and `/compact` proposals from the ideas backlog;
     preserve `/agent` and `/status`. Document current-profile resume/clone behavior,
     action controls, source immutability, shared historical child transcripts,
     and retained-but-not-activated clone notices;
     the fixed picker cap adds no configuration key. Reconcile the ideas file's
     introductory deferred status without overwriting unrelated user edits.
-11. [ ] Run focused owner/assembled tests during the steps, format/check all
+11. [x] Run focused owner/assembled tests during the steps, format/check all
     changed Markdown with `rumdl` and `.rumdl.toml`, then run the mandatory
     implementation gates `make format lint` and `make test-coverage`.
     Resolve failures and preserve at least 80% aggregate line coverage;
@@ -309,7 +314,7 @@ step 10. Do not stage or commit without explicit consent.
 
 ## Implementation Hints
 
-- User-confirmed picker decisions: fixed cap 32; other top-level sessions in
+- User-confirmed picker decisions: fixed cap 32; root sessions in
   the current store's launch-directory group; archives/clones/empty sessions
   included; active root and child transcripts excluded. The shared
   persisted-activity definition intentionally replaces the idea's

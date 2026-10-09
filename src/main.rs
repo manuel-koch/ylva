@@ -349,7 +349,7 @@ fn main() {
             // for the headless path — it must not pre-populate the interactive UI.
             let explicit_prompt = explicit_prompt(prompt_from_flag.clone());
             TuiApp::new(
-                Arc::clone(&factory),
+                factory,
                 profile,
                 root_agent_type.agent_type.clone(),
                 explicit_prompt,
@@ -453,16 +453,7 @@ fn resume_hint_text(
     hint
 }
 
-/// The root agent type this run executes as, plus whether an explicit
-/// `--agent` flag changed the type the session was already using.
-#[derive(Debug)]
-struct RootAgentTypeSelection {
-    agent_type: String,
-    /// `true` only for a resumed session whose stored type an explicit
-    /// `--agent` flag replaced: that is the case that must be appended as an
-    /// `agent_type_changed` record so later resumes keep the selection.
-    override_changes_active_type: bool,
-}
+use ylva::agent_factory::{select_root_agent_type, RootAgentTypeSelection};
 
 /// Resolve the root agent type for this run: `--agent` first, else the type
 /// stored on the resumed session, else `default`. Every candidate is checked
@@ -483,52 +474,6 @@ fn resolve_root_agent_type(
         conversation_id.is_some(),
         profile,
     )
-}
-
-/// Pure core of [`resolve_root_agent_type`], separated so the selection rules
-/// are unit-testable without touching the session store.
-fn select_root_agent_type(
-    explicit_agent_type: Option<&str>,
-    stored_agent_type: Option<&str>,
-    resumed: bool,
-    profile: &ProfileConfig,
-) -> Result<RootAgentTypeSelection, String> {
-    let available = available_agent_types(profile);
-    match explicit_agent_type {
-        Some(explicit) => {
-            if !profile.agents.contains_key(explicit) {
-                return Err(format!(
-                    "unknown agent type '{explicit}' selected by --agent; \
-                     available types: {available}"
-                ));
-            }
-            let previous = stored_agent_type.unwrap_or(ylva::DEFAULT_PROFILE_NAME);
-            Ok(RootAgentTypeSelection {
-                agent_type: explicit.to_string(),
-                override_changes_active_type: resumed && explicit != previous,
-            })
-        }
-        None => {
-            let agent_type = stored_agent_type.unwrap_or(ylva::DEFAULT_PROFILE_NAME);
-            if !profile.agents.contains_key(agent_type) {
-                return Err(format!(
-                    "session stored agent type '{agent_type}' is not configured in the \
-                     selected profile; pass --agent <type> to choose one of: {available}"
-                ));
-            }
-            Ok(RootAgentTypeSelection {
-                agent_type: agent_type.to_string(),
-                override_changes_active_type: false,
-            })
-        }
-    }
-}
-
-/// Every configured agent type, sorted, for error messages.
-fn available_agent_types(profile: &ProfileConfig) -> String {
-    let mut names: Vec<&str> = profile.agents.keys().map(String::as_str).collect();
-    names.sort_unstable();
-    names.join(", ")
 }
 
 /// The root agent type a session last stored — the last

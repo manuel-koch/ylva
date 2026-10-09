@@ -54,6 +54,7 @@ struct RunState {
     pending_child_finish_reprompt: bool,
     iteration_cap_exceeded: Option<String>,
     stream_error: Option<String>,
+    session_switch_frozen: bool,
     execution_span: tracing::Span,
 }
 
@@ -65,6 +66,24 @@ enum LoopControl {
 }
 
 impl RunState {
+    fn session_switch_quiescent(&self) -> bool {
+        !self.is_child
+            && self.mode == AgentMode::Idle
+            && self.pending_steers.is_empty()
+            && self.pending_tools.is_empty()
+            && self.current_cancel.is_none()
+            && self.current_tool_cancel.is_none()
+            && self.cancelled_run_ids.is_empty()
+            && self
+                .child_agent_manager
+                .as_ref()
+                .is_none_or(|manager| manager.outstanding_count() == 0)
+            && !self.compaction.summary_pending()
+            && !self.pending_child_finish_reprompt
+            && !self.request_waiting_for_startup_checks
+            && self.model_change_capacity_check.is_none()
+    }
+
     fn start_request(&mut self) {
         let span = self
             .context
@@ -331,6 +350,7 @@ impl AgentLoop {
                 pending_child_finish_reprompt,
                 iteration_cap_exceeded,
                 stream_error,
+                session_switch_frozen: false,
                 execution_span: parent_span.clone(),
             };
 
@@ -400,6 +420,8 @@ impl AgentLoop {
                                             // serial tool queue. Otherwise it stays pending
                                             // until the next completed turn.
                                             if let Some(outcome) = outcome {
+                                                let manual = state.compaction.trigger() == compaction::CompactionTrigger::Manual;
+                                                let request_id = state.compaction.request_id();
                                                 let summary_failure = match &outcome {
                                                     compaction::CompactionOutcome::SummaryFailed { reason, .. } => {
                                                         Some(reason.clone())
@@ -410,7 +432,8 @@ impl AgentLoop {
                                                     continue;
                                                 }
                                                 let waiting_continuation = state.compaction.take_waiting_continuation();
-                                                if (state.mode == AgentMode::Idle || waiting_continuation) && state.pending_tools.is_empty() {
+                                                if (state.mode == AgentMode::Idle || waiting_continuation) && state.pending_tools.is_empty()
+                                                    && (!manual || summary_failure.is_none() || waiting_continuation) {
                                                     let prefix_dropped = sweep_compaction_and_report(
                                                         &mut state.compaction,
                                                         &mut state.context,
@@ -428,7 +451,16 @@ impl AgentLoop {
                                                     state.advance_tool_queue(false).await;
                                                 }
                                                 if let Some(reason) = summary_failure {
-                                                    report_compaction_failure(&state.ui_tx, state.own_run_id, &reason).instrument(session_span.clone()).await;
+                                                    if manual {
+                                                        compaction_updates::report_manual_compaction_notice(
+                                                            &state.ui_tx,
+                                                            state.own_run_id,
+                                                            request_id,
+                                                            &format!("Manual context compaction failed: {reason}. The model view is unchanged."),
+                                                        ).instrument(session_span.clone()).await;
+                                                    } else {
+                                                        report_compaction_failure(&state.ui_tx, state.own_run_id, &reason).instrument(session_span.clone()).await;
+                                                    }
                                                 }
                                             }
                                         }

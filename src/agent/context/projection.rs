@@ -15,6 +15,52 @@
 use super::*;
 
 impl Context {
+    /// Estimate an exact manual candidate without changing any projection state.
+    /// Its cut must still advance and preserve the current latest explicit task.
+    pub(in crate::agent) fn manual_compaction_estimate(
+        &self,
+        snapshot: &compaction::CompactionSnapshot,
+        tools: &[ToolSchema],
+    ) -> Option<usize> {
+        let boundary = snapshot.boundary;
+        let latest_task = self.messages.iter().rposition(|message| {
+            matches!(
+                message,
+                Message::User {
+                    kind: UserMessageKind::Explicit,
+                    ..
+                }
+            )
+        })?;
+        if snapshot.summary.trim().is_empty()
+            || boundary <= self.model_view_start()
+            || boundary > latest_task
+            || !compaction::safe_boundaries_from(&self.messages, self.leading_system_len())
+                .contains(&boundary)
+        {
+            return None;
+        }
+        let system_tokens: usize = self.entries[..self.leading_system_len()]
+            .iter()
+            .map(|entry| entry.token_count)
+            .sum();
+        let tail_tokens: usize = (boundary..self.messages.len())
+            .map(|index| {
+                self.model_overrides
+                    .get(&index)
+                    .map_or(self.entries[index].token_count, |message| {
+                        estimate_message_tokens(self.estimator, message)
+                    })
+            })
+            .sum();
+        Some(
+            system_tokens
+                + estimate_message_tokens(self.estimator, &snapshot.summary_message())
+                + tail_tokens
+                + self.tool_schema_token_count(tools),
+        )
+    }
+
     pub(in crate::agent) fn project_last_harness_notice(&mut self, notice: String) {
         let index = self.messages.len() - 1;
         assert!(matches!(

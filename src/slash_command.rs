@@ -30,6 +30,10 @@ pub enum SlashCommand {
     Tools,
     /// Drop the in-memory conversation and start a fresh persisted session.
     Clear,
+    /// Resume or clone another persisted root conversation.
+    Session,
+    /// Summarize a completed prefix of the root model view.
+    Compact,
 }
 
 /// Static description of one entry in the slash-command allowlist.
@@ -78,6 +82,20 @@ pub const SLASH_COMMANDS: &[SlashCommandInfo] = &[
         aliases: &[],
         description: "Show the tools the agent may call",
         command: SlashCommand::Tools,
+        accepts_argument: false,
+    },
+    SlashCommandInfo {
+        name: "/compact",
+        aliases: &[],
+        description: "Compact the root conversation without deleting its transcript",
+        command: SlashCommand::Compact,
+        accepts_argument: false,
+    },
+    SlashCommandInfo {
+        name: "/session",
+        aliases: &[],
+        description: "Resume or clone a recent session",
+        command: SlashCommand::Session,
         accepts_argument: false,
     },
 ];
@@ -159,6 +177,22 @@ mod tests {
         assert_eq!(parse_slash_command("/models"), Some(SlashCommand::Models));
         assert_eq!(parse_slash_command("/tools"), Some(SlashCommand::Tools));
         assert_eq!(parse_slash_command("/clear"), Some(SlashCommand::Clear));
+        for (name, command) in [
+            ("/session", SlashCommand::Session),
+            ("/compact", SlashCommand::Compact),
+        ] {
+            assert_eq!(parse_slash_command(name), Some(command));
+            assert_eq!(parse_slash_command(&format!("{name} \n")), Some(command));
+            assert_eq!(parse_slash_command(&format!("{name} extra")), None);
+            assert_eq!(parse_slash_command(&format!(" {name}")), None);
+        }
+        assert_eq!(
+            slash_command_suggestions("/c")
+                .iter()
+                .map(|info| info.command)
+                .collect::<Vec<_>>(),
+            [SlashCommand::Clear, SlashCommand::Compact]
+        );
     }
 
     #[test]

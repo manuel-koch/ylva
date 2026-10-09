@@ -52,7 +52,24 @@ pub(in crate::agent) async fn sweep_compaction_and_report(
 ) -> bool {
     let boundary_before = context.compaction().map(|snapshot| snapshot.boundary);
     let result = compaction.sweep(context, engine, tools, generation);
-    if result.summary_applied {
+    if let Some(outcome) = &result.manual_outcome {
+        let (text, request_id) = match outcome {
+            compaction::ManualCompactionResult::Applied { request_id } => (
+                "Manual context compaction completed. The latest task and following messages \
+                 remain in the model view; the full transcript is preserved.",
+                *request_id,
+            ),
+            compaction::ManualCompactionResult::NoReduction { request_id } => (
+                "No reduction from manual compaction; the model view is unchanged.",
+                *request_id,
+            ),
+            compaction::ManualCompactionResult::Ineligible { request_id } => (
+                "Manual compaction could not safely apply; the model view is unchanged.",
+                *request_id,
+            ),
+        };
+        report_manual_compaction_notice(ui_tx, run_id, request_id, text).await;
+    } else if result.summary_applied {
         let _ = ui_tx
             .send(UiUpdate::Notice {
                 text: "Background context compaction completed. Older context was summarized; \
@@ -103,6 +120,21 @@ pub(in crate::agent) async fn sweep_compaction_and_report(
         }
     }
     result.prefix_dropped || result.summary_applied
+}
+
+pub(in crate::agent) async fn report_manual_compaction_notice(
+    ui_tx: &mpsc::Sender<UiUpdate>,
+    run_id: Option<Uuid>,
+    request_id: Option<Uuid>,
+    text: &str,
+) {
+    tracing::debug!(?run_id, ?request_id, "manual compaction notice reported");
+    let _ = ui_tx
+        .send(UiUpdate::Notice {
+            text: text.to_string(),
+            run_id,
+        })
+        .await;
 }
 
 pub(in crate::agent) async fn send_context_usage_estimate(

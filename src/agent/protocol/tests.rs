@@ -197,3 +197,15 @@ fn construct_and_pattern_match_protocol_enums() {
     assert_eq!(AgentMode::ToolPending, AgentMode::ToolPending);
     assert_eq!(AgentMode::ClarifyPending, AgentMode::ClarifyPending);
 }
+#[tokio::test]
+async fn session_switch_reply_clones_compare_by_identity_and_send_only_once() {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let reply = super::SessionSwitchReply::from(sender);
+    let duplicate = reply.clone();
+    let (other_sender, _) = tokio::sync::oneshot::channel();
+    assert_eq!(reply, duplicate);
+    assert_ne!(reply, super::SessionSwitchReply::from(other_sender));
+    reply.send(true);
+    duplicate.send(false);
+    assert!(receiver.await.expect("barrier reply"));
+}

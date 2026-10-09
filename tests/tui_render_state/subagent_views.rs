@@ -15,6 +15,52 @@
 use super::*;
 
 #[test]
+fn exact_and_suggested_child_compact_refuse_and_session_remains_available() {
+    use ylva::tui_reducer_state::{Effect, InputEvent};
+    for typed in ["/compact \n", "/comp", "/session \n", "/ses"] {
+        let mut state = ylva::AppState::new();
+        let run_id = uuid::Uuid::new_v4();
+        present_render_event(
+            &mut state,
+            ylva::DomainEvent::ChildAgentStarted {
+                run_id,
+                call_id: uuid::Uuid::new_v4(),
+                agent_type: "reviewer".into(),
+                task: "task".into(),
+                label: "Replay-only subagent".into(),
+            },
+        );
+        state.switch_to_child_view(run_id);
+        state.refresh_slash_overlay(typed);
+        let textarea = ylva::TextareaContext {
+            text: typed.into(),
+            is_empty: false,
+            ..empty_textarea_context()
+        };
+        let effects = ylva::presenter::update(
+            &mut state,
+            ylva::TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+            &textarea,
+        );
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SubmitPrompt { .. } | Effect::Compact)));
+        if typed.starts_with("/comp") {
+            assert!(state.chat_entries.iter().any(|entry| matches!(entry, ChatEntry::Notice { text } if text.contains("only in the root"))));
+        } else {
+            assert!(effects.contains(&Effect::ListSessions));
+        }
+        assert!(matches!(
+            state.active_view,
+            ylva::tui_reducer_state::ConversationView::Child { .. }
+        ));
+    }
+}
+
+#[test]
 fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
     use ylva::DomainEvent;
     let mut state = ylva::AppState::new();

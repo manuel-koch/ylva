@@ -174,6 +174,10 @@ pub(super) async fn execute_effects(
             // (they are split out of the batch by `split_slash_effects`
             // before this function ever sees them).
             Effect::ClearConversation
+            | Effect::ListSessions
+            | Effect::SelectSession { .. }
+            | Effect::CancelSessionSelection
+            | Effect::Compact
             | Effect::ShowTools
             | Effect::LoadChildTranscript { .. }
             | Effect::ListModels { .. }
@@ -190,6 +194,10 @@ pub(super) fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Eff
         matches!(
             effect,
             Effect::ClearConversation
+                | Effect::ListSessions
+                | Effect::SelectSession { .. }
+                | Effect::CancelSessionSelection
+                | Effect::Compact
                 | Effect::ShowTools
                 | Effect::ListModels { .. }
                 | Effect::SwitchModel(_)
@@ -211,6 +219,12 @@ pub(super) async fn execute_slash_effects(
 ) {
     for effect in effects {
         match effect {
+            Effect::Compact => {
+                if let Err(error) = cmd_tx.try_send(AgentCommand::Compact) {
+                    tracing::warn!(%error, "could not deliver manual compaction command");
+                    state.push_notice(format!("Could not request compaction: {error}"));
+                }
+            }
             Effect::ClearConversation => {
                 state.clear_conversation();
                 let _ = cmd_tx.send(AgentCommand::ClearContext).await;

@@ -348,7 +348,9 @@ impl DomainEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// Send the current textarea contents as a prompt.
-    SubmitPrompt { steer: bool },
+    SubmitPrompt {
+        steer: bool,
+    },
     /// Replace the textarea with an empty, freshly-configured default.
     ClearTextarea,
     /// Park the message-draft input state: snapshot the textarea lines and
@@ -367,10 +369,15 @@ pub enum Effect {
     /// Feed a pasted string (dedented) into the textarea.
     Paste(String),
     /// Send `AgentCommand::ApproveTool { id }` to the agent.
-    ApproveTool { id: Uuid },
+    ApproveTool {
+        id: Uuid,
+    },
     /// Send `AgentCommand::DenyTool { id, reason }` to the agent.
     /// `reason` is the user-typed denial text; empty when no reason was given.
-    DenyTool { id: Uuid, reason: String },
+    DenyTool {
+        id: Uuid,
+        reason: String,
+    },
     /// Send `AgentCommand::AnswerClarify(answer)` to the agent.
     AnswerClarify(String),
     /// Send `AgentCommand::AbortClarify` to the agent (user cancelled without answering).
@@ -380,15 +387,23 @@ pub enum Effect {
     /// Quit the TUI event loop.
     Quit,
     /// Load a history entry into the textarea (driver replaces textarea content).
-    LoadHistory { direction: HistoryDirection },
+    LoadHistory {
+        direction: HistoryDirection,
+    },
     /// Exit history browsing mode (driver restores live draft).
     ExitBrowsing,
     /// Place the textarea cursor at the given terminal cell coordinates.
-    PlaceCursorAtMousePos { column: u16, row: u16 },
+    PlaceCursorAtMousePos {
+        column: u16,
+        row: u16,
+    },
     /// Start a textarea text selection at the current cursor position.
     StartInputSelection,
     /// Extend the textarea text selection to the given terminal cell.
-    ExtendInputSelection { column: u16, row: u16 },
+    ExtendInputSelection {
+        column: u16,
+        row: u16,
+    },
     /// Copy the given text to the OS clipboard.
     CopyToClipboard(String),
     /// Finalize and copy the current textarea text selection.
@@ -397,11 +412,22 @@ pub enum Effect {
     ClearConversation,
     /// `/tools` — show the tools the running agent may call.
     ShowTools,
+    ListSessions,
+    SelectSession {
+        source_id: Uuid,
+        action: super::SessionAction,
+    },
+    CancelSessionSelection,
+    Compact,
     /// Read a replay-discovered child transcript before entering its view.
-    LoadChildTranscript { run_id: Uuid },
+    LoadChildTranscript {
+        run_id: Uuid,
+    },
     /// `/models` — fetch the provider's model list for the picker,
     /// optionally narrowed by a typed model filter.
-    ListModels { filter: Option<String> },
+    ListModels {
+        filter: Option<String>,
+    },
     /// A provider-connection/model was picked: activate it and confirm in the transcript.
     SwitchModel(ModelSelection),
 }
