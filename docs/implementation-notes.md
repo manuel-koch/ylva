@@ -751,7 +751,11 @@ events scroll the textarea, and the next frame synchronizes the offset.
 The footer readout follows the request path end to end: the OpenAI-compatible
 provider calls the estimate callback before response headers arrive; the agent
 loop maps it to `UiUpdate::ContextUsage` or
-`UiUpdate::ChildContextUsage { run_id, .. }`. The driver maps these to
+`UiUpdate::ChildContextUsage { run_id, .. }`. `AgentLoop::run` also emits a
+`ModelView` baseline estimate once at startup (before any prompt), so fresh and
+resumed sessions populate the footer without waiting for a request. Handling
+`AgentCommand::RecordModelChanged` re-emits the same `ModelView` estimate, so a
+model switch that changes the context window refreshes the percentage. The driver maps these to
 root/child domain events; the presenter stores root usage on
 `AppState::context_usage` and child usage on the matching `ChildConversation`.
 `AppState::active_context_usage` selects the readout for the currently rendered

@@ -381,15 +381,24 @@ fn startup_checks_unused_agent_types_with_their_independent_compaction_engines()
             let handle = root.run();
             if dedicated_summarizer {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                assert!(
-                    updates.try_recv().is_err(),
-                    "a dedicated sufficiently large agent summarizer must not warn",
-                );
+                while let Ok(update) = updates.try_recv() {
+                    assert!(
+                        !matches!(update, UiUpdate::Notice { .. }),
+                        "a dedicated sufficiently large agent summarizer must not warn, got {update:?}",
+                    );
+                }
             } else {
-                let update = tokio::time::timeout(Duration::from_secs(1), updates.recv())
-                    .await
-                    .expect("an unused agent must be checked without any prompt")
-                    .expect("startup notice");
+                let update = tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        match updates.recv().await {
+                            Some(UiUpdate::ContextUsage { .. }) => continue,
+                            other => break other,
+                        }
+                    }
+                })
+                .await
+                .expect("an unused agent must be checked without any prompt")
+                .expect("startup notice");
                 assert!(matches!(update, UiUpdate::Notice { text, run_id: None }
                             if text.contains("Agent type 'quick'")
                                 && text.contains("68812 tokens")
@@ -454,10 +463,17 @@ fn startup_groups_equivalent_capacity_warnings_without_merging_different_budgets
                 .create(&profile, "default", Role::Root)
                 .expect("root builds");
             let handle = root.run();
-            let first_update = tokio::time::timeout(Duration::from_secs(1), updates.recv())
-                .await
-                .expect("startup warning arrives before any prompt")
-                .expect("startup notice");
+            let first_update = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    match updates.recv().await {
+                        Some(UiUpdate::ContextUsage { .. }) => continue,
+                        other => break other,
+                    }
+                }
+            })
+            .await
+            .expect("startup warning arrives before any prompt")
+            .expect("startup notice");
             let mut notices = Vec::new();
             if let UiUpdate::Notice { text, run_id: None } = first_update {
                 notices.push(text);

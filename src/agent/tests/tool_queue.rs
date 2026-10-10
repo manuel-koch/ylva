@@ -208,10 +208,12 @@ fn large_read_result_is_capped_to_remaining_context_before_follow_up_request() {
 
         let first_context_usage = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
+                // The startup baseline (`ModelView`) arrives first; only the
+                // per-request estimate is compared against the sent request.
                 if let UiUpdate::ContextUsage {
                     estimated_tokens,
                     context_length,
-                    ..
+                    source: ContextUsageSource::SerializedRequest,
                 } = ui_rx.recv().await.expect("agent update channel stays open")
                 {
                     break (estimated_tokens, context_length);

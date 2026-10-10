@@ -111,6 +111,15 @@ fn manual_runtime_outcomes_preserve_transcript_and_refresh_only_accepted_views()
                 .with_store(store.clone())
                 .with_compaction_engine(summary_engine);
             let handle = agent_loop.run();
+            // The startup baseline estimate precedes any command; consume it so
+            // the ModelView assertions below only see compaction-driven updates.
+            assert!(matches!(
+                updates.recv().await,
+                Some(UiUpdate::ContextUsage {
+                    source: ContextUsageSource::ModelView,
+                    ..
+                })
+            ));
             agent_loop.send_command(AgentCommand::Compact).await;
             let mut reported_updates = Vec::new();
             tokio::time::timeout(Duration::from_secs(5), async {

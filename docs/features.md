@@ -850,10 +850,14 @@ for the full mechanics.
   right-aligns the local estimate
   of the latest serialized model request against the active context window —
   e.g. `64.2K (45%)`. It updates as each request starts, before the provider
-  responds. A resumed session has no latest request estimate until it sends
-  one. While drilled into a child transcript, it shows that child's latest
-  request estimate and context window; child updates remain isolated from the
-  root and other child readouts. A finished child's last readout remains
+  responds. Before any turn, a fresh or resumed session shows a baseline
+  model-view estimate (system prompt, restored messages, and tool schemas),
+  so the readout is populated immediately. A `/models` switch re-reports the
+  same model-view estimate against the new active window, so the percentage
+  follows the window change. While drilled into a child
+  transcript, it shows that child's latest request estimate and context
+  window; child updates remain isolated from the root and other child
+  readouts. A finished child's last readout remains
   available while its transcript is browsed. The estimate is not billed usage
   and can differ from the compaction budget's model-view estimate; the
   percentage is its fill of the window rounded to a whole percent and clamped

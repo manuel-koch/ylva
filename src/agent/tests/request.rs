@@ -76,12 +76,13 @@ fn engine_notices_are_forwarded_before_the_stream_starts() {
             .iter()
             .any(|update| matches!(update, UiUpdate::StreamStarted))
         {
-            updates.push(
-                tokio::time::timeout(Duration::from_millis(500), ui_rx.recv())
-                    .await
-                    .expect("the stream starts after initial updates")
-                    .expect("the UI channel stays open"),
-            );
+            let update = tokio::time::timeout(Duration::from_millis(500), ui_rx.recv())
+                .await
+                .expect("the stream starts after initial updates")
+                .expect("the UI channel stays open");
+            if !matches!(update, UiUpdate::ContextUsage { .. }) {
+                updates.push(update);
+            }
         }
         assert!(
             matches!(updates.first(), Some(UiUpdate::Notice { run_id: None, .. }))
@@ -303,5 +304,44 @@ fn irreducible_request_overhead_fails_visibly_without_contacting_the_provider() 
         assert!(requests.lock().expect("requests").is_empty());
         drop(agent);
         handle.await.expect("joins").expect("context");
+    });
+}
+
+#[test]
+fn fresh_loop_reports_baseline_context_usage_before_any_prompt() {
+    crate::test_support::run_locked(async {
+        let registry = Arc::new(tools::default_registry(
+            test_sandbox(),
+            tools::ToolRegistryConfig::default(),
+        ));
+        let expected_tokens = {
+            let engine = test_engine_with_context_length(64_000);
+            let context = Context::new();
+            context.estimated_model_tokens(&registry.schemas(), engine.as_ref())
+        };
+        let (mut agent_loop, mut ui_rx) =
+            AgentLoop::new(test_engine_with_context_length(64_000), registry);
+        let _handle = agent_loop.run();
+
+        let baseline = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(UiUpdate::ContextUsage {
+                    estimated_tokens,
+                    context_length,
+                    source,
+                }) = ui_rx.recv().await
+                {
+                    break (estimated_tokens, context_length, source);
+                }
+            }
+        })
+        .await
+        .expect("baseline estimate arrives without a prompt");
+
+        assert_eq!(
+            baseline,
+            (expected_tokens, 64_000, ContextUsageSource::ModelView)
+        );
+        assert!(expected_tokens > 0, "tool schemas alone must be counted");
     });
 }

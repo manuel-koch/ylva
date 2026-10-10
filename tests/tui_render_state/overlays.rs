@@ -550,10 +550,16 @@ async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pendi
             reason: "startup barrier".to_string(),
         })
         .await;
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(1), updates.recv()).await,
-        Ok(Some(ylva::UiUpdate::AgentIdle)),
-    ));
+    let idle = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match updates.recv().await {
+                Some(ylva::UiUpdate::ContextUsage { .. }) => continue,
+                other => break other,
+            }
+        }
+    })
+    .await;
+    assert!(matches!(idle, Ok(Some(ylva::UiUpdate::AgentIdle))));
     for engine_name in ["delayed", "latest"] {
         let provider_connection = format!("{engine_name}-provider");
         let model = format!("{engine_name}-model");
@@ -585,16 +591,29 @@ async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pendi
                     reason: "controls must remain responsive".to_string(),
                 })
                 .await;
-            assert!(matches!(
-                tokio::time::timeout(Duration::from_secs(1), updates.recv()).await,
-                Ok(Some(ylva::UiUpdate::AgentIdle)),
-            ));
+            let idle = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    match updates.recv().await {
+                        Some(ylva::UiUpdate::ContextUsage { .. }) => continue,
+                        other => break other,
+                    }
+                }
+            })
+            .await;
+            assert!(matches!(idle, Ok(Some(ylva::UiUpdate::AgentIdle))));
         }
     }
-    let update = tokio::time::timeout(Duration::from_secs(1), updates.recv())
-        .await
-        .expect("the latest switch must replace the blocked check")
-        .expect("capacity warning");
+    let update = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match updates.recv().await {
+                Some(ylva::UiUpdate::ContextUsage { .. }) => continue,
+                other => break other,
+            }
+        }
+    })
+    .await
+    .expect("the latest switch must replace the blocked check")
+    .expect("capacity warning");
     assert!(matches!(
         update,
         ylva::UiUpdate::Notice { text, run_id: None }

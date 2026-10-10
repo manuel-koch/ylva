@@ -17,6 +17,7 @@ mod commands;
 pub(super) mod compaction_updates;
 mod events;
 mod subagents;
+use self::compaction_updates::send_context_usage_estimate;
 use self::compaction_updates::{cancelled_or_pending, recv_finish, recv_subagent_ui};
 use self::compaction_updates::{report_compaction_failure, sweep_compaction_and_report};
 
@@ -264,6 +265,17 @@ impl AgentLoop {
                      reach the caller."
                 ));
             }
+            // Report the baseline estimate (system prompt, restored messages,
+            // tool schemas) before any turn, so the footer is populated on a
+            // fresh start and on resume rather than waiting for the first request.
+            send_context_usage_estimate(
+                &ui_tx,
+                context.estimated_model_tokens(&registry.schemas(), engine.as_ref()),
+                engine.effective_context_length(),
+                own_run_id,
+                ContextUsageSource::ModelView,
+            )
+            .await;
             let mode = AgentMode::Idle;
             let current_cancel: Option<CancellationToken> = None;
             let current_tool_cancel: Option<CancellationToken> = None;

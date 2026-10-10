@@ -635,6 +635,17 @@ impl RunState {
                 self.model_change_capacity_check = Some(Box::pin(
                     self.compaction.capacity_warning(self.engine.clone()),
                 ));
+                // The model view is unchanged, but the active window may have
+                // changed: re-report the estimate against the new window.
+                send_context_usage_estimate(
+                    &self.ui_tx,
+                    self.context
+                        .estimated_model_tokens(&self.registry.schemas(), self.engine.as_ref()),
+                    self.engine.effective_context_length(),
+                    self.own_run_id,
+                    ContextUsageSource::ModelView,
+                )
+                .await;
             }
             AgentCommand::ForChild { run_id, command } => {
                 // Only a root loop's `child_agent_manager` can

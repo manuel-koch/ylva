@@ -309,3 +309,83 @@ fn agent_command_dispatch_logs_every_command_variant() {
         "command receipt logs must not include private payloads: {log}"
     );
 }
+
+/// Engine double whose context window can change in place, like a `/models`
+/// switch to a model with a different window.
+struct ResizableContextEngine {
+    inner: Arc<dyn Engine>,
+    context_length: std::sync::Mutex<usize>,
+}
+
+impl Engine for ResizableContextEngine {
+    fn chat<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner.chat(messages, tools, cancel)
+    }
+
+    fn config(&self) -> EngineConfig {
+        let mut config = self.inner.config();
+        config.context_length = Some(*self.context_length.lock().expect("lock"));
+        config
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        self.inner.list_models()
+    }
+
+    fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        self.inner.switch_model(model)
+    }
+}
+
+#[test]
+fn model_change_re_reports_context_usage_against_the_new_window() {
+    crate::test_support::run_locked(async {
+        let engine = Arc::new(ResizableContextEngine {
+            inner: test_engine_with_context_length(32_000),
+            context_length: std::sync::Mutex::new(32_000),
+        });
+        let registry = Arc::new(ToolRegistry::new());
+        let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine.clone(), registry);
+        let handle = agent_loop.run();
+        let baseline = ui_rx.recv().await;
+        assert!(matches!(
+            baseline,
+            Some(UiUpdate::ContextUsage {
+                context_length: 32_000,
+                ..
+            })
+        ));
+
+        *engine.context_length.lock().expect("lock") = 128_000;
+        agent_loop
+            .send_command(AgentCommand::RecordModelChanged {
+                provider_connection: "mock".to_string(),
+                model: "bigger".to_string(),
+            })
+            .await;
+
+        let reported = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(UiUpdate::ContextUsage {
+                    context_length,
+                    source: ContextUsageSource::ModelView,
+                    ..
+                }) = ui_rx.recv().await
+                {
+                    break context_length;
+                }
+            }
+        })
+        .await
+        .expect("model switch re-reports context usage");
+        assert_eq!(reported, 128_000);
+
+        drop(agent_loop);
+        handle.await.expect("loop joins").expect("loop shuts down");
+    });
+}
