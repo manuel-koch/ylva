@@ -757,7 +757,8 @@ root/child domain events; the presenter stores root usage on
 `AppState::active_context_usage` selects the readout for the currently rendered
 root or child transcript, and
 `render`/`tui_widgets` format it as `64.2K (45%)` on the right end of the
-key-hints row. Finished child estimates stay with their transcripts for later
+key-hints row (or the engine label/usage row below 80 columns). Finished child
+estimates stay with their transcripts for later
 drill-in. Headless runs drop both usage update variants.
 
 ### Conversation layout cache

@@ -198,7 +198,7 @@ pub struct TuiState {
     /// while a drilled-in child transcript is displayed because the footer
     /// indicator belongs to the main conversation.
     pub active_subagent_counts: ActiveSubagentCounts,
-    /// Provider/model identity for the transcript currently being rendered.
+    /// Engine label for the transcript currently being rendered.
     pub engine_display: EngineDisplayInfo,
     pub chat_entries: Vec<ChatEntry>,
     pub subagent_started_at: HashMap<uuid::Uuid, Instant>,

@@ -199,8 +199,197 @@ pub(super) fn help_popup_footer_hints(state: &TuiState) -> &'static [FooterHint]
     }
 }
 
+/// Terminal width (in columns) below which the footer switches from the wide
+/// two-row layout to the narrow three-row layout.
+pub(super) const FOOTER_NARROW_WIDTH_THRESHOLD: u16 = 70;
+
+/// Number of footer rows for a terminal of the given width.
+pub(super) fn footer_height(width: u16) -> u16 {
+    if width < FOOTER_NARROW_WIDTH_THRESHOLD {
+        3
+    } else {
+        2
+    }
+}
+
+/// Footer rows for one frame, split according to the available width.
+pub(super) enum FooterRows {
+    /// Status text and engine label share the first row; keybinding
+    /// hints and context usage share the second.
+    Wide { status: Rect, controls: Rect },
+    /// Status text on the first row, engine label and context usage
+    /// on the second, keybinding hints (or approval buttons) on the third.
+    Narrow {
+        status: Rect,
+        meta: Rect,
+        controls: Rect,
+    },
+}
+
+pub(super) fn split_footer_rows(area: Rect) -> FooterRows {
+    if area.width < FOOTER_NARROW_WIDTH_THRESHOLD {
+        let [status, meta, controls] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
+        FooterRows::Narrow {
+            status,
+            meta,
+            controls,
+        }
+    } else {
+        let [status, controls] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+        FooterRows::Wide { status, controls }
+    }
+}
+
+/// Active engine label, with an explicit reasoning effort in
+/// parentheses. Empty when no engine is active.
+fn engine_label_text(state: &TuiState) -> String {
+    let model_label = state.engine_display.model.clone();
+    let engine_label = if state.engine_display.engine_name.is_empty() {
+        model_label
+    } else if model_label.is_empty() {
+        state.engine_display.engine_name.clone()
+    } else {
+        format!("{} → {}", state.engine_display.engine_name, model_label)
+    };
+    if engine_label.is_empty() {
+        return engine_label;
+    }
+    match state
+        .engine_display
+        .reasoning_effort
+        .as_deref()
+        .filter(|reasoning_effort| *reasoning_effort != "default")
+    {
+        Some(reasoning_effort) => format!("{engine_label} ({reasoning_effort})"),
+        None => engine_label,
+    }
+}
+
+/// Characters that delimit label tokens (`openrouter → anthropic/model:tag`).
+/// They are never elided; the runs of other characters between them are.
+const LABEL_SEPARATOR_CHARS: &[char] = &[' ', '→', '/', ':', '(', ')'];
+
+/// Shorten `text` to at most `max_chars` characters. Separator characters are
+/// kept verbatim. Each token between separators is shortened individually: the
+/// widest token is shrunk one column at a time until the text fits, so the
+/// budget is balanced across tokens. A shortened token keeps a head (about a
+/// third of its kept characters) and a tail around a single `…`.
+fn elide_balanced_tokens(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    // Split into alternating separator and token pieces, remembering the
+    // original token length and the display width each token is shrunk to.
+    let mut pieces: Vec<Piece> = Vec::new();
+    for character in text.chars() {
+        let is_separator = LABEL_SEPARATOR_CHARS.contains(&character);
+        match pieces.last_mut() {
+            Some(Piece::Token { chars, .. }) if !is_separator => chars.push(character),
+            _ if is_separator => pieces.push(Piece::Separator(character)),
+            _ => pieces.push(Piece::Token {
+                chars: vec![character],
+                display_width: 0,
+            }),
+        }
+    }
+    for piece in &mut pieces {
+        if let Piece::Token {
+            chars,
+            display_width,
+        } = piece
+        {
+            *display_width = chars.len();
+        }
+    }
+
+    let separator_width = pieces
+        .iter()
+        .filter(|piece| matches!(piece, Piece::Separator(_)))
+        .count();
+    let mut total_width = separator_width
+        + pieces
+            .iter()
+            .map(|piece| match piece {
+                Piece::Token { display_width, .. } => *display_width,
+                Piece::Separator(_) => 0,
+            })
+            .sum::<usize>();
+    while total_width > max_chars {
+        let widest_token = pieces
+            .iter_mut()
+            .filter_map(|piece| match piece {
+                Piece::Token { display_width, .. } if *display_width > 1 => Some(display_width),
+                _ => None,
+            })
+            .reduce(|widest, candidate| {
+                if *candidate > *widest {
+                    candidate
+                } else {
+                    widest
+                }
+            });
+        let Some(widest_token) = widest_token else {
+            break;
+        };
+        *widest_token -= 1;
+        total_width -= 1;
+    }
+    if total_width > max_chars {
+        // Separators alone do not fit: fall back to a plain head truncation.
+        let head: String = text.chars().take(max_chars - 1).collect();
+        return format!("{head}…");
+    }
+
+    pieces
+        .into_iter()
+        .map(|piece| match piece {
+            Piece::Separator(character) => character.to_string(),
+            Piece::Token {
+                chars,
+                display_width,
+            } => elide_token(&chars, display_width),
+        })
+        .collect()
+}
+
+/// One element of an label string: a separator kept verbatim, or a token
+/// that may be shortened to `display_width` columns.
+enum Piece {
+    Separator(char),
+    Token {
+        chars: Vec<char>,
+        display_width: usize,
+    },
+}
+
+/// Render `chars` in `display_width` columns. Full-width tokens are returned
+/// unchanged; narrower ones keep a head and a tail around a single `…`.
+fn elide_token(chars: &[char], display_width: usize) -> String {
+    if display_width >= chars.len() {
+        return chars.iter().collect();
+    }
+    let kept_chars = display_width.saturating_sub(1);
+    let head_count = kept_chars / 3;
+    let tail_count = kept_chars - head_count;
+    let head: String = chars[..head_count].iter().collect();
+    let tail: String = chars[chars.len() - tail_count..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+fn draw_footer_status(frame: &mut Frame, area: Rect, text: &str, color: Color) {
+    frame.render_widget(
+        Paragraph::new(Line::styled(text.to_string(), Style::default().fg(color))),
+        area,
+    );
+}
+
 /// Render a footer row with the status text on the left and the active
-/// named-engine/model identity aligned to the right.
+/// engine label aligned to the right.
 fn draw_footer_row(
     frame: &mut Frame,
     area: Rect,
@@ -208,65 +397,61 @@ fn draw_footer_row(
     left_color: Color,
     state: &TuiState,
 ) {
-    let model_identity = state.engine_display.model.clone();
-    let engine_identity = if state.engine_display.engine_name.is_empty() {
-        model_identity
-    } else if model_identity.is_empty() {
-        state.engine_display.engine_name.clone()
-    } else {
-        format!("{} → {}", state.engine_display.engine_name, model_identity)
-    };
-    if engine_identity.is_empty() || area.width == 0 {
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                left_text.to_string(),
-                Style::default().fg(left_color),
-            )),
-            area,
-        );
+    let engine_label = engine_label_text(state);
+    // The status text keeps its full width; the label gets the rest of the
+    // row minus one leading separator column and is elided to fit.
+    let label_budget = (area.width as usize)
+        .saturating_sub(left_text.chars().count())
+        .saturating_sub(1);
+    if engine_label.is_empty() || label_budget == 0 {
+        draw_footer_status(frame, area, left_text, left_color);
         return;
     }
 
-    let engine_identity = if !engine_identity.is_empty() {
-        match state
-            .engine_display
-            .reasoning_effort
-            .as_deref()
-            .filter(|reasoning_effort| *reasoning_effort != "default")
-        {
-            Some(reasoning_effort) => format!("{engine_identity} ({reasoning_effort})"),
-            None => engine_identity,
-        }
-    } else {
-        engine_identity
-    };
-    let identity_text = format!(" {engine_identity}");
-    let identity_width = (identity_text.chars().count() as u16).min(area.width);
-    let [left_area, identity_area] = Layout::default()
+    let label_text = format!(" {}", elide_balanced_tokens(&engine_label, label_budget));
+    let label_width = label_text.chars().count() as u16;
+    let [left_area, label_area] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Fill(1), Constraint::Length(identity_width)])
+        .constraints([Constraint::Fill(1), Constraint::Length(label_width)])
         .areas(area);
+    draw_footer_status(frame, left_area, left_text, left_color);
     frame.render_widget(
         Paragraph::new(Line::styled(
-            left_text.to_string(),
-            Style::default().fg(left_color),
-        )),
-        left_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            identity_text,
+            label_text,
             Style::default().fg(MUTED_TEXT_COLOR),
         ))
         .alignment(Alignment::Right),
-        identity_area,
+        label_area,
+    );
+}
+
+/// Narrow-layout meta row: the engine label followed by the context
+/// usage, left-aligned. Renders nothing when neither is available.
+fn draw_footer_meta(frame: &mut Frame, area: Rect, state: &TuiState) {
+    let engine_label = engine_label_text(state);
+    let usage = state.context_usage_text.as_deref();
+    // One leading column precedes everything; the usage (plus its separator)
+    // is reserved at the end. The label is elided to the remaining width.
+    let usage_suffix_width = usage.map_or(0, |usage| usage.chars().count() + 1);
+    let label_budget = (area.width as usize).saturating_sub(1 + usage_suffix_width);
+    let label = (!engine_label.is_empty() && label_budget > 0)
+        .then(|| elide_balanced_tokens(&engine_label, label_budget));
+    let parts: Vec<String> = label.into_iter().chain(usage.map(str::to_string)).collect();
+    if parts.is_empty() {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            format!(" {}", parts.join(" ")),
+            Style::default().fg(MUTED_TEXT_COLOR),
+        )),
+        area,
     );
 }
 
 pub(super) fn draw_normal_footer(
     frame: &mut Frame,
-    row_1: Rect,
-    row_2: Rect,
+    footer_area: Rect,
     state: &TuiState,
     footer_hints: &[FooterHint],
     hint: Option<&str>,
@@ -407,13 +592,26 @@ pub(super) fn draw_normal_footer(
         }
         row_1_text
     };
-    draw_footer_row(frame, row_1, &row_1_text, FOOTER_STATUS_COLOR, state);
-    draw_footer_hints(
-        frame,
-        row_2,
-        footer_hints,
-        state.context_usage_text.as_deref(),
-    );
+    match split_footer_rows(footer_area) {
+        FooterRows::Wide { status, controls } => {
+            draw_footer_row(frame, status, &row_1_text, FOOTER_STATUS_COLOR, state);
+            draw_footer_hints(
+                frame,
+                controls,
+                footer_hints,
+                state.context_usage_text.as_deref(),
+            );
+        }
+        FooterRows::Narrow {
+            status,
+            meta,
+            controls,
+        } => {
+            draw_footer_status(frame, status, &row_1_text, FOOTER_STATUS_COLOR);
+            draw_footer_meta(frame, meta, state);
+            draw_footer_hints(frame, controls, footer_hints, None);
+        }
+    }
 }
 
 fn active_subagent_footer_label(counts: ActiveSubagentCounts) -> Option<String> {
@@ -503,8 +701,7 @@ fn draw_footer_context_usage(
 #[expect(clippy::too_many_arguments)]
 pub(super) fn draw_approval_footer(
     frame: &mut Frame,
-    row_1: Rect,
-    row_2: Rect,
+    footer_area: Rect,
     state: &TuiState,
     tool_name: &str,
     is_subagent: bool,
@@ -525,7 +722,6 @@ pub(super) fn draw_approval_footer(
     } else {
         format!(" Tool '{tool_name}' requests your approval:")
     };
-    draw_footer_row(frame, row_1, &row_1_text, FOOTER_STATUS_COLOR, state);
 
     // When the user is typing a denial reason, Enter will deny rather than
     // approve — reflect this by disabling the Approve button and adding
@@ -538,13 +734,26 @@ pub(super) fn draw_approval_footer(
     };
     let approve_width = approve_label.chars().count() as u16;
     let deny_width = deny_label.chars().count() as u16;
-    let controls_area = draw_footer_context_usage(
-        frame,
-        row_2,
-        state.context_usage_text.as_deref(),
-        1 + approve_width + 2 + deny_width,
-    );
-
+    let controls_area = match split_footer_rows(footer_area) {
+        FooterRows::Wide { status, controls } => {
+            draw_footer_row(frame, status, &row_1_text, FOOTER_STATUS_COLOR, state);
+            draw_footer_context_usage(
+                frame,
+                controls,
+                state.context_usage_text.as_deref(),
+                1 + approve_width + 2 + deny_width,
+            )
+        }
+        FooterRows::Narrow {
+            status,
+            meta,
+            controls,
+        } => {
+            draw_footer_status(frame, status, &row_1_text, FOOTER_STATUS_COLOR);
+            draw_footer_meta(frame, meta, state);
+            controls
+        }
+    };
     // Indent buttons by 1 char so they align with the leading space of the
     // approval title above.
     let [_, buttons_area] = Layout::default()

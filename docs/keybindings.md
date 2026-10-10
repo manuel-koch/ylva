@@ -6,9 +6,7 @@ Footer hints render each keybinding in bold and its action in normal text.
 Multiple hints are separated by ` · `, for example:
 `enter send · esc cancel · ctrl-c cancel & quit · F1 help`.
 
-The context-usage readout stays right-aligned on the second footer row,
-including beside tool-approval buttons. On narrow terminals it is omitted
-rather than overwriting the controls.
+The footer layout is dynamic and adapts to the terminal width.
 
 While a bounded continuation waits for an existing context summary, normal
 interrupt controls and `/clear` remain responsive. `Compacting…` is scoped to

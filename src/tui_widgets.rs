@@ -263,14 +263,9 @@ fn draw_internal(
     // ABOVE the input field so the approve/deny controls sit immediately
     // above where the user types a denial reason.
     //
-    // The layout produces three variable slots (slot_a / slot_b / slot_c) that
-    // are then mapped to named areas based on the current mode:
-    //
-    //   approval pending          │  normal mode
-    //   ─────────────────────────────────────────
-    //   slot_a → footer_row_1     │  slot_a → input_area
-    //   slot_b → footer_row_2     │  slot_b → footer_row_1
-    //   slot_c → input_area       │  slot_c → footer_row_2
+    // The footer is one area whose height (2 wide / 3 narrow rows) comes from
+    // `footer::footer_height`; its row split happens inside the footer
+    // drawing functions. In approval mode the footer sits above the input.
     let approval_pending = state.pending_approval.is_some();
     let clarify_banner_content_height = state
         .clarify_banner_state
@@ -296,61 +291,48 @@ fn draw_internal(
     } else {
         0
     };
-    let (chat_area, separator_area, input_area, footer_row_1, footer_row_2, clarify_area) =
-        if approval_pending {
-            let [chat_area, separator_area, slot_a, slot_b, slot_c] = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Fill(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Length(input_height),
-                ])
-                .areas(area);
-            (chat_area, separator_area, slot_c, slot_a, slot_b, None)
-        } else if clarify_banner_height > 0 {
-            let [chat_area, separator_area, clarify_area, input_area, footer_row_1, footer_row_2] =
-                Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Fill(1),
-                        Constraint::Length(1),
-                        Constraint::Length(clarify_banner_height),
-                        Constraint::Length(input_height),
-                        Constraint::Length(1),
-                        Constraint::Length(1),
-                    ])
-                    .areas(area);
-            (
-                chat_area,
-                separator_area,
-                input_area,
-                footer_row_1,
-                footer_row_2,
-                Some(clarify_area),
-            )
-        } else {
-            let [chat_area, separator_area, input_area, footer_row_1, footer_row_2] =
-                Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Fill(1),
-                        Constraint::Length(1),
-                        Constraint::Length(input_height),
-                        Constraint::Length(1),
-                        Constraint::Length(1),
-                    ])
-                    .areas(area);
-            (
-                chat_area,
-                separator_area,
-                input_area,
-                footer_row_1,
-                footer_row_2,
-                None,
-            )
-        };
+    let footer_height = footer::footer_height(area.width);
+    let (chat_area, separator_area, input_area, footer_area, clarify_area) = if approval_pending {
+        let [chat_area, separator_area, footer_area, input_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Length(footer_height),
+                Constraint::Length(input_height),
+            ])
+            .areas(area);
+        (chat_area, separator_area, input_area, footer_area, None)
+    } else if clarify_banner_height > 0 {
+        let [chat_area, separator_area, clarify_area, input_area, footer_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Length(clarify_banner_height),
+                Constraint::Length(input_height),
+                Constraint::Length(footer_height),
+            ])
+            .areas(area);
+        (
+            chat_area,
+            separator_area,
+            input_area,
+            footer_area,
+            Some(clarify_area),
+        )
+    } else {
+        let [chat_area, separator_area, input_area, footer_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Length(input_height),
+                Constraint::Length(footer_height),
+            ])
+            .areas(area);
+        (chat_area, separator_area, input_area, footer_area, None)
+    };
 
     if let Some((header_area, header_separator_area)) = header_area {
         let [header_content_area, header_scrollbar_area] = Layout::default()
@@ -591,8 +573,7 @@ fn draw_internal(
     let button_areas = if state.help_popup.show_help {
         draw_normal_footer(
             frame,
-            footer_row_1,
-            footer_row_2,
+            footer_area,
             state,
             help_popup_footer_hints(state),
             hint,
@@ -602,8 +583,7 @@ fn draw_internal(
     } else if let Some((_, name, _)) = &state.pending_approval.clone() {
         draw_approval_footer(
             frame,
-            footer_row_1,
-            footer_row_2,
+            footer_area,
             state,
             name,
             state.pending_approval_is_subagent,
@@ -613,15 +593,7 @@ fn draw_internal(
         )
     } else {
         let footer_hints = footer_keybinding_hints(state, input_is_empty);
-        draw_normal_footer(
-            frame,
-            footer_row_1,
-            footer_row_2,
-            state,
-            footer_hints,
-            hint,
-            footer_source,
-        );
+        draw_normal_footer(frame, footer_area, state, footer_hints, hint, footer_source);
         None
     };
 

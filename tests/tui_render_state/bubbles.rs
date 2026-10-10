@@ -481,11 +481,11 @@ fn footer_shows_the_active_named_engine_and_model() {
         .collect();
     assert!(
         rendered.contains("ollama/local → llama3.2 (max)"),
-        "footer must show the active named-engine/model identity: {rendered:?}"
+        "footer must show the active engine label: {rendered:?}"
     );
     assert!(
         !rendered.contains(" → ollama → "),
-        "footer must omit the provider connection identity: {rendered:?}"
+        "footer must omit the provider connection label: {rendered:?}"
     );
 
     state.engine_display.reasoning_effort = None;
@@ -509,7 +509,7 @@ fn footer_shows_the_active_named_engine_and_model() {
         .collect();
     assert!(
         rendered_without_reasoning.contains("ollama/local → llama3.2"),
-        "footer must retain the active named-engine/model identity: {rendered_without_reasoning:?}"
+        "footer must retain the active engine label: {rendered_without_reasoning:?}"
     );
     assert!(
         !rendered_without_reasoning.contains("ollama/local → llama3.2 ("),
@@ -787,11 +787,24 @@ fn narrow_approval_footer_preserves_buttons_without_context_usage() {
         })
         .expect("draw");
     let buffer = terminal.backend().buffer();
-    let rendered: String = (0..20)
-        .flat_map(|row| (0..50).map(move |column| buffer.cell((column, row)).unwrap().symbol()))
+    let rows: Vec<String> = (0..20)
+        .map(|row| {
+            (0..50)
+                .map(|column| buffer.cell((column, row)).unwrap().symbol())
+                .collect()
+        })
         .collect();
-    assert!(!rendered.contains("64.2K (45%)"), "{rendered:?}");
-    assert!(rendered.contains("Approve (enter)") && rendered.contains("Deny (esc)"));
+    let usage_row = rows
+        .iter()
+        .find(|row| row.contains("64.2K (45%)"))
+        .expect("narrow approval footer shows usage on its meta row");
+    assert!(!usage_row.contains("Approve"), "{usage_row:?}");
+    let buttons_row = rows
+        .iter()
+        .find(|row| row.contains("Approve (enter)"))
+        .expect("approval buttons");
+    assert!(buttons_row.contains("Deny (esc)"), "{buttons_row:?}");
+    assert!(!buttons_row.contains("64.2K"), "{buttons_row:?}");
 }
 
 #[test]
@@ -1841,4 +1854,229 @@ fn startup_logo_shows_selected_profile() {
         rendered.contains("profile: work"),
         "startup logo should show the selected profile: {rendered:?}"
     );
+}
+
+/// Render the TUI at `width` x `height` and return every buffer row as text.
+fn render_tui_rows(state: &mut ylva::TuiState, width: u16, height: u16) -> Vec<String> {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    let mut textarea = TextArea::default();
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    (0..height)
+        .map(|row| {
+            (0..width)
+                .map(|column| buffer.cell((column, row)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect()
+}
+
+fn row_index_containing(rows: &[String], needle: &str) -> usize {
+    rows.iter()
+        .position(|row| row.contains(needle))
+        .unwrap_or_else(|| panic!("no row contains {needle:?} in {rows:#?}"))
+}
+
+#[test]
+fn narrow_footer_splits_status_meta_and_hints_onto_three_rows() {
+    use ylva::{AgentMode, TuiState};
+
+    let mut state = TuiState {
+        agent_mode: AgentMode::Streaming,
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        ..TuiState::new()
+    };
+    state.engine_display.engine_name = "openrouter".to_string();
+    state.engine_display.model = "claude-haiku".to_string();
+
+    let rows = render_tui_rows(&mut state, 60, 14);
+
+    let status_row = row_index_containing(&rows, "Streaming…");
+    let meta_row = row_index_containing(&rows, "64.2K (45%)");
+    let hints_row = row_index_containing(&rows, "F1 help");
+    assert_eq!(
+        meta_row,
+        status_row + 1,
+        "meta row follows status: {rows:#?}"
+    );
+    assert_eq!(hints_row, meta_row + 1, "hints row follows meta: {rows:#?}");
+    assert!(
+        !rows[status_row].contains("openrouter"),
+        "label moves off the status row: {:?}",
+        rows[status_row]
+    );
+    assert!(
+        rows[meta_row].contains("openrouter → claude-haiku 64.2K (45%)"),
+        "meta row carries label then usage: {:?}",
+        rows[meta_row]
+    );
+    assert!(
+        !rows[hints_row].contains("64.2K"),
+        "hints row drops the context usage: {:?}",
+        rows[hints_row]
+    );
+}
+
+#[test]
+fn narrow_footer_keeps_status_visible_with_long_model_label() {
+    use ylva::{AgentMode, TuiState};
+
+    let mut state = TuiState {
+        agent_mode: AgentMode::Streaming,
+        ..TuiState::new()
+    };
+    state.engine_display.engine_name = "a-very-long-engine-name".to_string();
+    state.engine_display.model = "an-extremely-long-model-identifier-for-testing".to_string();
+
+    let rows = render_tui_rows(&mut state, 40, 14);
+
+    let status_row = row_index_containing(&rows, "Streaming…");
+    let meta_row = &rows[status_row + 1];
+    assert!(
+        meta_row.trim_end().starts_with(" a-ver…"),
+        "engine token keeps its head: {meta_row:?}"
+    );
+    assert!(
+        meta_row.contains(" → "),
+        "separator is never elided: {meta_row:?}"
+    );
+    assert!(
+        meta_row.trim_end().ends_with("-for-testing"),
+        "model token keeps its tail: {meta_row:?}"
+    );
+}
+
+#[test]
+fn wide_footer_keeps_status_and_label_on_the_first_row() {
+    use ylva::{AgentMode, TuiState};
+
+    let mut state = TuiState {
+        agent_mode: AgentMode::Streaming,
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        ..TuiState::new()
+    };
+    state.engine_display.engine_name = "openrouter".to_string();
+    state.engine_display.model = "claude-haiku".to_string();
+
+    let rows = render_tui_rows(&mut state, 80, 14);
+
+    let status_row = row_index_containing(&rows, "Streaming…");
+    assert!(
+        rows[status_row].contains("openrouter → claude-haiku"),
+        "wide layout keeps label on the status row: {:?}",
+        rows[status_row]
+    );
+    let hints_row = row_index_containing(&rows, "F1 help");
+    assert_eq!(hints_row, status_row + 1);
+    assert!(rows[hints_row].ends_with("64.2K (45%)"));
+}
+
+#[test]
+fn narrow_approval_footer_puts_buttons_on_the_third_row() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::TuiState;
+
+    let mut terminal = Terminal::new(TestBackend::new(60, 14)).expect("terminal");
+    let mut state = TuiState {
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        pending_approval: Some((
+            uuid::Uuid::new_v4(),
+            "bash".to_string(),
+            serde_json::json!({"command": "echo hello"}),
+        )),
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+    let mut buttons = None;
+    terminal
+        .draw(|frame| {
+            buttons = tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+    let buttons = buttons.expect("approval buttons");
+    let buffer = terminal.backend().buffer().clone();
+    let row_text = |row: u16| -> String {
+        (0..60)
+            .map(|column| buffer.cell((column, row)).unwrap().symbol().to_string())
+            .collect()
+    };
+
+    let title_row = buttons.approve.y - 2;
+    assert!(row_text(title_row).contains("requests your approval"));
+    assert!(row_text(title_row + 1).contains("64.2K (45%)"));
+    assert!(row_text(buttons.approve.y).contains("Approve"));
+    assert!(!row_text(title_row + 1).contains("Approve"));
+}
+
+#[test]
+fn wide_footer_elides_label_before_truncating_status() {
+    use ylva::{AgentMode, TuiState};
+
+    let mut state = TuiState {
+        agent_mode: AgentMode::Streaming,
+        ..TuiState::new()
+    };
+    state.engine_display.engine_name = "openrouter".to_string();
+    state.engine_display.model =
+        "anthropic/claude-fable-5.1:batch-extra-long-name-that-goes-on-and-on".to_string();
+
+    let rows = render_tui_rows(&mut state, 80, 14);
+
+    let status_row = row_index_containing(&rows, "Streaming…");
+    let row = rows[status_row].trim_end();
+    assert!(row.contains("Streaming…"), "status intact: {row:?}");
+    assert!(
+        row.starts_with(" ") && row.contains("openrouter → "),
+        "{row:?}"
+    );
+    assert!(row.contains('…'), "label is elided: {row:?}");
+    assert!(row.ends_with("on-and-on"), "label keeps its tail: {row:?}");
+    assert!(!row.contains("anthropic/claude-fable-5.1:batch-extra-long-name-that-goes-on-and-on"));
+}
+
+#[test]
+fn narrow_meta_row_elides_label_before_context_usage() {
+    use ylva::TuiState;
+
+    let mut state = TuiState {
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        ..TuiState::new()
+    };
+    state.engine_display.engine_name = "openrouter".to_string();
+    state.engine_display.model = "anthropic/claude-fable-5.1:batch".to_string();
+
+    let rows = render_tui_rows(&mut state, 40, 14);
+
+    let meta_row = &rows[row_index_containing(&rows, "64.2K (45%)")];
+    let row = meta_row.trim_end();
+    assert!(row.starts_with(" o…"), "{row:?}");
+    assert!(row.contains(" → "), "separator is never elided: {row:?}");
+    assert!(row.ends_with("-5.1:batch 64.2K (45%)"), "{row:?}");
+    assert!(row.chars().count() <= 40, "{row:?}");
 }

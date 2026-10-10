@@ -821,14 +821,15 @@ for the full mechanics.
 ## TUI Architecture
 
 - **Layout:** a scrollable chat-history area, a variable-height input box
-  (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row
-  footer (mode/hint row and key-hints row). Key names in the key-hints row are
+  (capped at 1/3 of the terminal height), a `─` separator line, and a dynamic
+  footer whose layout adapts to the available width. Key names in the key-hints row are
   bold, action text is normal, and multiple hints use a ` · ` separator. The
   mode/hint row also shows the
-  active `named-engine → selected model-id` identity for the transcript on
+  active `named-engine → selected model-id` engine label for the transcript on
   screen, including an explicit reasoning effort in parentheses and the
-  selected child while drilled in. In the main conversation it also shows separate counts
-  for running and queued subagents in a compact `Subagents: <running> running,
+  selected child while drilled in. The engine label is shortened to fit the row. In the main conversation
+  it also shows separate counts for running and queued subagents in a compact
+  `Subagents: <running> running,
   <queued> queued` label; finished subagents are excluded, zero-valued
   categories are omitted, and the counts are hidden while viewing a child
   transcript. No sidebar.
@@ -856,9 +857,8 @@ for the full mechanics.
   available while its transcript is browsed. The estimate is not billed usage
   and can differ from the compaction budget's model-view estimate; the
   percentage is its fill of the window rounded to a whole percent and clamped
-  at `100%`. On a row too narrow to hold the readout next to the hints, the
-  readout is dropped rather than overwriting them. Headless output has no
-  footer and ignores the update.
+  at `100%`. It follows the dynamic footer layout and is dropped when there is no
+  room. Headless output has no footer and ignores the update.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming, the message is queued as a
   pending steer (shown dimmed, then committed once the model has seen it),
