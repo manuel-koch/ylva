@@ -13,14 +13,17 @@ the TUI or CLI is active. Do not store costs in session data. If the provider
 does not report usage or pricing, leave that request out of the total rather
 than estimating a precise billed amount from the context-token counter.
 
-Display the accumulated total in the TUI footer, right-aligned on its second
-row. The currency and pricing source still need a decision because providers
+We need to track utility and compaction model calls too!
+
+The currency and pricing source still need a decision because providers
 may not report comparable values.
+
+Display the accumulated total in the TUI footer.
 
 When Ylva exits, print the accumulated total if it is available:
 
 ```text
 Session: <session_id>
-Costs:   <currency> <costs>
+Costs:   <value> <currency>
 Resume with: ylva --conversation-id <session_id>
 ```
