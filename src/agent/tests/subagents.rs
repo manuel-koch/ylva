@@ -57,7 +57,7 @@ fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projectio
                 hard_compaction_threshold: 0.9,
             },
         ));
-        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
         let manager = ChildAgentManager::new(
             subagent_ui_tx,
             Box::new(
@@ -66,9 +66,10 @@ fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projectio
                     handle: tokio::spawn(async {}),
                 },
             ),
+            Some(1),
         );
-        let (finish_tx, finish_rx) = mpsc::channel(1);
-        let (_parent_subagent_ui_tx, parent_subagent_ui_rx) = mpsc::channel(8);
+        let (finish_tx, finish_rx) = mpsc::unbounded_channel();
+        let (_parent_subagent_ui_tx, parent_subagent_ui_rx) = mpsc::unbounded_channel();
         let (agent_loop, _ui_rx) = AgentLoop::new(
             root_engine,
             Arc::new(default_registry(
@@ -95,7 +96,6 @@ fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projectio
                 error: None,
                 sources: vec!["src/store.rs".to_string()],
             })
-            .await
             .expect("parent completion receiver remains open");
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(agent_loop);
@@ -192,7 +192,7 @@ fn child_role_run_returns_immediately_after_finish_tool_is_called() {
         ));
 
         let (finish_tx, mut finish_rx) = mpsc::channel(1);
-        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
 
@@ -377,7 +377,7 @@ fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
         ));
 
         let (finish_tx, _finish_rx) = mpsc::channel(1);
-        let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::channel(16);
+        let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::unbounded_channel();
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
 
@@ -499,7 +499,7 @@ async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_child() {
 
     let started: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let started_clone = started.clone();
-    let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::channel(8);
+    let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::unbounded_channel();
     let manager = ChildAgentManager::new(
         subagent_ui_tx,
         Box::new(move |request, _cancel, _ui_tx| {
@@ -509,6 +509,7 @@ async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_child() {
                 handle: tokio::spawn(async {}),
             }
         }),
+        Some(1),
     );
     let mut child_agent_manager = Some(manager);
 

@@ -30,6 +30,7 @@ surface.
 | `--auto-approve-web-search` | none | — | — | Skip the human-approval prompt for `web_search` tool calls. |
 | `--auto-approve-web-fetch` | none | — | — | Skip the human-approval prompt for `web_fetch` tool calls. |
 | `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Child-agent delegation" in `docs/features.md`. |
+| `--max-concurrent-subagents <N>` | signed integer | any integer | profile setting | Override the profile's maximum number of simultaneously running child agents for this run. A value `<= 0` means unlimited. |
 
 An invalid `--color`, `--log-level`, `--log-format`, or `--conversation-id`
 value, an unknown flag, a flag missing its required value (for any

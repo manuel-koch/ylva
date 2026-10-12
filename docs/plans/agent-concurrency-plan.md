@@ -18,7 +18,7 @@ tree. Queued spawns beyond the cap wait in FIFO order.
 run some/all subagents concurrently. We should introduce a customizable concurrency setting to limit
 how many subagents can concurrently run with main agent."
 
-**Acceptance criteria**
+### Acceptance criteria
 
 - A new per-profile configuration setting caps the number of concurrently running child agents. The
   default is `4`. A value `<= 0` means unlimited.
@@ -44,12 +44,14 @@ how many subagents can concurrently run with main agent."
 - `make format lint` and `make test-coverage` pass (coverage at least 80%).
 - Documentation that currently says "at most one child at a time" is updated.
 
-**Key constraints**
+### Key constraints
 
 - The runtime is tokio. Children are `tokio::spawn`ed. Channels are `tokio::sync::mpsc`. Per-child
   cancellation uses `tokio_util::sync::CancellationToken`.
-- The root loop must never `await` a send on the channel it drains itself. That would deadlock when
-  the channel is full. Lifecycle sends from the scheduler use non-blocking `try_send`.
+- The root loop must never `await` a send on the channel it drains itself. Child UI and finish
+  channels are unbounded, so every send from the scheduler and the child driver is synchronous and
+  never blocks or drops an update. Each child's private finish channel is capacity 1 and is awaited
+  only by its own driver task, never by the root loop.
 - Provider HTTP concurrency is already bounded per provider connection by
   `RequestConcurrencyLimiter` (`MAX_CONCURRENT_PROVIDER_REQUESTS = 4`). The new limit bounds
   children only. It does not replace the provider limiter.
@@ -69,7 +71,7 @@ Execution protocol: an implementing agent must flip `[ ]` to `[x]` immediately a
 step and rewrite this file in place, so progress is resumable across sessions. Complete the steps in
 order. Verify each step with its named tests before moving on.
 
-1. [ ] Add the configuration setting `max_concurrent_subagents` to the profile, mirroring
+1. [x] Add the configuration setting `max_concurrent_subagents` to the profile, mirroring
    `input_history_limit`.
    - In `src/config/profile.rs`: add a field to `ProfileConfig` with serde default `4` and a
      deserializer that accepts an integer or a string form, following `deserialize_usize_or_string`.
@@ -84,14 +86,14 @@ order. Verify each step with its named tests before moving on.
      is rejected.
    - Commit boundary: this step together with step 11 (documentation).
 
-2. [ ] Thread the limit into the child scheduler.
+2. [x] Thread the limit into the child scheduler.
    - In `src/agent/child_agent_manager.rs`, add a `max_concurrent_children: Option<usize>` field, set
      in the constructor. `None` means unlimited.
    - Pass it from `AgentFactory::build_child_agent_manager` (`src/agent_factory.rs:573-574`).
    - Keep `spawn_fn` unchanged. It is already `Send + Sync`.
    - Tests: constructor stores the limit for finite and unlimited values.
 
-3. [ ] Replace the single running slot with a per-run collection in `ChildAgentManager`.
+3. [x] Replace the single running slot with a per-run collection in `ChildAgentManager`.
    - Change `running: Option<RunningChild>` to a map keyed by `run_id` (`HashMap<Uuid, RunningChild>`
      or an equivalent with deterministic iteration order for `cancel_all`).
    - Replace `is_running()` with a method that answers whether a slot is free: `true` when the limit
@@ -111,7 +113,7 @@ order. Verify each step with its named tests before moving on.
      - Add: stale or unknown `run_id` is ignored and does not free a slot.
      - Add: `outstanding_count` equals running plus queued at each step.
 
-4. [ ] Replace single-child accessors with per-run lookups.
+4. [x] Replace single-child accessors with per-run lookups.
    - `running_run_id()` (`child_agent_manager.rs:371-373`): remove. Its only caller is the child
      token stamping in `src/agent/runtime/subagents.rs:273-297`. Replace that stamping with step 5.
    - `running_duration` (`child_agent_manager.rs:332-337`) and its caller at `subagents.rs:173-177`:
@@ -126,43 +128,51 @@ order. Verify each step with its named tests before moving on.
    - Tests: `Stop` with two running and one queued child yields three cancelled completions and
      leaves `outstanding_count() == 0`.
 
-5. [ ] Attribute child output to its `run_id` at the source.
+5. [x] Attribute child output to its `run_id` at the source.
    - In `drive_child_to_completion` (`src/agent_factory.rs:961-1062`), the `forward_task` at
      `agent_factory.rs:970-976` tags each forwarded `AppendText` / `AppendThinking` with that child's
      own `run_id`, before the update enters the shared `subagent_ui_tx`.
    - Remove the `running_run_id()` lookup in `forward_subagent_update`
      (`src/agent/runtime/subagents.rs:258-321`). Emit `ChildAgentToken { run_id, .. }` using the run
      id carried by the update.
-   - Tests: two children stream interleaved text; each `ChildAgentToken` carries the correct
-     `run_id`. Unit test in `src/agent/tests/subagents.rs`; integration test in
-     `tests/tools_agent_loop/subagents.rs`.
+    - Tests: two children stream interleaved text; each `ChildAgentToken` carries the correct
+      `run_id`. The source-attribution unit test is in
+      `src/agent_factory/tests/children.rs`; the integration test
+      `interleaved_child_tokens_retain_their_own_run_id` is in
+      `tests/tools_agent_loop/subagents.rs`.
 
-6. [ ] Make lifecycle UI updates robust to higher volume.
-   - Raise the `subagent_ui` channel capacity (`src/agent_factory.rs:574`)      from `100` to a fixed
-     constant defined in one place, with value `1024`. The capacity must not depend on the
-     configured limit, because the limit can be unlimited.
-   - Keep the lifecycle sends at `child_agent_manager.rs:426, 442, 449` as `try_send`. On `Err`, log
-     at `warn!` with `run_id` and the update kind. Do not await a send from the root loop.
-   - Tests: with a deliberately small channel, a full-channel drop emits a `warn!` log line
-     (capture with `test_support::capture_logs`), and the scheduler keeps running.
+6. [x] Make lifecycle UI updates lossless at any volume.
+   - The shared `subagent_ui` and `finish` channels are unbounded (`src/agent_factory.rs`,
+     `build_child_agent_manager`). Their capacity therefore never depends on the configured limit,
+     which can be unlimited, and no update is dropped.
+   - Lifecycle sends at `child_agent_manager.rs` (`send_lifecycle_update`) are synchronous. A closed
+     channel is logged at `debug!`, because it means the root has already exited.
+   - Each child reports its finish on a private capacity-1 channel. The driver forwards that finish
+     to the shared channel only after the child's UI forwarder has drained, so a child's last UI
+     update always precedes its finish. The root loop drains queued subagent UI updates before it
+     handles a finish.
+   - Tests: `lifecycle_updates_are_never_dropped_under_volume` (1500 spawns, unlimited cap) in
+     `child_agent_manager.rs`. `child_completion_is_delivered_after_the_child_tool_done_that_precedes_it`
+     in `tests/tools_agent_loop/subagents.rs` covers ordering.
 
-7. [ ] Serialize approval prompts with a FIFO queue.
+7. [x] Serialize approval prompts with a FIFO queue.
    - `ToolPending` and `ClarifyPending` already carry `run_id: Option<Uuid>`
      (`src/agent/protocol.rs:323-334`). The driver wraps replies in `AgentCommand::ForChild`
      (`commands.rs:650-667`).
    - Keep a FIFO queue of pending prompts. Show only the head in the TUI. When the head is answered,
      show the next. A child whose prompt is not at the head stays blocked on its approval, and other
      children continue.
-   - Replace the single-slot `Focus::ToolApproval { tool_id, tool_name }`
-     (`src/tui_reducer_state/events.rs:96`) with the head of that queue. Update the `tool_id` checks in
-     `src/presenter/domain.rs` and `src/tui_reducer_state/conversation.rs:716`.
+    - Replace the single-slot `Focus::ToolApproval { tool_id, tool_name }`
+      (`src/tui_reducer_state/events.rs:96`) with the queue head. Update `tool_id` checks in
+      `src/presenter/domain.rs` and
+      `src/tui_reducer_state/conversation.rs:716`.
    - Confirm that a reply to a finished child is dropped without hanging the root (existing test
      `for_child_targeting_an_unknown_run_id_is_dropped_without_hanging_the_root` in
      `tests/tools_agent_loop/subagents.rs:459`).
    - Tests: two children request approval at the same time. The second prompt appears only after the
      first is answered. Each reply resolves only its own tool call.
 
-8. [ ] Replace the TUI single-child slot with a per-run structure.
+8. [x] Replace the TUI single-child slot with a per-run structure.
    - `running_child: Option<ChildRunInfo>` in `src/tui_reducer_state.rs:343` becomes a map keyed by
      `run_id`, or is removed if the per-run `ChildConversation` entries already carry the needed data.
    - Update `start_child_run` (`src/tui_reducer_state/conversation.rs:613-617`), the clear on
@@ -171,7 +181,7 @@ order. Verify each step with its named tests before moving on.
    - Tests: under `src/tui_reducer_state/tests/` and `tests/tui_render_state/subagent_views.rs`,
      two children running at once each keep their own mode and conversation.
 
-9. [ ] Verify the footer and counts.
+9. [x] Verify the footer and counts.
    - `ActiveSubagentCounts::from_entries` (`src/tui_reducer_state/conversation.rs:135-170`) and
      `active_subagent_counts()` (`conversation.rs:674`) already count per bubble. Confirm that the
      footer at `src/tui_widgets/footer.rs:627-636` shows `Subagents: 2 running, 1 queued` for a
@@ -179,22 +189,22 @@ order. Verify each step with its named tests before moving on.
    - Tests: footer rendering with multiple running children, in `tests/tui_render_state/subagent_views.rs`
      or the footer suite under `tui_widgets/`.
 
-10. [ ] Add integration tests for the observable contract.
-    - In `tests/tools_agent_loop/subagents.rs`, using the mock LLM server
-      (`tests/common/mock_llm_server.rs`) and `start_paused = true` as the existing tests do:
-      - Limit 2, three spawns that each stream output: at most two children are running at any time.
+10. [x] Add integration tests for the observable contract.
+     - In `tests/tools_agent_loop/subagents.rs`, using the controlled mock provider and
+       `start_paused = true` as the existing tests do:
+       - Limit 2, three spawns: at most two children are running at any time.
         The third starts when the first finishes.
       - Limit 3, three children: all three run concurrently. The root is re-prompted once, after the
         last child finishes.
       - Unlimited, five children: all five run concurrently.
       - Limit 1: the existing test `intermediate_subagent_completion_does_not_reprompt_until_all_children_finish`
         (line 18) passes unchanged.
-      - `stop_while_spawn_subagent_is_running_resolves_it_to_cancelled_tool_done` (line 333) passes
-        with multiple running children.
+       - `stop_cancels_multiple_running_and_queued_subagents` passes with two running and one queued
+         child.
     - Coordinate asynchronous steps through observable events and explicit gates with bounded waits,
       not fixed sleeps (see `docs/development-workflow.md` → *Deterministic test dependencies*).
 
-11. [ ] Update the child-delegation documentation and the setting reference.
+11. [x] Update the child-delegation documentation and the setting reference.
     - `docs/features.md`:
       - `spawn_subagent` section (lines ~685-738): replace "the current scheduler runs at most one
         child at a time" with the configured cap, its default, and the unlimited value.
@@ -213,16 +223,16 @@ order. Verify each step with its named tests before moving on.
     - `docs/keybindings.md` (lines ~17-18): verify the "Subagents: 1 running, 1 queued" example still
       reads correctly. Update it if it becomes misleading.
     - `README.md` (lines ~23-30): update any subagent description that says children run one at a time.
-    - `docs/ideas/agent-concurrency.md`: after the feature ships, ask the user whether to delete it or
-      move it to a shipped note. Do not delete it without consent.
+    - `docs/ideas/agent-concurrency.md`: after the feature ships, ask whether to delete it or move it
+      to a shipped note. Do not delete it without consent.
 
-12. [ ] Add the CLI override `--max-concurrent-subagents <N>`.
+12. [x] Add the CLI override `--max-concurrent-subagents <N>`.
     - Add the flag next to `--auto-approve-spawn` (`src/cli.rs:146, 564`), following the layered
       override pattern at `src/config/profile.rs:860-870`. `<= 0` means unlimited, as in the profile.
     - Tests: CLI override beats profile value; `0` yields unlimited.
     - Document it in `docs/configuration.md` and `docs/features.md`.
 
-13. [ ] Run the verification gate.
+13. [x] Run the verification gate.
     - `make format lint` must pass. Fix every warning.
     - `make test-coverage` must pass with at least 80% aggregate line coverage.
     - The documentation named in step 11 is updated in the same commit as the code it describes.
@@ -256,12 +266,14 @@ order. Verify each step with its named tests before moving on.
   line 411.
 - Completion handling: `src/agent/runtime/subagents.rs:18-257`. Re-prompt on `outstanding_count == 0`:
   lines 211-240 (immediate) and 241-243 (deferred via `pending_child_finish_reprompt`, `runtime.rs:55`).
-- Channels: `src/agent_factory.rs:573-574`. `finish` capacity 16, `subagent_ui` capacity 100.
+- Channels: `src/agent_factory.rs` (`build_child_agent_manager`). Shared `finish` and `subagent_ui`
+  are unbounded. Each child's private finish channel is capacity 1.
 - Child task: `drive_child_to_completion` at `src/agent_factory.rs:961-1062`. `forward_task` at lines
   970-976. Transcript write at line 978. Child is `tokio::spawn`ed at line 668.
 - Child spawn closure type: `SpawnFn`, a `Box<dyn Fn(...) + Send + Sync>` at
   `child_agent_manager.rs:206-208`.
-- Lifecycle `try_send` sites: `child_agent_manager.rs:426, 442, 449`.
+- Lifecycle sends: `send_lifecycle_update` in `child_agent_manager.rs`. Synchronous, on an
+  unbounded channel.
 - Cancellation: per-child token created at `child_agent_manager.rs:462`. `cancel_all` used by `Stop`
   (`commands.rs:376-440`) and `ClearContext` (`commands.rs:582-590`).
 - `session_switch_frozen` / `session_switch_quiescent`: `runtime.rs:70-86`. Both consult

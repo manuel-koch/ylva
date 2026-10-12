@@ -699,12 +699,17 @@ admission event containing the `run_id`, `tool_call_id`, `label`, and
 outstanding-run count; this is not the child's outcome. A terminal
 completion event later carries the same correlation fields plus
 `status`, `result`/`error`, `sources`, `outstanding_count`, and `all_done`.
-Completion order is not a reliable ordering signal. The current scheduler
-runs at most one child at a time and queues further spawns, but that is an
-implementation constraint rather than part of the model-facing contract. Its
-description lists every configured agent type and its optional
+Completion order is not a reliable ordering signal. The profile-level
+`max_concurrent_subagents` setting defaults to `4`; a positive value caps
+simultaneous child runs, while `0` or a negative value means unlimited. Spawns
+beyond the cap wait in FIFO order. The cap applies across the delegation tree
+(delegation is currently one level deep; children cannot spawn further
+children). Provider request concurrency is a separate limit. Its description
+lists every configured agent type and its optional
 model-facing `description`, so the parent can choose a suitable type instead
 of guessing names.
+`--max-concurrent-subagents <N>` overrides the profile value for the current
+run; `N <= 0` means unlimited.
 The description tells the parent to continue only genuinely independent work;
 when none remains, it must end its response immediately without waiting
 narration, timing speculation, or continued thinking about pending results.
@@ -743,21 +748,28 @@ One level of agent delegation lets a root agent hand off a self-contained
 task to a child agent that runs **concurrently** with the parent — the
 parent keeps processing its own messages and tools while the child works.
 
-- The current scheduler runs at most one child at a time; further
-  `spawn_subagent` calls queue and start automatically as each preceding child
-  finishes. This is not a model-facing ordering guarantee, so callers correlate
-  results by `run_id`, `tool_call_id`, and `label`.
+- Up to the profile's `max_concurrent_subagents` limit run at once (default
+  `4`); `0` or a negative value removes the child-scheduler cap. Additional
+  calls wait in FIFO order and start as running children finish. Callers still
+  correlate results by `run_id`, `tool_call_id`, and `label`, not completion
+  order.
+- `--max-concurrent-subagents <N>` overrides the profile setting for one run;
+  `N <= 0` means unlimited.
 - Each child's outcome (success, failure, or cancellation) is reported back
   to the parent as a structured hidden harness event. Intermediate events are
   recorded without forcing an acknowledgement turn; once `all_done` is true,
   the parent receives one continuation so it can aggregate the results without
   waiting for a new user message.
-- Stopping the parent (`Ctrl+C`/`Esc`) also cancels any running/queued
-  children.
+- Stopping the parent (`Ctrl+C`/`Esc`) or clearing its context (`/clear`)
+  cancels every running and queued child, settling each spawn call as cancelled.
 - A child's own tool calls go through the same approval flow as the
-  parent's — a child is never auto-denied just for being a child.
+  parent's — a child is never auto-denied just for being a child. Approval
+  prompts are presented one at a time in request order; a child waiting behind
+  another prompt stays blocked while other children continue running.
 - Use `--auto-approve-spawn` to skip the human-approval prompt for
   `spawn_subagent` calls (mirrors `--auto-approve-edit` / `--auto-approve-write`).
+- Concurrent children share a filesystem. They may write the same file at the
+  same time; the scheduler does not serialize or merge those writes.
 - A child spawned after a root `/models` switch uses the root's active
   provider/model when it resolves the same named engine. An explicit engine
   override for that child uses its own named engine selection.
@@ -810,6 +822,8 @@ streaming/running tools in the background:
 - The footer/header spinner keeps animating for as long as the subagent's
   tool call is running, including while the subagent itself is paused
   waiting for its own tool approval.
+- Several child transcripts can stream independently. Each text and thinking
+  fragment is assigned to its originating child run.
 - If a tool approval is pending for a child while you've navigated back to
   the root view, the approval footer is prefixed `"Subagent tool '<name>'
   requests your approval:"` so it's clear the approval belongs to a

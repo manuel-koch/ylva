@@ -376,7 +376,7 @@ impl RunState {
             AgentCommand::Stop { reason } => {
                 self.reset_compaction().await;
                 if let Some(manager) = self.child_agent_manager.as_mut() {
-                    let cancelled_spawns = manager.cancel_all();
+                    let cancelled_spawns = manager.cancel_all().await;
                     let cancelled_count = cancelled_spawns.len();
                     for (index, cancelled) in cancelled_spawns.into_iter().enumerate() {
                         // Store integration (child_result JSONL
@@ -414,6 +414,14 @@ impl RunState {
                             ),
                             sources: vec![],
                         };
+                        let _ = self
+                            .ui_tx
+                            .send(UiUpdate::ChildAgentDone {
+                                run_id: cancelled.run_id,
+                                status: cancellation_result.status.clone(),
+                                result: None,
+                            })
+                            .await;
                         let outstanding_count = cancelled_count.saturating_sub(index + 1);
                         let result_text = serde_json::to_string(
                             &cancellation_result
@@ -580,7 +588,7 @@ impl RunState {
                     tool_cancel.cancel();
                 }
                 if let Some(manager) = self.child_agent_manager.as_mut() {
-                    for cancelled in manager.cancel_all() {
+                    for cancelled in manager.cancel_all().await {
                         tracing::info!(
                             run_id = %cancelled.run_id,
                             tool_call_id = %cancelled.call_id,

@@ -333,14 +333,18 @@ pub struct AppState {
     /// finishes, so these entries have the same session lifetime as their
     /// transcripts.
     pub child_engine_displays: HashMap<Uuid, EngineDisplayInfo>,
-    /// Identifies the currently *running* child (at most one at a time —
-    /// see `ChildAgentManager`), independent of whether `active_view` has
-    /// switched to it yet, and independent of which (if any) child the user
-    /// is currently viewing. `None` when no child is currently running
-    /// (though earlier children may still have entries in
-    /// `child_conversations`). Populated on `ChildAgentStarted`, cleared on
-    /// `ChildAgentDone`.
-    pub running_child: Option<ChildRunInfo>,
+    /// Identifies every currently *running* child (several may run at once
+    /// — see `ChildAgentManager`), independent of whether `active_view` has
+    /// switched to one yet, and independent of which child the user is
+    /// currently viewing. Keyed by `run_id`; empty when no child is running
+    /// (earlier children may still have entries in `child_conversations`).
+    /// Populated on `ChildAgentStarted`, removed on `ChildAgentDone`.
+    pub running_children: HashMap<Uuid, ChildRunInfo>,
+    /// Tool-call ids awaiting approval, in the order their `ToolPending`
+    /// arrived (across the root and every child). The head is the prompt
+    /// shown in `Focus::ToolApproval`; the rest wait their turn. Entries
+    /// whose bubble has left `Pending` are pruned lazily.
+    pub pending_approval_order: Vec<Uuid>,
     /// `true` when `active_view` was switched automatically (an interactive
     /// pause — `note_interactive_pause`), to `Child` *or* `Root`, rather than
     /// by explicit user navigation (click/Esc). Gates whether the view
@@ -496,7 +500,8 @@ impl AppState {
             active_view: ConversationView::Root,
             child_conversations: HashMap::new(),
             child_engine_displays: HashMap::new(),
-            running_child: None,
+            running_children: HashMap::new(),
+            pending_approval_order: Vec::new(),
             auto_switched_to_child: false,
             pre_pause_view: None,
             last_bubble_click: None,
@@ -534,7 +539,8 @@ impl AppState {
         self.queued_steer_texts.clear();
         self.steer_indicator = false;
         self.child_conversations.clear();
-        self.running_child = None;
+        self.running_children.clear();
+        self.pending_approval_order.clear();
         self.active_view = ConversationView::Root;
         self.child_view = ChildViewState::default();
         self.conversation.chat_selection = None;

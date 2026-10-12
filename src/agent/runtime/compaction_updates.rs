@@ -189,7 +189,7 @@ pub(in crate::agent) async fn report_compaction_failure(
 /// Lets `AgentLoop::run`'s `select!` treat "no `ChildAgentManager` wired" the
 /// same as "channel open but empty" without an `Option`-shaped branch.
 pub(super) async fn recv_finish(
-    rx: &mut Option<mpsc::Receiver<crate::child_agent_manager::FinishResult>>,
+    rx: &mut Option<mpsc::UnboundedReceiver<crate::child_agent_manager::FinishResult>>,
 ) -> Option<crate::child_agent_manager::FinishResult> {
     match rx {
         Some(rx) => rx.recv().await,
@@ -200,7 +200,7 @@ pub(super) async fn recv_finish(
 /// Awaits the next forwarded child `UiUpdate` when `rx` is `Some`, else
 /// never resolves. See [`recv_finish`].
 pub(super) async fn recv_subagent_ui(
-    rx: &mut Option<mpsc::Receiver<UiUpdate>>,
+    rx: &mut Option<mpsc::UnboundedReceiver<UiUpdate>>,
 ) -> Option<UiUpdate> {
     match rx {
         Some(rx) => rx.recv().await,

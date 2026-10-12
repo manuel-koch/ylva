@@ -21,3 +21,13 @@
       Can we use the elide_balanced_tokens() method and use maybe two rows
       per provider/model on narrow terminals ( same width as the footer uses
       to toggle layout ) ?
+
+- [ ] A configured engine that uses context-length less then the provider
+      advertises for the model.
+      Open the /models picker popup, browse to the named engines provider/model
+      select it with enter.
+      The context-length that can be toggled with left/right keys is
+      capped at the configured value, not at the provider advertised max
+      context-size.
+      The /models picker popup should allow for selecting the whole range
+      of context-length as advertised by the provider.

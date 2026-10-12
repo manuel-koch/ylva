@@ -142,9 +142,18 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             }
             vec![]
         }
-        DomainEvent::ChildAgentDone { run_id, .. } => {
+        DomainEvent::ChildAgentDone { run_id, status, .. } => {
             state.compaction_requests.remove(&Some(run_id));
             state.flush_child_partial_text(run_id);
+            if status == "cancelled" {
+                for tool_id in state.kill_unfinished_child_tools(run_id) {
+                    if matches!(state.focus, Focus::ToolApproval { tool_id: focused_id, .. } if focused_id == tool_id)
+                    {
+                        state.focus = Focus::MainInput;
+                    }
+                    state.resolve_possible_interactive_pause(tool_id);
+                }
+            }
             // Only auto-return if the user is currently viewing *this*
             // finished child's transcript — a different child may still be
             // running/queued, or the user may be looking at an unrelated
@@ -157,13 +166,7 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             if is_viewing_this_child && state.auto_switched_to_child {
                 state.switch_to_root_view();
             }
-            if state
-                .running_child
-                .as_ref()
-                .is_some_and(|child| child.run_id == run_id)
-            {
-                state.running_child = None;
-            }
+            state.running_children.remove(&run_id);
             vec![]
         }
         DomainEvent::BubbleClickWindowExpired => {
@@ -370,6 +373,7 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
                 state.focus = Focus::MainInput;
             }
+            state.resolve_possible_interactive_pause(id);
             vec![]
         }
         DomainEvent::ConfirmExpired => vec![],
@@ -512,6 +516,7 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
                 state.focus = Focus::MainInput;
             }
+            state.resolve_possible_interactive_pause(id);
             vec![]
         }
         DomainEvent::ConfirmExpired => vec![],
@@ -643,6 +648,7 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
                 state.focus = Focus::MainInput;
             }
+            state.resolve_possible_interactive_pause(id);
             vec![]
         }
         DomainEvent::Error { message, run_id } => {

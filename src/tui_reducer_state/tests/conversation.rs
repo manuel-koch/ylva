@@ -1140,3 +1140,112 @@ fn toggle_header_bubble_collapsed_is_a_no_op_while_viewing_root() {
         matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed)
     );
 }
+
+fn pending_tool_bubble(id: Uuid, name: &str) -> ChatEntry {
+    ChatEntry::ToolBubble {
+        id,
+        name: name.to_string(),
+        state: Box::new(ToolCallState::Pending {
+            arguments: serde_json::json!({}),
+            content_sections: vec![],
+            title_arguments: vec![],
+        }),
+        collapsed: true,
+    }
+}
+
+fn child_run_info(run_id: Uuid) -> ChildRunInfo {
+    ChildRunInfo {
+        run_id,
+        bubble_id: Uuid::new_v4(),
+        agent_type: "reviewer".to_string(),
+        task: "task".to_string(),
+        label: "Label".to_string(),
+    }
+}
+
+#[test]
+fn pending_approvals_are_offered_in_request_order_across_root_and_children() {
+    let mut state = AppState::new();
+    let first_run_id = Uuid::new_v4();
+    let second_run_id = Uuid::new_v4();
+    state.start_child_run(child_run_info(first_run_id));
+    state.start_child_run(child_run_info(second_run_id));
+    let root_tool_id = Uuid::new_v4();
+    let first_child_tool_id = Uuid::new_v4();
+    let second_child_tool_id = Uuid::new_v4();
+
+    // Requested: second child, then root, then first child.
+    for (tool_id, transcript_run_id) in [
+        (second_child_tool_id, Some(second_run_id)),
+        (root_tool_id, None),
+        (first_child_tool_id, Some(first_run_id)),
+    ] {
+        match transcript_run_id {
+            Some(run_id) => state
+                .child_conversations
+                .get_mut(&run_id)
+                .expect("child transcript")
+                .messages
+                .push(pending_tool_bubble(tool_id, "bash")),
+            None => state
+                .chat_entries
+                .push(pending_tool_bubble(tool_id, "bash")),
+        }
+        state.pending_approval_order.push(tool_id);
+    }
+
+    assert_eq!(
+        state.pending_tool_approval().map(|(id, _)| id),
+        Some(second_child_tool_id),
+        "the earliest request is the head, regardless of transcript"
+    );
+
+    // Answering the head moves on to the next request.
+    if let Some(ChatEntry::ToolBubble {
+        state: tool_state, ..
+    }) = state
+        .child_conversations
+        .get_mut(&second_run_id)
+        .and_then(|conversation| conversation.messages.first_mut())
+    {
+        **tool_state = ToolCallState::Running {
+            arguments: serde_json::json!({}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            progress_arguments: vec![],
+        };
+    }
+    state.prune_pending_approval_order();
+    assert_eq!(
+        state.pending_tool_approval().map(|(id, _)| id),
+        Some(root_tool_id)
+    );
+    assert_eq!(state.pending_approval_order.len(), 2);
+}
+
+#[test]
+fn two_running_children_each_keep_their_own_agent_mode() {
+    let mut state = AppState::new();
+    let first_run_id = Uuid::new_v4();
+    let second_run_id = Uuid::new_v4();
+    state.start_child_run(child_run_info(first_run_id));
+    state.start_child_run(child_run_info(second_run_id));
+
+    assert_eq!(
+        state.agent_mode_for_child(first_run_id),
+        AgentMode::Streaming
+    );
+    assert_eq!(
+        state.agent_mode_for_child(second_run_id),
+        AgentMode::Streaming
+    );
+
+    state.running_children.remove(&first_run_id);
+    assert_eq!(state.agent_mode_for_child(first_run_id), AgentMode::Idle);
+    assert_eq!(
+        state.agent_mode_for_child(second_run_id),
+        AgentMode::Streaming,
+        "finishing one child leaves its sibling running"
+    );
+}

@@ -99,6 +99,76 @@ fn child_agent_started_does_not_auto_switch_the_active_view() {
 }
 
 #[test]
+fn cancelled_child_releases_its_pending_tools_and_resumes_the_next_approval() {
+    let mut state = AppState::new();
+    let first_run_id = Uuid::new_v4();
+    let second_run_id = Uuid::new_v4();
+    for (run_id, task) in [(first_run_id, "first task"), (second_run_id, "second task")] {
+        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: task.to_string(),
+            label: task.to_string(),
+        });
+    }
+    let first_tool_id = Uuid::new_v4();
+    let second_tool_id = Uuid::new_v4();
+    for (run_id, tool_id) in [
+        (first_run_id, first_tool_id),
+        (second_run_id, second_tool_id),
+    ] {
+        state
+            .child_conversations
+            .get_mut(&run_id)
+            .unwrap()
+            .messages
+            .push(ChatEntry::ToolBubble {
+                id: tool_id,
+                name: "bash".to_string(),
+                state: Box::new(ToolCallState::Pending {
+                    arguments: serde_json::json!({"command": "echo ready"}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                }),
+                collapsed: true,
+            });
+        state.pending_approval_order.push(tool_id);
+    }
+    state.focus = Focus::ToolApproval {
+        tool_id: first_tool_id,
+        tool_name: "bash".to_string(),
+    };
+    state.note_interactive_pause(Some(first_run_id));
+
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ChildAgentDone {
+            run_id: first_run_id,
+            status: "cancelled".to_string(),
+            result: None,
+        }),
+        &empty_textarea(),
+    );
+
+    assert!(matches!(
+        state.child_conversations[&first_run_id].messages.first(),
+        Some(ChatEntry::ToolBubble { state, .. }) if matches!(state.as_ref(), ToolCallState::Killed)
+    ));
+    assert!(!state.running_children.contains_key(&first_run_id));
+    assert!(state.running_children.contains_key(&second_run_id));
+    assert_eq!(state.pending_approval_order, vec![second_tool_id]);
+    assert!(matches!(
+        state.focus,
+        Focus::ToolApproval { tool_id, .. } if tool_id == second_tool_id
+    ));
+    assert!(matches!(
+        state.active_view,
+        ConversationView::Child { run_id, .. } if run_id == second_run_id
+    ));
+}
+
+#[test]
 fn child_agent_started_clears_transcript_without_seeding_a_synthetic_task_message() {
     // The task is shown via the real root `spawn_subagent` bubble
     // re-rendered as the child-view header (see
@@ -171,7 +241,7 @@ fn child_tool_pending_for_a_different_running_child_auto_switches_away_from_a_fi
     // First child finishes; user manually drills into its (now static)
     // transcript.
     let finished_run_id = tracked_child(&mut state);
-    state.running_child = None;
+    state.running_children.clear();
     state.switch_to_child_view(finished_run_id);
     assert!(!state.auto_switched_to_child);
 

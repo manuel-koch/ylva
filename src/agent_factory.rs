@@ -570,13 +570,14 @@ impl AgentFactory {
         parent_engine_name: String,
         system_prompt: Option<String>,
     ) -> BuiltChildAgentManager {
-        let (finish_tx, finish_rx) = mpsc::channel::<FinishResult>(16);
-        let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel::<UiUpdate>(100);
+        let (finish_tx, finish_rx) = mpsc::unbounded_channel::<FinishResult>();
+        let (subagent_ui_tx, subagent_ui_rx) = mpsc::unbounded_channel::<UiUpdate>();
+        let max_concurrent_children = profile.max_concurrent_subagents_limit();
 
         let spawn_fn: crate::child_agent_manager::SpawnFn = Box::new(
             move |request: SpawnRequest,
                   cancel: CancellationToken,
-                  forward_ui_tx: mpsc::Sender<UiUpdate>| {
+                  forward_ui_tx: mpsc::UnboundedSender<UiUpdate>| {
                 let engines = engines.clone();
                 let allowed_tools = allowed_tools.clone();
                 let auto_approve = auto_approve.clone();
@@ -600,6 +601,10 @@ impl AgentFactory {
                 let inherited_engine =
                     (child_engine_name == parent_engine_name).then_some(parent_engine);
 
+                // The child's `agent_finish` tool reports into this private
+                // channel; `drive_child_to_completion` forwards it to the shared
+                // `finish_tx` only after the child's UI has fully drained.
+                let (child_finish_tx, child_finish_rx) = mpsc::channel::<FinishResult>(1);
                 let child_role_config = ChildRoleConfig {
                     run_id,
                     call_id,
@@ -607,7 +612,7 @@ impl AgentFactory {
                     briefing: request.briefing.clone(),
                     parent_cancel: cancel.clone(),
                     subagent_ui_tx: forward_ui_tx.clone(),
-                    finish_tx: finish_tx.clone(),
+                    finish_tx: child_finish_tx,
                 };
 
                 // Constructing the child `AgentLoop` is synchronous
@@ -633,13 +638,9 @@ impl AgentFactory {
                     Ok(built) => built,
                     Err(error) => {
                         tracing::error!(%run_id, %error, "failed to construct child agent");
-                        // No async context is available synchronously here, so
-                        // this failure report uses a non-blocking send instead
-                        // of the usual `.send(...).await` — the channel's
-                        // capacity is small and this is a single immediate
-                        // report, so a dropped send (full channel) is
-                        // acceptable for this fail-safe path.
-                        let _ = finish_tx.try_send(FinishResult {
+                        // The failure report goes to the unbounded shared finish
+                        // channel, so it is never dropped and needs no await.
+                        let _ = finish_tx.send(FinishResult {
                             run_id,
                             call_id,
                             origin: FinishResultOrigin::Runtime,
@@ -658,7 +659,7 @@ impl AgentFactory {
                 let child_engine = child_loop.engine();
                 let child_engine_config = Some(child_engine.config());
                 let child_engine_display = child_loop.engine_display_info();
-                let _ = forward_ui_tx.try_send(UiUpdate::ChildAgentEngineConfigured {
+                let _ = forward_ui_tx.send(UiUpdate::ChildAgentEngineConfigured {
                     run_id,
                     engine: child_engine_display,
                 });
@@ -670,6 +671,7 @@ impl AgentFactory {
                         drive_child_to_completion(
                             child_loop,
                             child_ui_rx,
+                            child_finish_rx,
                             task,
                             run_id,
                             call_id,
@@ -695,7 +697,7 @@ impl AgentFactory {
         );
 
         BuiltChildAgentManager {
-            manager: ChildAgentManager::new(subagent_ui_tx, spawn_fn),
+            manager: ChildAgentManager::new(subagent_ui_tx, spawn_fn, max_concurrent_children),
             finish_rx,
             subagent_ui_rx,
         }
@@ -723,8 +725,8 @@ fn compose_agent_system_prompt(
 /// caller stores on the parent `AgentLoop`.
 struct BuiltChildAgentManager {
     manager: ChildAgentManager,
-    finish_rx: mpsc::Receiver<FinishResult>,
-    subagent_ui_rx: mpsc::Receiver<UiUpdate>,
+    finish_rx: mpsc::UnboundedReceiver<FinishResult>,
+    subagent_ui_rx: mpsc::UnboundedReceiver<UiUpdate>,
 }
 
 /// Drives an already-constructed child `AgentLoop` to completion and reports
@@ -957,22 +959,42 @@ fn configured_agent_types(profile: &ProfileConfig) -> Vec<AgentTypeInfo> {
     agent_types
 }
 
+/// Tags a child's streamed text and thinking with the child's own `run_id`
+/// before the update enters the shared subagent channel. The root then
+/// attributes each fragment directly, so several children can stream at once.
+fn attribute_child_update(run_id: uuid::Uuid, update: UiUpdate) -> UiUpdate {
+    match update {
+        UiUpdate::AppendText(text) => UiUpdate::ChildAgentToken {
+            run_id,
+            text,
+            is_thinking: false,
+        },
+        UiUpdate::AppendThinking(text) => UiUpdate::ChildAgentToken {
+            run_id,
+            text,
+            is_thinking: true,
+        },
+        other => other,
+    }
+}
+
 #[expect(clippy::too_many_arguments)]
 async fn drive_child_to_completion(
     mut child_loop: AgentLoop,
     mut child_ui_rx: mpsc::Receiver<UiUpdate>,
+    mut child_finish_rx: mpsc::Receiver<FinishResult>,
     task: String,
     run_id: uuid::Uuid,
     call_id: uuid::Uuid,
     cancel: CancellationToken,
-    finish_tx: mpsc::Sender<FinishResult>,
-    forward_ui_tx: mpsc::Sender<UiUpdate>,
+    finish_tx: mpsc::UnboundedSender<FinishResult>,
+    forward_ui_tx: mpsc::UnboundedSender<UiUpdate>,
     transcript_target: ChildTranscriptTarget,
 ) {
     let forward_task = tokio::spawn(
         async move {
             while let Some(update) = child_ui_rx.recv().await {
-                let _ = forward_ui_tx.send(update).await;
+                let _ = forward_ui_tx.send(attribute_child_update(run_id, update));
             }
         }
         .in_current_span(),
@@ -1011,49 +1033,48 @@ async fn drive_child_to_completion(
         Ok(Ok(context)) => {
             write_child_transcript(&transcript_target, run_id, &context).await;
             if child_context_called_finish(&context) {
-                // The `agent_finish` tool already sent its own `FinishResult`.
-                tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: agent_finish already reported result, not sending fallback");
+                // The `agent_finish` tool buffered its result in
+                // `child_finish_rx`; release it only now that its ToolDone has been
+                // forwarded, so the parent never applies the finish first.
+                if let Ok(agent_finish_result) = child_finish_rx.try_recv() {
+                    let _ = finish_tx.send(agent_finish_result);
+                }
+                tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: agent_finish reported result, not sending fallback");
                 return;
             }
             let text = extract_last_assistant_text(&context);
             tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: child never called agent_finish, sending unstructured fallback");
-            let _ = finish_tx
-                .send(FinishResult {
-                    run_id,
-                    call_id,
-                    origin: FinishResultOrigin::Runtime,
-                    status: "unstructured".to_string(),
-                    result: Some(text),
-                    error: None,
-                    sources: vec![],
-                })
-                .await;
+            let _ = finish_tx.send(FinishResult {
+                run_id,
+                call_id,
+                origin: FinishResultOrigin::Runtime,
+                status: "unstructured".to_string(),
+                result: Some(text),
+                error: None,
+                sources: vec![],
+            });
         }
         Ok(Err(error)) => {
-            let _ = finish_tx
-                .send(FinishResult {
-                    run_id,
-                    call_id,
-                    origin: FinishResultOrigin::Runtime,
-                    status: "failure".to_string(),
-                    result: None,
-                    error: Some(error.to_string()),
-                    sources: vec![],
-                })
-                .await;
+            let _ = finish_tx.send(FinishResult {
+                run_id,
+                call_id,
+                origin: FinishResultOrigin::Runtime,
+                status: "failure".to_string(),
+                result: None,
+                error: Some(error.to_string()),
+                sources: vec![],
+            });
         }
         Err(join_error) => {
-            let _ = finish_tx
-                .send(FinishResult {
-                    run_id,
-                    call_id,
-                    origin: FinishResultOrigin::Runtime,
-                    status: "failure".to_string(),
-                    result: None,
-                    error: Some(format!("child agent task panicked: {join_error}")),
-                    sources: vec![],
-                })
-                .await;
+            let _ = finish_tx.send(FinishResult {
+                run_id,
+                call_id,
+                origin: FinishResultOrigin::Runtime,
+                status: "failure".to_string(),
+                result: None,
+                error: Some(format!("child agent task panicked: {join_error}")),
+                sources: vec![],
+            });
         }
     }
 }

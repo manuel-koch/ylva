@@ -172,8 +172,9 @@ fn refresh_slash_overlay_stays_hidden_while_help_is_open_during_an_outstanding_a
     // outstanding: the denial reason typed before opening help must not
     // bring the overlay back behind the popup.
     state.focus = Focus::HelpPopup;
+    let tool_id = Uuid::new_v4();
     state.chat_entries.push(ChatEntry::ToolBubble {
-        id: Uuid::new_v4(),
+        id: tool_id,
         name: "write".to_string(),
         state: Box::new(ToolCallState::Pending {
             arguments: serde_json::json!({}),
@@ -182,6 +183,7 @@ fn refresh_slash_overlay_stays_hidden_while_help_is_open_during_an_outstanding_a
         }),
         collapsed: true,
     });
+    state.pending_approval_order.push(tool_id);
     state.refresh_slash_overlay("/mo");
     assert_eq!(
         state.slash_overlay,

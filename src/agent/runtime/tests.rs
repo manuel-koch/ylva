@@ -363,13 +363,14 @@ fn session_replacement_barrier_counts_tool_child_and_summary_queues() {
         });
         assert!(!state.session_switch_quiescent());
         state.pending_tools.clear();
-        let (child_updates, _child_receiver) = mpsc::channel(8);
+        let (child_updates, _child_receiver) = mpsc::unbounded_channel();
         let mut manager = crate::child_agent_manager::ChildAgentManager::new(
             child_updates,
             Box::new(|_, _, _| crate::child_agent_manager::SpawnOutcome {
                 command_sender: None,
                 handle: tokio::spawn(async {}),
             }),
+            Some(1),
         );
         manager.spawn(
             "first task".to_string(),
@@ -388,7 +389,12 @@ fn session_replacement_barrier_counts_tool_child_and_summary_queues() {
         assert_eq!(manager.outstanding_count(), 2);
         state.child_agent_manager = Some(manager);
         assert!(!state.session_switch_quiescent());
-        state.child_agent_manager.as_mut().unwrap().cancel_all();
+        state
+            .child_agent_manager
+            .as_mut()
+            .unwrap()
+            .cancel_all()
+            .await;
         assert!(state.session_switch_quiescent());
 
         let summary_engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
@@ -434,6 +440,199 @@ fn session_replacement_barrier_counts_tool_child_and_summary_queues() {
             state.handle_command(Some(AgentCommand::Shutdown)).await,
             LoopControl::PollAgain
         );
+    });
+}
+
+#[test]
+fn stop_returns_only_after_every_cancelled_child_task_has_finished() {
+    crate::test_support::run_locked(async {
+        let (mut state, _updates) = run_state();
+        state.is_child = false;
+
+        let finished_flags: Arc<Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let recorded_flags = Arc::clone(&finished_flags);
+        let spawn_fn: crate::child_agent_manager::SpawnFn =
+            Box::new(move |_request, cancellation_token, _subagent_ui_tx| {
+                let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                recorded_flags.lock().unwrap().push(Arc::clone(&finished));
+                let handle = tokio::spawn(async move {
+                    cancellation_token.cancelled().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                crate::child_agent_manager::SpawnOutcome {
+                    command_sender: None,
+                    handle,
+                }
+            });
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
+        let mut manager =
+            crate::child_agent_manager::ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(2));
+        for index in 0..2 {
+            manager.spawn(
+                format!("task {index}"),
+                None,
+                "default".to_string(),
+                format!("task {index}"),
+                Uuid::new_v4(),
+            );
+        }
+        state.child_agent_manager = Some(manager);
+
+        state
+            .handle_command(Some(AgentCommand::Stop {
+                reason: "test stop".to_string(),
+            }))
+            .await;
+
+        let flags = finished_flags.lock().unwrap();
+        assert_eq!(flags.len(), 2);
+        for finished in flags.iter() {
+            assert!(
+                finished.load(std::sync::atomic::Ordering::SeqCst),
+                "a cancelled child task was still running when Stop returned"
+            );
+        }
+    });
+}
+
+#[test]
+fn stop_cancels_two_running_children_and_one_queued_child() {
+    crate::test_support::run_locked(async {
+        let (mut state, mut updates) = run_state();
+        state.is_child = false;
+
+        let cancelled_tokens = Arc::new(Mutex::new(Vec::new()));
+        let recorded_tokens = Arc::clone(&cancelled_tokens);
+        let spawn_fn: crate::child_agent_manager::SpawnFn =
+            Box::new(move |_request, cancellation_token, _subagent_ui_tx| {
+                recorded_tokens.lock().unwrap().push(cancellation_token);
+                crate::child_agent_manager::SpawnOutcome {
+                    command_sender: None,
+                    handle: tokio::spawn(async {}),
+                }
+            });
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
+        let mut manager =
+            crate::child_agent_manager::ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(2));
+        let call_ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        let run_ids: Vec<Uuid> = call_ids
+            .iter()
+            .enumerate()
+            .map(|(index, call_id)| {
+                manager
+                    .spawn(
+                        format!("task {index}"),
+                        None,
+                        "default".to_string(),
+                        format!("task {index}"),
+                        *call_id,
+                    )
+                    .run_id()
+            })
+            .collect();
+        assert_eq!(manager.outstanding_count(), 3);
+        assert_eq!(manager.queue_len(), 1);
+        state.child_agent_manager = Some(manager);
+
+        state
+            .handle_command(Some(AgentCommand::Stop {
+                reason: "test stop".to_string(),
+            }))
+            .await;
+
+        let mut cancelled_tool_done_ids = Vec::new();
+        let mut cancelled_child_done_run_ids = Vec::new();
+        while let Ok(update) = updates.try_recv() {
+            match update {
+                UiUpdate::ToolDone { id, summary, .. } => {
+                    if summary
+                        .iter()
+                        .any(|(key, value)| key == "status" && value == "cancelled")
+                    {
+                        cancelled_tool_done_ids.push(id);
+                    }
+                }
+                UiUpdate::ChildAgentDone { run_id, status, .. } if status == "cancelled" => {
+                    cancelled_child_done_run_ids.push(run_id);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(cancelled_tool_done_ids.len(), 3);
+        for call_id in call_ids {
+            assert!(cancelled_tool_done_ids.contains(&call_id));
+        }
+        let manager = state.child_agent_manager.as_ref().unwrap();
+        assert_eq!(manager.outstanding_count(), 0);
+        assert_eq!(manager.queue_len(), 0);
+        for run_id in run_ids {
+            assert!(state.cancelled_run_ids.contains(&run_id));
+        }
+        assert_eq!(cancelled_child_done_run_ids.len(), 3);
+        for run_id in state.cancelled_run_ids.iter() {
+            assert!(cancelled_child_done_run_ids.contains(run_id));
+        }
+        assert!(cancelled_tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .all(CancellationToken::is_cancelled));
+    });
+}
+
+#[test]
+fn clear_context_cancels_every_running_and_queued_child() {
+    crate::test_support::run_locked(async {
+        let (mut state, _updates) = run_state();
+        state.is_child = false;
+
+        let cancelled_tokens = Arc::new(Mutex::new(Vec::new()));
+        let recorded_tokens = Arc::clone(&cancelled_tokens);
+        let spawn_fn: crate::child_agent_manager::SpawnFn =
+            Box::new(move |_request, cancellation_token, _subagent_ui_tx| {
+                recorded_tokens.lock().unwrap().push(cancellation_token);
+                crate::child_agent_manager::SpawnOutcome {
+                    command_sender: None,
+                    handle: tokio::spawn(async {}),
+                }
+            });
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
+        let mut manager =
+            crate::child_agent_manager::ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(2));
+        let run_ids: Vec<Uuid> = (0..3)
+            .map(|index| {
+                manager
+                    .spawn(
+                        format!("task {index}"),
+                        None,
+                        "default".to_string(),
+                        format!("task {index}"),
+                        Uuid::new_v4(),
+                    )
+                    .run_id()
+            })
+            .collect();
+        state.child_agent_manager = Some(manager);
+        state.context.push_user("pre-clear content".to_string());
+
+        state.handle_command(Some(AgentCommand::ClearContext)).await;
+
+        let manager = state.child_agent_manager.as_ref().unwrap();
+        assert_eq!(manager.outstanding_count(), 0);
+        assert_eq!(manager.queue_len(), 0);
+        assert!(!state.context.messages().iter().any(|message| {
+            matches!(message, crate::agent::Message::User { content, .. } if content == "pre-clear content")
+        }));
+        for run_id in run_ids {
+            assert!(state.cancelled_run_ids.contains(&run_id));
+        }
+        assert!(cancelled_tokens
+            .lock()
+            .unwrap()
+            .iter()
+            .all(CancellationToken::is_cancelled));
     });
 }
 

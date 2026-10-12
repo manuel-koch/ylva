@@ -595,7 +595,7 @@ fn root_reprompts_after_child_finish_arrives_mid_stream() {
             ToolRegistryConfig::default(),
         ));
 
-        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
         let manager = ChildAgentManager::new(
             subagent_ui_tx,
             Box::new(
@@ -604,9 +604,10 @@ fn root_reprompts_after_child_finish_arrives_mid_stream() {
                     handle: tokio::spawn(async {}),
                 },
             ),
+            Some(1),
         );
-        let (finish_tx, finish_rx) = mpsc::channel(1);
-        let (parent_subagent_ui_tx, parent_subagent_ui_rx) = mpsc::channel(8);
+        let (finish_tx, finish_rx) = mpsc::unbounded_channel();
+        let (parent_subagent_ui_tx, parent_subagent_ui_rx) = mpsc::unbounded_channel();
         let _ = parent_subagent_ui_tx; // kept alive only to avoid closing the channel early
 
         let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
@@ -629,7 +630,6 @@ fn root_reprompts_after_child_finish_arrives_mid_stream() {
                 error: None,
                 sources: vec![],
             })
-            .await
             .expect("finish_rx must still be open");
 
         // Give the loop time to finish the first stream, observe the

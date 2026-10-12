@@ -1146,7 +1146,7 @@ fn double_click_on_finished_spawn_bubble_still_drills_in_via_child_conversations
         task: "look into flaky test".to_string(),
         label: "Investigate flaky test".to_string(),
     });
-    state.running_child = None;
+    state.running_children.clear();
     let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
 
     update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());

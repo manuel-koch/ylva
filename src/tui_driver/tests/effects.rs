@@ -244,7 +244,9 @@ async fn overlapping_approvals_resume_root_and_preserve_input() {
             label: "Review".to_string(),
         });
         let mut pending_run_ids = PendingRunIds::default();
-        for (id, run_id) in [(root_tool_id, None), (child_tool_id, Some(child_run_id))] {
+        // Approvals are shown in request order: the child asks first, so its
+        // prompt is the head and the root's prompt waits behind it.
+        for (id, run_id) in [(child_tool_id, Some(child_run_id)), (root_tool_id, None)] {
             let context = textarea_ctx_from(&textarea);
             process_one_update(
                 &mut state,
@@ -330,6 +332,118 @@ async fn overlapping_approvals_resume_root_and_preserve_input() {
         assert_eq!(state.focus, Focus::MainInput);
         assert_eq!(textarea.lines(), &["unfinished draft"]);
     }
+}
+
+#[tokio::test]
+async fn two_child_approvals_are_presented_fifo_and_route_to_their_own_runs() {
+    let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+    state.mode = TuiMode::Streaming;
+    let first_run_id = Uuid::new_v4();
+    let second_run_id = Uuid::new_v4();
+    for (run_id, task) in [(first_run_id, "first task"), (second_run_id, "second task")] {
+        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: task.to_string(),
+            label: task.to_string(),
+        });
+    }
+    let first_tool_id = Uuid::new_v4();
+    let second_tool_id = Uuid::new_v4();
+    let mut pending_run_ids = PendingRunIds::default();
+    for (tool_id, run_id) in [
+        (first_tool_id, first_run_id),
+        (second_tool_id, second_run_id),
+    ] {
+        let context = textarea_ctx_from(&textarea);
+        process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &context,
+            &UiUpdate::ToolPending {
+                id: tool_id,
+                name: "bash".to_string(),
+                arguments: serde_json::json!({"command": "echo ready"}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: Some(run_id),
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+    }
+
+    assert!(matches!(
+        state.focus,
+        Focus::ToolApproval { tool_id, .. } if tool_id == first_tool_id
+    ));
+    assert!(matches!(
+        state.active_view,
+        crate::tui_reducer_state::ConversationView::Child { run_id, .. }
+            if run_id == first_run_id
+    ));
+
+    let context = textarea_ctx_from(&textarea);
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &context,
+    );
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        effects,
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut pending_run_ids,
+    )
+    .await;
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(AgentCommand::ForChild { run_id, command })
+            if run_id == first_run_id
+                && matches!(*command, AgentCommand::ApproveTool { id } if id == first_tool_id)
+    ));
+    assert!(matches!(
+        state.focus,
+        Focus::ToolApproval { tool_id, .. } if tool_id == second_tool_id
+    ));
+    assert!(matches!(
+        state.active_view,
+        crate::tui_reducer_state::ConversationView::Child { run_id, .. }
+            if run_id == second_run_id
+    ));
+
+    let context = textarea_ctx_from(&textarea);
+    let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &context);
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        effects,
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut pending_run_ids,
+    )
+    .await;
+    let second_command = cmd_rx
+        .try_recv()
+        .expect("the second approval verdict should be sent");
+    assert!(
+        matches!(
+            &second_command,
+            AgentCommand::ForChild { run_id, command }
+                if *run_id == second_run_id
+                    && matches!(**command, AgentCommand::DenyTool { id, .. } if id == second_tool_id)
+        ),
+        "second verdict must target the second child and tool, got: {second_command:?}"
+    );
+    assert!(state.pending_approval_order.is_empty());
 }
 
 #[tokio::test]

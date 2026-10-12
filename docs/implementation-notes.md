@@ -615,7 +615,14 @@ routes the run to the clone instead of a resume.
 outcome arrives later as a hidden harness notice because the tool protocol
 allows only one result per `tool_call_id`. The root receives one continuation
 after all spawned work finishes. `AgentCommand::Stop` cancels running and
-queued work without resuming the root.
+queued work without resuming the root; `/clear` cancels both states as well.
+`ChildAgentManager` tracks every running child by `run_id`, plus a FIFO queue
+for spawns beyond `max_concurrent_subagents`. The profile default is `4`, and
+`0` or a negative value means unlimited. `None` is the scheduler's unlimited
+representation. The profile-level cap applies across the current one-level
+delegation tree; child-role tool registries do not expose `spawn_subagent`.
+When a child finishes, the scheduler removes only that run and starts queued
+requests in FIFO order until the cap is full.
 The tool description and intermediate completion notices tell the root to
 end its response when no independent work remains, rather than keep thinking
 while waiting. This is model guidance, not an agent suspension or a change
@@ -629,6 +636,22 @@ details must not be invented. These are model instructions, not output validatio
 Pending tool-approval and clarify updates carry a `run_id`. Drivers wrap the
 response in `AgentCommand::ForChild`, and the root loop forwards it to the
 matching subagent. `AgentLoop` logs and drops a stale or unknown `run_id`.
+Streamed text and thinking are tagged with their child's `run_id` in the
+factory's forward task before entering the shared subagent UI channel, so
+concurrent streams cannot be attributed to whichever child started most
+recently. That channel is unbounded, so no update is dropped and the send never
+blocks the root loop that drains it; scheduler lifecycle updates use synchronous
+sends. Each child reports its finish on a private capacity-1 channel, which the
+driver forwards to the shared finish channel only after the child's UI forwarder
+has drained. A child's last UI update therefore always precedes its finish. The
+root loop also drains queued subagent UI updates before handling a finish. Stop
+and clear-context await every cancelled child task before proceeding.
+
+The TUI keeps pending approval ids in request order and displays only the head
+of that FIFO queue. Replies remain keyed by tool id and are wrapped in the
+owning child's `run_id`; a child awaiting a later prompt stays blocked without
+pausing its running siblings. `AppState::running_children` tracks every live
+child by `run_id`, separately from the retained `child_conversations` map.
 
 ### Drill-in TUI conversation view internals
 
@@ -648,12 +671,11 @@ Live Thinking timers also use truncated whole seconds in cached and legacy
 rendering, with the cached title and animation key sharing one sample.
 Completed `Thought for` titles retain millisecond precision.
 
-`AppState` keeps `active_view`, `running_child`, and
-`child_conversations` (keyed by `run_id`) separate. Finished conversations
-remain available while another subagent runs, and the view model does not
-assume execution is sequential. `ChildAgentManager` forwards token updates but
-consumes subagent stream lifecycle events so they cannot change the root TUI
-mode.
+`AppState` keeps `active_view`, `running_children`, and `child_conversations`
+(keyed by `run_id`) separate. Finished conversations remain available while
+other subagents run, and the view model retains independent mode and transcript
+state for every run. `ChildAgentManager` forwards token updates but consumes
+subagent stream lifecycle events so they cannot change the root TUI mode.
 
 `CompactionApplied` carries `run_id` from the agent sweep through the driver
 to the presenter. The presenter inserts and deduplicates the live marker in
@@ -670,9 +692,9 @@ screen. It saves the current view into `pre_pause_view` before switching and
 `resolve_possible_interactive_pause` restores it once the pause resolves. It
 skips the switch if the owning view is already open, so a manual drill-in does
 not trigger an automatic return.
-Outstanding approvals are derived from pending bubbles across root and child
-transcripts. Committing a verdict locally transitions its bubble out of
-`Pending` and resumes another outstanding approval with its owning view.
+Outstanding approvals are queued in `pending_approval_order` across root and
+child transcripts. Committing a verdict locally transitions its bubble out of
+`Pending` and resumes the next request with its owning view.
 Overlapping pauses preserve the first `pending_input_snapshot`; restoration
 waits until no approval owns the input.
 See [features](./features.md#drill-in-tui-conversation-view) for the visible

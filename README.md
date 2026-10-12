@@ -20,7 +20,7 @@ Ylva is highly customizable to adapt to user needs.
   - [ ] Copilot
   - [ ] Anthropic
 - [x] Configurable `engines` ( combination of provider + model + config )
-- [x] Ability to run main and subagent(s)
+- [x] Concurrent subagent execution with a profile-configurable limit
 - [x] Support LLM calling tools:
   - [x] `read`, `edit` & `write` file access
   - [x] `search` for file content using regexp

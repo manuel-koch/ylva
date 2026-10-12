@@ -126,6 +126,7 @@ fn restore_focus_after_help_returns_to_an_outstanding_approval_first() {
         }),
         collapsed: true,
     });
+    state.pending_approval_order.push(tool_id);
     state.focus = Focus::HelpPopup;
     state.restore_focus_after_help();
     assert_eq!(

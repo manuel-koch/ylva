@@ -184,6 +184,12 @@ in `src/agent/tests/subagents.rs` for the pattern. Queue/approval,
 cancellation and subagent integration cases retain the `tools_agent_loop`
 target, with their implementations under `tests/tools_agent_loop/`.
 
+A test that awaits the agent's join handle while still holding its `AgentLoop`
+also hangs: the loop exits only after every `AgentLoop` handle is dropped. Call
+`drop(agent)` before `handle.await`; see
+`child_completion_is_delivered_after_the_child_tool_done_that_precedes_it` in
+`tests/tools_agent_loop/subagents.rs`.
+
 ## Fixed-delay shutdown can discard an unfinished TUI turn
 
 Closing the action channel tells `run_tui` to stop; it does not wait for an

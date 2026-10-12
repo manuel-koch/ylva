@@ -15,7 +15,7 @@ safe application, while failure, timeout, stop, and clear remove it.
 
 While the main conversation is shown, the footer also reports separate
 running and queued subagent counts in a compact label such as
-`Subagents: 1 running, 1 queued`; finished subagents are not included.
+`Subagents: 2 running, 1 queued`; finished subagents are not included.
 
 When root and subagent tool approvals overlap, approving or denying one
 restores the controls for another outstanding approval in its owning

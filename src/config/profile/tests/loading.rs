@@ -804,3 +804,64 @@ fn agent_config_defaults_to_no_engine_override() {
     assert!(agent_config.persona.is_none());
     assert!(agent_config.can_spawn);
 }
+
+fn load_max_concurrent_subagents(setting_toml: &str) -> Result<Option<usize>, ConfigError> {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(temp.path(), "concurrency", setting_toml);
+    ProfileConfig::load(temp.path(), "concurrency")
+        .map(|profile| profile.max_concurrent_subagents_limit())
+}
+
+#[test]
+fn max_concurrent_subagents_defaults_to_four() {
+    assert_eq!(
+        ProfileConfig::default().max_concurrent_subagents_limit(),
+        Some(4)
+    );
+    assert_eq!(
+        load_max_concurrent_subagents("theme = \"dark\"\n").expect("the fixture loads"),
+        Some(4)
+    );
+}
+
+#[test]
+fn max_concurrent_subagents_accepts_an_explicit_positive_integer() {
+    assert_eq!(
+        load_max_concurrent_subagents("max_concurrent_subagents = 7\n").expect("loads"),
+        Some(7)
+    );
+}
+
+#[test]
+fn max_concurrent_subagents_accepts_the_string_form() {
+    assert_eq!(
+        load_max_concurrent_subagents("max_concurrent_subagents = \" 3 \"\n").expect("loads"),
+        Some(3)
+    );
+}
+
+#[test]
+fn max_concurrent_subagents_zero_and_negative_mean_unlimited() {
+    assert_eq!(
+        load_max_concurrent_subagents("max_concurrent_subagents = 0\n").expect("loads"),
+        None
+    );
+    assert_eq!(
+        load_max_concurrent_subagents("max_concurrent_subagents = -2\n").expect("loads"),
+        None
+    );
+    assert_eq!(
+        load_max_concurrent_subagents("max_concurrent_subagents = \"0\"\n").expect("loads"),
+        None
+    );
+}
+
+#[test]
+fn max_concurrent_subagents_rejects_a_non_integer_string() {
+    let error = load_max_concurrent_subagents("max_concurrent_subagents = \"many\"\n")
+        .expect_err("a non-integer string must be rejected");
+    assert!(
+        error.to_string().contains("max_concurrent_subagents"),
+        "{error}"
+    );
+}

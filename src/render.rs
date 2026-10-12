@@ -1416,7 +1416,7 @@ mod tests {
         state.switch_to_child_view(run_id);
         // The child finished: `running_child` is cleared (mirrors
         // `ChildAgentDone` handling), but the transcript/view stays around.
-        state.running_child = None;
+        state.running_children.clear();
 
         let projected = project_for_draw(&state);
 
@@ -1463,6 +1463,8 @@ mod tests {
             task: "running task".to_string(),
             label: "Running task".to_string(),
         });
+        // The first child finished (`ChildAgentDone`); only the sibling is still running.
+        state.running_children.remove(&finished_run_id);
         state.switch_to_child_view(finished_run_id);
 
         assert_eq!(state.agent_mode(), crate::agent::AgentMode::ToolRunning);

@@ -182,6 +182,7 @@ fn main() {
             exit_with_error(&mut log_guard, message);
         }
     };
+    apply_cli_profile_overrides(&cli, &mut profile);
     let profile_path = match selected_profile_path(explicit_profile_name, workspace_root.as_deref())
     {
         Ok(path) => path,
@@ -401,6 +402,12 @@ fn main() {
         Err(error) => {
             exit_with_error(&mut log_guard, error);
         }
+    }
+}
+
+fn apply_cli_profile_overrides(cli: &Cli, profile: &mut ProfileConfig) {
+    if let Some(max_concurrent_subagents) = cli.max_concurrent_subagents {
+        profile.apply_max_concurrent_subagents_override(max_concurrent_subagents);
     }
 }
 
@@ -787,6 +794,25 @@ fn log_provider_selection(selection: &ProviderSelection) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_max_concurrent_subagents_overrides_profile_and_zero_means_unlimited() {
+        let mut profile = ProfileConfig {
+            max_concurrent_subagents: Some(2),
+            ..ProfileConfig::default()
+        };
+        let cli = Cli::try_parse_from(["ylva", "--max-concurrent-subagents", "7"])
+            .expect("positive override parses");
+
+        apply_cli_profile_overrides(&cli, &mut profile);
+
+        assert_eq!(profile.max_concurrent_subagents_limit(), Some(7));
+
+        let unlimited_cli = Cli::try_parse_from(["ylva", "--max-concurrent-subagents", "0"])
+            .expect("zero override parses");
+        apply_cli_profile_overrides(&unlimited_cli, &mut profile);
+        assert_eq!(profile.max_concurrent_subagents_limit(), None);
+    }
 
     #[test]
     fn profile_environment_fills_only_missing_explicit_engine_api_keys() {

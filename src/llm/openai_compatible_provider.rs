@@ -545,6 +545,7 @@ impl Provider for OpenAiCompatibleProvider {
                     path,
                 );
             }
+            let request_started_at = std::time::Instant::now();
             let (response, request_permit) = match crate::http::post_with_retry_and_limiter(
                 &client,
                 &completions_url,
@@ -567,6 +568,11 @@ impl Provider for OpenAiCompatibleProvider {
                     return Err(error);
                 }
             };
+            tracing::debug!(
+                dump_id = %dump_id,
+                elapsed_ms = request_started_at.elapsed().as_millis() as u64,
+                "response headers received"
+            );
             let response_content_type = response
                 .headers()
                 .get(CONTENT_TYPE)
@@ -588,9 +594,11 @@ impl Provider for OpenAiCompatibleProvider {
             }
 
             let (tx, rx) = mpsc::channel(16);
+            let stream_dump_id = dump_id.clone();
             tokio::spawn(async move {
                 let _request_permit = request_permit;
                 let mut reported_input_tokens = None;
+                let mut first_token_received = false;
                 // Own the byte stream (and the `Response`) inside this task so
                 // dropping it on cancel closes the underlying TCP socket.
                 let stream = response.bytes_stream().eventsource();
@@ -618,6 +626,11 @@ impl Provider for OpenAiCompatibleProvider {
                                         dump_path,
                                     );
                                 }
+                            tracing::debug!(
+                                dump_id = %stream_dump_id,
+                                elapsed_ms = request_started_at.elapsed().as_millis() as u64,
+                                "stream ended without [DONE]"
+                            );
                                 let _ = tx
                                     .send(StreamEvent::Error(anyhow::anyhow!(
                                         "provider stream ended before [DONE]"
@@ -635,7 +648,11 @@ impl Provider for OpenAiCompatibleProvider {
                                     }
                                     match parse_sse_payload(&event.data) {
                                         Some(StreamEvent::Done) => {
-                                            tracing::debug!("stream ended with [DONE]");
+                                            tracing::debug!(
+                                                dump_id = %stream_dump_id,
+                                                elapsed_ms = request_started_at.elapsed().as_millis() as u64,
+                                                "stream ended with [DONE]"
+                                            );
                                             let _ = tx.send(StreamEvent::Done).await;
                                             break;
                                         }
@@ -644,6 +661,16 @@ impl Provider for OpenAiCompatibleProvider {
                                             break;
                                         }
                                         Some(stream_event) => {
+                                            // `parse_sse_payload` yields only Text/Thinking/Delta here,
+                                            // so the first such event is the first token.
+                                            if !first_token_received {
+                                                first_token_received = true;
+                                                tracing::debug!(
+                                                    dump_id = %stream_dump_id,
+                                                    elapsed_ms = request_started_at.elapsed().as_millis() as u64,
+                                                    "first token received"
+                                                );
+                                            }
                                             if tx.send(stream_event).await.is_err() {
                                                 break;
                                             }

@@ -161,8 +161,9 @@ fn child_with_over_context_task_compacts_and_finishes() {
                 Arc::new(EngineImpl::new(provider.clone(), child_engine_config)) as Arc<dyn Engine>,
             ),
         ]));
-        let (finish_tx, mut finish_rx) = mpsc::channel(4);
-        let (forward_ui_tx, mut forwarded_updates) = mpsc::channel(100);
+        let (finish_tx, mut finish_rx) = mpsc::unbounded_channel();
+        let (child_finish_tx, child_finish_rx) = mpsc::channel(1);
+        let (forward_ui_tx, mut forwarded_updates) = mpsc::unbounded_channel();
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
         let child_role = Role::Child(ChildRoleConfig {
@@ -172,7 +173,7 @@ fn child_with_over_context_task_compacts_and_finishes() {
             briefing: None,
             parent_cancel: CancellationToken::new(),
             subagent_ui_tx: forward_ui_tx,
-            finish_tx: finish_tx.clone(),
+            finish_tx: child_finish_tx,
         });
 
         let (child_loop, child_ui_rx) = factory
@@ -190,12 +191,13 @@ fn child_with_over_context_task_compacts_and_finishes() {
         let drive_task = tokio::spawn(drive_child_to_completion(
             child_loop,
             child_ui_rx,
+            child_finish_rx,
             task,
             run_id,
             call_id,
             CancellationToken::new(),
             finish_tx,
-            mpsc::channel(1).0,
+            mpsc::unbounded_channel::<UiUpdate>().0,
             transcript_target,
         ));
 
@@ -231,6 +233,114 @@ fn child_with_over_context_task_compacts_and_finishes() {
             .await
             .is_ok(),
             "child compaction notices are forwarded with the child run id"
+        );
+        drive_task.await.expect("child driver task joins");
+    });
+}
+
+#[derive(Default)]
+struct FinishOnlyChildProvider;
+
+impl Provider for FinishOnlyChildProvider {
+    fn name(&self) -> &str {
+        "child-finish-only"
+    }
+
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async {
+            let (sender, receiver) = mpsc::channel(4);
+            tokio::spawn(async move {
+                let _ = sender
+                    .send(StreamEvent::Delta(crate::agent::DeltaChunk {
+                        tool_call_index: 0,
+                        tool_call_id: Some("finish-child".to_string()),
+                        function_name: Some("agent_finish".to_string()),
+                        arguments_fragment: Some(
+                            r#"{"status":"success","result":"finished"}"#.to_string(),
+                        ),
+                    }))
+                    .await;
+                let _ = sender.send(StreamEvent::Done).await;
+            });
+            Ok(receiver)
+        })
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+}
+
+#[test]
+fn terminal_finish_is_received_only_after_the_child_agent_finish_tool_done_is_forwarded() {
+    crate::test_support::run_locked_paused(async {
+        let mut profile = two_engine_profile();
+        profile
+            .agents
+            .get_mut("quick")
+            .expect("quick agent")
+            .allowed_tools = Some(vec!["agent_finish".to_string()]);
+
+        let provider = Arc::new(FinishOnlyChildProvider);
+        let factory = AgentFactory::new(HashMap::from([(
+            "fast".to_string(),
+            Arc::new(EngineImpl::new(provider, test_engine_config())) as Arc<dyn Engine>,
+        )]));
+        let (finish_tx, mut finish_rx) = mpsc::unbounded_channel();
+        let (child_finish_tx, child_finish_rx) = mpsc::channel(1);
+        let (forward_ui_tx, mut forwarded_updates) = mpsc::unbounded_channel();
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        let child_role = Role::Child(ChildRoleConfig {
+            run_id,
+            call_id,
+            session_id: None,
+            briefing: None,
+            parent_cancel: CancellationToken::new(),
+            subagent_ui_tx: mpsc::unbounded_channel().0,
+            finish_tx: child_finish_tx,
+        });
+
+        let (child_loop, child_ui_rx) = factory
+            .create(&profile, "quick", child_role)
+            .expect("child factory builds");
+        let transcript_target = ChildTranscriptTarget {
+            parent_store: None,
+            engine_config: Some(child_loop.engine().config()),
+            utility_engine: None,
+        };
+        let drive_task = tokio::spawn(drive_child_to_completion(
+            child_loop,
+            child_ui_rx,
+            child_finish_rx,
+            "finish now".to_string(),
+            run_id,
+            call_id,
+            CancellationToken::new(),
+            finish_tx,
+            forward_ui_tx,
+            transcript_target,
+        ));
+
+        let finish = tokio::time::timeout(Duration::from_secs(5), finish_rx.recv())
+            .await
+            .expect("child finishes")
+            .expect("finish event is sent");
+        assert_eq!(finish.status, "success");
+
+        let agent_finish_tool_done_forwarded =
+            std::iter::from_fn(|| forwarded_updates.try_recv().ok()).any(|update| {
+                matches!(update, UiUpdate::ToolDone { ref name, .. }
+                    if name == crate::agent::tools::agent_finish::AgentFinishTool::NAME)
+            });
+        assert!(
+            agent_finish_tool_done_forwarded,
+            "the terminal finish must not overtake the child's agent_finish ToolDone"
         );
         drive_task.await.expect("child driver task joins");
     });
@@ -643,10 +753,11 @@ fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
             ..ProfileConfig::default()
         };
 
-        let (finish_tx, mut finish_rx) = mpsc::channel::<FinishResult>(1);
-        let (forward_ui_tx, mut forward_ui_rx) = mpsc::channel::<UiUpdate>(16);
+        let (finish_tx, mut finish_rx) = mpsc::unbounded_channel::<FinishResult>();
+        let (forward_ui_tx, mut forward_ui_rx) = mpsc::unbounded_channel::<UiUpdate>();
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
+        let (child_finish_tx, child_finish_rx) = mpsc::channel::<FinishResult>(1);
         let request = SpawnRequest {
             run_id,
             call_id,
@@ -664,7 +775,7 @@ fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
             briefing: request.briefing.clone(),
             parent_cancel: cancel.clone(),
             subagent_ui_tx: forward_ui_tx.clone(),
-            finish_tx: finish_tx.clone(),
+            finish_tx: child_finish_tx,
         };
         let (child_loop, child_ui_rx) = AgentFactory::build(
             &engines,
@@ -682,6 +793,7 @@ fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
         drive_child_to_completion(
             child_loop,
             child_ui_rx,
+            child_finish_rx,
             request.task,
             run_id,
             call_id,
@@ -739,11 +851,12 @@ fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
             ..ProfileConfig::default()
         };
 
-        let (finish_tx, mut finish_rx) = mpsc::channel::<FinishResult>(1);
-        let (forward_ui_tx, mut forward_ui_rx) = mpsc::channel::<UiUpdate>(16);
+        let (finish_tx, mut finish_rx) = mpsc::unbounded_channel::<FinishResult>();
+        let (forward_ui_tx, mut forward_ui_rx) = mpsc::unbounded_channel::<UiUpdate>();
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
         let cancel = CancellationToken::new();
+        let (child_finish_tx, child_finish_rx) = mpsc::channel::<FinishResult>(1);
         let child_role_config = ChildRoleConfig {
             run_id,
             call_id,
@@ -751,7 +864,7 @@ fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
             briefing: None,
             parent_cancel: cancel.clone(),
             subagent_ui_tx: forward_ui_tx.clone(),
-            finish_tx: finish_tx.clone(),
+            finish_tx: child_finish_tx,
         };
         let (child_loop, child_ui_rx) = AgentFactory::build(
             &engines,
@@ -769,6 +882,7 @@ fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
         drive_child_to_completion(
             child_loop,
             child_ui_rx,
+            child_finish_rx,
             "do the child task".to_string(),
             run_id,
             call_id,
@@ -797,4 +911,52 @@ fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
             Some("provider returned HTTP 404: model 'invalid' not found")
         );
     });
+}
+
+#[test]
+fn interleaved_child_streams_keep_their_own_run_id() {
+    let first_run_id = uuid::Uuid::new_v4();
+    let second_run_id = uuid::Uuid::new_v4();
+    let interleaved = [
+        (first_run_id, UiUpdate::AppendText("alpha ".to_string())),
+        (second_run_id, UiUpdate::AppendText("beta ".to_string())),
+        (
+            first_run_id,
+            UiUpdate::AppendThinking("first-thought".to_string()),
+        ),
+        (second_run_id, UiUpdate::AppendText("gamma".to_string())),
+    ];
+
+    let attributed: Vec<UiUpdate> = interleaved
+        .into_iter()
+        .map(|(run_id, update)| attribute_child_update(run_id, update))
+        .collect();
+
+    assert!(matches!(
+        &attributed[0],
+        UiUpdate::ChildAgentToken { run_id, text, is_thinking: false }
+            if *run_id == first_run_id && text == "alpha "
+    ));
+    assert!(matches!(
+        &attributed[1],
+        UiUpdate::ChildAgentToken { run_id, text, is_thinking: false }
+            if *run_id == second_run_id && text == "beta "
+    ));
+    assert!(matches!(
+        &attributed[2],
+        UiUpdate::ChildAgentToken { run_id, text, is_thinking: true }
+            if *run_id == first_run_id && text == "first-thought"
+    ));
+    assert!(matches!(
+        &attributed[3],
+        UiUpdate::ChildAgentToken { run_id, text, is_thinking: false }
+            if *run_id == second_run_id && text == "gamma"
+    ));
+}
+
+#[test]
+fn non_text_child_updates_pass_through_unchanged() {
+    let run_id = uuid::Uuid::new_v4();
+    let passed = attribute_child_update(run_id, UiUpdate::StreamDone);
+    assert!(matches!(passed, UiUpdate::StreamDone));
 }

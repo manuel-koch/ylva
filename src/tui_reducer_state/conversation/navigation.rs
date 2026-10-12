@@ -97,6 +97,7 @@ impl AppState {
     }
 
     pub(in crate::tui_reducer_state) fn resume_pending_tool_approval(&mut self) {
+        self.prune_pending_approval_order();
         if matches!(self.focus, Focus::HelpPopup)
             || matches!(
                 self.mode,

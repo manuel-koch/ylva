@@ -239,6 +239,9 @@ and list currently implemented features in a brief markdown descriptions.
 
 ONLY use `bash` tool to search for relevant files!
 
+Save the complete summary to `logs/summary.md`, don't edit an existing file nor use
+its current content. If file exists, override it.
+
 ---
 
 Which subagent types can you use to delegate tasks ?

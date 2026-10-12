@@ -21,10 +21,11 @@ use uuid::Uuid;
 /// Shared handling for `DomainEvent::ToolPending`, used identically by
 /// `domain_idle`, `domain_pending`, and `domain_streaming`: creates the
 /// `Pending` bubble in whichever transcript `run_id` targets (root or a
-/// child), arms `Focus::ToolApproval`, and always auto-switches the drill-in
-/// view to wherever this pending call actually lives — root or that
-/// specific child — regardless of which conversation is currently on
-/// screen (see `AppState::note_interactive_pause`).
+/// child) and queues it in `pending_approval_order`. When no other approval
+/// is on screen it arms `Focus::ToolApproval` and auto-switches the drill-in
+/// view to wherever this pending call lives (see
+/// `AppState::note_interactive_pause`). Otherwise it waits its turn behind
+/// the prompt already shown, which is re-armed when that one resolves.
 pub(super) fn push_tool_pending_bubble(
     state: &mut AppState,
     id: Uuid,
@@ -47,6 +48,13 @@ pub(super) fn push_tool_pending_bubble(
             }),
             collapsed: true,
         });
+    let already_awaiting_approval = matches!(state.focus, Focus::ToolApproval { .. })
+        || state.pending_tool_approval().is_some()
+        || matches!(state.mode, TuiMode::ClarifyPending { .. });
+    state.pending_approval_order.push(id);
+    if already_awaiting_approval {
+        return vec![];
+    }
     state.focus = Focus::ToolApproval {
         tool_id: id,
         tool_name: name,

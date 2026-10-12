@@ -605,14 +605,14 @@ impl AppState {
     /// conversation rather than whichever child happens to be running now.
     /// No-op when `run_id` is not a tracked child.
     /// Registers a new tracked child run (adding a fresh, empty entry to
-    /// `child_conversations`) and marks it as the currently *running*
-    /// child. Used by `presenter::domain::domain_child_lifecycle` on
+    /// `child_conversations`) and marks it as running (`running_children`).
+    /// Used by `presenter::domain::domain_child_lifecycle` on
     /// `DomainEvent::ChildAgentStarted`, and directly by tests that need to
     /// simulate a child run's existence without driving the full event
     /// pipeline.
     pub(crate) fn start_child_run(&mut self, info: ChildRunInfo) {
         self.invalidate_transcript_layout(Some(info.run_id));
-        self.running_child = Some(info.clone());
+        self.running_children.insert(info.run_id, info.clone());
         self.child_conversations
             .insert(info.run_id, ChildConversation::new(info));
     }
@@ -713,11 +713,15 @@ impl AppState {
     /// AgentMode::Streaming` — text popped straight from "invisible" to a
     /// fully-committed bubble once flushed (see docs/known-test-issues.md).
     pub fn agent_mode_for_child(&self, run_id: uuid::Uuid) -> AgentMode {
-        let is_pending_approval_for_this_child = matches!(self.focus, Focus::ToolApproval { tool_id, .. }
-        if self.child_conversations.get(&run_id).is_some_and(|conversation| {
-            conversation.messages.iter().any(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id))
-        }));
-        if is_pending_approval_for_this_child {
+        // Any Pending bubble in this child's transcript means its loop is
+        // blocked on an approval, even when that prompt is queued behind the
+        // head shown in `Focus::ToolApproval`.
+        let has_pending_approval = self.child_conversations.get(&run_id).is_some_and(|conversation| {
+            conversation.messages.iter().any(|entry| {
+                matches!(entry, ChatEntry::ToolBubble { state, .. } if matches!(**state, ToolCallState::Pending { .. }))
+            })
+        });
+        if has_pending_approval {
             return AgentMode::ToolPending;
         }
         let has_running_tool_bubble =
@@ -728,11 +732,7 @@ impl AppState {
                 });
         if has_running_tool_bubble {
             AgentMode::ToolRunning
-        } else if self
-            .running_child
-            .as_ref()
-            .is_some_and(|child| child.run_id == run_id)
-        {
+        } else if self.running_children.contains_key(&run_id) {
             AgentMode::Streaming
         } else {
             AgentMode::Idle

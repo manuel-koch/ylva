@@ -402,6 +402,13 @@ impl AgentLoop {
                 }
                 }
                 Some(finish_result) = recv_finish(&mut finish_rx) => {
+                // Apply child UI updates already queued before this finish so a child's
+                // `ToolDone` is shown before its completion.
+                if let Some(subagent_rx) = subagent_ui_rx.as_mut() {
+                    while let Ok(update) = subagent_rx.try_recv() {
+                        state.forward_subagent_update(update).instrument(session_span.clone()).await;
+                    }
+                }
                 match state.handle_subagent_finish(finish_result).instrument(session_span.clone()).await {
                 LoopControl::PollAgain => continue,
                 LoopControl::Finished => return Ok(state.context),

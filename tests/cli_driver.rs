@@ -1125,8 +1125,8 @@ async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
     let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
     let (mut agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
 
-    let (finish_tx, finish_rx) = mpsc::channel(1);
-    let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel(8);
+    let (finish_tx, finish_rx) = mpsc::unbounded_channel();
+    let (subagent_ui_tx, subagent_ui_rx) = mpsc::unbounded_channel();
     // Finishes well after the parent's own turn ends, to reproduce the race
     // the fix addresses.
     let spawn_fn: SpawnFn = Box::new(move |request, cancel: CancellationToken, _ui_tx| {
@@ -1144,8 +1144,7 @@ async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
                             result: Some("child result payload".to_string()),
                             error: None,
                             sources: vec![],
-                        })
-                        .await;
+                        });
                 }
             }
         });
@@ -1154,7 +1153,7 @@ async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
             handle,
         }
     });
-    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn);
+    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(1));
     agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
 
     run_cli_to(

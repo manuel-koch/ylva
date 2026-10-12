@@ -208,6 +208,89 @@ fn footer_shows_running_and_queued_subagent_counts() {
     );
 }
 
+#[test]
+fn concurrent_children_keep_separate_streams_and_running_modes() {
+    use ylva::{AppState, DomainEvent};
+
+    let mut state = AppState::new();
+    let first_run_id = uuid::Uuid::new_v4();
+    let second_run_id = uuid::Uuid::new_v4();
+    let first_bubble_id = uuid::Uuid::new_v4();
+    let second_bubble_id = uuid::Uuid::new_v4();
+
+    for (run_id, bubble_id, task, output) in [
+        (
+            first_run_id,
+            first_bubble_id,
+            "first concurrent task",
+            "FIRST-ONLY-STREAM",
+        ),
+        (
+            second_run_id,
+            second_bubble_id,
+            "second concurrent task",
+            "SECOND-ONLY-STREAM",
+        ),
+    ] {
+        present_render_event(
+            &mut state,
+            DomainEvent::ToolStart {
+                id: bubble_id,
+                name: "spawn_subagent".to_string(),
+                arguments: serde_json::json!({"task": task}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            },
+        );
+        present_render_event(
+            &mut state,
+            DomainEvent::ChildAgentStarted {
+                run_id,
+                call_id: bubble_id,
+                agent_type: "reviewer".to_string(),
+                task: task.to_string(),
+                label: task.to_string(),
+            },
+        );
+        present_render_event(
+            &mut state,
+            DomainEvent::ChildAgentToken {
+                run_id,
+                text: output.to_string(),
+                is_thinking: false,
+            },
+        );
+    }
+
+    assert_eq!(state.running_children.len(), 2);
+    for (run_id, own_output, sibling_output) in [
+        (first_run_id, "FIRST-ONLY-STREAM", "SECOND-ONLY-STREAM"),
+        (second_run_id, "SECOND-ONLY-STREAM", "FIRST-ONLY-STREAM"),
+    ] {
+        state.switch_to_child_view(run_id);
+        let rendered = rendered_text(&render_offline(&mut state, 80, 24));
+        assert!(rendered.contains(own_output), "{rendered:?}");
+        assert!(!rendered.contains(sibling_output), "{rendered:?}");
+        assert!(rendered.contains("Subagent streaming"), "{rendered:?}");
+    }
+
+    present_render_event(
+        &mut state,
+        DomainEvent::ChildAgentDone {
+            run_id: first_run_id,
+            status: "success".to_string(),
+            result: Some("first complete".to_string()),
+        },
+    );
+    assert!(!state.running_children.contains_key(&first_run_id));
+    assert!(state.running_children.contains_key(&second_run_id));
+    state.switch_to_child_view(second_run_id);
+    let rendered = rendered_text(&render_offline(&mut state, 80, 24));
+    assert!(rendered.contains("SECOND-ONLY-STREAM"), "{rendered:?}");
+    assert!(rendered.contains("Subagent streaming"), "{rendered:?}");
+}
+
 /// While viewing a child that is streaming extended-thinking/reasoning text
 /// (no visible reply yet), the footer must say "Subagent thinking…" rather
 /// than the generic "Subagent working…" — mirrors the root's own

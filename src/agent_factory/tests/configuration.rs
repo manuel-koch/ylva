@@ -345,7 +345,7 @@ fn per_agent_compaction_engine_and_timeout_are_applied_to_child_loops() {
         session_id: None,
         briefing: None,
         parent_cancel: CancellationToken::new(),
-        subagent_ui_tx: mpsc::channel(4).0,
+        subagent_ui_tx: mpsc::unbounded_channel().0,
         finish_tx: mpsc::channel(4).0,
     });
 
@@ -580,7 +580,7 @@ fn profile_compaction_settings_apply_to_child_without_agent_override() {
         session_id: None,
         briefing: None,
         parent_cancel: CancellationToken::new(),
-        subagent_ui_tx: mpsc::channel(4).0,
+        subagent_ui_tx: mpsc::unbounded_channel().0,
         finish_tx: mpsc::channel(4).0,
     });
 
@@ -785,7 +785,7 @@ fn validate_profile_agent_engines_rejects_unknown_agent_type_scoped_tool_name() 
 fn create_returns_ok_for_child_role_with_known_engine() {
     let (factory, profile) = make_factory();
     let (finish_tx, _finish_rx) = mpsc::channel(1);
-    let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(1);
+    let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
     let child_role_config = ChildRoleConfig {
         run_id: uuid::Uuid::new_v4(),
         call_id: uuid::Uuid::new_v4(),

@@ -74,28 +74,75 @@ impl AppState {
         &mut self.chat_entries
     }
 
-    /// The tool call currently awaiting a user verdict, as
-    /// `(tool_id, tool_name)`: the first bubble still in
-    /// [`ToolCallState::Pending`] in the root or any child transcript.
+    /// The head of the queued tool approvals, as `(tool_id, tool_name)`, when
+    /// its bubble is still in [`ToolCallState::Pending`] in the root or a child
+    /// transcript.
     ///
     /// This is the authoritative "an approval is outstanding" marker —
     /// arming `Focus::ToolApproval` pushes such a bubble in the same event
     /// and a verdict resolves both together — so it stays usable while the
     /// help popup has temporarily replaced the focus.
     pub fn pending_tool_approval(&self) -> Option<(Uuid, String)> {
-        fn find_in(messages: &[ChatEntry]) -> Option<(Uuid, String)> {
+        self.pending_approval_order.iter().find_map(|tool_id| {
+            self.pending_approval_name(*tool_id)
+                .map(|name| (*tool_id, name))
+        })
+    }
+
+    /// Name of the tool bubble `tool_id` when it is still awaiting approval
+    /// in the root or any child transcript.
+    fn pending_approval_name(&self, tool_id: Uuid) -> Option<String> {
+        fn find_in(messages: &[ChatEntry], tool_id: Uuid) -> Option<String> {
             messages.iter().find_map(|entry| match entry {
                 ChatEntry::ToolBubble {
                     id, name, state, ..
-                } if matches!(**state, ToolCallState::Pending { .. }) => Some((*id, name.clone())),
+                } if *id == tool_id && matches!(**state, ToolCallState::Pending { .. }) => {
+                    Some(name.clone())
+                }
                 _ => None,
             })
         }
-        find_in(&self.chat_entries).or_else(|| {
+        find_in(&self.chat_entries, tool_id).or_else(|| {
             self.child_conversations
                 .values()
-                .find_map(|conversation| find_in(&conversation.messages))
+                .find_map(|conversation| find_in(&conversation.messages, tool_id))
         })
+    }
+
+    /// Drops queued approvals whose bubble has left `Pending` (answered,
+    /// denied, stopped, or cleared), keeping the request order of the rest.
+    pub(crate) fn prune_pending_approval_order(&mut self) {
+        let still_pending: Vec<Uuid> = self
+            .pending_approval_order
+            .iter()
+            .copied()
+            .filter(|tool_id| self.pending_approval_name(*tool_id).is_some())
+            .collect();
+        self.pending_approval_order = still_pending;
+    }
+
+    /// Mark unfinished tool bubbles in a cancelled child transcript as
+    /// killed, returning their ids so the presenter can release any approval
+    /// focus and resume the next queued prompt.
+    pub(crate) fn kill_unfinished_child_tools(&mut self, run_id: Uuid) -> Vec<Uuid> {
+        let Some(conversation) = self.child_conversations.get_mut(&run_id) else {
+            return Vec::new();
+        };
+        let mut killed_tool_ids = Vec::new();
+        for entry in &mut conversation.messages {
+            let ChatEntry::ToolBubble { id, state, .. } = entry else {
+                continue;
+            };
+            if matches!(
+                state.as_ref(),
+                ToolCallState::Pending { .. } | ToolCallState::Running { .. }
+            ) {
+                **state = ToolCallState::Killed;
+                killed_tool_ids.push(*id);
+            }
+        }
+        self.prune_pending_approval_order();
+        killed_tool_ids
     }
 
     /// Toggle the collapsed/expanded state of the tool bubble with the given id.

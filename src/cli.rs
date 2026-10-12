@@ -145,6 +145,10 @@ pub struct Cli {
     #[arg(long)]
     pub auto_approve_spawn: bool,
 
+    /// Maximum child agents running at once; values <= 0 mean unlimited
+    #[arg(long, value_name = "N", allow_negative_numbers = true)]
+    pub max_concurrent_subagents: Option<i64>,
+
     /// Hidden alias for the removed `--no-color` flag, rejected after parsing
     /// with a migration hint (see [`Cli::resolved_color_mode`]).
     #[arg(long, hide = true)]
@@ -340,6 +344,30 @@ mod tests {
     fn profile_without_a_value_is_an_error() {
         let error = parse(["--profile"]).expect_err("a missing value must not be silently ignored");
         assert!(error.to_string().contains("--profile"), "{error}");
+    }
+
+    #[test]
+    fn max_concurrent_subagents_is_absent_without_the_flag() {
+        let cli = parse([]).expect("parses");
+        assert_eq!(cli.max_concurrent_subagents, None);
+    }
+
+    #[test]
+    fn max_concurrent_subagents_accepts_positive_and_non_positive_values() {
+        for (value, expected) in [("7", 7), ("0", 0), ("-2", -2)] {
+            let cli = parse(["--max-concurrent-subagents", value]).expect("signed integer parses");
+            assert_eq!(cli.max_concurrent_subagents, Some(expected));
+        }
+    }
+
+    #[test]
+    fn max_concurrent_subagents_requires_a_value() {
+        let error = parse(["--max-concurrent-subagents"])
+            .expect_err("the override requires a signed integer value");
+        assert!(
+            error.to_string().contains("--max-concurrent-subagents"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -191,7 +191,7 @@ pub struct ChildRoleConfig {
     pub parent_cancel: CancellationToken,
     /// Forwards this child's `UiUpdate`s up to the parent, for live-token and
     /// context-usage display in the child drill-in view.
-    pub subagent_ui_tx: mpsc::Sender<UiUpdate>,
+    pub subagent_ui_tx: mpsc::UnboundedSender<UiUpdate>,
     /// Sent to by this child's `agent_finish` tool when called.
     pub finish_tx: mpsc::Sender<crate::child_agent_manager::FinishResult>,
 }
@@ -232,8 +232,8 @@ pub struct AgentLoop {
     /// Set via [`AgentLoop::with_child_agent_manager`] for a `Role::Root`
     /// agent whose `AgentConfig::can_spawn` is `true`.
     child_agent_manager: Option<crate::child_agent_manager::ChildAgentManager>,
-    finish_rx: Option<mpsc::Receiver<crate::child_agent_manager::FinishResult>>,
-    subagent_ui_rx: Option<mpsc::Receiver<UiUpdate>>,
+    finish_rx: Option<mpsc::UnboundedReceiver<crate::child_agent_manager::FinishResult>>,
+    subagent_ui_rx: Option<mpsc::UnboundedReceiver<UiUpdate>>,
     /// Set via [`AgentLoop::with_max_tool_iterations`]: the effective
     /// tool-use iteration limit for this loop, applied by the shared
     /// iteration guard. Defaults to [`DEFAULT_MAX_TOOL_USE_ITERATIONS`].
@@ -431,8 +431,8 @@ impl AgentLoop {
     pub fn with_child_agent_manager(
         mut self,
         manager: crate::child_agent_manager::ChildAgentManager,
-        finish_rx: mpsc::Receiver<crate::child_agent_manager::FinishResult>,
-        subagent_ui_rx: mpsc::Receiver<UiUpdate>,
+        finish_rx: mpsc::UnboundedReceiver<crate::child_agent_manager::FinishResult>,
+        subagent_ui_rx: mpsc::UnboundedReceiver<UiUpdate>,
     ) -> Self {
         self.child_agent_manager = Some(manager);
         self.finish_rx = Some(finish_rx);

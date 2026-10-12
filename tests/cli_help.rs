@@ -41,6 +41,7 @@ fn help_flag_prints_usage_and_exits_zero() {
         "--auto-approve-read",
         "--auto-approve-web-fetch",
         "--auto-approve-spawn",
+        "--max-concurrent-subagents",
         "init",
     ] {
         assert!(

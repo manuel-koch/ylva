@@ -74,6 +74,16 @@ pub struct ProfileConfig {
         deserialize_with = "deserialize_usize_or_string"
     )]
     pub input_history_limit: usize,
+    /// Cap on child agents running at the same time across the whole agent
+    /// tree (root plus all nested children). An effective value of `None`
+    /// means unlimited; a configured value `<= 0` resolves to `None`. Queued
+    /// spawns beyond the cap wait in FIFO order. Read through
+    /// [`ProfileConfig::max_concurrent_subagents_limit`].
+    #[serde(
+        default = "default_max_concurrent_subagents",
+        deserialize_with = "deserialize_max_concurrent_subagents"
+    )]
+    pub max_concurrent_subagents: Option<usize>,
     /// Reserved key-to-action map. Accepted and validated as a table of
     /// strings so a profile carrying one still loads, but Phase 7 ships a
     /// fixed key map (`docs/keybindings.md`) and does not apply these
@@ -409,6 +419,40 @@ where
     }
 }
 
+const DEFAULT_MAX_CONCURRENT_SUBAGENTS: usize = 4;
+
+fn default_max_concurrent_subagents() -> Option<usize> {
+    Some(DEFAULT_MAX_CONCURRENT_SUBAGENTS)
+}
+
+/// Maps a configured concurrency setting to its effective cap: a value `<= 0`
+/// means unlimited and yields `None`; a positive value yields `Some`.
+pub fn concurrency_limit_from_setting(value: i64) -> Option<usize> {
+    usize::try_from(value).ok().filter(|limit| *limit > 0)
+}
+
+fn deserialize_max_concurrent_subagents<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ConcurrencyValue {
+        Number(i64),
+        Text(String),
+    }
+
+    let value = match ConcurrencyValue::deserialize(deserializer)? {
+        ConcurrencyValue::Number(value) => value,
+        ConcurrencyValue::Text(value) => value.trim().parse::<i64>().map_err(|error| {
+            serde::de::Error::custom(format!(
+                "invalid max_concurrent_subagents '{value}': {error}"
+            ))
+        })?,
+    };
+    Ok(concurrency_limit_from_setting(value))
+}
+
 fn default_agent_config() -> AgentConfig {
     AgentConfig {
         engine: None,
@@ -437,6 +481,7 @@ impl Default for ProfileConfig {
             default_model: None,
             theme: ThemeName::default(),
             input_history_limit: default_input_history_limit(),
+            max_concurrent_subagents: default_max_concurrent_subagents(),
             keybindings: HashMap::new(),
             agents: HashMap::from([(DEFAULT_PROFILE_NAME.to_string(), default_agent_config())]),
             tools: HashMap::new(),
@@ -665,6 +710,18 @@ impl ProfileConfig {
                 engine_config.model = default_model.clone();
             }
         }
+    }
+
+    /// Effective cap on concurrently running child agents across the whole
+    /// agent tree; `None` means unlimited.
+    pub fn max_concurrent_subagents_limit(&self) -> Option<usize> {
+        self.max_concurrent_subagents.filter(|limit| *limit > 0)
+    }
+
+    /// Apply the signed CLI override for the profile-level child concurrency
+    /// cap. Non-positive values mean unlimited, matching profile deserialization.
+    pub fn apply_max_concurrent_subagents_override(&mut self, value: i64) {
+        self.max_concurrent_subagents = concurrency_limit_from_setting(value);
     }
 
     /// Profile-level compaction engine without agent-type resolution:

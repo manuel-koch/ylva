@@ -100,7 +100,7 @@ fn root_and_child_contexts_share_global_and_agent_type_prompt_once() {
         );
 
         let (finish_tx, _finish_rx) = mpsc::channel(1);
-        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(1);
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
         let (mut child, _child_ui_rx) = factory
             .create(
                 &profile,

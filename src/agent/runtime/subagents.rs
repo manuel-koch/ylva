@@ -270,37 +270,11 @@ impl RunState {
         // (tool approvals/progress/errors, already stamped
         // with the child's own `run_id`) is forwarded as-is.
         match update {
-            UiUpdate::AppendText(text) => {
-                if let Some(run_id) = self
-                    .child_agent_manager
-                    .as_ref()
-                    .and_then(|manager| manager.running_run_id())
-                {
-                    let _ = self
-                        .ui_tx
-                        .send(UiUpdate::ChildAgentToken {
-                            run_id,
-                            text,
-                            is_thinking: false,
-                        })
-                        .await;
-                }
-            }
-            UiUpdate::AppendThinking(text) => {
-                if let Some(run_id) = self
-                    .child_agent_manager
-                    .as_ref()
-                    .and_then(|manager| manager.running_run_id())
-                {
-                    let _ = self
-                        .ui_tx
-                        .send(UiUpdate::ChildAgentToken {
-                            run_id,
-                            text,
-                            is_thinking: true,
-                        })
-                        .await;
-                }
+            // Child text and thinking arrive already attributed to their own
+            // `run_id` (see `attribute_child_update`), so no running-child
+            // lookup is needed and concurrent children stay separated.
+            UiUpdate::AppendText(_) | UiUpdate::AppendThinking(_) => {
+                tracing::warn!("dropping child text that was not attributed to a run");
             }
             UiUpdate::StreamStarted
             | UiUpdate::StreamDone
