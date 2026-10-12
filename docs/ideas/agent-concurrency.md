@@ -6,4 +6,4 @@ agent.
 
 It should be possible to run some/all subagents concurrently.
 We should introduce a customizable concurrency setting to limit
-how many subagents can concurrelty run with main agent.
+how many subagents can concurrently run with main agent.

@@ -27,6 +27,10 @@ For every agent show info:
 - result (sucess/error), if avail
 - elapsed run duration ( counting up while the run is in progress )
 
+Should this be a dedicated keybinding instead of a slash-command ?
+Keybinding would be more usable when you are in the mids of drafting a message
+and want to view finished/running subagents.
+
 ## /status
 
 Show the sources of the composed system prompt in a popup, so it is visible
