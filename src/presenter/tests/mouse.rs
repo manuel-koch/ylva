@@ -385,11 +385,16 @@ fn mouse_scroll_up_in_chat_area_decrements_scroll_offset() {
 fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: (0..3)
             .map(|index| ModelChoice {
-                label: format!("stub/model-{index}"),
+                label: crate::tui_reducer_state::ChoiceLabel {
+                    identity: format!("stub/model-{index}"),
+                    details: Vec::new(),
+                },
                 initial_reasoning_effort: None,
                 selection: ProviderModelOption {
+                    context_length_override: None,
                     provider_connection: "stub".to_string(),
                     model: crate::llm::ModelInfo {
                         id: format!("model-{index}"),
@@ -435,9 +440,13 @@ fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
 #[test]
 fn mouse_click_on_model_picker_entry_selects_without_switching() {
     let model_choice = |model_id: &str| ModelChoice {
-        label: format!("stub/{model_id}"),
+        label: crate::tui_reducer_state::ChoiceLabel {
+            identity: format!("stub/{model_id}"),
+            details: Vec::new(),
+        },
         initial_reasoning_effort: None,
         selection: ProviderModelOption {
+            context_length_override: None,
             provider_connection: "stub".to_string(),
             model: crate::llm::ModelInfo {
                 id: model_id.to_string(),
@@ -455,6 +464,7 @@ fn mouse_click_on_model_picker_entry_selects_without_switching() {
     };
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: vec![model_choice("model-0"), model_choice("model-1")],
         filter: String::new(),
         selected: 0,
@@ -487,9 +497,13 @@ fn mouse_click_on_model_picker_entry_selects_without_switching() {
 #[test]
 fn slash_overlay_model_drag_copies_the_filtered_model_label() {
     let model_choice = |label: &str, provider_connection: &str, model_id: &str| ModelChoice {
-        label: label.to_string(),
+        label: crate::tui_reducer_state::ChoiceLabel {
+            identity: label.to_string(),
+            details: Vec::new(),
+        },
         initial_reasoning_effort: None,
         selection: ProviderModelOption {
+            context_length_override: None,
             provider_connection: provider_connection.to_string(),
             model: crate::llm::ModelInfo {
                 id: model_id.to_string(),
@@ -508,6 +522,7 @@ fn slash_overlay_model_drag_copies_the_filtered_model_label() {
     let expected_text = "provider/provider-model";
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: vec![
             model_choice("engine/engine-model", "engine", "engine-model"),
             model_choice(expected_text, "provider", "provider-model"),
@@ -1148,4 +1163,98 @@ fn double_click_on_finished_spawn_bubble_still_drills_in_via_child_conversations
         state.active_view,
         ConversationView::Child { run_id: r, .. } if r == run_id
     ));
+}
+
+use crossterm::event::MouseButton;
+
+fn overlay_mouse(kind: MouseEventKind, column: u16, row: u16) -> TuiEvent {
+    TuiEvent::Mouse(crossterm::event::MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+/// A visible list with a two-row footer below it, as `/models` draws it.
+fn state_with_overlay_footer() -> AppState {
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::Suggestions {
+        choices: crate::slash_command::SLASH_COMMANDS.to_vec(),
+        selected: 0,
+    };
+    state.layout.slash_overlay = crate::tui_reducer_state::SlashOverlayLayout {
+        content_area: ratatui::layout::Rect::new(1, 5, 37, 2),
+        detail_area: ratatui::layout::Rect::new(1, 10, 37, 2),
+        detail_rows: vec![
+            "Compaction effect: shared engine".to_string(),
+            "second line".to_string(),
+        ],
+        ..Default::default()
+    };
+    state
+}
+
+#[test]
+fn slash_overlay_footer_drag_copies_the_displayed_footer_text() {
+    let mut state = state_with_overlay_footer();
+
+    update(
+        &mut state,
+        overlay_mouse(MouseEventKind::Down(MouseButton::Left), 1, 10),
+        &empty_textarea(),
+    );
+    update(
+        &mut state,
+        overlay_mouse(MouseEventKind::Drag(MouseButton::Left), 7, 11),
+        &empty_textarea(),
+    );
+    let effects = update(
+        &mut state,
+        overlay_mouse(MouseEventKind::Up(MouseButton::Left), 7, 11),
+        &empty_textarea(),
+    );
+
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::CopyToClipboard(text)
+                if text == "Compaction effect: shared engine\nsecond"
+        )),
+        "footer drag must copy the displayed footer text: {effects:?}"
+    );
+    assert!(
+        !state.conversation.chat_drag_active,
+        "a footer press must not start a chat selection underneath the popup"
+    );
+}
+
+#[test]
+fn slash_overlay_footer_drag_is_clamped_to_the_footer() {
+    let mut state = state_with_overlay_footer();
+
+    update(
+        &mut state,
+        overlay_mouse(MouseEventKind::Down(MouseButton::Left), 1, 10),
+        &empty_textarea(),
+    );
+    // Dragging up into the list must not extend the footer selection there.
+    update(
+        &mut state,
+        overlay_mouse(MouseEventKind::Drag(MouseButton::Left), 4, 2),
+        &empty_textarea(),
+    );
+    let effects = update(
+        &mut state,
+        overlay_mouse(MouseEventKind::Up(MouseButton::Left), 4, 2),
+        &empty_textarea(),
+    );
+
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::CopyToClipboard(text) if text == "Com"
+        )),
+        "footer selection must stay in the footer: {effects:?}"
+    );
 }

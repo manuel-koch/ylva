@@ -55,10 +55,14 @@ pub use layout::{
     SlashOverlayLayout,
 };
 pub(crate) use model_picker::{
-    engine_choice_label, extract_models_filter, format_context_length, matching_model_indices,
-    model_choice_label, model_picker_row_entries, slash_overlay_text_rows,
+    engine_choice_parts, extract_models_filter, format_context_length, matching_model_indices,
+    model_choice_parts, model_picker_row_entries, model_picker_row_is_details,
+    model_picker_row_layout, slash_overlay_text_rows, visible_model_choices,
 };
-pub use model_picker::{InputSnapshot, ModelChoice, SlashOverlay};
+pub use model_picker::{
+    ChoiceLabel, InputSnapshot, ModelChoice, ModelParameterEdit, ParameterField, PickerRowLayout,
+    SlashOverlay,
+};
 pub use selection::{BannerDragSelection, ChatSelection};
 pub use session_picker::{SessionAction, SessionChoice, SessionPicker, SessionPickerPhase};
 

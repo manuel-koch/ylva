@@ -129,6 +129,7 @@ fn implicit_summarizer_follows_root_named_engine_activation() {
         .select_model(&crate::llm::engine::ModelSelection::NamedEngine {
             engine_name: named_engine.name,
             option: crate::llm::ProviderModelOption {
+                context_length_override: None,
                 provider_connection: named_engine.config.provider_connection,
                 model: crate::llm::ModelInfo {
                     id: named_engine.config.model,
@@ -172,6 +173,7 @@ fn implicit_summarizer_follows_root_named_engine_activation() {
     );
     engine
         .switch_model_option(&crate::llm::ProviderModelOption {
+            context_length_override: None,
             provider_connection: "mock".to_string(),
             model: crate::llm::ModelInfo {
                 id: "fast-catalog-model".to_string(),
@@ -223,6 +225,7 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
         .select_model(&crate::llm::engine::ModelSelection::NamedEngine {
             engine_name: named_engine.name,
             option: crate::llm::ProviderModelOption {
+                context_length_override: None,
                 provider_connection: named_engine.config.provider_connection,
                 model: crate::llm::ModelInfo {
                     id: named_engine.config.model,
@@ -262,6 +265,7 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
         .select_model(&crate::llm::engine::ModelSelection::NamedEngine {
             engine_name: main_engine.name,
             option: crate::llm::ProviderModelOption {
+                context_length_override: None,
                 provider_connection: main_engine.config.provider_connection,
                 model: crate::llm::ModelInfo {
                     id: main_engine.config.model,
@@ -277,6 +281,7 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
         .expect("reactivate the explicit summarizer engine");
     engine
         .switch_model_option(&crate::llm::ProviderModelOption {
+            context_length_override: None,
             provider_connection: "mock".to_string(),
             model: crate::llm::ModelInfo {
                 id: "main-catalog-model".to_string(),

@@ -594,6 +594,7 @@ mod tests {
             context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
             reasoning_effort: Some("medium".to_string()),
             input_modalities: None,
+            context_length_override: None,
         };
 
         OllamaProvider::customize_request_body(&mut request_body, &runtime_config);

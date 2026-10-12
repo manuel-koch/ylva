@@ -107,37 +107,35 @@ fn extract_clarify_banner_text(
     selected.join("\n")
 }
 
-/// Extract the plain text from slash-overlay rows between two screen
-/// positions. The two leading marker columns are presentation chrome, so
-/// copied text starts at the row content rather than including the marker.
-fn extract_slash_overlay_text(
-    state: &AppState,
-    from_column: u16,
-    from_row: u16,
-    to_column: u16,
-    to_row: u16,
+/// Extract the plain text from one region of a slash overlay between two
+/// screen positions. `rows` are the region's text rows; `first_row` is the
+/// index of the row drawn at the top of `area`. `leading_chrome` is the
+/// number of marker columns drawn before the row text, which copies skip.
+fn extract_overlay_region_text(
+    rows: &[String],
+    area: ratatui::layout::Rect,
+    first_row: usize,
+    leading_chrome: u16,
+    start: (u16, u16),
+    end: (u16, u16),
 ) -> String {
-    let area = state.layout.slash_overlay.content_area;
-    if area.is_empty() {
-        return String::new();
-    }
-    let rows = slash_overlay_text_rows(&state.slash_overlay);
-    if rows.is_empty() {
+    if area.is_empty() || rows.is_empty() {
         return String::new();
     }
 
-    let position = |column: u16, row: u16| {
+    let position = |(column, row): (u16, u16)| {
         let last_row = area.y.saturating_add(area.height.saturating_sub(1));
         let clamped_row = row.clamp(area.y, last_row);
         let clamped_column = column.clamp(area.x, area.x.saturating_add(area.width));
-        let row_index = state.layout.slash_overlay.first_visible_row
-            + clamped_row.saturating_sub(area.y) as usize;
-        let content_column = clamped_column.saturating_sub(area.x).saturating_sub(2) as usize;
+        let row_index = first_row + clamped_row.saturating_sub(area.y) as usize;
+        let content_column = clamped_column
+            .saturating_sub(area.x)
+            .saturating_sub(leading_chrome) as usize;
         (row_index, content_column)
     };
 
-    let start = position(from_column, from_row);
-    let end = position(to_column, to_row);
+    let start = position(start);
+    let end = position(end);
     let (start, end) = if start <= end {
         (start, end)
     } else {
@@ -168,6 +166,60 @@ fn extract_slash_overlay_text(
         .collect::<Vec<String>>()
         .join("\n")
 }
+
+/// Whether a screen cell lies in the overlay's footer text (`detail_area`).
+fn is_in_overlay_detail_area(state: &AppState, column: u16, row: u16) -> bool {
+    let detail_area = state.layout.slash_overlay.detail_area;
+    !detail_area.is_empty() && detail_area.contains(ratatui::layout::Position::new(column, row))
+}
+
+/// The region a slash-overlay drag belongs to, decided by where it started.
+/// Each region is its own selection, so drags never cross into another one.
+fn slash_overlay_drag_region(state: &AppState, start: (u16, u16)) -> ratatui::layout::Rect {
+    if is_in_overlay_detail_area(state, start.0, start.1) {
+        state.layout.slash_overlay.detail_area
+    } else {
+        state.layout.slash_overlay.content_area
+    }
+}
+
+/// Clamp a drag position to the region the drag started in.
+fn clamp_to_region(area: ratatui::layout::Rect, (column, row): (u16, u16)) -> (u16, u16) {
+    let last_row = area.y.saturating_add(area.height.saturating_sub(1));
+    (
+        column.clamp(area.x, area.x.saturating_add(area.width)),
+        row.clamp(area.y, last_row),
+    )
+}
+
+/// Copy text for a finished slash-overlay drag. Dispatches to the list rows
+/// or the footer lines depending on where the drag started.
+fn extract_slash_overlay_text(state: &AppState, start: (u16, u16), end: (u16, u16)) -> String {
+    if is_in_overlay_detail_area(state, start.0, start.1) {
+        let layout = &state.layout.slash_overlay;
+        return extract_overlay_region_text(
+            &layout.detail_rows,
+            layout.detail_area,
+            0,
+            0,
+            start,
+            end,
+        );
+    }
+    let layout = &state.layout.slash_overlay;
+    let rows = slash_overlay_text_rows(&state.slash_overlay, layout.row_layout);
+    // The two leading marker columns are presentation chrome, so copied text
+    // starts at the row content rather than including the marker.
+    extract_overlay_region_text(
+        &rows,
+        layout.content_area,
+        layout.first_visible_row,
+        2,
+        start,
+        end,
+    )
+}
+
 // ─── Mouse routing ────────────────────────────────────────────────────────────
 
 pub(super) fn route_mouse(
@@ -283,20 +335,32 @@ pub(super) fn route_mouse(
                 if let Some(overlay_row) = state.layout.slash_overlay.row_at(column, row) {
                     state.slash_overlay_drag_start = Some((column, row));
                     state.slash_overlay_drag_end = Some((column, row));
+                    let row_layout = state.layout.slash_overlay.row_layout;
                     if let SlashOverlay::ModelPicker {
                         choices,
                         filter,
                         selected,
+                        parameters: None,
                     } = &mut state.slash_overlay
                     {
-                        if let Some(entry_index) = model_picker_row_entries(choices, filter)
-                            .get(overlay_row)
-                            .copied()
-                            .flatten()
+                        if let Some(entry_index) =
+                            model_picker_row_entries(choices, filter, row_layout)
+                                .get(overlay_row)
+                                .copied()
+                                .flatten()
                         {
                             *selected = entry_index;
                         }
                     }
+                    return vec![];
+                }
+                // A press on the footer text (e.g. the compaction preview)
+                // starts its own selection; it never reaches the chat below.
+                if is_in_overlay_detail_area(state, column, row)
+                    && !state.layout.slash_overlay.detail_rows.is_empty()
+                {
+                    state.slash_overlay_drag_start = Some((column, row));
+                    state.slash_overlay_drag_end = Some((column, row));
                     return vec![];
                 }
             }
@@ -401,9 +465,12 @@ pub(super) fn route_mouse(
         }
 
         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-            if state.slash_overlay.is_visible() && state.slash_overlay_drag_start.is_some() {
-                state.slash_overlay_drag_end = Some((column, row));
-                return vec![];
+            if state.slash_overlay.is_visible() {
+                if let Some(start) = state.slash_overlay_drag_start {
+                    let region = slash_overlay_drag_region(state, start);
+                    state.slash_overlay_drag_end = Some(clamp_to_region(region, (column, row)));
+                    return vec![];
+                }
             }
             if state.help_popup.help_drag_active {
                 if let Some((line, column)) = state.help_popup_drag_position(column, row) {
@@ -451,11 +518,12 @@ pub(super) fn route_mouse(
                 state.slash_overlay_drag_start = None;
                 state.slash_overlay_drag_end = None;
             }
-            if let Some((start_column, start_row)) = state.slash_overlay_drag_start.take() {
-                let (end_column, end_row) =
-                    state.slash_overlay_drag_end.take().unwrap_or((column, row));
-                let text =
-                    extract_slash_overlay_text(state, start_column, start_row, end_column, end_row);
+            if let Some(start) = state.slash_overlay_drag_start.take() {
+                let end = match state.slash_overlay_drag_end.take() {
+                    Some(end) => end,
+                    None => clamp_to_region(slash_overlay_drag_region(state, start), (column, row)),
+                };
+                let text = extract_slash_overlay_text(state, start, end);
                 if !text.is_empty() {
                     return vec![Effect::CopyToClipboard(text)];
                 }

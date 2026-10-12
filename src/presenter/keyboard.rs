@@ -305,6 +305,17 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
     // look like a no-op. So Esc always clears the draft alongside hiding
     // the overlay, matching the plain "Esc clears a non-empty draft"
     // behavior below.
+    // The parameter popup is the innermost layer of the model picker: Esc
+    // returns to the model list and keeps the draft, discarding only the
+    // popup's edits.
+    if let SlashOverlay::ModelPicker {
+        parameters: Some(_),
+        ..
+    } = state.slash_overlay
+    {
+        state.leave_model_parameters();
+        return vec![];
+    }
     if state.slash_overlay.is_visible() {
         state.slash_overlay = SlashOverlay::Hidden;
         state.history_index = None;
@@ -425,6 +436,7 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
             vec![]
         }
         InputEvent::KeyInput(key) => {
+            let page_entry_count = state.layout.slash_overlay.page_entry_count();
             let SlashOverlay::SessionPicker(picker) = &mut state.slash_overlay else {
                 return vec![];
             };
@@ -434,8 +446,8 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
             match key.code {
                 KeyCode::Up => picker.move_selection(-1),
                 KeyCode::Down => picker.move_selection(1),
-                KeyCode::PageUp => picker.move_selection(-SLASH_OVERLAY_PAGE_SIZE),
-                KeyCode::PageDown => picker.move_selection(SLASH_OVERLAY_PAGE_SIZE),
+                KeyCode::PageUp => picker.move_selection(-page_entry_count),
+                KeyCode::PageDown => picker.move_selection(page_entry_count),
                 KeyCode::Left => picker.action = crate::tui_reducer_state::SessionAction::Resume,
                 KeyCode::Right => picker.action = crate::tui_reducer_state::SessionAction::Clone,
                 KeyCode::Enter if key.modifiers.is_empty() => {
@@ -454,7 +466,64 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
     }
 }
 
-const SLASH_OVERLAY_PAGE_SIZE: isize = 3;
+/// Keys while the `/models` picker is open. The list selects and opens the
+/// parameter popup, and typing falls through to the draft so it narrows the
+/// list. The popup owns every key, so the filter cannot change under it.
+/// Returns `None` when the key is left to the normal draft handling.
+fn handle_model_picker_key(state: &mut AppState, code: KeyCode) -> Option<Vec<Effect>> {
+    let parameters_open = matches!(
+        state.slash_overlay,
+        SlashOverlay::ModelPicker {
+            parameters: Some(_),
+            ..
+        }
+    );
+    if parameters_open {
+        match code {
+            KeyCode::Up => state.move_slash_selection(-1),
+            KeyCode::Down => state.move_slash_selection(1),
+            KeyCode::Left => state.adjust_model_parameter(-1),
+            KeyCode::Right => state.adjust_model_parameter(1),
+            KeyCode::Enter => {
+                state.confirm_model_parameters();
+                return Some(switch_to_highlighted_model(state));
+            }
+            _ => {}
+        }
+        return Some(vec![]);
+    }
+    match code {
+        KeyCode::Up => state.move_slash_selection(-1),
+        KeyCode::Down => state.move_slash_selection(1),
+        KeyCode::PageUp => {
+            let page_entry_count = state.layout.slash_overlay.page_entry_count();
+            state.move_slash_selection(-page_entry_count);
+        }
+        KeyCode::PageDown => {
+            let page_entry_count = state.layout.slash_overlay.page_entry_count();
+            state.move_slash_selection(page_entry_count);
+        }
+        KeyCode::Enter => state.open_model_parameters(),
+        // Left/right have no meaning in the list; they must not reach the draft.
+        KeyCode::Left | KeyCode::Right => {}
+        _ => return None,
+    }
+    Some(vec![])
+}
+
+/// Close the picker and switch to the highlighted choice, applying any
+/// parameters confirmed in the popup.
+fn switch_to_highlighted_model(state: &mut AppState) -> Vec<Effect> {
+    let picked = state
+        .selected_model()
+        .map(|choice| choice.to_model_selection());
+    state.slash_overlay = SlashOverlay::Hidden;
+    let mut effects = vec![Effect::ClearTextarea];
+    if let Some(model) = picked {
+        effects.push(Effect::SwitchModel(model));
+    }
+    effects
+}
 
 fn handle_key_main(
     state: &mut AppState,
@@ -501,43 +570,8 @@ fn handle_key_main(
     // confirmation while it is open; every other key (including plain
     // typing) falls through to the normal input handling.
     if matches!(state.slash_overlay, SlashOverlay::ModelPicker { .. }) {
-        match key_event.code {
-            KeyCode::Up => {
-                state.move_slash_selection(-1);
-                return vec![];
-            }
-            KeyCode::Down => {
-                state.move_slash_selection(1);
-                return vec![];
-            }
-            KeyCode::PageUp => {
-                state.move_slash_selection(-SLASH_OVERLAY_PAGE_SIZE);
-                return vec![];
-            }
-            KeyCode::PageDown => {
-                state.move_slash_selection(SLASH_OVERLAY_PAGE_SIZE);
-                return vec![];
-            }
-            KeyCode::Left => {
-                state.cycle_selected_model_reasoning_effort(-1);
-                return vec![];
-            }
-            KeyCode::Right => {
-                state.cycle_selected_model_reasoning_effort(1);
-                return vec![];
-            }
-            KeyCode::Enter => {
-                let picked = state
-                    .selected_model()
-                    .map(|choice| choice.to_model_selection());
-                state.slash_overlay = SlashOverlay::Hidden;
-                let mut effects = vec![Effect::ClearTextarea];
-                if let Some(model) = picked {
-                    effects.push(Effect::SwitchModel(model));
-                }
-                return effects;
-            }
-            _ => {}
+        if let Some(effects) = handle_model_picker_key(state, key_event.code) {
+            return effects;
         }
     }
 

@@ -233,6 +233,9 @@ pub struct EngineRuntimeConfig {
     /// Provider-advertised input modalities for the active model. `None`
     /// remains conservative: no media projection is enabled.
     pub input_modalities: Option<Vec<InputModality>>,
+    /// Session-only context window chosen in the model picker. While set,
+    /// catalog adoption leaves `context_length` alone.
+    pub context_length_override: Option<usize>,
 }
 
 impl From<&EngineConfig> for EngineRuntimeConfig {
@@ -246,6 +249,7 @@ impl From<&EngineConfig> for EngineRuntimeConfig {
             context_length: config.effective_context_length(None),
             reasoning_effort: config.reasoning.clone(),
             input_modalities: None,
+            context_length_override: None,
         }
     }
 }

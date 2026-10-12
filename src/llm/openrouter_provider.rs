@@ -248,6 +248,7 @@ mod tests {
     fn customizes_reasoning_request_body() {
         let mut request_body = serde_json::json!({});
         let runtime_config = crate::llm::engine::EngineRuntimeConfig {
+            context_length_override: None,
             model: "some/model".to_string(),
             temperature: None,
             context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,

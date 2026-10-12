@@ -267,6 +267,7 @@ impl OpenAiCompatibleProvider {
             name,
             base_url,
             runtime_config: std::sync::Arc::new(std::sync::RwLock::new(EngineRuntimeConfig {
+                context_length_override: None,
                 model,
                 temperature: None,
                 context_length: DEFAULT_CONTEXT_LENGTH,

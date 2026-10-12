@@ -95,7 +95,7 @@ fn session_picker_buttons_use_rendered_hit_targets_without_activating() {
         state.slash_overlay = SlashOverlay::SessionPicker(picker);
         for action in [SessionAction::Clone, SessionAction::Resume] {
             render_offline(&mut state, width, height);
-            let layout = state.layout.slash_overlay;
+            let layout = state.layout.slash_overlay.clone();
             let button = match action {
                 SessionAction::Resume => layout.resume_action,
                 SessionAction::Clone => layout.clone_action,
@@ -465,6 +465,8 @@ async fn switching_models_rechecks_compaction_capacity_before_any_prompt() {
         })
         .await
         .expect("the large model appears in the picker");
+        // First Enter opens the parameter popup; the second confirms the switch.
+        type_and_enter(&action_tx, "").await;
         type_and_enter(&action_tx, "").await;
         let rendered = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -565,6 +567,7 @@ async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pendi
         let model = format!("{engine_name}-model");
         conversation_engine
             .switch_model_option(&ylva::ProviderModelOption {
+                context_length_override: None,
                 provider_connection: provider_connection.clone(),
                 model: ModelInfo {
                     id: model.clone(),
@@ -936,10 +939,15 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
     let mut terminal = Terminal::new(backend).expect("terminal");
     let mut state = TuiState {
         slash_overlay: SlashOverlay::ModelPicker {
+            parameters: None,
             choices: vec![ModelChoice {
-                label: "stub/thinking  reasoning: default ⚙".to_string(),
+                label: ylva::tui_reducer_state::ChoiceLabel {
+                    identity: "stub/thinking".to_string(),
+                    details: vec!["reasoning: default ⚙".to_string()],
+                },
                 initial_reasoning_effort: None,
                 selection: ProviderModelOption {
+                    context_length_override: None,
                     provider_connection: "stub".to_string(),
                     model: ModelInfo {
                         id: "thinking".to_string(),
@@ -981,11 +989,11 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered.contains("←/→ effort"),
-        "rendered footer: {rendered:?}"
+        !rendered.contains("←/→ effort"),
+        "the list no longer adjusts reasoning, so its footer must not say so: {rendered:?}"
     );
     assert!(
-        rendered.contains("enter switch"),
+        rendered.contains("enter parameters"),
         "rendered footer: {rendered:?}"
     );
     assert!(
@@ -1022,11 +1030,12 @@ fn model_picker_details_show_highlighted_compaction_effect() {
     let make_choice =
         |name: &str, provider_connection: &str, model_id: &str, context_length: usize| {
             ModelChoice {
-                label: format!(
-                    "{name} → {provider_connection}/{model_id}  context: {}kb",
-                    context_length / 1024
-                ),
+                label: ylva::tui_reducer_state::ChoiceLabel {
+                    identity: format!("{name} → {provider_connection}/{model_id}"),
+                    details: vec![format!("context: {}kb", context_length / 1024)],
+                },
                 selection: ProviderModelOption {
+                    context_length_override: None,
                     provider_connection: provider_connection.to_string(),
                     model: ModelInfo {
                         id: model_id.to_string(),
@@ -1066,6 +1075,7 @@ fn model_picker_details_show_highlighted_compaction_effect() {
             inherits_parent_runtime: false,
         },
         slash_overlay: SlashOverlay::ModelPicker {
+            parameters: None,
             choices: vec![
                 make_choice("engine-a", "mock", "model-a", 131_072),
                 make_choice("engine-b", "mock", "model-b", 65_536),
@@ -1306,6 +1316,7 @@ fn model_picker_click_uses_rendered_row_geometry_without_switching() {
     use ylva::TuiEvent;
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: model_picker_choices(2),
         filter: String::new(),
         selected: 0,
@@ -1369,6 +1380,7 @@ fn model_picker_click_uses_absolute_row_after_scrolling() {
     use ylva::TuiEvent;
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: model_picker_choices(20),
         filter: String::new(),
         selected: 0,
@@ -1467,6 +1479,7 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
     use ylva::TuiEvent;
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: model_picker_choices(20),
         filter: String::new(),
         selected: 0,
@@ -1599,6 +1612,7 @@ fn model_picker_shows_scrollbar_when_entries_overflow() {
     let mut terminal = Terminal::new(backend).expect("terminal");
     let mut state = TuiState {
         slash_overlay: SlashOverlay::ModelPicker {
+            parameters: None,
             choices: model_picker_choices(20),
             filter: String::new(),
             selected: 0,
@@ -1652,10 +1666,15 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
     let mut terminal = Terminal::new(backend).expect("terminal");
     let mut state = TuiState {
         slash_overlay: SlashOverlay::ModelPicker {
+            parameters: None,
             choices: vec![ModelChoice {
-                label: "stub/thinking  reasoning: default".to_string(),
+                label: ylva::tui_reducer_state::ChoiceLabel {
+                    identity: "stub/thinking".to_string(),
+                    details: vec!["reasoning: default".to_string()],
+                },
                 initial_reasoning_effort: None,
                 selection: ProviderModelOption {
+                    context_length_override: None,
                     provider_connection: "stub".to_string(),
                     model: ModelInfo {
                         id: "thinking".to_string(),
@@ -1909,5 +1928,447 @@ fn help_popup_shows_profile_paths() {
     assert!(
         !rendered.contains("Ylva - Agent-Harness"),
         "help popup should not repeat the build product name: {rendered:?}"
+    );
+}
+
+/// Two `/models` rows with details long enough to be clipped on narrow terminals.
+fn long_model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::ModelChoice> {
+    use ylva::tui_reducer_state::ModelChoice;
+    (0..choice_count)
+        .map(|index| ModelChoice {
+            label: if index == 0 {
+                ylva::tui_reducer_state::ChoiceLabel {
+                    identity: "shortcut → stub/a-very-long-model-identifier-for-narrow-terminals"
+                        .to_string(),
+                    details: vec![
+                        "context: 128kb".to_string(),
+                        "reasoning: default ⚙".to_string(),
+                    ],
+                }
+            } else {
+                ylva::tui_reducer_state::ChoiceLabel {
+                    identity: format!("stub/other-model-{index}"),
+                    details: vec![
+                        "context: 64kb".to_string(),
+                        "reasoning: unavailable".to_string(),
+                    ],
+                }
+            },
+            initial_reasoning_effort: None,
+            selection: ylva::ProviderModelOption {
+                context_length_override: None,
+                provider_connection: "stub".to_string(),
+                model: ylva::ModelInfo {
+                    id: format!("model-{index}"),
+                    context_length: Some(131_072),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            },
+            is_active: false,
+            engine_name: (index == 0).then(|| "shortcut".to_string()),
+            selection_target: None,
+            selection_preview_error: None,
+        })
+        .collect()
+}
+
+/// Draw the app state into a fresh terminal and return every buffer row as text.
+fn draw_app_state_rows(
+    state: &mut ylva::AppState,
+    width: u16,
+    height: u16,
+) -> (Vec<String>, Terminal<ratatui::backend::TestBackend>) {
+    use ratatui::backend::TestBackend;
+    use ratatui_textarea::TextArea;
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    let mut textarea = TextArea::default();
+    terminal
+        .draw(|frame| {
+            ylva::render::render(
+                frame,
+                state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    let rows = (0..height)
+        .map(|row| {
+            (0..width)
+                .map(|column| buffer.cell((column, row)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect();
+    (rows, terminal)
+}
+
+#[test]
+fn model_picker_splits_identity_and_details_into_rows_on_narrow_terminals() {
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: long_model_picker_choices(2),
+        filter: String::new(),
+        selected: 0,
+    };
+
+    let (rows, _terminal) = draw_app_state_rows(&mut state, 50, 30);
+    let identity_row = rows
+        .iter()
+        .position(|row| row.contains("shortcut → "))
+        .expect("the identity row must be rendered");
+    assert!(
+        rows[identity_row].contains('…'),
+        "a long identity must be elided to the panel width: {:?}",
+        rows[identity_row]
+    );
+    assert!(
+        !rows[identity_row].contains("context:"),
+        "details must not share the identity row on narrow terminals: {:?}",
+        rows[identity_row]
+    );
+    assert!(
+        rows[identity_row + 1].contains("context: 128kb  reasoning: default ⚙"),
+        "the details must render complete on the row below: {:?}",
+        rows[identity_row + 1]
+    );
+    assert!(
+        state.layout.slash_overlay.row_layout == ylva::tui_reducer_state::PickerRowLayout::TwoRows,
+        "the layout must record the two-row mode for input mapping"
+    );
+}
+
+#[test]
+fn model_picker_keeps_one_row_per_model_on_wide_terminals() {
+    use ylva::tui_reducer_state::{AppState, PickerRowLayout, SlashOverlay};
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: long_model_picker_choices(2),
+        filter: String::new(),
+        selected: 0,
+    };
+
+    let (rows, _terminal) = draw_app_state_rows(&mut state, 120, 30);
+    assert!(
+        rows.iter().any(|row| row.contains(
+            "shortcut → stub/a-very-long-model-identifier-for-narrow-terminals  context: 128kb"
+        )),
+        "wide terminals must keep identity and details on one row: {rows:?}"
+    );
+    assert_eq!(
+        state.layout.slash_overlay.row_layout,
+        PickerRowLayout::SingleRow
+    );
+}
+
+#[test]
+fn model_picker_click_on_details_row_selects_its_model_on_narrow_terminals() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    use ylva::TuiEvent;
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: long_model_picker_choices(2),
+        filter: String::new(),
+        selected: 0,
+    };
+    let (_rows, _terminal) = draw_app_state_rows(&mut state, 50, 30);
+
+    // Rows: shortcut identity, shortcut details, catalog identity, catalog details.
+    let content_area = state.layout.slash_overlay.content_area;
+    let details_row_of_second_model = content_area.y + 3;
+    let effects = ylva::presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: content_area.x,
+            row: details_row_of_second_model,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &empty_textarea_context(),
+    );
+
+    assert_eq!(
+        state
+            .selected_model()
+            .map(|choice| choice.selection.model.id.as_str()),
+        Some("model-1"),
+        "clicking the details row of a model must highlight that model"
+    );
+    assert!(
+        effects.is_empty(),
+        "a click must not confirm the switch: {effects:?}"
+    );
+}
+
+#[test]
+fn model_picker_height_is_capped_at_two_thirds_of_the_space_above_input() {
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: model_picker_choices(60),
+        filter: String::new(),
+        selected: 0,
+    };
+    // The popup's inner area (list plus detail rows) is capped; the border
+    // rows sit outside that cap. The popup's bottom border touches the input.
+    let (rows, _terminal) = draw_app_state_rows(&mut state, 100, 60);
+    let space_above_input = state.layout.input_area.rect.y;
+    let expected_inner_height = (space_above_input.saturating_sub(1) * 2 / 3) as usize;
+    assert!(
+        expected_inner_height > 0,
+        "the fixture terminal must leave room above the input"
+    );
+    let title_row = rows
+        .iter()
+        .position(|row| row.contains("Engines & Provider Models"))
+        .expect("the picker title must be rendered");
+    let popup_outer_height = space_above_input as usize - title_row;
+    assert_eq!(
+        popup_outer_height - 2,
+        expected_inner_height,
+        "a long model list must fill two thirds of the space above the input"
+    );
+}
+
+#[test]
+fn model_picker_marks_the_active_model_by_style_instead_of_a_text_suffix() {
+    use ratatui::style::{Color, Modifier};
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    let mut choices = long_model_picker_choices(3);
+    choices[0].is_active = true;
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices,
+        filter: String::new(),
+        // The third model is highlighted so the second stays an inactive, unselected row.
+        selected: 2,
+    };
+
+    let (rows, terminal) = draw_app_state_rows(&mut state, 120, 30);
+    assert!(
+        rows.iter().all(|row| !row.contains("— active")),
+        "the active marker must not be rendered as text: {rows:?}"
+    );
+
+    let buffer = terminal.backend().buffer();
+    let style_of_text = |needle: &str| {
+        let row_index = rows
+            .iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} must be rendered: {rows:?}"));
+        let byte_index = rows[row_index].find(needle).expect("needle is in the row");
+        let column = rows[row_index][..byte_index].chars().count();
+        let cell = buffer.cell((column as u16, row_index as u16)).unwrap();
+        (cell.fg, cell.modifier)
+    };
+
+    assert_eq!(
+        style_of_text("shortcut → "),
+        (Color::Green, Modifier::BOLD),
+        "the active model's identity must be green and bold"
+    );
+    assert_eq!(
+        style_of_text("stub/other-model-1"),
+        (Color::Gray, Modifier::empty()),
+        "inactive models keep the list text style"
+    );
+}
+
+#[test]
+fn model_picker_uses_two_rows_at_any_width_when_a_single_line_would_not_fit() {
+    use ylva::tui_reducer_state::{AppState, PickerRowLayout, SlashOverlay};
+
+    // 74 columns is above the footer's narrow threshold, but the long labels
+    // do not fit one row, so the picker must still split each model.
+    let mut long_state = AppState::new();
+    long_state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: long_model_picker_choices(2),
+        filter: String::new(),
+        selected: 0,
+    };
+    let (rows, _terminal) = draw_app_state_rows(&mut long_state, 74, 30);
+    assert_eq!(
+        long_state.layout.slash_overlay.row_layout,
+        PickerRowLayout::TwoRows
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("context: 128kb  reasoning: default ⚙")),
+        "the details must be rendered on their own row: {rows:?}"
+    );
+
+    // Short labels fit one row at the same width and stay on one row each.
+    let mut short_state = AppState::new();
+    short_state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: model_picker_choices(2),
+        filter: String::new(),
+        selected: 0,
+    };
+    let (rows, _terminal) = draw_app_state_rows(&mut short_state, 74, 30);
+    assert_eq!(
+        short_state.layout.slash_overlay.row_layout,
+        PickerRowLayout::SingleRow
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("stub/model-0")),
+        "short models must keep their single row: {rows:?}"
+    );
+}
+
+fn press_key(state: &mut ylva::AppState, code: KeyCode) {
+    let textarea = empty_textarea_context();
+    ylva::presenter::update(
+        state,
+        ylva::TuiEvent::Input(ylva::tui_reducer_state::InputEvent::KeyInput(
+            KeyEvent::new(code, KeyModifiers::NONE),
+        )),
+        &textarea,
+    );
+}
+
+#[test]
+fn model_picker_page_keys_move_by_the_visible_entry_count() {
+    use ylva::tui_reducer_state::{AppState, PickerRowLayout, SlashOverlay};
+
+    // One row per model: a page is the list height in entries.
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: model_picker_choices(60),
+        filter: String::new(),
+        selected: 0,
+    };
+    let (_rows, _terminal) = draw_app_state_rows(&mut state, 100, 30);
+    let page = state.layout.slash_overlay.content_area.height as usize;
+    assert!(
+        page > 3,
+        "the fixture must show more than the old fixed step"
+    );
+
+    press_key(&mut state, KeyCode::PageDown);
+    assert_eq!(
+        state
+            .selected_model()
+            .map(|choice| choice.selection.model.id.as_str()),
+        Some(format!("model-{page}").as_str()),
+        "PageDown must move by one visible page of single-row entries"
+    );
+    press_key(&mut state, KeyCode::PageUp);
+    assert_eq!(
+        state
+            .selected_model()
+            .map(|choice| choice.selection.model.id.as_str()),
+        Some("model-0"),
+        "PageUp must return by the same page"
+    );
+
+    // Two rows per model: a page holds half as many entries.
+    let mut two_row_state = AppState::new();
+    two_row_state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: long_model_picker_choices(60),
+        filter: String::new(),
+        selected: 0,
+    };
+    let (_rows, _terminal) = draw_app_state_rows(&mut two_row_state, 50, 30);
+    assert_eq!(
+        two_row_state.layout.slash_overlay.row_layout,
+        PickerRowLayout::TwoRows
+    );
+    let two_row_page = two_row_state.layout.slash_overlay.content_area.height as usize / 2;
+    press_key(&mut two_row_state, KeyCode::PageDown);
+    assert_eq!(
+        two_row_state
+            .selected_model()
+            .map(|choice| choice.selection.model.id.as_str()),
+        Some(format!("model-{two_row_page}").as_str()),
+        "two-row pages must hold the entries that fit, not the rows"
+    );
+}
+
+#[test]
+fn session_picker_page_keys_move_by_the_visible_entry_count() {
+    use ylva::tui_reducer_state::{
+        AppState, SessionAction, SessionChoice, SessionPicker, SessionPickerPhase, SlashOverlay,
+    };
+
+    let mut picker = SessionPicker::loading();
+    picker.phase = SessionPickerPhase::Ready;
+    picker.action = SessionAction::Resume;
+    picker.choices = (0..60)
+        .map(|index| SessionChoice {
+            session_id: uuid::Uuid::new_v4(),
+            title: format!("session {index}"),
+            last_used_at: "2026-01-01 12:00:00 +01:00".into(),
+        })
+        .collect();
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::SessionPicker(picker);
+    let (_rows, _terminal) = draw_app_state_rows(&mut state, 100, 30);
+    let page = state.layout.slash_overlay.content_area.height as usize;
+    assert!(
+        page > 3,
+        "the fixture must show more than the old fixed step"
+    );
+
+    press_key(&mut state, KeyCode::PageDown);
+    let SlashOverlay::SessionPicker(picker) = &state.slash_overlay else {
+        panic!("the session picker must stay open")
+    };
+    assert_eq!(
+        picker.selected, page,
+        "PageDown must move by one visible page"
+    );
+    press_key(&mut state, KeyCode::PageUp);
+    let SlashOverlay::SessionPicker(picker) = &state.slash_overlay else {
+        panic!("the session picker must stay open")
+    };
+    assert_eq!(picker.selected, 0, "PageUp must return by the same page");
+}
+
+#[test]
+fn model_parameter_popup_renders_one_row_per_parameter_with_its_footer_hints() {
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    let mut choices = long_model_picker_choices(1);
+    choices[0].selection.model.reasoning_efforts = Some(vec!["low".to_string()]);
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices,
+        filter: String::new(),
+        selected: 0,
+        parameters: None,
+    };
+    state.open_model_parameters();
+
+    let (rows, _terminal) = draw_app_state_rows(&mut state, 120, 30);
+    let text: String = rows.join("\n");
+    assert!(
+        text.contains("Model parameters  ·  shortcut → stub/a-very-long-model-identifier-for-narrow-terminals"),
+        "the popup must be titled with the edited model: {text}"
+    );
+    assert!(text.contains("Context length:  128kb"), "{text}");
+    assert!(text.contains("Reasoning effort:  default"), "{text}");
+    assert!(
+        text.contains("parameter"),
+        "popup footer must name the cursor keys: {text}"
+    );
+    assert!(text.contains("back"), "popup footer must name esc: {text}");
+    assert!(
+        !text.contains("effort") || !text.contains("←/→ effort"),
+        "the list footer must no longer advertise reasoning cycling"
     );
 }

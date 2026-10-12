@@ -701,10 +701,15 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
     let mut textarea = TextArea::from(vec!["/models deep".to_string()]);
     configure_textarea(&mut textarea);
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: vec![ModelChoice {
-            label: "stub/deepseek-v3".to_string(),
+            label: crate::tui_reducer_state::ChoiceLabel {
+                identity: "stub/deepseek-v3".to_string(),
+                details: Vec::new(),
+            },
             initial_reasoning_effort: None,
             selection: crate::llm::ProviderModelOption {
+                context_length_override: None,
                 provider_connection: "stub".to_string(),
                 model: crate::llm::ModelInfo {
                     id: "deepseek-v3".to_string(),

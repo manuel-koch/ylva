@@ -152,6 +152,7 @@ fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection()
     )
     .expect("router construction");
     let option = |connection: &str, model: &str| ProviderModelOption {
+        context_length_override: None,
         provider_connection: connection.to_string(),
         model: ModelInfo {
             id: model.to_string(),
@@ -253,6 +254,7 @@ fn named_engine_selection_rejects_invalid_targets_without_switching() {
     .expect("router construction");
     let option = |provider_connection: &str, reasoning_efforts: Option<Vec<&str>>, id: &str| {
         ProviderModelOption {
+            context_length_override: None,
             provider_connection: provider_connection.to_string(),
             model: ModelInfo {
                 id: id.to_string(),

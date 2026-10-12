@@ -15,7 +15,7 @@
 use crate::agent::AgentCommand;
 use crate::llm::engine::{Engine, ModelSelection};
 use crate::tui_reducer_state::{
-    engine_choice_label, extract_models_filter, matching_model_indices, model_choice_label,
+    engine_choice_parts, extract_models_filter, matching_model_indices, model_choice_parts,
     AppState, ModelChoice, SlashOverlay,
 };
 use std::sync::Arc;
@@ -179,12 +179,13 @@ pub(super) fn apply_model_list_result(
                             .and_then(|model| model.input_modalities.clone()),
                     };
                     let selection = crate::llm::ProviderModelOption {
+                        context_length_override: None,
                         provider_connection: engine_config.provider_connection,
                         model,
                         reasoning_effort: initial_reasoning_effort.clone(),
                     };
                     ModelChoice {
-                        label: engine_choice_label(&engine_name, &selection, is_active),
+                        label: engine_choice_parts(&engine_name, &selection),
                         initial_reasoning_effort,
                         selection,
                         is_active,
@@ -202,7 +203,7 @@ pub(super) fn apply_model_list_result(
                         option.reasoning_effort = active_reasoning_effort.clone();
                     }
                     ModelChoice {
-                        label: model_choice_label(&option, is_active),
+                        label: model_choice_parts(&option),
                         initial_reasoning_effort: option.reasoning_effort.clone(),
                         selection: option,
                         is_active,
@@ -236,6 +237,7 @@ pub(super) fn apply_model_list_result(
                 })
                 .unwrap_or(0);
             state.slash_overlay = SlashOverlay::ModelPicker {
+                parameters: None,
                 choices,
                 filter,
                 selected,

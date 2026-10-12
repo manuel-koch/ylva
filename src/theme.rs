@@ -89,6 +89,8 @@ pub(crate) const LIST_SELECTION_FOREGROUND_COLOR: Color = Color::Black;
 pub(crate) const LIST_SELECTION_BACKGROUND_COLOR: Color = Color::Cyan;
 pub(crate) const LIST_TEXT_COLOR: Color = Color::Gray;
 pub(crate) const LIST_BORDER_COLOR: Color = Color::Cyan;
+/// Foreground of the `/models` row for the model currently serving the conversation.
+pub(crate) const ACTIVE_MODEL_COLOR: Color = Color::Green;
 pub(crate) const OVERLAY_SELECTION_COLOR: Color = Color::Yellow;
 pub(crate) const BUTTON_TEXT_COLOR: Color = Color::Black;
 pub(crate) const APPROVE_HOVER_BACKGROUND_COLOR: Color = Color::LightGreen;

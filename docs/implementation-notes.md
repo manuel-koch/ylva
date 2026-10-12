@@ -688,7 +688,9 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   turn buffers; `conversation/replay.rs`, `conversation/navigation.rs` and
   `conversation/tools.rs` separate transcript projection, root/child navigation
   and bubble mutations. `selection.rs` owns terminal-column selection,
-  `model_picker.rs` owns slash/model choices and filtering,
+  `model_picker.rs` owns slash/model choices, filtering and the
+  `PickerRowLayout` that splits each narrow-terminal model into identity and
+  details rows,
   `input_history.rs` owns history browsing, `layout.rs` owns hit-test geometry,
   and `events.rs` owns input/domain events, modes, focus and effects.
   Descendant impl blocks operate on the same parent-owned `AppState`; its

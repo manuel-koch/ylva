@@ -281,11 +281,26 @@ impl Engine for EngineImpl {
             .context_length
     }
 
+    fn set_context_length_override(&self, context_length: Option<usize>) -> anyhow::Result<()> {
+        let mut runtime_config = self
+            .runtime_config
+            .write()
+            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))?;
+        runtime_config.context_length_override = context_length;
+        if let Some(context_length) = context_length {
+            runtime_config.context_length = context_length;
+        }
+        Ok(())
+    }
+
     fn adopt_catalog_context_length(&self, catalog_context_length: Option<usize>) {
         let mut runtime_config = self
             .runtime_config
             .write()
             .expect("the engine runtime configuration lock is poisoned");
+        if runtime_config.context_length_override.is_some() {
+            return;
+        }
         let context_length =
             self.context_length_for_model(&runtime_config.model, catalog_context_length);
         if runtime_config.context_length == context_length {

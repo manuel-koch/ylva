@@ -135,6 +135,7 @@ pub trait Engine: Send + Sync {
                 models
                     .into_iter()
                     .map(|model| ProviderModelOption {
+                        context_length_override: None,
                         provider_connection: provider_connection.clone(),
                         model,
                         reasoning_effort: None,
@@ -191,6 +192,17 @@ pub trait Engine: Send + Sync {
     fn set_reasoning_effort(&self, reasoning_effort: Option<&str>) -> anyhow::Result<()> {
         if let Some(reasoning_effort) = reasoning_effort {
             anyhow::bail!("engine does not support reasoning effort '{reasoning_effort}'");
+        }
+        Ok(())
+    }
+
+    /// Set or clear the session-only context window override. `None` returns
+    /// to the catalog or profile window on the next catalog adoption.
+    ///
+    /// Engines whose window cannot be changed reject a `Some` value.
+    fn set_context_length_override(&self, context_length: Option<usize>) -> anyhow::Result<()> {
+        if context_length.is_some() {
+            anyhow::bail!("engine does not support a context length override");
         }
         Ok(())
     }
@@ -274,6 +286,9 @@ pub trait Engine: Send + Sync {
                 if let ReasoningEffortChange::Set(reasoning_effort) = reasoning_effort {
                     self.set_reasoning_effort(reasoning_effort.as_deref())?;
                 }
+                if let Some(context_length) = option.context_length_override {
+                    self.set_context_length_override(Some(context_length))?;
+                }
                 Ok(())
             }
         }
@@ -311,9 +326,13 @@ pub trait Engine: Send + Sync {
             }
         };
         let context_length = match selection {
-            ModelSelection::NamedEngine { .. } => self.effective_context_length(),
+            ModelSelection::NamedEngine { option, .. } => option
+                .context_length_override
+                .unwrap_or_else(|| self.effective_context_length()),
             ModelSelection::ProviderModel(option) => {
-                self.context_length_for_model(&option.model.id, option.model.context_length)
+                option.context_length_override.unwrap_or_else(|| {
+                    self.context_length_for_model(&option.model.id, option.model.context_length)
+                })
             }
         };
         Ok(ModelSelectionTarget {
@@ -347,6 +366,9 @@ pub(super) fn apply_model_option(
     engine.set_reasoning_effort(option.reasoning_effort.as_deref())?;
     engine.switch_model(&option.model.id)?;
     engine.set_input_modalities(option.model.input_modalities.clone());
+    // The override is set before adoption so that adoption leaves it alone;
+    // a plain catalog selection (`None`) clears it and adopts the catalog.
+    engine.set_context_length_override(option.context_length_override)?;
     engine.adopt_catalog_context_length(option.model.context_length);
     Ok(())
 }

@@ -50,6 +50,7 @@ fn configured_copies_keep_provider_runtimes_independent_and_restore_original_set
         let engine = EngineImpl::new(provider.clone(), config);
         engine
             .switch_model_option(&ProviderModelOption {
+                context_length_override: None,
                 provider_connection: "mock".to_string(),
                 model: ModelInfo {
                     id: "larger-model".to_string(),
@@ -123,6 +124,7 @@ fn catalog_selection_without_optional_metadata_does_not_fetch_again() {
         let engine = EngineImpl::new(provider.clone(), make_engine_config());
         engine
             .switch_model_option(&ProviderModelOption {
+                context_length_override: None,
                 provider_connection: "mock".to_string(),
                 model: model_info_with_modalities("catalog-selection", None),
                 reasoning_effort: None,
@@ -423,4 +425,49 @@ fn engine_impl_keeps_a_profile_reasoning_effort_when_the_catalog_fetch_fails() {
         log.contains("failed to discover active model input modalities"),
         "the failure must be logged: {log}"
     );
+}
+
+#[test]
+fn context_length_override_survives_catalog_adoption_until_a_plain_selection_clears_it() {
+    crate::test_support::run_locked(async {
+        let mut larger_model = model_info_with_modalities("larger-model", Some(Vec::new()));
+        larger_model.context_length = Some(262_144);
+        let provider = Arc::new(CatalogProvider::new(vec![
+            model_info_with_modalities("test-model", Some(Vec::new())),
+            larger_model.clone(),
+        ]));
+        let engine = EngineImpl::new(provider, make_engine_config());
+        let option = |context_length_override| ProviderModelOption {
+            provider_connection: "mock".to_string(),
+            model: larger_model.clone(),
+            reasoning_effort: None,
+            context_length_override,
+        };
+
+        engine
+            .switch_model_option(&option(Some(65_536)))
+            .expect("switch with a context override");
+        assert_eq!(engine.effective_context_length(), 65_536);
+
+        engine.adopt_catalog_context_length(Some(262_144));
+        assert_eq!(
+            engine.effective_context_length(),
+            65_536,
+            "catalog adoption must not replace a session override"
+        );
+
+        let preview = engine
+            .preview_model_selection(&ModelSelection::ProviderModel(option(Some(65_536))))
+            .expect("preview with a context override");
+        assert_eq!(preview.context_length, 65_536);
+
+        engine
+            .switch_model_option(&option(None))
+            .expect("plain catalog selection");
+        assert_eq!(
+            engine.effective_context_length(),
+            262_144,
+            "a selection without an override returns to the catalog window"
+        );
+    });
 }

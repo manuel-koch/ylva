@@ -253,6 +253,7 @@ fn a_models_switch_scopes_the_context_override_to_the_configured_model() {
         input_modalities: None,
     };
     let mut selection = ProviderModelOption {
+        context_length_override: None,
         provider_connection: "mock".to_string(),
         model: catalog_model,
         reasoning_effort: None,
@@ -367,6 +368,7 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
 
     engine
         .switch_model_option(&ProviderModelOption {
+            context_length_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
                 id: "vision-model".to_string(),
@@ -382,6 +384,7 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
 
     engine
         .switch_model_option(&ProviderModelOption {
+            context_length_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
                 id: "text-model".to_string(),
@@ -403,6 +406,7 @@ fn switch_model_option_rejects_a_reasoning_effort_the_model_does_not_advertise()
 
     let error = engine
         .switch_model_option(&ProviderModelOption {
+            context_length_override: None,
             provider_connection: "mock".to_string(),
             model: model_info_with_reasoning_efforts("test-model", Some(vec!["low".to_string()])),
             reasoning_effort: Some("max".to_string()),

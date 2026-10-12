@@ -16,6 +16,8 @@
 
 use ratatui::layout::Rect;
 
+use super::PickerRowLayout;
+
 /// The on-screen rect of the input box, written by `tui_widgets::draw` every frame and
 /// read by the event loop for mouse click/drag cursor placement. Ephemeral
 /// view state, reset to an empty rect between frames.
@@ -88,7 +90,7 @@ impl HelpPopupLayout {
 }
 
 /// Screen-space geometry for the slash-command overlay's selectable content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SlashOverlayLayout {
     pub content_area: Rect,
     pub resume_action: Rect,
@@ -96,9 +98,30 @@ pub struct SlashOverlayLayout {
     /// Absolute row in the overlay's content list corresponding to the first
     /// row currently rendered in `content_area`.
     pub first_visible_row: usize,
+    /// Row layout the overlay was last drawn with. Input handling (click
+    /// row mapping) and drag-copy must map rows the same way the renderer did.
+    pub row_layout: PickerRowLayout,
+    /// Screen rect of the footer text lines (below the separator), such as
+    /// the `/models` compaction preview. Empty when the overlay has none.
+    pub detail_area: Rect,
+    /// Plain text of each footer line, as displayed, one entry per row of
+    /// `detail_area` starting at its top.
+    pub detail_rows: Vec<String>,
 }
 
 impl SlashOverlayLayout {
+    /// Entries one `PageUp`/`PageDown` moves by: the whole entries that fit in
+    /// the last drawn list. Before the first draw there is no geometry, so a
+    /// small fixed step is used.
+    pub fn page_entry_count(&self) -> isize {
+        const FALLBACK_PAGE_ENTRY_COUNT: isize = 3;
+        let visible_rows = self.content_area.height as usize;
+        if visible_rows == 0 {
+            return FALLBACK_PAGE_ENTRY_COUNT;
+        }
+        (visible_rows / self.row_layout.rows_per_entry()).max(1) as isize
+    }
+
     /// Return the absolute content row under a terminal cell, if it is inside
     /// the rendered entry column.
     pub fn row_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -142,7 +165,7 @@ impl ChatScrollbarLayout {
 }
 
 /// Aggregated screen-space geometry written by the View each frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppLayout {
     pub chat_area: ChatArea,
     pub chat_scrollbar: ChatScrollbarLayout,

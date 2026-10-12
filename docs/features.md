@@ -356,9 +356,9 @@ When a provider also advertises a default effort (Ollama's `thinking.default`,
 OpenRouter's `reasoning.default_effort`), the picker's default slot renders it
 as `default (medium)`; without one the slot stays `default`.
 
-When alternatives are available, `←`/`→` in the `/models` picker cycles
-between the provider default and the advertised values for the highlighted
-model. Each picker row labels reasoning as `unavailable`, `default`, or the
+When alternatives are available, the `/models` parameter popup cycles
+reasoning effort between the provider default and the advertised values for the
+edited model. Each picker row labels reasoning as `unavailable`, `default`, or the
 current value followed by `⚙` when it can be adjusted, so models that do not
 respond to `←`/`→` are distinguishable. While an overlay is open, the footer
 replaces the normal send hint with the controls for that overlay.
@@ -937,7 +937,8 @@ for the full mechanics.
 - **Mouse editing:** a left-click in the input box places the cursor at the
   clicked character; a left-drag selects text. The same drag gesture selects
   visible text in the chat bubbles, child-view header bubble, and
-  slash-command overlay, copying it to the clipboard on release.
+  slash-command overlay (including the `/models` footer), copying it to the
+  clipboard on release.
   `read`/`glob` tool status lines and approval buttons remain mouse-clickable.
 - **Shift+Enter / Alt+Enter:** insert a newline through the terminal's
   modified-key encoding. Kitty keyboard protocol terminals (iTerm2, kitty,
@@ -1137,12 +1138,30 @@ A filter that matches nothing keeps the panel open with a
 user can keep editing it. The detail area previews the compaction engine used
 by the highlighted choice without duplicating the conversation engine/model
 shown in the TUI footer. It shrinks away when the terminal cannot fit it,
-leaving the picker controls usable. `Enter` confirms the highlighted choice
-and clears the input; `Esc` cancels and clears it too.
+leaving the picker controls usable. The picker's list, including the detail
+area, is capped at two thirds of the space above the input; longer lists scroll.
+The picker chooses its row layout from the visible models. While every visible
+single-line label fits the panel, each model takes one row. As soon as one does
+not fit, every visible model takes two rows: an identity row
+(`engine → provider/model`, elided to fit) and an indented details row carrying
+the context, reasoning and modality markers. Clicking either row highlights that
+model.
+The model currently serving the conversation is shown by its identity text in
+bold green instead of a text suffix.
+`Enter` on a highlighted model opens its parameter popup instead of switching.
+The popup lists one row per parameter, each a label followed by its value: the
+effective context length and, when the model advertises selectable efforts, the
+reasoning effort. `↑`/`↓` move between the rows; `←`/`→` adjust the highlighted
+value. The context length moves by one eighth of the current window, rounded
+down to a multiple of 32kb, and never exceeds the catalog's window
+when one is reported.
+Its edit is session-only and is not written to the profile. In the popup, `Enter`
+confirms the model and parameters and switches; `Esc` returns to the model list
+and discards the parameter edits. `Esc` in the list cancels and clears the input.
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |
-| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights); page keys move by a page; `←`/`→` cycle reasoning effort when available; `Enter` confirms; `Esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
+| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights); page keys move by a page; `Enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `Esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/tools` | Lists the tools the running agent may call, as resolved for its agent type. | Transient |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |
 | `/session` | Opens the recent-session picker in either conversation view. Select Resume or Clone, then confirm a root session. | Transient; activation and subsequent work use the selected persisted identity |

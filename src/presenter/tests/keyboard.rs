@@ -152,11 +152,16 @@ fn session_picker_owns_keyboard_action_selection_confirmation_and_cancellation()
 fn model_picker_pages_selection_with_page_keys() {
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: (0..10)
             .map(|index| ModelChoice {
-                label: format!("stub/model-{index}"),
+                label: crate::tui_reducer_state::ChoiceLabel {
+                    identity: format!("stub/model-{index}"),
+                    details: Vec::new(),
+                },
                 initial_reasoning_effort: None,
                 selection: ProviderModelOption {
+                    context_length_override: None,
                     provider_connection: "stub".to_string(),
                     model: crate::llm::ModelInfo {
                         id: format!("model-{index}"),

@@ -41,6 +41,7 @@ fn engine_display_info_is_a_snapshot_not_runtime_state() {
 fn direct_engine_previews_the_selected_effective_context_length() {
     let option = |context_length| {
         ModelSelection::ProviderModel(ProviderModelOption {
+            context_length_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
                 id: "candidate".to_string(),

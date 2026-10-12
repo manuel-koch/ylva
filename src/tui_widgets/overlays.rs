@@ -22,21 +22,30 @@ use ratatui::Frame;
 
 use crate::markdown::render_markdown;
 use crate::theme::{
-    CHAT_SCROLLBAR_COLOR, CLARIFY_BANNER_FG_COLOR, CLARIFY_BANNER_SCROLL_INDICATOR_COLOR,
-    CLARIFY_BANNER_SELECTION_FG_COLOR, COMPACTION_MISMATCH_COLOR, LIST_BORDER_COLOR,
-    LIST_SELECTION_BACKGROUND_COLOR, LIST_SELECTION_FOREGROUND_COLOR, LIST_TEXT_COLOR,
-    MUTED_TEXT_COLOR, OVERLAY_SELECTION_COLOR, TOAST_BG_COLOR, TOAST_FG_COLOR,
+    ACTIVE_MODEL_COLOR, CHAT_SCROLLBAR_COLOR, CLARIFY_BANNER_FG_COLOR,
+    CLARIFY_BANNER_SCROLL_INDICATOR_COLOR, CLARIFY_BANNER_SELECTION_FG_COLOR,
+    COMPACTION_MISMATCH_COLOR, LIST_BORDER_COLOR, LIST_SELECTION_BACKGROUND_COLOR,
+    LIST_SELECTION_FOREGROUND_COLOR, LIST_TEXT_COLOR, MUTED_TEXT_COLOR, OVERLAY_SELECTION_COLOR,
+    TOAST_BG_COLOR, TOAST_FG_COLOR,
 };
 use crate::tui_reducer_state::{
-    matching_model_indices, model_picker_row_entries, slash_overlay_text_rows, BannerDragSelection,
-    SlashOverlay, SlashOverlayLayout,
+    matching_model_indices, model_picker_row_entries, model_picker_row_is_details,
+    model_picker_row_layout, slash_overlay_text_rows, visible_model_choices, BannerDragSelection,
+    PickerRowLayout, SlashOverlay, SlashOverlayLayout,
 };
 
 use super::chat::{apply_selection_highlight_to_line, render_chat_scrollbar};
+use super::footer::elide_balanced_tokens;
 
 const SESSION_RESUME_BUTTON_LABEL: &str = " Resume ";
 const SESSION_CLONE_BUTTON_LABEL: &str = " Clone ";
 const SESSION_ACTION_BUTTON_GAP: &str = "  ";
+/// Indent of a `/models` details row, aligning it under the identity text
+/// (past the two-column selection marker).
+const MODEL_PICKER_DETAIL_INDENT: &str = "    ";
+/// Panel columns a single-line `/models` label cannot use: both border
+/// columns, the scrollbar column and the two-column selection marker.
+const MODEL_PICKER_CHROME_WIDTH: usize = 5;
 
 /// Draw the slash-command overlay as a floating panel whose bottom edge sits
 /// directly above the input box, so the list grows upward over the
@@ -51,6 +60,32 @@ pub(super) fn draw_slash_overlay(
 ) {
     let previous_first_visible = overlay_layout.first_visible_row;
     *overlay_layout = SlashOverlayLayout::default();
+    // Visible choices are computed once per frame; the row layout and the
+    // active-model styling both read this list.
+    let visible_model_choices_in_overlay = match overlay {
+        SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } => visible_model_choices(choices, filter),
+        _ => Vec::new(),
+    };
+    // A model takes two rows only when its single-line label would not fit
+    // the panel, so wide terminals keep one row per model.
+    // The parameter popup has one row per parameter, so it never splits rows.
+    let row_layout = match overlay {
+        SlashOverlay::ModelPicker {
+            parameters: Some(_),
+            ..
+        } => PickerRowLayout::SingleRow,
+        SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } => model_picker_row_layout(
+            choices,
+            filter,
+            (input_area.width as usize).saturating_sub(MODEL_PICKER_CHROME_WIDTH),
+        ),
+        _ => PickerRowLayout::SingleRow,
+    };
+    overlay_layout.row_layout = row_layout;
     let (title, selected) = match overlay {
         SlashOverlay::Hidden => return,
         SlashOverlay::Suggestions { selected, .. } => ("Commands".to_string(), Some(*selected)),
@@ -65,14 +100,27 @@ pub(super) fn draw_slash_overlay(
             choices,
             filter,
             selected,
-        } => {
-            let visible_indices = matching_model_indices(choices, filter);
-            if visible_indices.is_empty() {
-                ("Engines & Provider Models".to_string(), None)
-            } else {
-                ("Engines & Provider Models".to_string(), Some(*selected))
+            parameters,
+        } => match parameters {
+            Some(edit) => {
+                let identity = choices
+                    .get(edit.choice_index)
+                    .map(|choice| choice.label.identity.clone())
+                    .unwrap_or_default();
+                (
+                    format!("Model parameters  ·  {identity}"),
+                    Some(edit.cursor),
+                )
             }
-        }
+            None => {
+                let visible_indices = matching_model_indices(choices, filter);
+                if visible_indices.is_empty() {
+                    ("Engines & Provider Models".to_string(), None)
+                } else {
+                    ("Engines & Provider Models".to_string(), Some(*selected))
+                }
+            }
+        },
     };
     let entries = if let SlashOverlay::SessionPicker(picker) = overlay {
         if picker.choices.is_empty() {
@@ -85,7 +133,7 @@ pub(super) fn draw_slash_overlay(
                 .collect()
         }
     } else {
-        slash_overlay_text_rows(overlay)
+        slash_overlay_text_rows(overlay, row_layout)
     };
     if entries.is_empty() || input_area.width < 4 || input_area.y < 3 {
         return;
@@ -96,16 +144,20 @@ pub(super) fn draw_slash_overlay(
     // sections.
     let rows = match overlay {
         SlashOverlay::ModelPicker {
+            parameters: Some(_),
+            ..
+        } => (0..entries.len()).map(Some).collect(),
+        SlashOverlay::ModelPicker {
             choices, filter, ..
         } if !matching_model_indices(choices, filter).is_empty() => {
-            model_picker_row_entries(choices, filter)
+            model_picker_row_entries(choices, filter, row_layout)
         }
         _ => (0..entries.len()).map(Some).collect(),
     };
 
-    // Cap the panel at half the space above the input so a provider with
-    // hundreds of models cannot hide the conversation entirely.
-    let max_content_height = (input_area.y.saturating_sub(1) / 2).max(1);
+    // Cap the panel at two thirds of the space above the input so a provider
+    // with hundreds of models cannot hide the conversation entirely.
+    let max_content_height = (input_area.y.saturating_sub(1) * 2 / 3).max(1);
     let detail_lines = if let SlashOverlay::SessionPicker(picker) = overlay {
         let mut details = Vec::new();
         if input_area.y >= 4 {
@@ -170,26 +222,21 @@ pub(super) fn draw_slash_overlay(
     // longer than the panel, but preserve the current window when the
     // highlighted row is already visible. This prevents a mouse click from
     // repositioning the popup unnecessarily.
-    let selected_row = selected.and_then(|selected| match overlay {
-        SlashOverlay::Suggestions { .. } | SlashOverlay::SessionPicker(_) => {
-            rows.iter().position(|row| *row == Some(selected))
-        }
-        SlashOverlay::ModelPicker { .. } => rows
-            .iter()
-            .enumerate()
-            .filter_map(|(row_index, row)| row.is_some().then_some(row_index))
-            .nth(selected),
-        _ => None,
+    // A selected entry may span two rows; keep its whole span in view.
+    let selected_span = selected.and_then(|selected| {
+        let first_row = rows.iter().position(|row| *row == Some(selected))?;
+        let last_row = rows.iter().rposition(|row| *row == Some(selected))?;
+        Some((first_row, last_row))
     });
     let max_first_visible = rows.len().saturating_sub(content_height as usize);
     let mut first_visible = previous_first_visible.min(max_first_visible);
-    if let Some(selected_row) = selected_row {
+    if let Some((selected_first_row, selected_last_row)) = selected_span {
         let visible_end = first_visible.saturating_add(content_height as usize);
-        if selected_row < first_visible {
-            first_visible = selected_row;
-        } else if selected_row >= visible_end {
-            first_visible = selected_row
-                .saturating_sub(content_height.saturating_sub(1) as usize)
+        if selected_first_row < first_visible {
+            first_visible = selected_first_row;
+        } else if selected_last_row >= visible_end {
+            first_visible = (selected_last_row + 1)
+                .saturating_sub(content_height as usize)
                 .min(max_first_visible);
         }
     }
@@ -207,17 +254,53 @@ pub(super) fn draw_slash_overlay(
                 );
             };
             let entry = &entries[row_index];
-            let is_selected = selected_row == Some(row_index);
+            let is_selected = *entry_index == selected;
+            let is_model_details_row = matches!(overlay, SlashOverlay::ModelPicker { .. })
+                && model_picker_row_is_details(&rows, row_index);
+            let is_model_identity_row = matches!(overlay, SlashOverlay::ModelPicker { .. })
+                && row_layout == PickerRowLayout::TwoRows
+                && !is_model_details_row;
+            // Active styling belongs to the model list; the parameter popup's
+            // rows index its own fields, not the list.
+            let list_is_shown = !matches!(
+                overlay,
+                SlashOverlay::ModelPicker {
+                    parameters: Some(_),
+                    ..
+                }
+            );
+            let is_active_model_row = list_is_shown
+                && !is_model_details_row
+                && entry_index.is_some_and(|entry| {
+                    visible_model_choices_in_overlay
+                        .get(entry)
+                        .is_some_and(|choice| choice.is_active)
+                });
             let style = if is_selected {
                 Style::default()
                     .fg(LIST_SELECTION_FOREGROUND_COLOR)
                     .bg(LIST_SELECTION_BACKGROUND_COLOR)
                     .add_modifier(Modifier::BOLD)
+            } else if is_active_model_row {
+                Style::default()
+                    .fg(ACTIVE_MODEL_COLOR)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(LIST_TEXT_COLOR)
             };
+            if is_model_details_row {
+                let indent_width = MODEL_PICKER_DETAIL_INDENT.chars().count();
+                let text =
+                    truncate_with_ellipsis(entry, content_width.saturating_sub(indent_width));
+                return Line::styled(format!("{MODEL_PICKER_DETAIL_INDENT}{text}"), style);
+            }
             let marker = if is_selected { "▸ " } else { "  " };
-            Line::styled(format!("{marker}{entry}"), style)
+            let text = if is_model_identity_row {
+                elide_balanced_tokens(entry, content_width.saturating_sub(marker.chars().count()))
+            } else {
+                entry.clone()
+            };
+            Line::styled(format!("{marker}{text}"), style)
         })
         .collect();
 
@@ -243,28 +326,7 @@ pub(super) fn draw_slash_overlay(
     overlay_layout.content_area = content_area;
     overlay_layout.first_visible_row = first_visible;
     if let Some(selection) = drag {
-        for (visible_index, line) in lines.iter_mut().enumerate() {
-            let screen_row = content_area.y.saturating_add(visible_index as u16);
-            if screen_row < selection.start_row || screen_row > selection.end_row {
-                continue;
-            }
-            let column_start = if screen_row == selection.start_row {
-                selection.start_col.saturating_sub(content_area.x) as usize
-            } else {
-                0
-            };
-            let column_end = if screen_row == selection.end_row {
-                selection.end_col.saturating_sub(content_area.x) as usize
-            } else {
-                usize::MAX
-            };
-            apply_selection_highlight_to_line(
-                line,
-                column_start,
-                column_end,
-                OVERLAY_SELECTION_COLOR,
-            );
-        }
+        apply_overlay_drag_highlight(&mut lines, content_area, selection);
     }
     frame.render_widget(Paragraph::new(lines), content_area);
 
@@ -283,6 +345,14 @@ pub(super) fn draw_slash_overlay(
             )),
             separator_area,
         );
+        if !matches!(overlay, SlashOverlay::SessionPicker(_)) {
+            overlay_layout.detail_area = details_area;
+            overlay_layout.detail_rows = detail_lines.iter().map(line_plain_text).collect();
+        }
+        let mut detail_lines = detail_lines;
+        if let Some(selection) = drag {
+            apply_overlay_drag_highlight(&mut detail_lines, details_area, selection);
+        }
         frame.render_widget(
             Paragraph::new(detail_lines).style(Style::default().fg(MUTED_TEXT_COLOR)),
             details_area,
@@ -321,6 +391,18 @@ pub(super) fn draw_slash_overlay(
     }
 }
 
+/// Shorten `text` to at most `width` characters, ending a cut text with `…`.
+fn truncate_with_ellipsis(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let kept: String = text.chars().take(width - 1).collect();
+    format!("{kept}…")
+}
+
 fn session_row(choice: &crate::tui_reducer_state::SessionChoice, width: usize) -> String {
     let prefix = format!("{}  ", choice.last_used_at);
     let title_width = width.saturating_sub(Span::raw(&prefix).width());
@@ -343,6 +425,40 @@ fn session_row(choice: &crate::tui_reducer_state::SessionChoice, width: usize) -
     format!("{prefix}{title}…")
 }
 
+/// Concatenate a line's spans into the plain text the user sees on screen.
+fn line_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+/// Paint the drag selection onto the rows of `lines` that `area` displays.
+/// Rows outside the selection's row span are left untouched.
+fn apply_overlay_drag_highlight(
+    lines: &mut [Line<'static>],
+    area: Rect,
+    selection: BannerDragSelection,
+) {
+    for (visible_index, line) in lines.iter_mut().enumerate() {
+        let screen_row = area.y.saturating_add(visible_index as u16);
+        if screen_row < selection.start_row || screen_row > selection.end_row {
+            continue;
+        }
+        let column_start = if screen_row == selection.start_row {
+            selection.start_col.saturating_sub(area.x) as usize
+        } else {
+            0
+        };
+        let column_end = if screen_row == selection.end_row {
+            selection.end_col.saturating_sub(area.x) as usize
+        } else {
+            usize::MAX
+        };
+        apply_selection_highlight_to_line(line, column_start, column_end, OVERLAY_SELECTION_COLOR);
+    }
+}
+
 fn model_picker_detail_lines(
     overlay: &SlashOverlay,
     engine_display: &crate::llm::engine::EngineDisplayInfo,
@@ -353,6 +469,7 @@ fn model_picker_detail_lines(
         choices,
         filter,
         selected,
+        ..
     } = overlay
     else {
         return Vec::new();

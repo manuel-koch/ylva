@@ -15,6 +15,8 @@
 use super::*;
 use ratatui::layout::Rect;
 
+use crate::tui_reducer_state::PickerRowLayout;
+
 #[test]
 fn chat_area_contains_detects_interior_cells() {
     let area = ChatArea {
@@ -110,4 +112,33 @@ fn help_popup_hit_detects_interior_cells() {
     assert!(popup.hit(69, 34));
     assert!(!popup.hit(9, 5));
     assert!(!popup.hit(70, 5));
+}
+
+#[test]
+fn page_entry_count_is_the_number_of_whole_entries_that_fit() {
+    let layout_with = |height: u16, row_layout: PickerRowLayout| SlashOverlayLayout {
+        content_area: Rect::new(0, 0, 10, height),
+        row_layout,
+        ..SlashOverlayLayout::default()
+    };
+
+    assert_eq!(
+        SlashOverlayLayout::default().page_entry_count(),
+        3,
+        "before the first draw there is no geometry, so the fallback step applies"
+    );
+    assert_eq!(
+        layout_with(10, PickerRowLayout::SingleRow).page_entry_count(),
+        10
+    );
+    assert_eq!(
+        layout_with(10, PickerRowLayout::TwoRows).page_entry_count(),
+        5,
+        "two rows per model halve the entries a page holds"
+    );
+    assert_eq!(
+        layout_with(1, PickerRowLayout::TwoRows).page_entry_count(),
+        1,
+        "a page always moves by at least one entry"
+    );
 }

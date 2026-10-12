@@ -83,9 +83,15 @@ const LOADING_MODELS_FOOTER_HINTS: &[FooterHint] = &[
 ];
 const MODEL_PICKER_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("↑/↓", "select"),
-    FooterHint::key("←/→", "effort"),
-    FooterHint::key("enter", "switch"),
+    FooterHint::key("enter", "parameters"),
     FooterHint::key("esc", "cancel"),
+    FooterHint::key("F1", "help"),
+];
+const MODEL_PARAMETER_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("↑/↓", "parameter"),
+    FooterHint::key("←/→", "adjust"),
+    FooterHint::key("enter", "switch"),
+    FooterHint::key("esc", "back"),
     FooterHint::key("F1", "help"),
 ];
 const HELP_POPUP_IDLE_FOOTER_HINTS: &[FooterHint] = &[
@@ -148,6 +154,10 @@ pub(super) fn footer_keybinding_hints(
     match &state.slash_overlay {
         SlashOverlay::Suggestions { .. } => SUGGESTION_FOOTER_HINTS,
         SlashOverlay::LoadingModels => LOADING_MODELS_FOOTER_HINTS,
+        SlashOverlay::ModelPicker {
+            parameters: Some(_),
+            ..
+        } => MODEL_PARAMETER_FOOTER_HINTS,
         SlashOverlay::ModelPicker { .. } => MODEL_PICKER_FOOTER_HINTS,
         SlashOverlay::SessionPicker(picker) => {
             if picker.phase == crate::tui_reducer_state::SessionPickerPhase::Ready {
@@ -274,7 +284,7 @@ const LABEL_SEPARATOR_CHARS: &[char] = &[' ', '→', '/', ':', '(', ')'];
 /// widest token is shrunk one column at a time until the text fits, so the
 /// budget is balanced across tokens. A shortened token keeps a head (about a
 /// third of its kept characters) and a tail around a single `…`.
-fn elide_balanced_tokens(text: &str, max_chars: usize) -> String {
+pub(super) fn elide_balanced_tokens(text: &str, max_chars: usize) -> String {
     let char_count = text.chars().count();
     if char_count <= max_chars {
         return text.to_string();

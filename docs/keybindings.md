@@ -87,11 +87,15 @@ conversation. The original draft returns after all approvals are resolved.
 | `page-down` / `fn-down` | `/models` picker open | Move the highlighted provider-connection/model down by a page |
 | `Mouse wheel` | `/models` picker open | Move the highlighted provider-connection/model up / down |
 | `left-click` on an entry | `/models` picker open | Highlight the provider-connection/model; does not switch until `enter` |
-| `left-drag` | Slash-command overlay open | Select visible popup text; release copies it to the clipboard |
-| `←` / `→` | `/models` picker open | Cycle the highlighted model's reasoning effort when alternatives are available |
+| `left-drag` | Slash-command overlay open | Select visible popup text; release copies it to the clipboard. A drag stays within its region: the list rows or the footer text (e.g. the compaction preview) |
 | any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices by engine name, provider connection, or model ID; no re-query |
-| `enter` | `/models` picker open | Activate the highlighted named engine's current Engine runtime selection, or route a raw catalog model by provider connection; apply only an edited named-engine reasoning effort and clear the input |
+| `enter` | `/models` picker open | Open the parameter popup for the highlighted model; nothing switches yet |
 | `esc` | `/models` picker open | Cancel without switching and clear the input |
+| `↑` / `↓` | `/models` parameter popup open | Move between the parameter rows (context length, reasoning effort) |
+| `←` / `→` | `/models` parameter popup open | Adjust the highlighted parameter: context length by one eighth of the window (32kb minimum, capped at the catalog window); reasoning effort through the advertised values |
+| `enter` | `/models` parameter popup open | Confirm the model and the edited parameters, activate the highlighted selection, and clear the input |
+| `esc` | `/models` parameter popup open | Return to the model list and discard the parameter edits |
+| typing / backspace | `/models` parameter popup open | Ignored; the filter stays as it was |
 | `↑` / `↓`, page keys, mouse wheel | `/session` picker ready | Move the highlighted session |
 | `←` / `→` | `/session` picker ready | Select Resume / Clone; every new open defaults to Resume |
 | `left-click` on action | `/session` picker ready | Choose Resume or Clone without activating |

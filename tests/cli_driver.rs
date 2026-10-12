@@ -595,6 +595,7 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
         .select_model(&ylva::engine::ModelSelection::NamedEngine {
             engine_name: "alternate".to_string(),
             option: ProviderModelOption {
+                context_length_override: None,
                 provider_connection: "alternate-provider".to_string(),
                 model: ModelInfo {
                     id: "alternate-model".to_string(),
@@ -710,6 +711,7 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
     child_request_barrier.first_request_started.notified().await;
     root.engine()
         .switch_model_option(&ProviderModelOption {
+            context_length_override: None,
             provider_connection: "alternate-provider".to_string(),
             model: ModelInfo {
                 id: "alternate-model".to_string(),
@@ -819,6 +821,7 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
 
     root.engine()
         .switch_model_option(&ProviderModelOption {
+            context_length_override: None,
             provider_connection: "alternate-provider".to_string(),
             model: ModelInfo {
                 id: "alternate-model".to_string(),

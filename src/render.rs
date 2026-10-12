@@ -380,7 +380,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         input_scroll_top: state.input_scroll_top,
         slash_overlay: state.slash_overlay.clone(),
         slash_overlay_drag: state.slash_overlay_drag_selection(),
-        slash_overlay_layout: state.layout.slash_overlay,
+        slash_overlay_layout: state.layout.slash_overlay.clone(),
         help_popup: crate::tui_render_state::HelpPopupState {
             show_help: state.show_help(),
             help_scroll_offset: state.help_popup.help_scroll_offset,

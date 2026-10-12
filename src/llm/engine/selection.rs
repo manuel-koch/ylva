@@ -95,6 +95,10 @@ pub struct ProviderModelOption {
     ///
     /// `None` means that the provider's own default behavior is used.
     pub reasoning_effort: Option<String>,
+    /// Context window edited in the model picker's parameter popup, in
+    /// tokens. `None` keeps the catalog or profile window. The override is
+    /// session-only and never written to the profile.
+    pub context_length_override: Option<usize>,
 }
 
 /// How a named-engine shortcut should treat the engine's current reasoning

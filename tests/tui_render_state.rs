@@ -331,9 +331,13 @@ impl Backend for InspectableTestBackend {
 fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::ModelChoice> {
     (0..choice_count)
         .map(|index| ylva::tui_reducer_state::ModelChoice {
-            label: format!("stub/model-{index}"),
+            label: ylva::tui_reducer_state::ChoiceLabel {
+                identity: format!("stub/model-{index}"),
+                details: Vec::new(),
+            },
             initial_reasoning_effort: None,
             selection: ylva::ProviderModelOption {
+                context_length_override: None,
                 provider_connection: "stub".to_string(),
                 model: ylva::ModelInfo {
                     id: format!("model-{index}"),

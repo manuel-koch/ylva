@@ -15,14 +15,25 @@
 use super::*;
 use crate::llm::engine::{ModelSelection, ProviderModelOption, ReasoningEffortChange};
 use crate::llm::InputModality;
+use crate::tui_reducer_state::model_picker::{
+    adjust_context_length, context_length_step, cycle_reasoning_effort, model_parameter_rows,
+};
+use crate::tui_reducer_state::model_picker::{
+    engine_choice_parts, model_choice_parts, model_picker_row_layout, visible_model_choices,
+    ChoiceLabel,
+};
 
 #[test]
 fn matching_model_indices_requires_every_filter_word_in_any_order() {
     let choice =
         |provider_connection: &str, model_id: &str, engine_name: Option<&str>| ModelChoice {
-            label: format!("{provider_connection}/{model_id}"),
+            label: ChoiceLabel {
+                identity: format!("{provider_connection}/{model_id}"),
+                details: Vec::new(),
+            },
             initial_reasoning_effort: None,
             selection: ProviderModelOption {
+                context_length_override: None,
                 provider_connection: provider_connection.to_string(),
                 model: crate::llm::ModelInfo {
                     id: model_id.to_string(),
@@ -99,6 +110,7 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
 
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices,
         filter: String::new(),
         selected: 4,
@@ -111,8 +123,8 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
         ModelSelection::NamedEngine { engine_name, .. } if engine_name == "Remote-Dense"
     ));
     assert_eq!(
-        slash_overlay_text_rows(&state.slash_overlay),
-        vec![selected_choice.label.clone()]
+        slash_overlay_text_rows(&state.slash_overlay, PickerRowLayout::SingleRow),
+        vec![selected_choice.label.single_line()]
     );
     state.refresh_slash_overlay("/models remote");
     state.move_slash_selection(1);
@@ -227,9 +239,13 @@ fn refresh_slash_overlay_keeps_the_selection_while_the_choices_are_unchanged() {
 #[test]
 fn slash_overlay_text_rows_preserves_filtered_model_labels_and_divider() {
     let choice = |label: &str, provider_connection: &str, engine_name: Option<&str>| ModelChoice {
-        label: label.to_string(),
+        label: ChoiceLabel {
+            identity: label.to_string(),
+            details: Vec::new(),
+        },
         initial_reasoning_effort: None,
         selection: ProviderModelOption {
+            context_length_override: None,
             provider_connection: provider_connection.to_string(),
             model: crate::llm::ModelInfo {
                 id: label.to_string(),
@@ -251,23 +267,25 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_divider() {
     ];
 
     let filtered_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: choices.clone(),
         filter: "provider".to_string(),
         selected: 0,
     };
     assert_eq!(
-        slash_overlay_text_rows(&filtered_overlay),
+        slash_overlay_text_rows(&filtered_overlay, PickerRowLayout::SingleRow),
         vec!["provider/model".to_string()],
         "filtering must keep labels tied to the matching choice index"
     );
 
     let all_choices_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices,
         filter: String::new(),
         selected: 0,
     };
     assert_eq!(
-        slash_overlay_text_rows(&all_choices_overlay),
+        slash_overlay_text_rows(&all_choices_overlay, PickerRowLayout::SingleRow),
         vec![
             "engine/model".to_string(),
             String::new(),
@@ -280,6 +298,7 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_divider() {
 #[test]
 fn model_choice_label_explains_reasoning_effort_availability() {
     let model_option = |reasoning_efforts| ProviderModelOption {
+        context_length_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
@@ -292,15 +311,15 @@ fn model_choice_label_explains_reasoning_effort_availability() {
     };
 
     assert_eq!(
-        model_choice_label(&model_option(None), false),
+        model_choice_parts(&model_option(None)).single_line(),
         "stub/model  reasoning: unavailable"
     );
     assert_eq!(
-        model_choice_label(&model_option(Some(vec![])), false),
+        model_choice_parts(&model_option(Some(vec![]))).single_line(),
         "stub/model  reasoning: default"
     );
     assert_eq!(
-        model_choice_label(&model_option(Some(vec!["low".to_string()])), false),
+        model_choice_parts(&model_option(Some(vec!["low".to_string()]))).single_line(),
         "stub/model  reasoning: default ⚙"
     );
 }
@@ -308,8 +327,12 @@ fn model_choice_label_explains_reasoning_effort_availability() {
 #[test]
 fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
     let choice = ModelChoice {
-        label: "reasoning → stub/model".to_string(),
+        label: ChoiceLabel {
+            identity: "reasoning → stub/model".to_string(),
+            details: Vec::new(),
+        },
         selection: ProviderModelOption {
+            context_length_override: None,
             provider_connection: "stub".to_string(),
             model: crate::llm::ModelInfo {
                 id: "model".to_string(),
@@ -353,6 +376,7 @@ fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
 #[test]
 fn model_choice_label_shows_the_provider_advertised_default_effort() {
     let option = |reasoning_efforts, reasoning_effort| ProviderModelOption {
+        context_length_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
@@ -365,35 +389,191 @@ fn model_choice_label_shows_the_provider_advertised_default_effort() {
     };
 
     assert_eq!(
-        model_choice_label(&option(Some(vec![]), None), false),
+        model_choice_parts(&option(Some(vec![]), None)).single_line(),
         "stub/model  reasoning: default (medium)"
     );
     assert_eq!(
-        model_choice_label(
-            &option(Some(vec!["low".to_string(), "high".to_string()]), None),
-            false
-        ),
+        model_choice_parts(&option(
+            Some(vec!["low".to_string(), "high".to_string()]),
+            None
+        ))
+        .single_line(),
         "stub/model  reasoning: default (medium) ⚙",
         "the default slot of a selectable model names the advertised default"
     );
     assert_eq!(
-        model_choice_label(
-            &option(Some(vec!["low".to_string()]), Some("low".to_string())),
-            false
-        ),
+        model_choice_parts(&option(
+            Some(vec!["low".to_string()]),
+            Some("low".to_string())
+        ))
+        .single_line(),
         "stub/model  reasoning: low ⚙",
         "an explicit effort must not show the default suffix"
     );
     assert_eq!(
-        model_choice_label(&option(None, None), false),
+        model_choice_parts(&option(None, None)).single_line(),
         "stub/model  reasoning: unavailable",
         "an unavailable model must ignore the advertised default"
+    );
+}
+
+fn two_row_fixture_choices() -> Vec<ModelChoice> {
+    let choice = |identity: &str,
+                  details: &[&str],
+                  provider_connection: &str,
+                  engine_name: Option<&str>| ModelChoice {
+        label: ChoiceLabel {
+            identity: identity.to_string(),
+            details: details.iter().map(|detail| detail.to_string()).collect(),
+        },
+        initial_reasoning_effort: None,
+        selection: ProviderModelOption {
+            context_length_override: None,
+            provider_connection: provider_connection.to_string(),
+            model: crate::llm::ModelInfo {
+                id: "model".to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
+            },
+            reasoning_effort: None,
+        },
+        is_active: false,
+        engine_name: engine_name.map(str::to_string),
+        selection_target: None,
+        selection_preview_error: None,
+    };
+    vec![
+        choice(
+            "engine → provider/model",
+            &["context: 64kb", "reasoning: unavailable"],
+            "provider",
+            Some("engine"),
+        ),
+        choice(
+            "provider/other",
+            &["reasoning: unavailable"],
+            "provider",
+            None,
+        ),
+    ]
+}
+
+#[test]
+fn model_picker_row_layout_is_single_row_only_when_every_visible_label_fits() {
+    let choices = two_row_fixture_choices();
+    let longest_label = choices
+        .iter()
+        .map(|choice| choice.label.single_line().chars().count())
+        .max()
+        .expect("fixture has choices");
+
+    assert_eq!(
+        model_picker_row_layout(&choices, "", longest_label),
+        PickerRowLayout::SingleRow,
+        "a label exactly as wide as the budget still fits"
+    );
+    assert_eq!(
+        model_picker_row_layout(&choices, "", longest_label - 1),
+        PickerRowLayout::TwoRows,
+        "one column short of the longest label needs two rows"
+    );
+    assert_eq!(
+        model_picker_row_layout(&choices, "provider/other", longest_label - 1),
+        PickerRowLayout::SingleRow,
+        "filtered-out labels must not force two rows"
+    );
+}
+
+#[test]
+fn visible_model_choices_follow_filter_and_display_order() {
+    let choices = two_row_fixture_choices();
+
+    let visible: Vec<&str> = visible_model_choices(&choices, "")
+        .iter()
+        .map(|choice| choice.selection.provider_connection.as_str())
+        .collect();
+    assert_eq!(visible, vec!["provider", "provider"]);
+    assert_eq!(
+        visible_model_choices(&choices, "engine")
+            .iter()
+            .map(|choice| choice.label.single_line())
+            .collect::<Vec<_>>(),
+        vec!["engine → provider/model  context: 64kb  reasoning: unavailable".to_string()]
+    );
+}
+
+#[test]
+fn choice_label_keeps_identity_and_details_as_separate_parts() {
+    let label = ChoiceLabel {
+        identity: "engine → p/m".to_string(),
+        details: vec![
+            "context: 1kb".to_string(),
+            "reasoning: unavailable".to_string(),
+        ],
+    };
+    assert_eq!(label.identity, "engine → p/m");
+    assert_eq!(label.details_text(), "context: 1kb  reasoning: unavailable");
+    assert_eq!(
+        label.single_line(),
+        "engine → p/m  context: 1kb  reasoning: unavailable"
+    );
+    let bare = ChoiceLabel {
+        identity: "p/m".to_string(),
+        details: Vec::new(),
+    };
+    assert_eq!(bare.single_line(), "p/m");
+    assert_eq!(bare.details_text(), "");
+}
+
+#[test]
+fn two_row_layout_repeats_each_entry_and_keeps_the_divider_single() {
+    let choices = two_row_fixture_choices();
+
+    let single = model_picker_row_entries(&choices, "", PickerRowLayout::SingleRow);
+    assert_eq!(single, vec![Some(0), None, Some(1)]);
+
+    let two_rows = model_picker_row_entries(&choices, "", PickerRowLayout::TwoRows);
+    assert_eq!(two_rows, vec![Some(0), Some(0), None, Some(1), Some(1)]);
+    assert!(model_picker_row_is_details(&two_rows, 1));
+    assert!(!model_picker_row_is_details(&two_rows, 0));
+    assert!(!model_picker_row_is_details(&two_rows, 3));
+}
+
+#[test]
+fn two_row_layout_text_is_identity_then_details_per_entry() {
+    let overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: two_row_fixture_choices(),
+        filter: String::new(),
+        selected: 1,
+    };
+
+    assert_eq!(
+        slash_overlay_text_rows(&overlay, PickerRowLayout::TwoRows),
+        vec![
+            "engine → provider/model".to_string(),
+            "context: 64kb  reasoning: unavailable".to_string(),
+            String::new(),
+            "provider/other".to_string(),
+            "reasoning: unavailable".to_string(),
+        ]
+    );
+    assert_eq!(
+        slash_overlay_text_rows(&overlay, PickerRowLayout::SingleRow),
+        vec![
+            "engine → provider/model  context: 64kb  reasoning: unavailable".to_string(),
+            String::new(),
+            "provider/other  reasoning: unavailable".to_string(),
+        ]
     );
 }
 
 #[test]
 fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
     let option = ProviderModelOption {
+        context_length_override: None,
         provider_connection: "openrouter".to_string(),
         model: crate::llm::ModelInfo {
             id: "openai/gpt-oss-120b".to_string(),
@@ -406,7 +586,7 @@ fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
     };
 
     assert_eq!(
-        model_choice_label(&option, false),
+        model_choice_parts(&option).single_line(),
         "openrouter/openai/gpt-oss-120b  context: 128kb  reasoning: default ⚙"
     );
 }
@@ -414,6 +594,7 @@ fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
 #[test]
 fn model_choice_label_formats_context_length_as_integer_binary_size() {
     let model_option = |context_length| ProviderModelOption {
+        context_length_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
@@ -426,15 +607,15 @@ fn model_choice_label_formats_context_length_as_integer_binary_size() {
     };
 
     assert_eq!(
-        model_choice_label(&model_option(2_048), false),
+        model_choice_parts(&model_option(2_048)).single_line(),
         "stub/model  context: 2kb  reasoning: unavailable"
     );
     assert_eq!(
-        model_choice_label(&model_option(1_048_576), false),
+        model_choice_parts(&model_option(1_048_576)).single_line(),
         "stub/model  context: 1mb  reasoning: unavailable"
     );
     assert_eq!(
-        model_choice_label(&model_option(1_023), false),
+        model_choice_parts(&model_option(1_023)).single_line(),
         "stub/model  context: 1023 tokens  reasoning: unavailable"
     );
 }
@@ -442,6 +623,7 @@ fn model_choice_label_formats_context_length_as_integer_binary_size() {
 #[test]
 fn model_choice_label_marks_advertised_non_text_input_modalities() {
     let model_option = |input_modalities| ProviderModelOption {
+        context_length_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
@@ -454,37 +636,228 @@ fn model_choice_label_marks_advertised_non_text_input_modalities() {
     };
 
     assert_eq!(
-        model_choice_label(&model_option(None), false),
+        model_choice_parts(&model_option(None)).single_line(),
         "stub/model  reasoning: unavailable",
         "unknown modality data must not add a marker segment"
     );
     assert_eq!(
-        model_choice_label(&model_option(Some(vec![])), false),
+        model_choice_parts(&model_option(Some(vec![]))).single_line(),
         "stub/model  reasoning: unavailable",
         "a known text-only model must not add a marker segment"
     );
     assert_eq!(
-        model_choice_label(&model_option(Some(vec![InputModality::Image])), true),
-        "stub/model  reasoning: unavailable  [I]  — active"
+        model_choice_parts(&model_option(Some(vec![InputModality::Image]))).single_line(),
+        "stub/model  reasoning: unavailable  [I]"
     );
     assert_eq!(
-        model_choice_label(&model_option(Some(vec![InputModality::File])), false),
+        model_choice_parts(&model_option(Some(vec![InputModality::File]))).single_line(),
         "stub/model  reasoning: unavailable  [F]"
     );
     assert_eq!(
-        model_choice_label(
-            &model_option(Some(vec![InputModality::File, InputModality::Image])),
-            false
-        ),
+        model_choice_parts(&model_option(Some(vec![
+            InputModality::File,
+            InputModality::Image
+        ])))
+        .single_line(),
         "stub/model  reasoning: unavailable  [IF]",
         "marker order must be fixed regardless of the advertised order"
     );
     assert_eq!(
-        engine_choice_label(
-            "engine",
-            &model_option(Some(vec![InputModality::Image])),
-            false
-        ),
+        engine_choice_parts("engine", &model_option(Some(vec![InputModality::Image])))
+            .single_line(),
         "engine → stub/model  reasoning: unavailable  [I]"
+    );
+}
+
+const KB: usize = 1024;
+
+#[test]
+fn context_length_step_is_an_eighth_rounded_to_32kb_with_a_32kb_floor() {
+    assert_eq!(context_length_step(256 * KB), 32 * KB);
+    assert_eq!(context_length_step(1024 * KB), 128 * KB);
+    assert_eq!(context_length_step(64 * KB), 32 * KB);
+    assert_eq!(context_length_step(0), 32 * KB);
+}
+
+#[test]
+fn adjust_context_length_steps_and_stays_within_the_bounds() {
+    assert_eq!(adjust_context_length(256 * KB, 1, None), 288 * KB);
+    assert_eq!(adjust_context_length(256 * KB, -1, None), 224 * KB);
+    assert_eq!(
+        adjust_context_length(256 * KB, 1, Some(260 * KB)),
+        260 * KB,
+        "the catalog maximum clamps the step"
+    );
+    assert_eq!(
+        adjust_context_length(32 * KB, -1, None),
+        32 * KB,
+        "the window never drops below one step unit"
+    );
+}
+
+#[test]
+fn adjust_context_length_moves_to_the_next_multiple_of_32kb_from_an_off_grid_value() {
+    assert_eq!(adjust_context_length(100 * KB, 1, None), 128 * KB);
+    assert_eq!(adjust_context_length(100 * KB, -1, None), 96 * KB);
+    assert_eq!(
+        adjust_context_length(128 * KB, 1, None),
+        160 * KB,
+        "after landing on the grid, steps are whole multiples again"
+    );
+    assert_eq!(adjust_context_length(33 * KB, -1, None), 32 * KB);
+}
+
+#[test]
+fn cycle_reasoning_effort_wraps_through_the_provider_default() {
+    let efforts = vec!["low".to_string(), "high".to_string()];
+    assert_eq!(
+        cycle_reasoning_effort(&efforts, None, 1),
+        Some("low".to_string())
+    );
+    assert_eq!(cycle_reasoning_effort(&efforts, Some("high"), 1), None);
+    assert_eq!(
+        cycle_reasoning_effort(&efforts, None, -1),
+        Some("high".to_string())
+    );
+}
+
+fn parameter_fixture(
+    reasoning_efforts: Option<Vec<String>>,
+    context_length: Option<usize>,
+) -> AppState {
+    let selection = ProviderModelOption {
+        provider_connection: "stub".to_string(),
+        model: crate::llm::ModelInfo {
+            id: "model".to_string(),
+            context_length,
+            reasoning_efforts,
+            reasoning_default: Some("medium".to_string()),
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+        context_length_override: None,
+    };
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: vec![ModelChoice {
+            label: model_choice_parts(&selection),
+            initial_reasoning_effort: None,
+            selection_target: Some(crate::llm::ModelSelectionTarget {
+                engine_name: None,
+                provider_connection: "stub".to_string(),
+                model: "model".to_string(),
+                context_length: 256 * KB,
+            }),
+            selection,
+            is_active: false,
+            engine_name: None,
+            selection_preview_error: None,
+        }],
+        filter: String::new(),
+        selected: 0,
+        parameters: None,
+    };
+    state
+}
+
+#[test]
+fn parameter_popup_shows_reasoning_only_for_models_with_selectable_efforts() {
+    let mut with_efforts = parameter_fixture(Some(vec!["low".to_string()]), Some(512 * KB));
+    with_efforts.open_model_parameters();
+    let SlashOverlay::ModelPicker {
+        parameters: Some(edit),
+        ..
+    } = &with_efforts.slash_overlay
+    else {
+        panic!("popup must open");
+    };
+    assert_eq!(
+        edit.fields,
+        vec![
+            ParameterField::ContextLength,
+            ParameterField::ReasoningEffort
+        ]
+    );
+    assert_eq!(
+        edit.context_length,
+        Some(256 * KB),
+        "the preview window is the start value"
+    );
+
+    let mut without_efforts = parameter_fixture(Some(Vec::new()), None);
+    if let SlashOverlay::ModelPicker { choices, .. } = &mut without_efforts.slash_overlay {
+        choices[0].selection_target = None;
+    }
+    without_efforts.open_model_parameters();
+    let SlashOverlay::ModelPicker {
+        parameters: Some(edit),
+        ..
+    } = &without_efforts.slash_overlay
+    else {
+        panic!("popup must open");
+    };
+    assert_eq!(edit.fields, vec![ParameterField::ContextLength]);
+    assert_eq!(
+        edit.context_length, None,
+        "no preview and no catalog window is unknown"
+    );
+}
+
+#[test]
+fn confirming_applies_only_edited_parameters_and_escape_discards_them() {
+    let mut state = parameter_fixture(Some(vec!["low".to_string()]), Some(512 * KB));
+    state.open_model_parameters();
+    state.adjust_model_parameter(1);
+    state.move_model_parameter_cursor(1);
+    state.adjust_model_parameter(1);
+    state.leave_model_parameters();
+    assert_eq!(
+        state
+            .selected_model()
+            .expect("selected")
+            .selection
+            .context_length_override,
+        None,
+        "escape must discard the draft"
+    );
+
+    state.open_model_parameters();
+    state.adjust_model_parameter(1);
+    state.confirm_model_parameters();
+    let choice = state.selected_model().expect("selected");
+    assert_eq!(
+        choice.selection.context_length_override,
+        Some(256 * KB + 32 * KB),
+        "a confirmed edit becomes the selection's override"
+    );
+    assert_eq!(
+        choice
+            .selection_target
+            .as_ref()
+            .map(|target| target.context_length),
+        Some(288 * KB),
+        "the compaction preview follows the edited window"
+    );
+    assert_eq!(choice.selection.reasoning_effort, None);
+}
+
+#[test]
+fn parameter_rows_show_label_and_value_for_each_field() {
+    let mut state = parameter_fixture(Some(vec!["low".to_string()]), Some(512 * KB));
+    state.open_model_parameters();
+    let SlashOverlay::ModelPicker {
+        choices,
+        parameters: Some(edit),
+        ..
+    } = &state.slash_overlay
+    else {
+        panic!("popup must open");
+    };
+    assert_eq!(
+        model_parameter_rows(edit, &choices[0]),
+        vec![
+            "Context length:  256kb".to_string(),
+            "Reasoning effort:  default (medium)".to_string(),
+        ]
     );
 }

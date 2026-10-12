@@ -300,6 +300,7 @@ impl Engine for EngineRouter {
                 match result {
                     Ok(models) => {
                         options.extend(models.into_iter().map(|model| ProviderModelOption {
+                            context_length_override: None,
                             provider_connection: provider_connection.clone(),
                             model,
                             reasoning_effort: None,
@@ -390,9 +391,15 @@ impl Engine for EngineRouter {
         };
         let config = target_engine.config();
         let context_length = match selection {
-            ModelSelection::NamedEngine { .. } => target_engine.effective_context_length(),
-            ModelSelection::ProviderModel(option) => target_engine
-                .context_length_for_model(&option.model.id, option.model.context_length),
+            ModelSelection::NamedEngine { option, .. } => option
+                .context_length_override
+                .unwrap_or_else(|| target_engine.effective_context_length()),
+            ModelSelection::ProviderModel(option) => {
+                option.context_length_override.unwrap_or_else(|| {
+                    target_engine
+                        .context_length_for_model(&option.model.id, option.model.context_length)
+                })
+            }
         };
         Ok(ModelSelectionTarget {
             engine_name: Some(engine_name),
@@ -420,6 +427,9 @@ impl Engine for EngineRouter {
                     .map_err(|_| anyhow::anyhow!("the active engine lock is poisoned"))?;
                 if let ReasoningEffortChange::Set(reasoning_effort) = reasoning_effort {
                     engine.set_reasoning_effort(reasoning_effort.as_deref())?;
+                }
+                if let Some(context_length) = option.context_length_override {
+                    engine.set_context_length_override(Some(context_length))?;
                 }
                 *active_engine = engine_name.clone();
                 Ok(())

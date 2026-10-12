@@ -16,7 +16,7 @@
       We send the finished subagent trigger to LLM, why does agent go to idle
       in the first place ( or is this just a TUI glitch ) ?
 
-- [ ] Narrow terminal width: The /models popup renders the available provider/models
+- [x] Narrow terminal width: The /models popup renders the available provider/models
       but depending on the terminal width only the start of each row is actually visible.
       Can we use the elide_balanced_tokens() method and use maybe two rows
       per provider/model on narrow terminals ( same width as the footer uses

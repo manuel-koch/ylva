@@ -392,6 +392,7 @@ async fn openrouter_request_projects_selected_image_capability_once() {
     let models = engine.list_models().await.expect("model catalog");
     engine
         .switch_model_option(&ProviderModelOption {
+            context_length_override: None,
             provider_connection: "openrouter".to_string(),
             model: models[0].clone(),
             reasoning_effort: None,
@@ -462,6 +463,7 @@ async fn ollama_vision_request_uses_compatibility_image_shape_and_pdf_fallback()
     let models = engine.list_models().await.expect("model catalog");
     engine
         .switch_model_option(&ProviderModelOption {
+            context_length_override: None,
             provider_connection: "ollama".to_string(),
             model: models[0].clone(),
             reasoning_effort: None,
@@ -602,6 +604,7 @@ async fn generic_openai_compatible_catalog_can_opt_into_image_projection() {
     let models = engine.list_models().await.expect("model catalog");
     engine
         .switch_model_option(&ProviderModelOption {
+            context_length_override: None,
             provider_connection: "generic".to_string(),
             model: models[0].clone(),
             reasoning_effort: None,

@@ -26,6 +26,7 @@ fn picker_preview_and_confirmation_keep_explicit_compaction_fixed_and_implicit_c
         use ratatui::style::Color;
 
         let make_option = |connection: &str, model: &str, context_length| ProviderModelOption {
+            context_length_override: None,
             provider_connection: connection.to_string(),
             model: crate::llm::ModelInfo {
                 id: model.to_string(),
@@ -407,11 +408,11 @@ async fn models_lists_the_candidates_and_preselects_the_active_model() {
     assert_eq!(
         choices
             .iter()
-            .map(|choice| choice.label.as_str())
+            .map(|choice| choice.label.single_line())
             .collect::<Vec<_>>(),
         vec![
             "stub/small  reasoning: unavailable",
-            "stub/large  reasoning: unavailable  — active"
+            "stub/large  reasoning: unavailable"
         ]
     );
     assert_eq!(*selected, 1);
@@ -465,7 +466,8 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_efforts() {
          not the provider's advertised one (999_999)"
     );
     assert_eq!(
-        shortcut.label, "openrouter → stub/thinking  context: 31kb  reasoning: max ⚙",
+        shortcut.label.single_line(),
+        "openrouter → stub/thinking  context: 31kb  reasoning: max ⚙",
         "the shortcut must show its configured reasoning effort instead of 'unavailable'"
     );
 }
@@ -518,7 +520,8 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_default() {
         "the shortcut's model must carry the catalog's advertised default effort"
     );
     assert_eq!(
-        shortcut.label, "openrouter → stub/thinking  context: 31kb  reasoning: default (medium) ⚙",
+        shortcut.label.single_line(),
+        "openrouter → stub/thinking  context: 31kb  reasoning: default (medium) ⚙",
         "the shortcut's default slot must name the advertised default"
     );
 }
@@ -561,7 +564,7 @@ async fn models_lists_an_engine_shortcut_falling_back_to_the_catalogs_context_le
         "an unconfigured context_length must fall back to the catalog's advertised value"
     );
     assert_eq!(
-        shortcut.label,
+        shortcut.label.single_line(),
         "openrouter → stub/thinking  context: 976kb  reasoning: max ⚙"
     );
 }
@@ -764,10 +767,11 @@ async fn typing_after_models_narrows_the_already_open_picker_without_clearing_th
     assert_eq!(textarea.lines().join("\n"), "");
 }
 
-#[test]
-fn model_picker_cycles_reasoning_effort_with_left_and_right() {
+#[tokio::test]
+async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_enter() {
     let (mut state, textarea, _cmd_tx, _cmd_rx) = setup();
     let selection = crate::llm::ProviderModelOption {
+        context_length_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "thinking".to_string(),
@@ -779,8 +783,12 @@ fn model_picker_cycles_reasoning_effort_with_left_and_right() {
         reasoning_effort: None,
     };
     state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
         choices: vec![ModelChoice {
-            label: "stub/thinking  reasoning: default".to_string(),
+            label: crate::tui_reducer_state::ChoiceLabel {
+                identity: "stub/thinking".to_string(),
+                details: vec!["reasoning: default".to_string()],
+            },
             initial_reasoning_effort: selection.reasoning_effort.clone(),
             selection,
             is_active: false,
@@ -792,61 +800,135 @@ fn model_picker_cycles_reasoning_effort_with_left_and_right() {
         selected: 0,
     };
     let context = textarea_ctx_from(&textarea);
+    let press = |state: &mut AppState, code: KeyCode| {
+        presenter::update(
+            state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(code))),
+            &context,
+        )
+    };
 
-    let effects = presenter::update(
-        &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Right))),
-        &context,
-    );
-    assert!(effects.is_empty());
+    // Left/right do nothing in the list itself.
+    assert!(press(&mut state, KeyCode::Right).is_empty());
     assert_eq!(
         state
             .selected_model()
-            .and_then(|choice| choice.selection.reasoning_effort.as_deref()),
-        Some("low")
-    );
-    assert!(state
-        .selected_model()
-        .expect("selected model")
-        .label
-        .contains("reasoning: low"));
-
-    presenter::update(
-        &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Right))),
-        &context,
-    );
-    assert_eq!(
-        state
-            .selected_model()
-            .and_then(|choice| choice.selection.reasoning_effort.as_deref()),
-        Some("high")
-    );
-
-    presenter::update(
-        &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Left))),
-        &context,
-    );
-    assert_eq!(
-        state
-            .selected_model()
-            .and_then(|choice| choice.selection.reasoning_effort.as_deref()),
-        Some("low")
-    );
-
-    presenter::update(
-        &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Left))),
-        &context,
-    );
-    assert_eq!(
-        state
-            .selected_model()
-            .expect("selected model")
+            .expect("selected")
             .selection
             .reasoning_effort,
         None
+    );
+
+    // Enter opens the popup; the context row is first, reasoning second.
+    assert!(press(&mut state, KeyCode::Enter).is_empty());
+    assert!(matches!(
+        state.slash_overlay,
+        SlashOverlay::ModelPicker {
+            parameters: Some(_),
+            ..
+        }
+    ));
+    press(&mut state, KeyCode::Down);
+    press(&mut state, KeyCode::Right);
+    press(&mut state, KeyCode::Right);
+    press(&mut state, KeyCode::Left);
+    let SlashOverlay::ModelPicker {
+        parameters: Some(edit),
+        ..
+    } = &state.slash_overlay
+    else {
+        panic!("the parameter popup must stay open while adjusting");
+    };
+    assert_eq!(edit.reasoning_effort.as_deref(), Some("low"));
+    assert_eq!(
+        state
+            .selected_model()
+            .expect("selected")
+            .selection
+            .reasoning_effort,
+        None,
+        "the draft must not reach the choice before confirmation"
+    );
+
+    // Enter confirms the popup and switches with the adjusted effort.
+    let effects = press(&mut state, KeyCode::Enter);
+    assert!(matches!(
+        effects.last(),
+        Some(Effect::SwitchModel(ModelSelection::ProviderModel(option)))
+            if option.reasoning_effort.as_deref() == Some("low")
+    ));
+    assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+}
+
+#[tokio::test]
+async fn model_picker_parameter_popup_esc_returns_to_the_list_and_discards_the_draft() {
+    let (mut state, textarea, _cmd_tx, _cmd_rx) = setup();
+    let selection = crate::llm::ProviderModelOption {
+        context_length_override: None,
+        provider_connection: "stub".to_string(),
+        model: crate::llm::ModelInfo {
+            id: "thinking".to_string(),
+            context_length: None,
+            reasoning_efforts: Some(vec!["low".to_string()]),
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+    };
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: vec![ModelChoice {
+            label: crate::tui_reducer_state::ChoiceLabel {
+                identity: "stub/thinking".to_string(),
+                details: vec!["reasoning: default".to_string()],
+            },
+            initial_reasoning_effort: None,
+            selection,
+            is_active: false,
+            engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
+        }],
+        filter: String::new(),
+        selected: 0,
+    };
+    let context = textarea_ctx_from(&textarea);
+    let press = |state: &mut AppState, code: KeyCode| {
+        presenter::update(
+            state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(code))),
+            &context,
+        )
+    };
+
+    press(&mut state, KeyCode::Enter);
+    press(&mut state, KeyCode::Down);
+    press(&mut state, KeyCode::Right);
+    // A terminal reports a bare Esc as `InputEvent::Escape`, not a key event.
+    let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &context);
+    assert!(
+        effects.is_empty(),
+        "esc inside the popup must not clear the draft"
+    );
+
+    assert!(
+        matches!(
+            state.slash_overlay,
+            SlashOverlay::ModelPicker {
+                parameters: None,
+                ..
+            }
+        ),
+        "esc must return to the model list, not close the picker"
+    );
+    assert_eq!(
+        state
+            .selected_model()
+            .expect("selected")
+            .selection
+            .reasoning_effort,
+        None,
+        "esc must discard the popup draft"
     );
 }
 
@@ -876,6 +958,12 @@ async fn confirming_a_picked_model_switches_the_engine_and_records_the_change() 
         cursor_row: 0,
         cursor_row_is_last: true,
     };
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &ctx,
+    );
+    assert!(effects.is_empty(), "the first Enter only opens the popup");
     let effects = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -980,6 +1068,12 @@ async fn selecting_a_named_engine_shortcut_activates_that_exact_engine() {
         Some("engine-b"),
         "the test must select engine B's named shortcut"
     );
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &textarea_ctx_from(&textarea),
+    );
+    assert!(effects.is_empty(), "the first Enter only opens the popup");
     let effects = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
