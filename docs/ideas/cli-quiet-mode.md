@@ -21,5 +21,5 @@ not change the exit code (see [exit codes](../cli-options.md#exit-codes)).
 ## Related
 
 - [`cli-output-streams.md`](./cli-output-streams.md)
-- [`cli-exit-codes.md`](./cli-exit-codes.md)
+- [`docs/cli-options.md#exit-codes`](../cli-options.md#exit-codes)
 - [`docs/cli-options.md`](../cli-options.md)

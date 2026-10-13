@@ -18,5 +18,5 @@ after the run finishes.
 ## Related
 
 - [`cli-json-output.md`](./cli-json-output.md)
-- [`cli-exit-codes.md`](./cli-exit-codes.md)
+- [`docs/cli-options.md#exit-codes`](../cli-options.md#exit-codes)
 - [`docs/features.md`](../features.md#cli-mode)

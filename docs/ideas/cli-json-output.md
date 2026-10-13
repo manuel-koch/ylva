@@ -23,6 +23,6 @@ object after the run completes.
 
 ## Related
 
-- [`cli-exit-codes.md`](./cli-exit-codes.md)
+- [`docs/cli-options.md#exit-codes`](../cli-options.md#exit-codes)
 - [`cli-quiet-mode.md`](./cli-quiet-mode.md)
 - [`docs/cli-options.md`](../cli-options.md)
