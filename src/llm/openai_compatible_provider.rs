@@ -25,7 +25,7 @@ use crate::http::{RequestConcurrencyLimiter, OUTBOUND_USER_AGENT};
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::openai_compatible_messages::{serialize_messages_with_policy, ContentPartFormat};
 use crate::llm::token_usage::{TokenUsageDumpSource, TokenUsageRecord};
-use crate::llm::{InputModality, Provider, ToolSchema};
+use crate::llm::{order_reasoning_efforts, InputModality, Provider, ToolSchema};
 
 type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig);
 pub(crate) type RequestBodyRedactor = fn(&serde_json::Value) -> serde_json::Value;
@@ -902,20 +902,19 @@ fn parse_input_modalities(entry: &serde_json::Value) -> Option<Vec<InputModality
 
 fn parse_reasoning_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
     let reasoning = entry.get("reasoning")?;
-    Some(
-        reasoning
-            .get("supported_efforts")
-            .and_then(serde_json::Value::as_array)
-            .map(|efforts| {
-                efforts
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .filter(|effort| !effort.is_empty())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default(),
-    )
+    let efforts = reasoning
+        .get("supported_efforts")
+        .and_then(serde_json::Value::as_array)
+        .map(|efforts| {
+            efforts
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|effort| !effort.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(order_reasoning_efforts(efforts))
 }
 
 /// Read an entry's provider-advertised default effort

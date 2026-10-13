@@ -174,6 +174,7 @@ fn model_picker_pages_selection_with_page_keys() {
                 },
                 is_active: false,
                 engine_name: None,
+                catalog_context_length: None,
                 selection_target: None,
                 selection_preview_error: None,
             })

@@ -104,12 +104,14 @@ pub struct ModelInfo {
     /// - `Some([])` means that reasoning is supported but the
     ///   provider exposes no selectable effort alternatives.
     /// - `Some(values)` means that reasoning is supported and
-    ///   `values` contains the selectable effort values.
+    ///   `values` contains the selectable effort values, weakest to strongest
+    ///   (see [`order_reasoning_efforts`]).
     pub reasoning_efforts: Option<Vec<String>>,
     /// Provider-advertised default reasoning effort, when the provider
     /// exposes one; `None` otherwise.
     ///
-    /// Rendered only in the picker's default slot; it never changes the
+    /// Rendered only in the `/models` picker, marking the matching advertised
+    /// effort or labelling the leading default slot; it never changes the
     /// [`ModelInfo::reasoning_efforts`] three-state semantics.
     pub reasoning_default: Option<String>,
     /// Provider-advertised input modalities.
@@ -133,6 +135,35 @@ impl ModelInfo {
             .as_ref()
             .is_some_and(|efforts| efforts.iter().any(|effort| effort == reasoning_effort))
     }
+}
+
+/// Canonical reasoning-effort ladder, weakest to strongest. Names in one group
+/// are aliases that share a rank.
+const REASONING_EFFORT_LADDER: &[&[&str]] = &[
+    &["none"],
+    &["min", "minimal"],
+    &["low"],
+    &["medium", "med"],
+    &["high"],
+    &["xhigh", "extrahigh"],
+    &["max"],
+];
+
+/// Sort provider-advertised reasoning efforts weakest to strongest.
+///
+/// Providers return efforts in arbitrary order. Names missing from
+/// [`REASONING_EFFORT_LADDER`] sort after all known names and keep their
+/// server order relative to each other.
+pub(crate) fn order_reasoning_efforts(mut reasoning_efforts: Vec<String>) -> Vec<String> {
+    reasoning_efforts.sort_by_key(|effort| reasoning_effort_rank(effort));
+    reasoning_efforts
+}
+
+fn reasoning_effort_rank(effort: &str) -> usize {
+    REASONING_EFFORT_LADDER
+        .iter()
+        .position(|aliases| aliases.contains(&effort))
+        .unwrap_or(REASONING_EFFORT_LADDER.len())
 }
 
 /// Provider-neutral input modality advertised for a model.
@@ -341,6 +372,48 @@ impl ToolEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn efforts(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn order_reasoning_efforts_sorts_weakest_to_strongest_with_aliases_sharing_a_rank() {
+        assert_eq!(
+            order_reasoning_efforts(efforts(&[
+                "xhigh",
+                "med",
+                "none",
+                "max",
+                "minimal",
+                "high",
+                "low",
+                "extrahigh",
+                "min",
+                "medium",
+            ])),
+            efforts(&[
+                "none",
+                "minimal",
+                "min",
+                "low",
+                "med",
+                "medium",
+                "high",
+                "xhigh",
+                "extrahigh",
+                "max",
+            ])
+        );
+    }
+
+    #[test]
+    fn order_reasoning_efforts_keeps_unknown_names_after_known_ones_in_server_order() {
+        assert_eq!(
+            order_reasoning_efforts(efforts(&["zeta", "high", "weird", "low"])),
+            efforts(&["low", "high", "zeta", "weird"])
+        );
+    }
 
     #[test]
     fn tool_schema_renders_function_envelope() {

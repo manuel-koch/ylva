@@ -46,6 +46,7 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
             },
             is_active: false,
             engine_name: engine_name.map(str::to_string),
+            catalog_context_length: None,
             selection_target: None,
             selection_preview_error: None,
         };
@@ -246,6 +247,7 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_divider() {
             details: Vec::new(),
         },
         initial_reasoning_effort: None,
+        catalog_context_length: None,
         selection: ProviderModelOption {
             context_length_override: None,
             provider_connection: provider_connection.to_string(),
@@ -322,7 +324,7 @@ fn model_choice_label_explains_reasoning_effort_availability() {
     );
     assert_eq!(
         model_choice_parts(&model_option(Some(vec!["low".to_string()]))).single_line(),
-        "stub/model  reasoning: default ⚙"
+        "stub/model  reasoning: default"
     );
 }
 
@@ -348,6 +350,7 @@ fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
         initial_reasoning_effort: Some("high".to_string()),
         is_active: false,
         engine_name: Some("reasoning".to_string()),
+        catalog_context_length: None,
         selection_target: None,
         selection_preview_error: None,
     };
@@ -400,8 +403,17 @@ fn model_choice_label_shows_the_provider_advertised_default_effort() {
             None
         ))
         .single_line(),
-        "stub/model  reasoning: default (medium) ⚙",
+        "stub/model  reasoning: default (medium)",
         "the default slot of a selectable model names the advertised default"
+    );
+    assert_eq!(
+        model_choice_parts(&option(
+            Some(vec!["low".to_string(), "medium".to_string()]),
+            None
+        ))
+        .single_line(),
+        "stub/model  reasoning: medium (default)",
+        "an advertised provider default is named at its own effort"
     );
     assert_eq!(
         model_choice_parts(&option(
@@ -409,7 +421,7 @@ fn model_choice_label_shows_the_provider_advertised_default_effort() {
             Some("low".to_string())
         ))
         .single_line(),
-        "stub/model  reasoning: low ⚙",
+        "stub/model  reasoning: low",
         "an explicit effort must not show the default suffix"
     );
     assert_eq!(
@@ -429,6 +441,7 @@ fn two_row_fixture_choices() -> Vec<ModelChoice> {
             details: details.iter().map(|detail| detail.to_string()).collect(),
         },
         initial_reasoning_effort: None,
+        catalog_context_length: None,
         selection: ProviderModelOption {
             context_length_override: None,
             provider_connection: provider_connection.to_string(),
@@ -589,7 +602,7 @@ fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
 
     assert_eq!(
         model_choice_parts(&option).single_line(),
-        "openrouter/openai/gpt-oss-120b  context: 128kb  reasoning: default ⚙"
+        "openrouter/openai/gpt-oss-120b  context: 128kb  reasoning: default"
     );
 }
 
@@ -710,16 +723,63 @@ fn adjust_context_length_moves_to_the_next_multiple_of_32kb_from_an_off_grid_val
 }
 
 #[test]
-fn cycle_reasoning_effort_wraps_through_the_provider_default() {
+fn cycle_reasoning_effort_stops_at_the_provider_default_and_the_last_effort() {
     let efforts = vec!["low".to_string(), "high".to_string()];
     assert_eq!(
-        cycle_reasoning_effort(&efforts, None, 1),
+        cycle_reasoning_effort(&efforts, None, None, 1),
         Some("low".to_string())
     );
-    assert_eq!(cycle_reasoning_effort(&efforts, Some("high"), 1), None);
     assert_eq!(
-        cycle_reasoning_effort(&efforts, None, -1),
+        cycle_reasoning_effort(&efforts, None, Some("low"), 1),
         Some("high".to_string())
+    );
+    assert_eq!(
+        cycle_reasoning_effort(&efforts, None, Some("high"), 1),
+        Some("high".to_string()),
+        "the last advertised effort must not wrap back to the provider default"
+    );
+    assert_eq!(
+        cycle_reasoning_effort(&efforts, None, None, -1),
+        None,
+        "the provider default must not wrap to the last advertised effort"
+    );
+    assert_eq!(
+        cycle_reasoning_effort(&efforts, None, Some("low"), -1),
+        None
+    );
+}
+
+#[test]
+fn cycle_reasoning_effort_places_an_advertised_default_at_its_effort() {
+    let efforts: Vec<String> = ["none", "low", "medium", "high"]
+        .iter()
+        .map(|effort| effort.to_string())
+        .collect();
+    let cycle = |current: Option<&str>, delta| {
+        cycle_reasoning_effort(&efforts, Some("medium"), current, delta)
+    };
+    assert_eq!(
+        cycle(Some("low"), 1),
+        None,
+        "stepping onto the marked medium effort selects the provider default"
+    );
+    assert_eq!(cycle(None, 1), Some("high".to_string()));
+    assert_eq!(cycle(None, -1), Some("low".to_string()));
+    assert_eq!(cycle(Some("none"), 1), Some("low".to_string()));
+    assert_eq!(
+        cycle(Some("none"), -1),
+        Some("none".to_string()),
+        "the first effort must not wrap"
+    );
+    assert_eq!(
+        cycle(Some("high"), 1),
+        Some("high".to_string()),
+        "the last effort must not wrap"
+    );
+    assert_eq!(
+        cycle(Some("medium"), 1),
+        Some("high".to_string()),
+        "an explicit medium effort lands on the marked slot and moves on from there"
     );
 }
 
@@ -744,6 +804,7 @@ fn parameter_fixture(
         choices: vec![ModelChoice {
             label: model_choice_parts(&selection),
             initial_reasoning_effort: None,
+            catalog_context_length: context_length,
             selection_target: Some(crate::llm::ModelSelectionTarget {
                 engine_name: None,
                 provider_connection: "stub".to_string(),
@@ -760,6 +821,137 @@ fn parameter_fixture(
         parameters: None,
     };
     state
+}
+
+fn engine_parameter_fixture(
+    configured_context_length: usize,
+    catalog_context_length: Option<usize>,
+) -> AppState {
+    let selection = ProviderModelOption {
+        provider_connection: "stub".to_string(),
+        model: crate::llm::ModelInfo {
+            id: "model".to_string(),
+            context_length: Some(configured_context_length),
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+        context_length_override: None,
+    };
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: vec![ModelChoice {
+            label: crate::tui_reducer_state::model_picker::engine_choice_parts(
+                "engine", &selection,
+            ),
+            initial_reasoning_effort: None,
+            catalog_context_length,
+            selection_target: Some(crate::llm::ModelSelectionTarget {
+                engine_name: Some("engine".to_string()),
+                provider_connection: "stub".to_string(),
+                model: "model".to_string(),
+                context_length: configured_context_length,
+            }),
+            selection,
+            is_active: false,
+            engine_name: Some("engine".to_string()),
+            selection_preview_error: None,
+        }],
+        filter: String::new(),
+        selected: 0,
+        parameters: None,
+    };
+    state
+}
+
+/// The popup's context window and its cap, or `None` when no popup is open.
+fn popup_window(state: &AppState) -> (Option<usize>, Option<usize>) {
+    let SlashOverlay::ModelPicker {
+        parameters: Some(edit),
+        ..
+    } = &state.slash_overlay
+    else {
+        panic!("popup must be open");
+    };
+    (edit.context_length, edit.context_length_maximum)
+}
+
+#[test]
+fn parameter_popup_steps_a_configured_engine_window_up_to_the_advertised_window() {
+    let mut state = engine_parameter_fixture(32 * KB, Some(512 * KB));
+    state.open_model_parameters();
+    assert_eq!(
+        popup_window(&state),
+        (Some(32 * KB), Some(512 * KB)),
+        "the popup starts at the configured window and caps at the advertised one"
+    );
+
+    state.adjust_model_parameter(1);
+    assert_eq!(
+        popup_window(&state).0,
+        Some(64 * KB),
+        "a configured window below the advertised one must step past itself"
+    );
+
+    for _ in 0..64 {
+        state.adjust_model_parameter(1);
+    }
+    assert_eq!(
+        popup_window(&state).0,
+        Some(512 * KB),
+        "stepping must reach the advertised window and stop there"
+    );
+}
+
+#[test]
+fn parameter_popup_clamps_a_configured_window_above_the_advertised_one_on_adjust() {
+    let mut state = engine_parameter_fixture(1024 * KB, Some(512 * KB));
+    state.open_model_parameters();
+    assert_eq!(
+        popup_window(&state).0,
+        Some(1024 * KB),
+        "the configured start value is kept until the window is adjusted"
+    );
+
+    state.adjust_model_parameter(-1);
+    assert_eq!(
+        popup_window(&state).0,
+        Some(512 * KB),
+        "the first adjustment clamps to the advertised window"
+    );
+}
+
+#[test]
+fn parameter_popup_steps_without_a_cap_when_no_window_is_advertised() {
+    let mut state = engine_parameter_fixture(32 * KB, None);
+    state.open_model_parameters();
+    assert_eq!(
+        popup_window(&state).1,
+        None,
+        "no advertised window means no maximum"
+    );
+
+    for _ in 0..10 {
+        state.adjust_model_parameter(1);
+    }
+    assert_eq!(popup_window(&state).0, Some(352 * KB));
+}
+
+#[test]
+fn confirming_an_edited_engine_window_relabels_the_row_with_the_override() {
+    let mut state = engine_parameter_fixture(32 * KB, Some(512 * KB));
+    state.open_model_parameters();
+    state.adjust_model_parameter(1);
+    state.confirm_model_parameters();
+
+    let choice = state.selected_model().expect("selected");
+    assert_eq!(choice.selection.context_length_override, Some(64 * KB));
+    assert!(
+        choice.label.details.contains(&"context: 64kb".to_string()),
+        "the row must show the overridden window, got {:?}",
+        choice.label.details
+    );
 }
 
 #[test]
@@ -847,19 +1039,120 @@ fn confirming_applies_only_edited_parameters_and_escape_discards_them() {
 fn parameter_rows_show_label_and_value_for_each_field() {
     let mut state = parameter_fixture(Some(vec!["low".to_string()]), Some(512 * KB));
     state.open_model_parameters();
+    assert_eq!(
+        popup_rows(&state),
+        vec![
+            "Context length:  ◂ 256kb ▸".to_string(),
+            "Reasoning effort:    default (medium) ▸".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn reasoning_row_marks_an_advertised_default_at_its_effort() {
+    let mut state = parameter_fixture(
+        Some(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ]),
+        Some(512 * KB),
+    );
+    state.open_model_parameters();
+    state.move_model_parameter_cursor(1);
+    assert_eq!(
+        popup_rows(&state)[1],
+        "Reasoning effort:  ◂ medium (default) ▸",
+        "the provider default is marked at its advertised effort"
+    );
+
+    state.adjust_model_parameter(-1);
+    assert_eq!(
+        popup_rows(&state)[1],
+        "Reasoning effort:    low ▸",
+        "stepping down from the default lands on the effort before it"
+    );
+
+    state.adjust_model_parameter(1);
+    state.adjust_model_parameter(1);
+    assert_eq!(
+        popup_rows(&state)[1],
+        "Reasoning effort:  ◂ high",
+        "stepping past the marked default lands on the next effort"
+    );
+}
+
+/// Text of every row in the open parameter popup.
+fn popup_rows(state: &AppState) -> Vec<String> {
     let SlashOverlay::ModelPicker {
         choices,
         parameters: Some(edit),
         ..
     } = &state.slash_overlay
     else {
-        panic!("popup must open");
+        panic!("popup must be open");
     };
+    model_parameter_rows(edit, &choices[0])
+}
+
+#[test]
+fn context_length_row_marks_each_direction_that_can_still_move() {
+    let cases = [
+        (128 * KB, Some(512 * KB), "Context length:  ◂ 128kb ▸"),
+        (32 * KB, Some(512 * KB), "Context length:    32kb ▸"),
+        (512 * KB, Some(512 * KB), "Context length:  ◂ 512kb"),
+        (128 * KB, None, "Context length:  ◂ 128kb ▸"),
+        (1024 * KB, Some(512 * KB), "Context length:  ◂ 1mb"),
+    ];
+    for (configured, catalog, expected) in cases {
+        let mut state = engine_parameter_fixture(configured, catalog);
+        state.open_model_parameters();
+        assert_eq!(
+            popup_rows(&state)[0],
+            expected,
+            "configured {configured} tokens, advertised {catalog:?}"
+        );
+    }
+}
+
+#[test]
+fn context_length_row_shows_no_arrows_while_the_window_is_unknown() {
+    let mut state = parameter_fixture(Some(Vec::new()), None);
+    if let SlashOverlay::ModelPicker { choices, .. } = &mut state.slash_overlay {
+        choices[0].selection_target = None;
+    }
+    state.open_model_parameters();
     assert_eq!(
-        model_parameter_rows(edit, &choices[0]),
-        vec![
-            "Context length:  256kb".to_string(),
-            "Reasoning effort:  default (medium)".to_string(),
-        ]
+        popup_rows(&state),
+        vec!["Context length:  unknown".to_string()]
+    );
+}
+
+#[test]
+fn reasoning_row_marks_each_direction_that_can_still_move() {
+    let mut state = parameter_fixture(
+        Some(vec!["low".to_string(), "high".to_string()]),
+        Some(512 * KB),
+    );
+    state.open_model_parameters();
+    assert_eq!(
+        popup_rows(&state)[1],
+        "Reasoning effort:    default (medium) ▸",
+        "the provider default can only move greater"
+    );
+
+    state.move_model_parameter_cursor(1);
+    state.adjust_model_parameter(1);
+    assert_eq!(
+        popup_rows(&state)[1],
+        "Reasoning effort:  ◂ low ▸",
+        "an advertised effort in the middle can move both ways"
+    );
+
+    state.adjust_model_parameter(1);
+    assert_eq!(
+        popup_rows(&state)[1],
+        "Reasoning effort:  ◂ high",
+        "the last advertised effort can only move smaller"
     );
 }

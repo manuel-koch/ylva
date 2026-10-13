@@ -190,6 +190,8 @@ pub(super) fn apply_model_list_result(
                         selection,
                         is_active,
                         engine_name: Some(engine_name),
+                        catalog_context_length: catalog_model
+                            .and_then(|model| model.context_length),
                         selection_target: None,
                         selection_preview_error: None,
                     }
@@ -205,6 +207,7 @@ pub(super) fn apply_model_list_result(
                     ModelChoice {
                         label: model_choice_parts(&option),
                         initial_reasoning_effort: option.reasoning_effort.clone(),
+                        catalog_context_length: option.model.context_length,
                         selection: option,
                         is_active,
                         engine_name: None,

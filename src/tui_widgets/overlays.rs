@@ -469,7 +469,7 @@ fn model_picker_detail_lines(
         choices,
         filter,
         selected,
-        ..
+        parameters,
     } = overlay
     else {
         return Vec::new();
@@ -478,9 +478,20 @@ fn model_picker_detail_lines(
         return Vec::new();
     }
 
-    let selected_choice = matching_model_indices(choices, filter)
+    let selected_choice_index = matching_model_indices(choices, filter)
         .get(*selected)
-        .and_then(|choice_index| choices.get(*choice_index));
+        .copied();
+    let selected_choice = selected_choice_index.and_then(|choice_index| choices.get(choice_index));
+    // An unconfirmed context-length edit in the parameter popup previews live;
+    // Enter commits it and Esc discards it.
+    let draft_context_length = match parameters {
+        Some(edit)
+            if edit.context_length_edited && Some(edit.choice_index) == selected_choice_index =>
+        {
+            edit.context_length
+        }
+        _ => None,
+    };
     let compaction_effect = selected_choice.map_or_else(
         || Line::from("Select an engine or model to preview compaction."),
         |choice| {
@@ -498,14 +509,15 @@ fn model_picker_detail_lines(
                     || (target.engine_name.is_none() && compaction.engine_name.is_empty()));
             let selection_becomes_compaction_engine =
                 compaction.follows_conversation || target_is_compaction_engine;
+            let target_context_length = draft_context_length.unwrap_or(target.context_length);
             let mismatch = !selection_becomes_compaction_engine
-                && target.context_length != compaction.context_length;
+                && target_context_length != compaction.context_length;
             let (provider_connection, model, context_length) =
                 if selection_becomes_compaction_engine {
                     (
                         target.provider_connection.as_str(),
                         target.model.as_str(),
-                        target.context_length,
+                        target_context_length,
                     )
                 } else {
                     (
@@ -766,3 +778,6 @@ pub(super) fn draw_toast(frame: &mut Frame, area: Rect, message: &str) {
         inner,
     );
 }
+
+#[cfg(test)]
+mod tests;

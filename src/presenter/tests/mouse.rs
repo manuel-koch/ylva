@@ -407,6 +407,7 @@ fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
                 },
                 is_active: false,
                 engine_name: None,
+                catalog_context_length: None,
                 selection_target: None,
                 selection_preview_error: None,
             })
@@ -445,6 +446,7 @@ fn mouse_click_on_model_picker_entry_selects_without_switching() {
             details: Vec::new(),
         },
         initial_reasoning_effort: None,
+        catalog_context_length: None,
         selection: ProviderModelOption {
             context_length_override: None,
             provider_connection: "stub".to_string(),
@@ -502,6 +504,7 @@ fn slash_overlay_model_drag_copies_the_filtered_model_label() {
             details: Vec::new(),
         },
         initial_reasoning_effort: None,
+        catalog_context_length: None,
         selection: ProviderModelOption {
             context_length_override: None,
             provider_connection: provider_connection.to_string(),

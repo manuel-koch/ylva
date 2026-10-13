@@ -333,6 +333,9 @@ The detail turns orange when a fixed compaction engine would retain a
 different effective context window than the highlighted choice, including
 raw catalog models from the same provider connection. A different
 provider connection or model alone does not indicate a context-window mismatch.
+While the parameter popup is open, the detail uses the popup's edited context
+length, so it previews the window before `Enter` confirms it; `Esc` restores
+the stored window.
 Compaction that follows the conversation selection shows the resulting pair
 without a mismatch warning. Explicit compaction keeps its configured model and
 window across selections, even with the same engine name. Switch notices describe the resulting
@@ -353,15 +356,22 @@ level names pass through); models that only advertise the `thinking`
 capability keep `Some([])`.
 
 When a provider also advertises a default effort (Ollama's `thinking.default`,
-OpenRouter's `reasoning.default_effort`), the picker's default slot renders it
-as `default (medium)`; without one the slot stays `default`.
+OpenRouter's `reasoning.default_effort`) that is one of the advertised efforts,
+the picker marks that effort as `medium (default)` instead of adding a separate
+default entry; stepping onto that entry selects the provider default (no effort
+is sent). When the default is not among the advertised efforts, a leading
+default slot reads `default (medium)`; without a default it reads `default`.
 
 When alternatives are available, the `/models` parameter popup cycles
-reasoning effort between the provider default and the advertised values for the
-edited model. Each picker row labels reasoning as `unavailable`, `default`, or the
-current value followed by `⚙` when it can be adjusted, so models that do not
-respond to `←`/`→` are distinguishable. While an overlay is open, the footer
-replaces the normal send hint with the controls for that overlay.
+reasoning effort through the provider default and the advertised values for the
+edited model, stopping at both ends rather than wrapping. Advertised values are
+sorted weakest to strongest (`none`, `min`/`minimal`, `low`, `medium`/`med`,
+`high`, `xhigh`/`extrahigh`, `max`) whatever order the provider returns; names
+outside that ladder follow in provider order. Each picker row labels
+reasoning as `unavailable`, its default label, or the current value. The parameter popup
+shows whether it can be adjusted: `◂`/`▸` mark each direction that can still
+move. While an overlay is open, the footer replaces the normal send
+hint with the controls for that overlay.
 `Enter` activates the exact named-engine shortcut or applies the raw catalog
 model and selected effort to subsequent requests. On a named shortcut, the
 engine keeps its current Engine runtime model/settings; only a reasoning-effort edit
@@ -1168,7 +1178,12 @@ effective context length and, when the model advertises selectable efforts, the
 reasoning effort. `↑`/`↓` move between the rows; `←`/`→` adjust the highlighted
 value. The context length moves by one eighth of the current window, rounded
 down to a multiple of 32kb, and never exceeds the catalog's window
-when one is reported.
+when one is reported. A `◂` before a value means it can move smaller and a `▸`
+after it means it can move greater; a missing arrow marks a bound (for example
+the 32kb floor or the advertised window). Reasoning effort moves through the
+advertised efforts in order (and the provider default's slot, see above), without
+wrapping. When the advertised default is `medium`, that effort cannot be chosen
+on its own; its slot selects the provider default.
 Its edit is session-only and is not written to the profile. In the popup, `Enter`
 confirms the model and parameters and switches; `Esc` returns to the model list
 and discards the parameter edits. `Esc` in the list cancels and clears the input.

@@ -41,6 +41,11 @@ pub struct ModelChoice {
     /// separated from it by a divider. `None` for a plain provider/model
     /// entry from the catalog itself.
     pub engine_name: Option<String>,
+    /// Context window the provider advertises for this row's model, when
+    /// known. Caps the parameter popup's context-length range; a shortcut's
+    /// `selection.model.context_length` carries the engine's configured window
+    /// instead.
+    pub catalog_context_length: Option<usize>,
     /// Resolved without mutation through the engine router when the picker
     /// was populated, so the detail area previews the actual routing target.
     pub selection_target: Option<ModelSelectionTarget>,
@@ -130,16 +135,12 @@ pub(crate) fn engine_choice_parts(engine_name: &str, option: &ProviderModelOptio
 }
 
 fn format_model_choice_label(identity: String, option: &ProviderModelOption) -> ChoiceLabel {
-    // The provider-advertised default effort, rendered only in the picker's
-    // default slot as `default (X)`.
-    let provider_default = option
-        .model
-        .reasoning_default
-        .as_deref()
-        .map(|reasoning_default| format!(" ({reasoning_default})"))
-        .unwrap_or_default();
+    let reasoning_default = option.model.reasoning_default.as_deref();
     let mut details = Vec::new();
-    if let Some(context_length) = option.model.context_length {
+    if let Some(context_length) = option
+        .context_length_override
+        .or(option.model.context_length)
+    {
         details.push(format!(
             "context: {}",
             format_context_length(context_length)
@@ -147,10 +148,16 @@ fn format_model_choice_label(identity: String, option: &ProviderModelOption) -> 
     }
     details.push(match option.model.reasoning_efforts.as_deref() {
         None => "reasoning: unavailable".to_string(),
-        Some([]) => format!("reasoning: default{provider_default}"),
-        Some(_) => match option.reasoning_effort.as_deref() {
-            Some(reasoning_effort) => format!("reasoning: {reasoning_effort} ⚙"),
-            None => format!("reasoning: default{provider_default} ⚙"),
+        Some([]) => format!(
+            "reasoning: {}",
+            default_effort_label(&[], reasoning_default)
+        ),
+        Some(reasoning_efforts) => match option.reasoning_effort.as_deref() {
+            Some(reasoning_effort) => format!("reasoning: {reasoning_effort}"),
+            None => format!(
+                "reasoning: {}",
+                default_effort_label(reasoning_efforts, reasoning_default)
+            ),
         },
     });
     if let Some(modality_markers) =
@@ -287,6 +294,11 @@ pub struct ModelParameterEdit {
 /// Smallest context-window step and the unit every step is a multiple of.
 pub(crate) const CONTEXT_LENGTH_STEP_UNIT: usize = 32 * 1024;
 
+/// Shown before a parameter value when a smaller value can be selected.
+const SMALLER_VALUE_GLYPH: &str = "◂";
+/// Shown after a parameter value when a greater value can be selected.
+const GREATER_VALUE_GLYPH: &str = "▸";
+
 /// Step size for the context window: one eighth of it, rounded down to a
 /// multiple of [`CONTEXT_LENGTH_STEP_UNIT`] and never below that unit.
 pub(crate) fn context_length_step(context_length: usize) -> usize {
@@ -317,28 +329,109 @@ pub(crate) fn adjust_context_length(current: usize, delta: isize, maximum: Optio
     }
 }
 
-/// Cycle the reasoning effort through `None` (provider default) followed by
-/// each advertised effort, wrapping at both ends.
+/// Slots of the reasoning-effort cycle, weakest to strongest. When the
+/// provider's default effort is advertised, that effort's own slot is `None`,
+/// so the default sits at its effort instead of in a separate slot. Otherwise
+/// a leading `None` slot stands for the provider default.
+fn reasoning_effort_slots(
+    reasoning_efforts: &[String],
+    reasoning_default: Option<&str>,
+) -> Vec<Option<String>> {
+    let default_is_advertised = reasoning_default
+        .is_some_and(|default| reasoning_efforts.iter().any(|effort| effort == default));
+    if default_is_advertised {
+        reasoning_efforts
+            .iter()
+            .map(|effort| {
+                if Some(effort.as_str()) == reasoning_default {
+                    None
+                } else {
+                    Some(effort.clone())
+                }
+            })
+            .collect()
+    } else {
+        std::iter::once(None)
+            .chain(reasoning_efforts.iter().map(|effort| Some(effort.clone())))
+            .collect()
+    }
+}
+
+/// Position of the draft reasoning effort among the cycle slots. An effort
+/// without a slot of its own (such as the advertised default, which is marked
+/// at its effort's slot) maps to the default slot.
+fn reasoning_effort_position(slots: &[Option<String>], current: Option<&str>) -> usize {
+    current
+        .and_then(|effort| {
+            slots
+                .iter()
+                .position(|slot| slot.as_deref() == Some(effort))
+        })
+        .or_else(|| slots.iter().position(Option::is_none))
+        .unwrap_or(0)
+}
+
+/// Step the reasoning effort through the cycle slots. The cycle stops at both
+/// ends instead of wrapping.
 pub(crate) fn cycle_reasoning_effort(
     reasoning_efforts: &[String],
+    reasoning_default: Option<&str>,
     current: Option<&str>,
     delta: isize,
 ) -> Option<String> {
-    let current_index = current
-        .and_then(|effort| {
-            reasoning_efforts
-                .iter()
-                .position(|candidate| candidate == effort)
-                .map(|index| index + 1)
-        })
-        .unwrap_or(0);
-    let option_count = reasoning_efforts.len() + 1;
-    let next_index = (current_index as isize + delta).rem_euclid(option_count as isize) as usize;
-    if next_index == 0 {
-        None
-    } else {
-        Some(reasoning_efforts[next_index - 1].clone())
+    let slots = reasoning_effort_slots(reasoning_efforts, reasoning_default);
+    let last_position = slots.len() as isize - 1;
+    let next_position = (reasoning_effort_position(&slots, current) as isize + delta)
+        .clamp(0, last_position) as usize;
+    slots[next_position].clone()
+}
+
+/// Label of the provider-default reasoning effort: `medium (default)` when the
+/// default is an advertised effort, otherwise `default (X)` or `default`.
+fn default_effort_label(reasoning_efforts: &[String], reasoning_default: Option<&str>) -> String {
+    match reasoning_default {
+        Some(default) if reasoning_efforts.iter().any(|effort| effort == default) => {
+            format!("{default} (default)")
+        }
+        Some(default) => format!("default ({default})"),
+        None => "default".to_string(),
     }
+}
+
+/// Whether the context window can still move smaller and greater with the
+/// left and right keys.
+fn context_length_directions(context_length: usize, maximum: Option<usize>) -> (bool, bool) {
+    (
+        adjust_context_length(context_length, -1, maximum) < context_length,
+        adjust_context_length(context_length, 1, maximum) > context_length,
+    )
+}
+
+/// Whether the reasoning effort can still move earlier and later in the cycle.
+fn reasoning_effort_directions(
+    reasoning_efforts: &[String],
+    reasoning_default: Option<&str>,
+    current: Option<&str>,
+) -> (bool, bool) {
+    let slots = reasoning_effort_slots(reasoning_efforts, reasoning_default);
+    let position = reasoning_effort_position(&slots, current);
+    (position > 0, position + 1 < slots.len())
+}
+
+/// Wrap a parameter value in the direction glyphs. The left slot keeps its
+/// width when empty so the value does not shift as the glyph appears.
+fn format_parameter_value(value: &str, (can_go_smaller, can_go_greater): (bool, bool)) -> String {
+    let smaller_slot = if can_go_smaller {
+        format!("{SMALLER_VALUE_GLYPH} ")
+    } else {
+        "  ".to_string()
+    };
+    let greater_suffix = if can_go_greater {
+        format!(" {GREATER_VALUE_GLYPH}")
+    } else {
+        String::new()
+    };
+    format!("{smaller_slot}{value}{greater_suffix}")
 }
 
 /// The message-draft input state parked by `Effect::SaveInputStateAndClear`
@@ -447,24 +540,38 @@ pub(crate) fn model_parameter_rows(edit: &ModelParameterEdit, choice: &ModelChoi
     edit.fields
         .iter()
         .map(|field| match field {
-            ParameterField::ContextLength => format!(
-                "Context length:  {}",
-                edit.context_length
-                    .map_or_else(|| "unknown".to_string(), format_context_length)
-            ),
+            ParameterField::ContextLength => match edit.context_length {
+                Some(context_length) => {
+                    let directions =
+                        context_length_directions(context_length, edit.context_length_maximum);
+                    format!(
+                        "Context length:  {}",
+                        format_parameter_value(&format_context_length(context_length), directions)
+                    )
+                }
+                None => "Context length:  unknown".to_string(),
+            },
             ParameterField::ReasoningEffort => {
-                let provider_default = choice
+                let reasoning_default = choice.selection.model.reasoning_default.as_deref();
+                let reasoning_efforts = choice
                     .selection
                     .model
-                    .reasoning_default
+                    .reasoning_efforts
                     .as_deref()
-                    .map(|reasoning_default| format!(" ({reasoning_default})"))
                     .unwrap_or_default();
+                let directions = reasoning_effort_directions(
+                    reasoning_efforts,
+                    reasoning_default,
+                    edit.reasoning_effort.as_deref(),
+                );
                 let value = edit
                     .reasoning_effort
                     .clone()
-                    .unwrap_or_else(|| format!("default{provider_default}"));
-                format!("Reasoning effort:  {value}")
+                    .unwrap_or_else(|| default_effort_label(reasoning_efforts, reasoning_default));
+                format!(
+                    "Reasoning effort:  {}",
+                    format_parameter_value(&value, directions)
+                )
             }
         })
         .collect()
@@ -728,7 +835,7 @@ impl AppState {
                 .as_ref()
                 .map(|target| target.context_length)
                 .or(choice.selection.model.context_length),
-            context_length_maximum: choice.selection.model.context_length,
+            context_length_maximum: choice.catalog_context_length,
             context_length_edited: false,
             reasoning_effort: choice.selection.reasoning_effort.clone(),
         });
@@ -753,10 +860,17 @@ impl AppState {
             },
             None => return,
         };
-        let reasoning_efforts = match &self.slash_overlay {
-            SlashOverlay::ModelPicker { choices, .. } => choices
-                .get(choice_index)
-                .and_then(|choice| choice.selection.model.reasoning_efforts.clone()),
+        let reasoning_cycle = match &self.slash_overlay {
+            SlashOverlay::ModelPicker { choices, .. } => {
+                choices.get(choice_index).and_then(|choice| {
+                    choice
+                        .selection
+                        .model
+                        .reasoning_efforts
+                        .clone()
+                        .map(|efforts| (efforts, choice.selection.model.reasoning_default.clone()))
+                })
+            }
             _ => None,
         };
         let Some(edit) = self.model_parameters_mut() else {
@@ -775,11 +889,12 @@ impl AppState {
                 edit.context_length_edited = true;
             }
             ParameterField::ReasoningEffort => {
-                let Some(reasoning_efforts) = reasoning_efforts else {
+                let Some((reasoning_efforts, reasoning_default)) = reasoning_cycle else {
                     return;
                 };
                 edit.reasoning_effort = cycle_reasoning_effort(
                     &reasoning_efforts,
+                    reasoning_default.as_deref(),
                     edit.reasoning_effort.as_deref(),
                     delta,
                 );

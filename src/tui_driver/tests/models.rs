@@ -466,8 +466,13 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_efforts() {
          not the provider's advertised one (999_999)"
     );
     assert_eq!(
+        shortcut.catalog_context_length,
+        Some(999_999),
+        "the popup must cap at the provider's advertised window, not the configured 32_000"
+    );
+    assert_eq!(
         shortcut.label.single_line(),
-        "openrouter → stub/thinking  context: 31kb  reasoning: max ⚙",
+        "openrouter → stub/thinking  context: 31kb  reasoning: max",
         "the shortcut must show its configured reasoning effort instead of 'unavailable'"
     );
 }
@@ -521,7 +526,7 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_default() {
     );
     assert_eq!(
         shortcut.label.single_line(),
-        "openrouter → stub/thinking  context: 31kb  reasoning: default (medium) ⚙",
+        "openrouter → stub/thinking  context: 31kb  reasoning: default (medium)",
         "the shortcut's default slot must name the advertised default"
     );
 }
@@ -563,9 +568,10 @@ async fn models_lists_an_engine_shortcut_falling_back_to_the_catalogs_context_le
         Some(999_999),
         "an unconfigured context_length must fall back to the catalog's advertised value"
     );
+    assert_eq!(shortcut.catalog_context_length, Some(999_999));
     assert_eq!(
         shortcut.label.single_line(),
-        "openrouter → stub/thinking  context: 976kb  reasoning: max ⚙"
+        "openrouter → stub/thinking  context: 976kb  reasoning: max"
     );
 }
 
@@ -790,6 +796,7 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
                 details: vec!["reasoning: default".to_string()],
             },
             initial_reasoning_effort: selection.reasoning_effort.clone(),
+            catalog_context_length: None,
             selection,
             is_active: false,
             engine_name: None,
@@ -883,6 +890,7 @@ async fn model_picker_parameter_popup_esc_returns_to_the_list_and_discards_the_d
                 details: vec!["reasoning: default".to_string()],
             },
             initial_reasoning_effort: None,
+            catalog_context_length: None,
             selection,
             is_active: false,
             engine_name: None,

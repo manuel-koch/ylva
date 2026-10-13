@@ -92,7 +92,7 @@ conversation. The original draft returns after all approvals are resolved.
 | `enter` | `/models` picker open | Open the parameter popup for the highlighted model; nothing switches yet |
 | `esc` | `/models` picker open | Cancel without switching and clear the input |
 | `↑` / `↓` | `/models` parameter popup open | Move between the parameter rows (context length, reasoning effort) |
-| `←` / `→` | `/models` parameter popup open | Adjust the highlighted parameter: context length by one eighth of the window (32kb minimum, capped at the catalog window); reasoning effort through the advertised values |
+| `←` / `→` | `/models` parameter popup open | Adjust the highlighted parameter: context length by one eighth of the window (32kb minimum, capped at the catalog window); reasoning effort through the advertised values, stopping at the ends. `◂`/`▸` beside a value mark the directions that can still move |
 | `enter` | `/models` parameter popup open | Confirm the model and the edited parameters, activate the highlighted selection, and clear the input |
 | `esc` | `/models` parameter popup open | Return to the model list and discard the parameter edits |
 | typing / backspace | `/models` parameter popup open | Ignored; the filter stays as it was |

@@ -26,6 +26,26 @@ fn parse_model_list_preserves_context_length() {
 }
 
 #[test]
+fn parse_model_list_orders_reasoning_efforts_weakest_to_strongest() {
+    let body = serde_json::json!({
+        "data": [{
+            "id": "provider/unordered",
+            "reasoning": { "supported_efforts": ["high", "none", "xhigh", "low"] }
+        }]
+    });
+
+    assert_eq!(
+        parse_model_list(&body)[0].reasoning_efforts,
+        Some(vec![
+            "none".to_string(),
+            "low".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ])
+    );
+}
+
+#[test]
 fn parse_model_list_extracts_reasoning_effort_scenarios() {
     let body = serde_json::json!({
         "data": [

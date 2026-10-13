@@ -941,9 +941,10 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         slash_overlay: SlashOverlay::ModelPicker {
             parameters: None,
             choices: vec![ModelChoice {
+                catalog_context_length: None,
                 label: ylva::tui_reducer_state::ChoiceLabel {
                     identity: "stub/thinking".to_string(),
-                    details: vec!["reasoning: default ⚙".to_string()],
+                    details: vec!["reasoning: default".to_string()],
                 },
                 initial_reasoning_effort: None,
                 selection: ProviderModelOption {
@@ -1030,6 +1031,7 @@ fn model_picker_details_show_highlighted_compaction_effect() {
     let make_choice =
         |name: &str, provider_connection: &str, model_id: &str, context_length: usize| {
             ModelChoice {
+                catalog_context_length: Some(context_length),
                 label: ylva::tui_reducer_state::ChoiceLabel {
                     identity: format!("{name} → {provider_connection}/{model_id}"),
                     details: vec![format!("context: {}kb", context_length / 1024)],
@@ -1668,6 +1670,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
         slash_overlay: SlashOverlay::ModelPicker {
             parameters: None,
             choices: vec![ModelChoice {
+                catalog_context_length: None,
                 label: ylva::tui_reducer_state::ChoiceLabel {
                     identity: "stub/thinking".to_string(),
                     details: vec!["reasoning: default".to_string()],
@@ -1936,13 +1939,14 @@ fn long_model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state
     use ylva::tui_reducer_state::ModelChoice;
     (0..choice_count)
         .map(|index| ModelChoice {
+            catalog_context_length: Some(131_072),
             label: if index == 0 {
                 ylva::tui_reducer_state::ChoiceLabel {
                     identity: "shortcut → stub/a-very-long-model-identifier-for-narrow-terminals"
                         .to_string(),
                     details: vec![
                         "context: 128kb".to_string(),
-                        "reasoning: default ⚙".to_string(),
+                        "reasoning: default".to_string(),
                     ],
                 }
             } else {
@@ -2035,7 +2039,7 @@ fn model_picker_splits_identity_and_details_into_rows_on_narrow_terminals() {
         rows[identity_row]
     );
     assert!(
-        rows[identity_row + 1].contains("context: 128kb  reasoning: default ⚙"),
+        rows[identity_row + 1].contains("context: 128kb  reasoning: default"),
         "the details must render complete on the row below: {:?}",
         rows[identity_row + 1]
     );
@@ -2206,7 +2210,7 @@ fn model_picker_uses_two_rows_at_any_width_when_a_single_line_would_not_fit() {
     );
     assert!(
         rows.iter()
-            .any(|row| row.contains("context: 128kb  reasoning: default ⚙")),
+            .any(|row| row.contains("context: 128kb  reasoning: default")),
         "the details must be rendered on their own row: {rows:?}"
     );
 
@@ -2360,8 +2364,9 @@ fn model_parameter_popup_renders_one_row_per_parameter_with_its_footer_hints() {
         text.contains("Model parameters  ·  shortcut → stub/a-very-long-model-identifier-for-narrow-terminals"),
         "the popup must be titled with the edited model: {text}"
     );
-    assert!(text.contains("Context length:  128kb"), "{text}");
-    assert!(text.contains("Reasoning effort:  default"), "{text}");
+    assert!(text.contains("Context length:  ◂ 128kb"), "{text}");
+    assert!(text.contains("Reasoning effort:    default ▸"), "{text}");
+
     assert!(
         text.contains("parameter"),
         "popup footer must name the cursor keys: {text}"

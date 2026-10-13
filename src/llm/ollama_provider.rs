@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{Message, StreamEvent};
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle};
 use crate::llm::openai_compatible_messages::ContentPartFormat;
-use crate::llm::{InputModality, ModelInfo, Provider, ToolSchema};
+use crate::llm::{order_reasoning_efforts, InputModality, ModelInfo, Provider, ToolSchema};
 
 use super::OpenAiCompatibleProvider;
 use crate::http::{get_json, post_json};
@@ -297,7 +297,8 @@ fn parse_reasoning_efforts(body: &serde_json::Value) -> Option<Vec<String>> {
 /// Upstream: https://github.com/ollama/ollama/pull/18473 and
 /// https://github.com/ollama/ollama/commit/d0c8cdb795d4640890d87c146d674cc311df4138.
 ///
-/// De-duplicates while preserving the server's order. Returns `None` when
+/// De-duplicates, then orders weakest to strongest so the picker's arrows
+/// follow effort strength. Returns `None` when
 /// `thinking`/`values` is absent or when no entry maps to an effort name, so
 /// callers fall through to the capability-based logic.
 fn parse_thinking_values(body: &serde_json::Value) -> Option<Vec<String>> {
@@ -310,7 +311,7 @@ fn parse_thinking_values(body: &serde_json::Value) -> Option<Vec<String>> {
             }
         }
     }
-    (!efforts.is_empty()).then_some(efforts)
+    (!efforts.is_empty()).then(|| order_reasoning_efforts(efforts))
 }
 
 /// Parse `/api/show`'s `thinking.default` — the effort a request falls back
@@ -453,10 +454,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_reasoning_efforts_passes_named_thinking_levels_through_in_server_order() {
+    fn parse_reasoning_efforts_orders_named_thinking_levels_weakest_to_strongest() {
         let body = serde_json::json!({
             "capabilities": ["completion", "thinking"],
-            "thinking": { "values": [false, "low", "medium", "xhigh"], "default": "medium" }
+            "thinking": { "values": ["xhigh", false, "medium", "low"], "default": "medium" }
         });
 
         assert_eq!(

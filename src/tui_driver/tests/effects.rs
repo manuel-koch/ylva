@@ -836,6 +836,7 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
             },
             is_active: true,
             engine_name: None,
+            catalog_context_length: None,
             selection_target: None,
             selection_preview_error: None,
         }],
