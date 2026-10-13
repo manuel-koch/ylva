@@ -14,7 +14,8 @@ object after the run completes.
 - Define the stable object schema, including the session ID, assistant output,
   tool outcomes, and errors.
 - Decide what a failed or interrupted run emits. Avoid emitting malformed
-  partial JSON.
+  partial JSON. The exit code already reports the outcome (see
+  [exit codes](../cli-options.md#exit-codes)); JSON output must not change it.
 - Keep diagnostics and progress off stdout. Coordinate this with
   [`cli-output-streams.md`](./cli-output-streams.md) and
   [`cli-output-buffering.md`](./cli-output-buffering.md).

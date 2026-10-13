@@ -307,6 +307,18 @@ root's `StreamDone` until every spawned call reaches a terminal outcome. The
 immediate `spawn_subagent` result reports admission, not completion. See
 [features](./features.md#cli-mode) for the CLI behavior.
 
+Each run records a `RunOutcome` (`src/run_outcome.rs`) from driver events and
+maps it to an `ExitCode` (`src/exit_code.rs`) when it ends; the table is in
+[exit codes](./cli-options.md#exit-codes). `StopSignals` (`src/stop_signal.rs`) relays SIGINT and SIGTERM and
+sends `AgentCommand::Stop`. The loop then ends when the agent reports idle:
+`StreamCancelled`, `AgentIdle`, or a root `ToolKilled`, because a stop during a
+tool run emits no stream event. The TUI keeps the same recorder in
+`PendingRunIds::run_outcome`. It is fed from `UiUpdate`s, the `DenyTool` effect,
+and the driver loop's external SIGINT or SIGTERM (`PendingRunIds::record_stop_signal`,
+any TUI state). `SubmitPrompt` with `steer: false` resets it, and
+`StopAgent` (Ctrl+C or Esc in the TUI) records nothing, so only the latest turn
+decides the code.
+
 ## Store and persistence
 
 `Store` clones share one locked file and writer task. Record methods enqueue
@@ -750,7 +762,7 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   draft/overlay snapshots, mouse selection and history operations;
   `updates.rs` owns live UI-to-domain mapping, lazy child replay and the
   compatibility snapshot; and `terminal.rs` owns clipboard implementations,
-  terminal/title guards and SIGINT relay. Clipboard types retain their
+  terminal/title guards and stop-signal relay. Clipboard types retain their
   public facade paths. Pending destinations stay driver-local and are
   recorded before reducer transitions, then consumed by approval/clarify
   commands. Catalog cancellation, agent shutdown, terminal teardown and

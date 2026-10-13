@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::events::AppAction;
+use crate::stop_signal::StopSignals;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -24,7 +25,6 @@ use crossterm::terminal::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self, Write};
-use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Abstracts writing text to the OS clipboard so the Driver can be tested
@@ -144,22 +144,18 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Bridge OS SIGINT to `AppAction::SigInt`.
-pub(super) fn install_sigint_relay(action_tx: mpsc::Sender<AppAction>) -> anyhow::Result<()> {
-    let (sigint_tx, sigint_rx) = std::sync::mpsc::channel::<()>();
-    ctrlc::set_handler(move || {
-        let _ = sigint_tx.send(());
-    })?;
-    tokio::task::spawn_blocking(move || {
-        while !action_tx.is_closed() {
-            match sigint_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(()) => {
-                    if action_tx.blocking_send(AppAction::SigInt).is_err() {
+/// Bridge external SIGINT/SIGTERM to `AppAction::StopSignal`. Must run inside a Tokio runtime.
+pub(super) fn install_stop_signal_relay(action_tx: mpsc::Sender<AppAction>) -> anyhow::Result<()> {
+    let mut stop_signals = StopSignals::install()?;
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = action_tx.closed() => break,
+                received = stop_signals.recv() => {
+                    if received.is_none() || action_tx.send(AppAction::StopSignal).await.is_err() {
                         break;
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
     });

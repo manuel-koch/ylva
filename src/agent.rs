@@ -538,7 +538,7 @@ impl AgentLoop {
     }
 
     /// Clone of the command channel sender, for consumers (e.g. the TUI
-    /// driver and the SIGINT relay) that send commands without a `&self`.
+    /// driver and the stop-signal relay) that send commands without a `&self`.
     pub fn command_sender(&self) -> mpsc::Sender<AgentCommand> {
         self.cmd_tx.clone()
     }

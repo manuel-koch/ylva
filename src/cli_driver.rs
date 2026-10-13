@@ -28,10 +28,13 @@ use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::ProfileConfig;
+use crate::exit_code::ExitCode;
 use crate::llm::engine::{EngineConfig, EngineImpl};
 use crate::llm::Provider;
+use crate::run_outcome::RunOutcome;
 use crate::sandbox::{ApprovalCheck, Sandbox};
 use crate::session_title::TitleAttempt;
+use crate::stop_signal::StopSignals;
 use crate::theme::{
     ASSISTANT_STREAM_BORDER_COLOR, ERROR_COLOR, INTERRUPTED_COLOR, NOTICE_COLOR,
     THINKING_BORDER_COLOR, TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BORDER_COLOR,
@@ -350,7 +353,7 @@ impl App for ConsoleApp {
             attempt: TitleAttempt::default(),
             pending_tasks: std::sync::Mutex::new(Vec::new()),
         });
-        run_cli_to_with_title(
+        match run_cli_to_with_title(
             agent,
             ui_rx,
             registry,
@@ -361,7 +364,19 @@ impl App for ConsoleApp {
         )
         .instrument(session_span)
         .await
-        .map(|_| 0u8)
+        {
+            Ok(outcome) => {
+                tracing::debug!(?outcome, "headless run finished");
+                Ok(u8::from(outcome.exit_code()))
+            }
+            // The run had already started, so a failure while driving it is a
+            // general execution error, not a startup error (exit code 2).
+            Err(error) => {
+                tracing::error!(%error, "headless run failed");
+                eprintln!("error: {error}");
+                Ok(u8::from(ExitCode::GeneralError))
+            }
+        }
     }
 }
 
@@ -552,6 +567,7 @@ pub async fn run_cli_to_with_options(
         None,
     )
     .await
+    .map(|_outcome| ())
 }
 
 struct TitleDriver {
@@ -591,6 +607,8 @@ impl TitleDriver {
     }
 }
 
+/// Drive one headless run and report how it ended. Callers map the returned
+/// [`RunOutcome`] to an exit code.
 async fn run_cli_to_with_title(
     agent: AgentLoop,
     mut ui_rx: mpsc::Receiver<UiUpdate>,
@@ -599,8 +617,10 @@ async fn run_cli_to_with_title(
     out: &mut (dyn Write + Send),
     output_options: CliOutputOptions,
     title_driver: Option<TitleDriver>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<RunOutcome> {
     let mut agent = agent;
+    let mut outcome = RunOutcome::default();
+    let mut stop_signals = StopSignals::install()?;
 
     if let Some(title_driver) = &title_driver {
         title_driver.trigger(&agent);
@@ -657,8 +677,28 @@ async fn run_cli_to_with_title(
     // exiting.
     let mut pending_spawn_call_ids: std::collections::HashSet<uuid::Uuid> =
         std::collections::HashSet::new();
+    // Set by SIGINT/SIGTERM. The loop then stops waiting for a normal end and ends once
+    // the agent reports idle; see the `AgentIdle` and `ToolKilled` arms.
+    let mut interrupt_requested = false;
     while !response_finished {
-        match ui_rx.recv().await {
+        let next_update = tokio::select! {
+            update = ui_rx.recv() => update,
+            Some(()) = stop_signals.recv(), if !interrupt_requested => {
+                interrupt_requested = true;
+                outcome.record_interruption();
+                tracing::info!("cli_driver: interrupt requested, stopping the run");
+                agent
+                    .send_command(AgentCommand::Stop {
+                        reason: "interrupted by user".into(),
+                    })
+                    .await;
+                continue;
+            }
+        };
+        if let Some(update) = &next_update {
+            outcome.record_update(update);
+        }
+        match next_update {
             Some(UiUpdate::StreamStarted) => {
                 // The header is deferred to the first `AppendThinking` /
                 // `AppendText` of this round, since its text depends on
@@ -776,6 +816,7 @@ async fn run_cli_to_with_title(
                             .await;
                     }
                     ApprovalCheck::UserApprovalRequired => {
+                        outcome.record_approval_denied();
                         let reason = "tool requires approval, not supported in CLI mode";
                         let denied_invocation = render_denied_invocation(&title, &title_arguments);
                         write_cli_styled_line(
@@ -946,7 +987,7 @@ async fn run_cli_to_with_title(
                     output_options,
                 )?;
             }
-            Some(UiUpdate::ToolKilled { id, .. }) => {
+            Some(UiUpdate::ToolKilled { id, run_id }) => {
                 write_cli_styled_line(
                     out,
                     "[tool] killed",
@@ -960,6 +1001,11 @@ async fn run_cli_to_with_title(
                         pending = pending_spawn_call_ids.len(),
                         "cli_driver: spawned child reported ToolKilled"
                     );
+                }
+                // A stopped root tool leaves the agent idle without a stream
+                // event, so an interrupted run ends here.
+                if run_id.is_none() && interrupt_requested && pending_spawn_call_ids.is_empty() {
+                    response_finished = true;
                 }
             }
             Some(UiUpdate::SteerQueued { .. }) | Some(UiUpdate::SteerApplied { .. }) => {}
@@ -1060,7 +1106,13 @@ async fn run_cli_to_with_title(
                     );
                 }
             }
-            Some(UiUpdate::AgentIdle) => {}
+            // A stop with no stream in flight ends with `AgentIdle` instead of
+            // `StreamCancelled`, so an interrupted run also ends here.
+            Some(UiUpdate::AgentIdle) => {
+                if interrupt_requested && pending_spawn_call_ids.is_empty() {
+                    response_finished = true;
+                }
+            }
             Some(UiUpdate::Error { message, run_id }) => {
                 match run_id {
                     None => {
@@ -1130,9 +1182,15 @@ async fn run_cli_to_with_title(
         .expect("agent loop task panicked")
         .expect("agent loop returned an error");
     if let Some(title_driver) = &title_driver {
-        title_driver.wait_for_pending_tasks().await;
+        tokio::select! {
+            () = title_driver.wait_for_pending_tasks() => {}
+            Some(()) = stop_signals.recv() => {
+                // SIGINT/SIGTERM during title generation: stop waiting and exit.
+                outcome.record_interruption();
+            }
+        }
     }
-    Ok(())
+    Ok(outcome)
 }
 
 /// Render a tool invocation for the CLI status line, e.g.

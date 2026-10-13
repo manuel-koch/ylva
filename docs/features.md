@@ -58,8 +58,10 @@ agent, and the assistant response is streamed to stdout as it arrives. The
 committed session is persisted incrementally.
 CLI prints the identifier of the persisted session on exit via `stderr`.
 Argument parsing is `clap`-backed (see [CLI options](./cli-options.md)):
-`--help` prints usage to stdout and exits `0`; unknown flags and missing
-values are usage errors that exit `2`.
+`--help` prints usage to stdout and exits successfully; unknown flags and
+missing values are usage errors. Exit codes are a contract for scripts and CI:
+each run ends with one documented code (see [exit codes](./cli-options.md#exit-codes)).
+Ctrl+C or SIGTERM stops a headless run cooperatively and exits with the interruption code.
 
 Selected automatically when stdout is not a terminal, or forced via `--no-tui`.
 
@@ -904,8 +906,9 @@ for the full mechanics.
   & quit) and a second press within 2 seconds confirms that key's action;
   while idle, `Ctrl+C` double-press quits and `Esc` immediately clears the
   input. After an interrupt, the TUI waits for the agent's terminal idle
-  update before applying the selected quit-or-stay-open behavior. OS SIGINT
-  stops immediately (no double-press).
+  update before applying the selected quit-or-stay-open behavior. An external
+  SIGINT or SIGTERM skips the double-press: an idle TUI quits at once, and a
+  running turn is stopped before the TUI quits with exit code `130`.
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
   table, the selected profile and its config path, the resolved Ylva
   home, the discovered workspace root, and build-info values. An unavailable

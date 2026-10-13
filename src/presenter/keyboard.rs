@@ -15,6 +15,7 @@
 //! Pure keyboard event handling.
 
 use super::TextareaContext;
+use crate::agent::AgentMode;
 use crate::slash_command::{parse_slash_command_invocation, SlashCommand, SlashCommandInvocation};
 use crate::tui_reducer_state::{
     AppState, ConfirmKey, ConversationView, Effect, Focus, HistoryDirection, InputEvent,
@@ -49,7 +50,7 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
             state.clear_help_selection();
             vec![]
         }
-        InputEvent::SigInt => vec![Effect::StopAgent],
+        InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => handle_ctrl_c_generic(state, true),
         InputEvent::KeyInput(key_event) => {
             match key_event.code {
@@ -100,7 +101,7 @@ fn keyboard_approval(
                 Effect::RestoreInputState,
             ]
         }
-        InputEvent::SigInt => vec![Effect::StopAgent],
+        InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Enter => {
             state.focus = Focus::MainInput;
             if textarea.is_empty {
@@ -148,7 +149,7 @@ fn keyboard_main(
             state.clear_help_selection();
             vec![]
         }
-        InputEvent::SigInt => vec![Effect::StopAgent],
+        InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => handle_ctrl_c_generic(state, textarea.is_empty),
         // Esc with an empty draft while viewing a subagent's drill-in
         // transcript navigates back to the root conversation instead of
@@ -178,7 +179,7 @@ fn keyboard_clarify(
             state.clear_help_selection();
             vec![]
         }
-        InputEvent::SigInt => vec![Effect::StopAgent],
+        InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => {
             state.mode = TuiMode::Pending;
             vec![Effect::AbortClarify, Effect::RestoreInputState]
@@ -227,6 +228,19 @@ fn effective_mode(mode: &TuiMode) -> &TuiMode {
         TuiMode::DoublePressAbort { return_to, .. } => return_to,
         other => other,
     }
+}
+
+/// External SIGINT/SIGTERM, whatever the focus. Idle quits at once. A run in
+/// progress (including a live subagent) is stopped, and the TUI quits when the
+/// agent reports it idle or killed (`domain_aborting`).
+fn handle_stop_signal(state: &mut AppState) -> Vec<Effect> {
+    if matches!(state.agent_mode(), AgentMode::Idle) {
+        return vec![Effect::Quit];
+    }
+    tracing::info!("external stop signal: entering Aborting, stop requested");
+    state.mode = TuiMode::Aborting;
+    state.aborting_exit = true;
+    vec![Effect::StopAgent]
 }
 
 /// Ctrl+C logic for non-approval contexts.
@@ -429,8 +443,8 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
             state.slash_overlay = SlashOverlay::Hidden;
             vec![Effect::CancelSessionSelection, Effect::ClearTextarea]
         }
+        InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => handle_ctrl_c_generic(state, true),
-        InputEvent::SigInt => vec![Effect::StopAgent],
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
             vec![]

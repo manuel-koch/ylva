@@ -6,7 +6,8 @@ and tool status while a run is active and has no `--quiet` flag.
 ## Proposed behavior
 
 Add `--quiet` to suppress progress indicators and tool status. Keep assistant
-content on stdout so quiet mode remains useful in a pipeline.
+content on stdout so quiet mode remains useful in a pipeline. Quiet mode does
+not change the exit code (see [exit codes](../cli-options.md#exit-codes)).
 
 ## Open questions
 

@@ -42,18 +42,20 @@ environment file.
   [persistence](./persistence.md#relocating-the-ylva-home-with-ylva_home). The
   same home holds the chat store.
 - A **missing** file's behavior depends on how the profile was selected:
-  - **Explicit** (`--profile <name>` given): a hard error (exit code `2`)
-    naming the missing profile when no project or home file exists — the user
-    asked for that specific profile, so it is never silently substituted.
+  - **Explicit** (`--profile <name>` given): a hard error (a startup error, see
+    [exit codes](./cli-options.md#exit-codes)) naming the missing profile when no
+    project or home file exists — the user asked for that specific profile, so
+    it is never silently substituted.
   - **Implicit** (no `--profile` flag; the `default` profile): not an error —
     Ylva supplies a built-in default profile with one `default` agent type
     that may spawn children, the dark theme, and no configured engines. The
     backend then comes from the environment variables in
     `docs/cli-options.md`, so Ylva runs out of the box without writing a
     config file.
-- An **unreadable or malformed** file is always a hard error (exit code `2`)
-  naming the file and the parse problem, explicit or implicit; a config the
-  user did write is never silently ignored.
+- An **unreadable or malformed** file is always a hard error (a startup error,
+  see [exit codes](./cli-options.md#exit-codes)) naming the file and the parse
+  problem, explicit or implicit; a config the user did write is never silently
+  ignored.
 - Profile validation errors (for example, an engine reference that has no
   corresponding `[engines.*]` table) name the selected profile and the full
   path of the resolved `config.toml` together with the validation detail.

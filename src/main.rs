@@ -21,7 +21,7 @@ use clap::Parser;
 use ylva::llm::provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
 use ylva::logging::init_logging;
 use ylva::{
-    AgentFactory, App, Cli, CliColorMode, CliCommand, ConsoleApp, Engine, EngineImpl,
+    AgentFactory, App, Cli, CliColorMode, CliCommand, ConsoleApp, Engine, EngineImpl, ExitCode,
     ProfileConfig, TuiApp, DEFAULT_TUI_TOOLS,
 };
 
@@ -83,11 +83,11 @@ fn main() {
         Ok(cli) => cli,
         Err(error) if error.use_stderr() => {
             eprintln!("{error}");
-            std::process::exit(2);
+            exit_with(ExitCode::UsageError);
         }
         Err(error) => {
             print!("{error}");
-            std::process::exit(0);
+            exit_with(ExitCode::Success);
         }
     };
 
@@ -96,7 +96,7 @@ fn main() {
             Ok(report) => println!("{}", report.summary()),
             Err(message) => {
                 eprintln!("error: {message}");
-                std::process::exit(2);
+                exit_with(ExitCode::UsageError);
             }
         }
         return;
@@ -106,7 +106,7 @@ fn main() {
         Ok(color_mode) => color_mode,
         Err(message) => {
             eprintln!("error: {message}");
-            std::process::exit(2);
+            exit_with(ExitCode::UsageError);
         }
     };
     let log_config = cli.log_config();
@@ -117,7 +117,7 @@ fn main() {
         Ok(guard) => guard,
         Err(message) => {
             eprintln!("error: {message}");
-            std::process::exit(2);
+            exit_with(ExitCode::UsageError);
         }
     };
 
@@ -411,7 +411,7 @@ fn apply_cli_profile_overrides(cli: &Cli, profile: &mut ProfileConfig) {
     }
 }
 
-/// Report a fatal error after logging has been initialized.
+/// Report a fatal startup error after logging has been initialized.
 ///
 /// `std::process::exit` skips destructors, so explicitly dropping the
 /// non-blocking log guard is required before exiting or the diagnostic can
@@ -421,7 +421,12 @@ fn exit_with_error(log_guard: &mut Option<ylva::LogGuards>, message: impl std::f
     tracing::error!(%message, "fatal error");
     eprintln!("error: {message}");
     drop(log_guard.take());
-    std::process::exit(2);
+    exit_with(ExitCode::UsageError)
+}
+
+/// Terminate with a documented exit code. Callers drop any log guard first.
+fn exit_with(code: ExitCode) -> ! {
+    std::process::exit(i32::from(u8::from(code)))
 }
 
 /// Print the session id and a copy-pasteable command that resumes it.

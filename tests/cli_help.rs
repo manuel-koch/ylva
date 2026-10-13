@@ -56,6 +56,30 @@ fn help_flag_prints_usage_and_exits_zero() {
     );
 }
 
+/// `--help` lists every documented exit code with its meaning, built from the
+/// same `ExitCode` table the process exits with.
+#[test]
+fn help_lists_every_exit_code_with_its_meaning() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .arg("--help")
+        .output()
+        .expect("spawn the ylva binary");
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Exit codes:"),
+        "help lacks exit codes: {stdout}"
+    );
+    for code in ylva::ExitCode::ALL {
+        let expected = format!("{:<4}{}", u8::from(code), code.description());
+        assert!(
+            stdout.contains(&expected),
+            "help must list `{expected}`: {stdout}"
+        );
+    }
+}
+
 /// An unknown flag is rejected with clap's error on stderr and exit code 2
 /// (the historical usage-error code) instead of being silently ignored.
 #[test]

@@ -1124,3 +1124,182 @@ async fn tools_reports_the_registry_names_without_touching_the_agent() {
         "/tools must not command the agent"
     );
 }
+
+#[tokio::test]
+async fn tui_run_outcome_follows_driver_events_with_the_headless_precedence() {
+    let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+    let mut pending_run_ids = PendingRunIds::default();
+    let call_id = Uuid::nil();
+
+    let textarea_context = textarea_ctx_from(&textarea);
+    process_one_update(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        &textarea_context,
+        &UiUpdate::Error {
+            message: "child failed".into(),
+            run_id: Some(Uuid::nil()),
+        },
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut pending_run_ids,
+    )
+    .await;
+    assert_eq!(
+        pending_run_ids.run_outcome.exit_code(),
+        crate::ExitCode::Success,
+        "a child error must not change the run outcome"
+    );
+
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        vec![Effect::DenyTool {
+            id: call_id,
+            reason: String::new(),
+        }],
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut pending_run_ids,
+    )
+    .await;
+    assert_eq!(
+        pending_run_ids.run_outcome.exit_code(),
+        crate::ExitCode::ApprovalDenied,
+        "a user denial is an approval denial, as in headless mode"
+    );
+
+    let textarea_context = textarea_ctx_from(&textarea);
+    process_one_update(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        &textarea_context,
+        &UiUpdate::Error {
+            message: "provider failed".into(),
+            run_id: None,
+        },
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut pending_run_ids,
+    )
+    .await;
+    assert_eq!(
+        pending_run_ids.run_outcome.exit_code(),
+        crate::ExitCode::GeneralError,
+        "a root error outranks an approval denial"
+    );
+
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        vec![Effect::StopAgent],
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut pending_run_ids,
+    )
+    .await;
+    assert_eq!(
+        pending_run_ids.run_outcome.exit_code(),
+        crate::ExitCode::GeneralError,
+        "a stop request must not replace a recorded outcome"
+    );
+
+    pending_run_ids.record_stop_signal();
+    assert_eq!(
+        pending_run_ids.run_outcome.exit_code(),
+        crate::ExitCode::Interrupted,
+        "an external stop signal during a turn outranks every other outcome"
+    );
+}
+
+#[tokio::test]
+async fn stop_key_alone_keeps_the_run_outcome_successful() {
+    let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+    let mut pending_run_ids = PendingRunIds::default();
+
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        vec![Effect::StopAgent],
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut pending_run_ids,
+    )
+    .await;
+
+    assert!(
+        matches!(cmd_rx.try_recv(), Ok(AgentCommand::Stop { .. })),
+        "the stop key must still stop the agent"
+    );
+    assert_eq!(
+        pending_run_ids.run_outcome.exit_code(),
+        crate::ExitCode::Success,
+        "Ctrl+C and Esc stop a turn without setting the exit code"
+    );
+}
+
+#[test]
+fn stop_signal_interrupts_the_run_in_every_state() {
+    let mut pending_run_ids = PendingRunIds::default();
+    pending_run_ids.record_stop_signal();
+    assert_eq!(
+        pending_run_ids.run_outcome.exit_code(),
+        crate::ExitCode::Interrupted,
+        "an external stop signal sets 130 regardless of the TUI state it arrives in"
+    );
+}
+
+#[tokio::test]
+async fn new_prompt_starts_a_fresh_run_outcome() {
+    let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+    let mut pending_run_ids = PendingRunIds::default();
+    pending_run_ids.run_outcome.record_approval_denied();
+    pending_run_ids.run_outcome.record_root_error();
+    pending_run_ids.record_stop_signal();
+
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        vec![Effect::SubmitPrompt { steer: false }],
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut pending_run_ids,
+    )
+    .await;
+
+    assert_eq!(
+        pending_run_ids.run_outcome,
+        RunOutcome::default(),
+        "only the latest turn decides the exit code"
+    );
+}
+
+#[tokio::test]
+async fn steer_keeps_the_running_turn_outcome() {
+    let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+    let mut pending_run_ids = PendingRunIds::default();
+    pending_run_ids.run_outcome.record_approval_denied();
+
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        vec![Effect::SubmitPrompt { steer: true }],
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut pending_run_ids,
+    )
+    .await;
+
+    assert_eq!(
+        pending_run_ids.run_outcome.exit_code(),
+        crate::ExitCode::ApprovalDenied,
+        "a steer joins the running turn, so its outcome must stay"
+    );
+}

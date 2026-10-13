@@ -34,8 +34,10 @@ use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::ProfileConfig;
 use crate::events::{spawn_crossterm_bridge, AppAction};
+use crate::exit_code::ExitCode;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
+use crate::run_outcome::RunOutcome;
 use crate::session_title::{SessionTitleUpdate, TitleAttempt};
 use crate::tui_reducer_state::{
     AppState, ConfirmKey, DomainEvent, Effect, SlashOverlay, TuiDisplayMetadata, TuiMode,
@@ -57,7 +59,9 @@ use models::{
     start_model_list, wait_for_model_list, PendingModelList,
 };
 use sessions::{picker_mut, selection_error, SessionResult, SessionTasks};
-use terminal::{initialize_terminal, install_sigint_relay, set_terminal_title, TerminalTitleGuard};
+use terminal::{
+    initialize_terminal, install_stop_signal_relay, set_terminal_title, TerminalTitleGuard,
+};
 use updates::{app_state_to_tui_state, prepare_child_replay_effects, process_one_update};
 
 pub use terminal::{ArboardClipboard, ClipboardSink, NoopClipboard};
@@ -156,6 +160,7 @@ where
         tui_runtime,
     )
     .await
+    .map(|(tui_state, _outcome)| tui_state)
 }
 
 struct TitleDriver {
@@ -224,7 +229,7 @@ async fn run_tui_with_title<B>(
     mut action_rx: mpsc::Receiver<AppAction>,
     clipboard: &mut dyn ClipboardSink,
     tui_runtime: TuiRuntime,
-) -> anyhow::Result<TuiState>
+) -> anyhow::Result<(TuiState, RunOutcome)>
 where
     B: Backend,
     B::Error: std::error::Error + Send + Sync + 'static,
@@ -519,6 +524,11 @@ where
                     continue;
                 }
 
+                // Ctrl+C/Esc do not come through here: only an external signal
+                // interrupts the run, whatever the TUI is showing.
+                if matches!(action, AppAction::StopSignal) {
+                    pending_run_ids.record_stop_signal();
+                }
                 let Some(event) = app_action_to_tui_event(action) else { continue };
                 let was_loading_models = matches!(state.slash_overlay, SlashOverlay::LoadingModels);
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
@@ -699,6 +709,8 @@ where
     }.await;
 
     abort_pending_model_list(&mut pending_model_list);
+    // Updates drained during teardown are not recorded in the run outcome:
+    // closing the agent cancels its streams, which is not a user interruption.
     {
         let finishing = session_tasks.finish();
         tokio::pin!(finishing);
@@ -729,7 +741,7 @@ where
         }
     }
     event_loop_result?;
-    Ok(app_state_to_tui_state(state))
+    Ok((app_state_to_tui_state(state), pending_run_ids.run_outcome))
 }
 
 fn report_unactivated_clone(
@@ -863,7 +875,7 @@ impl App for TuiApp {
 
         let (action_tx, action_rx) = mpsc::channel::<AppAction>(CHANNEL_CAPACITY);
         spawn_crossterm_bridge(action_tx.clone());
-        install_sigint_relay(action_tx)?;
+        install_stop_signal_relay(action_tx)?;
 
         let (agent, ui_rx) = self
             .factory
@@ -908,7 +920,16 @@ impl App for TuiApp {
         {
             eprintln!("Clone created but not activated: {clone_id}");
         }
-        result.map(|_| 0u8)
+        match result {
+            Ok((_, outcome)) => Ok(u8::from(outcome.exit_code())),
+            // The terminal was already up, so a failure while driving the TUI
+            // is a general execution error, not a startup error (exit code 2).
+            Err(error) => {
+                tracing::error!(%error, "TUI run failed");
+                eprintln!("error: {error}");
+                Ok(u8::from(ExitCode::GeneralError))
+            }
+        }
     }
 }
 

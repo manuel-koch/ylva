@@ -1,6 +1,7 @@
 //! Provider-independent session command orchestration.
 
 use crate::cli::SessionCommand;
+use crate::exit_code::ExitCode;
 use crate::store::{
     default_chats_root, project_key, MaintenanceAction, SessionSelection, SessionSummary, Store,
 };
@@ -173,7 +174,11 @@ fn run_for_project(
                 writeln!(diagnostics, "error: {failure}")?;
                 tracing::error!(%failure, "session maintenance failed");
             }
-            Ok(u8::from(!report.failures.is_empty()))
+            if report.failures.is_empty() {
+                Ok(u8::from(ExitCode::Success))
+            } else {
+                Ok(u8::from(ExitCode::GeneralError))
+            }
         }
     }
 }

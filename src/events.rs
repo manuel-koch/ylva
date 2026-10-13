@@ -38,10 +38,10 @@ pub enum AppAction {
     Escape,
     /// F1 pressed — toggle Help popup.
     ShowHelp,
-    /// OS SIGINT (external, e.g. `kill -INT`): interrupt immediately, no
+    /// External SIGINT or SIGTERM (e.g. `kill -INT`): stop immediately, no
     /// double-press. Distinct from `CtrlC`, which is a terminal key event that
     /// follows the double-press confirm.
-    SigInt,
+    StopSignal,
     /// All other key events forwarded to the main task.
     KeyInput(KeyEvent),
     /// Mouse events forwarded to the main task.

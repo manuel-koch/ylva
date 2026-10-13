@@ -261,6 +261,7 @@ pub(super) async fn process_one_update(
     clipboard: &mut dyn ClipboardSink,
     pending_run_ids: &mut PendingRunIds,
 ) -> ActionOutcome {
+    pending_run_ids.run_outcome.record_update(update);
     if let UiUpdate::ToolError {
         id,
         error,

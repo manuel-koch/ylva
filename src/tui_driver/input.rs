@@ -35,7 +35,7 @@ pub(super) fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent> {
         AppAction::CtrlC => Some(TuiEvent::Input(InputEvent::CtrlC)),
         AppAction::Escape => Some(TuiEvent::Input(InputEvent::Escape)),
         AppAction::ShowHelp => Some(TuiEvent::Input(InputEvent::ShowHelp)),
-        AppAction::SigInt => Some(TuiEvent::Input(InputEvent::SigInt)),
+        AppAction::StopSignal => Some(TuiEvent::Input(InputEvent::StopSignal)),
         AppAction::KeyInput(event) => Some(TuiEvent::Input(InputEvent::KeyInput(event))),
         AppAction::Paste(text) => Some(TuiEvent::Input(InputEvent::Paste(text))),
         AppAction::MouseInput(mouse) => Some(TuiEvent::Mouse(mouse)),

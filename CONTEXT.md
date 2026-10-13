@@ -241,3 +241,19 @@ session ID, linked back by `cloned_from`. The source file is only read — it
 is never repaired, appended to, or rewritten — and all new writes go to the
 clone. Only root sessions can be cloned.
 _Avoid_: copy, fork, duplicate
+
+## Run outcome
+
+**Run outcome**:
+The terminal result recorded while a run is active: interrupted, failed,
+approval denied, or successful. It maps to exactly one exit code. Tool results
+do not contribute to it. "Interrupted" means an external SIGINT or SIGTERM aborted the run; a
+user stop (Ctrl+C or Esc in the TUI) does not count. In the TUI the outcome
+covers only the latest turn: a new prompt starts a fresh one, and a steer joins
+the running turn. An external signal sets it in any TUI state, including idle.
+_Avoid_: final status, result code
+
+**Exit code**:
+The documented process status that ends a Ylva process. Its table is the
+contract in `docs/cli-options.md`.
+_Avoid_: return code, status code

@@ -51,6 +51,36 @@ variable is set when `--color=auto` is selected. Use `--color=no` to disable
 them explicitly, or `--color=yes` to force them even for non-terminal output,
 `TERM=dumb`, or `NO_COLOR`. The flag only affects CLI output, not the TUI.
 
+## Exit codes
+
+Every `ylva` process ends with exactly one of these codes. The table covers chat
+runs in headless and TUI mode and the `ylva session` subcommands. The `--help`
+epilog lists the same codes, generated from the same source.
+
+| Code | Meaning | Examples |
+| --- | --- | --- |
+| `0` | Successful run | The response finished, and no error, interruption, or approval denial was recorded in the latest turn. `--help` and `--version` also exit `0`. |
+| `1` | General execution error | A provider or stream failure, a root-level error such as the tool-use iteration cap, an I/O failure while a run is in progress, or a partial `ylva session` maintenance failure. |
+| `2` | Usage or startup error; no run started | An unknown flag, a missing flag value, a `--log-file` that cannot be opened, an unresolvable profile or `--agent`, an unknown `--conversation-id`, a failing `init`. |
+| `3` | Approval required but denied | A tool needed approval and was denied. Headless mode cannot ask, so it denies every such call; in the TUI a user denial counts too. The run continues after a denial. |
+| `130` | User interruption (SIGINT or SIGTERM) | An external SIGINT or SIGTERM that aborts the run: Ctrl+C in headless mode, or a signal to the TUI in any state. `130` is the shell convention `128 + 2`. |
+
+When several outcomes occur in one run, the highest-precedence one sets the code:
+`130`, then `1`, then `3`, then `0`. A usage or startup error (`2`) ends the
+process before a run starts, so it never competes with them.
+
+Headless Ctrl+C (SIGINT) and SIGTERM are cooperative. The first signal stops the
+agent, the run ends through the normal path, the resume hint is printed, and the
+process exits `130`. Later signals during that shutdown do not force an exit.
+SIGHUP is not handled.
+
+In the TUI, only the latest turn counts. A new prompt starts a fresh outcome, and a
+steer joins the running turn. Ctrl+C and Esc stop a turn without setting `130`,
+because Ctrl+C is also how the TUI quits. An external SIGINT or SIGTERM always sets
+`130` in the TUI, in any state: it quits an idle TUI at once, and it stops a running
+turn (including a live subagent) before quitting. The TUI then restores the
+terminal and prints the resume hint, as on every other TUI exit.
+
 ## Session commands
 
 `ylva session list [--include-subagents]` lists every session for the canonicalized
@@ -108,8 +138,9 @@ sessions as `would compress <uuid>` or `would uncompress <uuid>`, respectively,
 without listing storage files. Active writers are refused even in previews. Without
 `--dry-run`, a valid selector executes; no `--yes` flag is required. Unknown
 explicit IDs fail before any target changes. Independent targets/groups
-continue after runtime failures with diagnostics on stderr and a nonzero exit
-status. No-ops print `already compressed <uuid>` or `already uncompressed <uuid>`,
+continue after runtime failures with diagnostics on stderr and exit with the
+general-error code `1` (see [exit codes](#exit-codes)). No-ops print
+`already compressed <uuid>` or `already uncompressed <uuid>`,
 including in previews.
 
 Normal maintenance prints one `deleted <uuid>`, `compressed <uuid>`, or
@@ -132,8 +163,8 @@ For locking, archive recovery and platform constraints, see
 
 Launches start a fresh session unless `--conversation-id` or `--clone` is supplied.
 
-On exit — success, error, or an unrecognized-tool/provider failure, as long as
-a session was persisted — Ylva prints the session id and a ready-to-paste
+On exit — with any code in the [exit-code table](#exit-codes), as long as a
+session was persisted — Ylva prints the session id and a ready-to-paste
 command to stderr:
 
 ```text

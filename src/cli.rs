@@ -40,7 +40,11 @@ pub enum CliColorMode {
 
 /// Parsed command line for the `ylva` binary.
 #[derive(Parser, Debug)]
-#[command(about = "Ylva - Agent-Harness", disable_version_flag = true)]
+#[command(
+    about = "Ylva - Agent-Harness",
+    disable_version_flag = true,
+    after_help = crate::exit_code::help_epilog()
+)]
 pub struct Cli {
     /// Force headless mode instead of auto-detecting a TUI from stdout
     #[arg(long)]

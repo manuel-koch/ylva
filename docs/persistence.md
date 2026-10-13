@@ -296,7 +296,8 @@ by surviving roots or clones are retained and reported. Explicit deletion of a
 referenced subagent transcript fails. `cloned_from` is historical provenance:
 deleting the source never cascades to its clones. A locked root blocks deletion
 of its entire descendant group. Independent groups continue after runtime
-failures; a partial batch returns a nonzero status. Deletion is not a multi-file
+failures; a partial batch exits with the general-error code (see
+[exit codes](./cli-options.md#exit-codes)). Deletion is not a multi-file
 transaction. Normal deletion reports each deleted session by UUID, including
 descendants, as `deleted <uuid>`; dry-run reports the same selected sessions as
 `would delete <uuid>`. Neither lists storage files. Retained descendants and

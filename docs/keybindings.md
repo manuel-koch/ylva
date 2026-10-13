@@ -128,6 +128,20 @@ sequences. Terminals that encode `shift-enter` as a line feed (such as Zed's
 terminal) are normalized to the same newline action. Other unsupported
 terminals may fall back to a plain `enter` and send the message.
 
+## Process signals
+
+An external SIGINT or SIGTERM (for example `kill -INT <pid>`) skips the
+double-press rules above, whatever the focus:
+
+| Signal | TUI state | Action | Exit code |
+|---|---|---|---|
+| SIGINT / SIGTERM | Idle | Quit at once | `130` |
+| SIGINT / SIGTERM | Pending, Streaming, ToolPending, clarify | Stop the agent; quit when it reports idle | `130` |
+| SIGINT / SIGTERM | Root idle, subagent still running | Stop the agent and its subagents; quit when idle | `130` |
+
+Every signal quit prints the resume hint after the terminal is restored. A second
+signal has no special handling. SIGHUP is not handled.
+
 ## Build info
 
 The Help popup (`F1`) renders the `BuildInfo` values: version, git commit,

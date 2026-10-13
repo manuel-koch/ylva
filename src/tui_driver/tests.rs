@@ -347,6 +347,7 @@ async fn tui_loads_prior_session_user_messages_into_input_history() {
         },
     )
     .await
+    .map(|(tui_state, _outcome)| tui_state)
     .expect("TUI exits cleanly");
 
     assert_eq!(

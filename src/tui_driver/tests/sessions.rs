@@ -744,7 +744,7 @@ fn cancelling_after_clone_creation_keeps_clone_visible_and_old_root_usable() {
             },
         );
         let (state, ()) = tokio::join!(run, controller);
-        let state = state.unwrap();
+        let (state, _outcome) = state.unwrap();
         assert_eq!(
             exit_snapshot.lock().unwrap().as_ref().unwrap().session_id,
             active_id
@@ -864,7 +864,7 @@ fn assembled_session_picker_switches_resume_and_clone_and_exit_identity() {
                 },
             );
             let (state, ()) = tokio::join!(run, controller);
-            let state = state.unwrap();
+            let (state, _outcome) = state.unwrap();
             assert!(matches!(state.slash_overlay, SlashOverlay::Hidden));
             let active_id = exit_snapshot.lock().unwrap().as_ref().unwrap().session_id;
             assert_eq!(active_id == original_id, return_to_original);

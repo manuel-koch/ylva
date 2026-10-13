@@ -20,6 +20,7 @@ use super::models::{apply_model_list_result, fetch_model_list, switch_model};
 use super::{ActionOutcome, ClipboardSink};
 use crate::agent::{AgentCommand, UiUpdate};
 use crate::llm::engine::Engine;
+use crate::run_outcome::RunOutcome;
 use crate::tui_reducer_state::{AppState, Effect, SlashOverlay};
 use ratatui_textarea::TextArea;
 use std::sync::Arc;
@@ -50,9 +51,18 @@ use tokio::sync::mpsc;
 pub(super) struct PendingRunIds {
     tool_run_ids: std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
     clarify_run_id: Option<uuid::Uuid>,
+    /// Terminal facts for the exit code. Recorded here because this struct is
+    /// already threaded through every update and effect path.
+    pub(super) run_outcome: RunOutcome,
 }
 
 impl PendingRunIds {
+    /// An external SIGINT or SIGTERM reached the TUI. It interrupts the run
+    /// whether a turn is active or the TUI is idle, because the TUI quits on it.
+    pub(super) fn record_stop_signal(&mut self) {
+        self.run_outcome.record_interruption();
+    }
+
     pub(super) fn record_update(&mut self, update: &UiUpdate) {
         if let UiUpdate::ToolPending {
             id,
@@ -95,7 +105,12 @@ pub(super) async fn execute_effects(
 ) -> ActionOutcome {
     for effect in effects {
         match effect {
-            Effect::SubmitPrompt { .. } => {
+            Effect::SubmitPrompt { steer } => {
+                // Only a fresh turn starts a new outcome. A steer joins the
+                // running turn, so its outcome stays.
+                if !steer {
+                    pending_run_ids.run_outcome = RunOutcome::default();
+                }
                 let raw_text = textarea.lines().join("\n");
                 let text = dedent(&raw_text);
                 let _ = cmd_tx.try_send(AgentCommand::Prompt(text));
@@ -125,6 +140,7 @@ pub(super) async fn execute_effects(
                 let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::ApproveTool { id }));
             }
             Effect::DenyTool { id, reason } => {
+                pending_run_ids.run_outcome.record_approval_denied();
                 state.apply_tool_denied(id, &reason);
                 let run_id = pending_run_ids.tool_run_ids.remove(&id);
                 let _ =

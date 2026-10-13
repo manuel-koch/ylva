@@ -21,6 +21,7 @@ pub mod cli_driver;
 pub mod config;
 pub mod conversation_render_cache;
 pub mod events;
+pub mod exit_code;
 pub mod highlight;
 pub mod http;
 pub mod init_command;
@@ -29,10 +30,12 @@ pub mod logging;
 pub mod markdown;
 pub mod presenter;
 pub mod render;
+pub mod run_outcome;
 pub mod sandbox;
 pub mod session_command;
 pub(crate) mod session_title;
 pub mod slash_command;
+pub(crate) mod stop_signal;
 pub mod store;
 pub(crate) mod theme;
 pub mod tui_driver;
@@ -45,6 +48,7 @@ pub mod ylva_home;
 mod test_support;
 
 pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
+pub use run_outcome::RunOutcome;
 
 pub use agent::child_agent_manager;
 pub use agent::tools::{
@@ -82,6 +86,7 @@ pub use config::{
     PROFILE_CONFIG_FILE_NAME, PROFILE_ENV_FILE_NAME,
 };
 pub use events::AppAction;
+pub use exit_code::ExitCode;
 pub use highlight::{active_theme, set_active_theme, ThemeName};
 pub use init_command::{run_init, run_init_workspace, InitReport};
 pub use llm::engine;

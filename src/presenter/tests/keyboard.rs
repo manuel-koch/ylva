@@ -633,14 +633,82 @@ fn show_help_toggles_focus_to_help_popup() {
 }
 
 #[test]
-fn sigint_sends_stop_agent_effect_immediately() {
+fn stop_signal_quits_when_idle_in_every_focus() {
+    for focus in [Focus::MainInput, Focus::HelpPopup] {
+        let mut state = AppState::new();
+        state.focus = focus.clone();
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::StopSignal),
+            &empty_textarea(),
+        );
+        assert_eq!(effects, vec![Effect::Quit], "focus {focus:?}");
+        assert_eq!(state.mode, TuiMode::Idle, "focus {focus:?}");
+    }
+}
+
+#[test]
+fn stop_signal_stops_busy_agent_in_every_focus() {
+    let tool_id = Uuid::new_v4();
+    let busy_cases = [
+        (TuiMode::Pending, Focus::MainInput),
+        (TuiMode::Streaming, Focus::MainInput),
+        (TuiMode::Streaming, Focus::HelpPopup),
+        (
+            TuiMode::Streaming,
+            Focus::ToolApproval {
+                tool_id,
+                tool_name: "shell".to_string(),
+            },
+        ),
+        (
+            TuiMode::ClarifyPending {
+                id: Uuid::new_v4(),
+                question: "which?".to_string(),
+                context: None,
+                choices: None,
+            },
+            Focus::MainInput,
+        ),
+    ];
+    for (mode, focus) in busy_cases {
+        let mut state = AppState::new();
+        state.mode = mode.clone();
+        state.focus = focus.clone();
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::StopSignal),
+            &empty_textarea(),
+        );
+        assert_eq!(effects, vec![Effect::StopAgent], "{mode:?} / {focus:?}");
+        assert_eq!(state.mode, TuiMode::Aborting, "{mode:?} / {focus:?}");
+        assert!(state.aborting_exit, "{mode:?} / {focus:?}");
+    }
+}
+
+#[test]
+fn stop_signal_stops_idle_root_while_subagent_still_runs() {
     let mut state = AppState::new();
+    state.chat_entries.push(ChatEntry::ToolBubble {
+        id: Uuid::new_v4(),
+        name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+        state: Box::new(ToolCallState::Running {
+            arguments: serde_json::json!({}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            progress_arguments: vec![],
+        }),
+        collapsed: false,
+    });
+    assert_eq!(state.mode, TuiMode::Idle);
     let effects = update(
         &mut state,
-        TuiEvent::Input(InputEvent::SigInt),
+        TuiEvent::Input(InputEvent::StopSignal),
         &empty_textarea(),
     );
-    assert!(effects.contains(&Effect::StopAgent));
+    assert_eq!(effects, vec![Effect::StopAgent]);
+    assert_eq!(state.mode, TuiMode::Aborting);
+    assert!(state.aborting_exit);
 }
 
 #[test]

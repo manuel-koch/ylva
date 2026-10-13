@@ -113,8 +113,8 @@ impl Focus {
 pub enum InputEvent {
     /// F1 pressed — toggle help popup.
     ShowHelp,
-    /// OS SIGINT (external `kill -INT`): interrupt immediately, no confirm.
-    SigInt,
+    /// External SIGINT or SIGTERM: stop immediately, no confirm.
+    StopSignal,
     /// Ctrl+C terminal key event; follows double-press confirm logic.
     CtrlC,
     /// Esc key; interpreted based on current [`Focus`] and [`TuiMode`].
