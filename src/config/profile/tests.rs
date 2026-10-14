@@ -31,5 +31,6 @@ fn write_agent_type_file(root: &Path, relative_path: &str, contents: &str) {
 
 mod backends;
 mod loading;
+mod profile_name;
 mod sandbox;
 mod validation;

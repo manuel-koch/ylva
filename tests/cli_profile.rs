@@ -287,6 +287,163 @@ fn an_unusable_chats_root_is_a_hard_error() {
     );
 }
 
+/// A `--profile` value that fails the name rule is a usage error naming the
+/// flag, so path traversal never reaches profile path construction.
+#[test]
+fn a_profile_name_with_path_separators_is_a_usage_error() {
+    let ylva_home = TempDir::new().expect("tempdir");
+    for invalid_name in ["../x", "a/b"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
+            .current_dir(ylva_home.path())
+            .args(["--profile", invalid_name, "session", "list"])
+            .output()
+            .expect("spawn the ylva binary");
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "--profile {invalid_name} must exit 2"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--profile"),
+            "the error must name the flag: {stderr}"
+        );
+    }
+}
+
+/// A valid `--profile` name passes the rule and resolves to its profile.
+#[test]
+fn a_valid_profile_name_resolves_to_its_profile() {
+    let ylva_home = TempDir::new().expect("tempdir");
+    let profile_directory = ylva_home
+        .path()
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join("work-2");
+    fs::create_dir_all(&profile_directory).expect("create profile directory");
+    fs::write(profile_directory.join("config.toml"), "").expect("write profile config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
+        .current_dir(ylva_home.path())
+        .args(["--profile", "work-2", "session", "list"])
+        .output()
+        .expect("spawn the ylva binary");
+
+    assert!(
+        output.status.success(),
+        "a valid profile name must resolve: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `profile list` run inside a workspace shows the workspace's and the Ylva home's
+/// profiles, and marks a home profile shadowed when the workspace has the same name.
+#[test]
+fn profile_list_merges_workspace_and_home_profiles_with_shadow_marks() {
+    let ylva_home = TempDir::new().expect("tempdir");
+    let workspace = TempDir::new().expect("tempdir");
+    for profile_directory in [
+        ylva_home
+            .path()
+            .join(ylva::PROFILES_DIRECTORY_NAME)
+            .join("shared"),
+        ylva_home
+            .path()
+            .join(ylva::PROFILES_DIRECTORY_NAME)
+            .join("home-only"),
+        workspace
+            .path()
+            .join(".ylva")
+            .join(ylva::PROFILES_DIRECTORY_NAME)
+            .join("shared"),
+        workspace
+            .path()
+            .join(".ylva")
+            .join(ylva::PROFILES_DIRECTORY_NAME)
+            .join("work"),
+    ] {
+        fs::create_dir_all(profile_directory).expect("create profile directory");
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
+        .current_dir(workspace.path())
+        .args(["profile", "list"])
+        .output()
+        .expect("spawn the ylva binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 5, "stdout: {stdout}");
+    assert!(lines[0].starts_with("shared  ") && !lines[0].contains("shadowed"));
+    assert!(lines[1].starts_with("work  ") && !lines[1].contains("shadowed"));
+    assert!(
+        lines[2].is_empty(),
+        "scopes are separated by a blank line: {stdout}"
+    );
+    assert!(lines[3].starts_with("home-only  ") && !lines[3].contains("shadowed"));
+    assert!(lines[4].starts_with("shared  ") && lines[4].ends_with("(shadowed by workspace)"));
+}
+
+/// `profile list` writes profile directories as `~`-relative paths when they sit
+/// under the home directory, and pads the name column without a header.
+#[test]
+fn profile_list_abbreviates_the_home_directory_to_tilde() {
+    let home = TempDir::new().expect("home tempdir");
+    let home_path = fs::canonicalize(home.path()).expect("canonical home");
+    let ylva_home = home_path.join(".ylva");
+    let workspace_root = home_path.join("workspace");
+    fs::create_dir_all(
+        ylva_home
+            .join(ylva::PROFILES_DIRECTORY_NAME)
+            .join("home-only"),
+    )
+    .expect("create home profile directory");
+    fs::create_dir_all(
+        workspace_root
+            .join(".ylva")
+            .join(ylva::PROFILES_DIRECTORY_NAME)
+            .join("work"),
+    )
+    .expect("create workspace profile directory");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &home_path)
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, &ylva_home)
+        .current_dir(&workspace_root)
+        .args(["profile", "list"])
+        .output()
+        .expect("spawn the ylva binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout,
+        "work       ~/workspace/.ylva/profiles/work  (no config.toml)\n\
+         \n\
+         home-only  ~/.ylva/profiles/home-only       (no config.toml)\n"
+    );
+}
+
 /// Write a profile config for the implicit `default` profile.
 fn write_default_profile_config(ylva_home: &TempDir, contents: &str) {
     let profile_directory = ylva_home

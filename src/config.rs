@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::home_relative_path::display_path;
 use crate::ylva_home::{ylva_home, YLVA_DIR_NAME};
 
 mod agent;
@@ -33,8 +34,8 @@ mod web_search;
 pub use agent::AgentConfig;
 pub use agent_type_file::AgentTypeDefinition;
 pub use profile::{
-    profile_config_source_path, AgentCompactionConfig, CompactionConfig, ProfileConfig,
-    ToolSandboxConfig,
+    is_valid_profile_name, profile_config_source_path, AgentCompactionConfig, CompactionConfig,
+    ProfileConfig, ToolSandboxConfig, MAX_PROFILE_NAME_LENGTH,
 };
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
 pub use web_fetch::WebFetchConfig;
@@ -66,9 +67,12 @@ pub const DEFAULT_PROFILE_NAME: &str = "default";
 /// ignoring a config file the user did write would hide their intent.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("profile '{profile_name}' not found: no config file at {}", path.display())]
+    #[error(
+        "profile '{profile_name}' not found: no config file at {}",
+        display_path(path)
+    )]
     ProfileNotFound { profile_name: String, path: PathBuf },
-    #[error("cannot read configuration file at {}: {source}", path.display())]
+    #[error("cannot read configuration file at {}: {source}", display_path(path))]
     Unreadable {
         path: PathBuf,
         #[source]
@@ -76,28 +80,28 @@ pub enum ConfigError {
     },
     #[error(
         "trusted instruction file {} exceeds the {}-byte limit",
-        path.display(),
+        display_path(path),
         limit
     )]
     OversizedInstructionFile { path: PathBuf, limit: usize },
     #[error(
         "trusted instruction file {} resolves outside the trust boundary {}",
-        path.display(),
-        root.display()
+        display_path(path),
+        display_path(root)
     )]
     InstructionFileOutsideTrustBoundary { path: PathBuf, root: PathBuf },
-    #[error("malformed profile config at {}: {source}", path.display())]
+    #[error("malformed profile config at {}: {source}", display_path(path))]
     Malformed {
         path: PathBuf,
         #[source]
         source: toml::de::Error,
     },
-    #[error("malformed agent-type file at {}: {message}", path.display())]
+    #[error("malformed agent-type file at {}: {message}", display_path(path))]
     MalformedAgentType { path: PathBuf, message: String },
     #[error(
         "agent type '{agent_type}' has conflicting {scope}-scope files at {} and {}",
-        first_path.display(),
-        second_path.display()
+        display_path(first_path),
+        display_path(second_path)
     )]
     ConflictingAgentTypeFiles {
         agent_type: String,
@@ -107,10 +111,9 @@ pub enum ConfigError {
     },
     #[error(
         "agent type '{agent_type}' has an ambiguous {scope}-scope definition: \
-         inline table at {} conflicts with file {}"
-        ,
-        toml_path.display(),
-        file_path.display()
+         inline table at {} conflicts with file {}",
+        display_path(toml_path),
+        display_path(file_path)
     )]
     AmbiguousAgentTypeDefinition {
         agent_type: String,
@@ -118,28 +121,28 @@ pub enum ConfigError {
         toml_path: PathBuf,
         file_path: PathBuf,
     },
-    #[error("cannot read profile environment at {}: {source}", path.display())]
+    #[error("cannot read profile environment at {}: {source}", display_path(path))]
     EnvironmentUnreadable {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("malformed profile environment at {}: {message}", path.display())]
+    #[error("malformed profile environment at {}: {message}", display_path(path))]
     EnvironmentMalformed { path: PathBuf, message: String },
     #[error(
         "profile config at {} references missing environment variable '{name}'",
-        path.display()
+        display_path(path)
     )]
     MissingEnvironmentVariable { path: PathBuf, name: String },
     #[error(
         "profile config at {} contains invalid environment variable reference '{reference}'",
-        path.display()
+        display_path(path)
     )]
     InvalidEnvironmentReference { path: PathBuf, reference: String },
     #[error(
         "profile config at {} has an invalid sandbox rule for tool '{tool}' \
          ([tools.{tool}].rules[{index}]): expected {expected}",
-        path.display()
+        display_path(path)
     )]
     InvalidSandboxRuleKind {
         path: PathBuf,
@@ -150,7 +153,7 @@ pub enum ConfigError {
     #[error(
         "profile config at {} has a misplaced wildcard in [tools.{tool}].rules[{index}].command: \
          `*`/`**` only match trailing arguments, so they may only appear as the last element",
-        path.display()
+        display_path(path)
     )]
     MisplacedCommandGlobWildcard {
         path: PathBuf,
@@ -161,7 +164,7 @@ pub enum ConfigError {
         "profile config at {} has a `target` parameter on [tools.{tool}].rules[{index}]: \
          `target` is only valid on a `network_request` rule (it scopes that rule to request \
          targets matching its `scheme://host[:port]` target pattern)",
-        path.display()
+        display_path(path)
     )]
     MisplacedSandboxRuleTarget {
         path: PathBuf,
@@ -170,7 +173,7 @@ pub enum ConfigError {
     },
     #[error(
         "profile config at {} has an invalid [tools.{tool}].rules[{index}].target: {detail}",
-        path.display()
+        display_path(path)
     )]
     InvalidSandboxRuleTarget {
         path: PathBuf,
@@ -180,7 +183,7 @@ pub enum ConfigError {
     },
     #[error(
         "profile config at {} has an invalid [web_search] backend '{backend}'; expected one of: {expected}",
-        path.display()
+        display_path(path)
     )]
     InvalidWebSearchBackend {
         path: PathBuf,
@@ -189,7 +192,7 @@ pub enum ConfigError {
     },
     #[error(
         "profile config at {} has an invalid {key} for [web_search] backend '{backend}': {reason}",
-        path.display()
+        display_path(path)
     )]
     InvalidWebSearchBackendSetting {
         path: PathBuf,
@@ -199,7 +202,7 @@ pub enum ConfigError {
     },
     #[error(
         "profile config at {} has an invalid [web_fetch] backend '{backend}'; expected one of: {expected}",
-        path.display()
+        display_path(path)
     )]
     InvalidWebFetchBackend {
         path: PathBuf,
@@ -209,12 +212,12 @@ pub enum ConfigError {
     #[error(
         "profile config at {} has max_tool_iterations = 0 for agent type '{agent_type}'; \
          expected at least 1",
-        path.display()
+        display_path(path)
     )]
     InvalidMaxToolIterations { path: PathBuf, agent_type: String },
     #[error(
         "profile config at {} has an invalid compaction setting for '{engine}': {detail}",
-        path.display()
+        display_path(path)
     )]
     InvalidCompactionSetting {
         path: PathBuf,

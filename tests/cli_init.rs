@@ -114,15 +114,20 @@ fn workspace_init_seeds_the_profile_starters() {
             .join(ylva::PROFILE_CONFIG_FILE_NAME)
     )
     .expect("read placeholder config")
-    .contains("example.invalid"));
-    assert!(fs::read_to_string(
+    .contains("example-ollama-local"));
+    let gitignore = fs::read_to_string(
         workspace_root
             .path()
             .join(ylva::YLVA_DIR_NAME)
-            .join(".gitignore")
+            .join(".gitignore"),
     )
-    .expect("read workspace gitignore")
-    .contains(".env"));
+    .expect("read workspace gitignore");
+    for entry in [".env", ".envrc", "chats/"] {
+        assert!(
+            gitignore.lines().any(|line| line == entry),
+            "workspace gitignore lists {entry}"
+        );
+    }
 }
 
 #[test]
@@ -163,11 +168,10 @@ fn workspace_init_does_not_treat_global_home_as_workspace_root() {
     assert!(fs::read_to_string(workspace_environment_path)
         .expect("read workspace environment starter")
         .starts_with('#'));
-    assert!(
-        fs::read_to_string(workspace_root.join(ylva::YLVA_DIR_NAME).join(".gitignore"))
-            .expect("read workspace gitignore")
-            .contains(".env")
-    );
+    let gitignore = fs::read_to_string(workspace_root.join(ylva::YLVA_DIR_NAME).join(".gitignore"))
+        .expect("read workspace gitignore");
+    assert!(gitignore.lines().any(|line| line == ".env"));
+    assert!(gitignore.lines().any(|line| line == "chats/"));
     assert_eq!(
         fs::read_to_string(global_config_path).expect("read global config"),
         "global config"

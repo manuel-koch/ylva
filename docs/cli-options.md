@@ -8,14 +8,14 @@ surface.
 
 | Flag | Type | Accepted values | Default | Description |
 | --- | --- | --- | --- | --- |
-| `--version` | none | — | — | Print build provenance (`Version`, `Commit`, `Built`, `Profile`) and exit. Takes precedence over all other arguments. |
+| `--version` | none | — | — | Print build provenance (`Version`, `Commit`, `Built`, `Profile`, `Features`), the Ylva home (`Ylva home:`), and the workspace root (`Workspace root:`) for the current directory, then exit. Paths under `$HOME` are shown with a leading `~`. Takes precedence over all other arguments. |
 | `--help` | none | — | — | Print usage (all flags and subcommands) to stdout and exit with code `0`. |
-| `init [--workspace] [--force]` | subcommand | `--workspace`, `--force` | — | Write configuration starters and exit before provider/session startup. Without `--workspace`, writes `SOUL.md`, `profiles/default/config.toml`, and an annotated `profiles/default/.env` under `YLVA_HOME` (or `${HOME}/.ylva`); `--workspace` writes the default profile config and `.env` starters plus `.gitignore` under the discovered workspace root's `.ylva/`; both modes write-if-missing unless `--force` is supplied. Agent-type files are not seeded. |
+| `init [--workspace] [--force]` | subcommand | `--workspace`, `--force` | — | Write configuration starters and exit before provider/session startup. Without `--workspace`, writes `SOUL.md`, `profiles/default/config.toml`, and an annotated `profiles/default/.env` under `YLVA_HOME` (or `${HOME}/.ylva`); `--workspace` writes the default profile config and `.env` starters plus `.gitignore` under the discovered workspace root's `.ylva/`; both modes write-if-missing unless `--force` is supplied. The workspace `.gitignore` lists `.env`, `.envrc`, and `chats/`; an existing one keeps its lines and only the missing entries are appended. Agent-type files are not seeded. |
 | `--no-tui` | none | — | — | Force headless (CLI) mode even when stdout is a terminal. Useful for scripting or debugging without the TUI. |
 | `--color=<mode>` | enum | `auto`, `no`, `yes` | `auto` | Select CLI color behavior: detect terminal support, force no colors, or force colors. Has no effect on TUI rendering. |
 | `--prompt <text>` | string | any text | *none* | Initial user turn sent to the agent. Resolved with the precedence described below. |
-| `--profile <name>` | string | any profile directory name | `default` | Resolve `<workspace-root>/.ylva/profiles/<name>/config.toml`, then `~/.ylva/profiles/<name>/config.toml`. When `--profile` is given explicitly, a missing file at both disk layers is a hard error (exit code `2`) naming the profile. With no `--profile` flag, the implicit `default` profile uses `ProfileConfig::default()` when no disk file exists. A malformed or unreadable file at the winning layer is always an error. See `docs/configuration.md`. |
-| `--log-file <path>` | path | any writable file path | *none* | Write logs to this file. The file is opened in truncate/overwrite mode on each start, so logs never accumulate across runs. |
+| `--profile <name>` | string | a profile name: 1–64 ASCII characters, starting with a letter or digit, then letters, digits, `_`, or `-` | `default` | An invalid name is a usage error (exit code `2`). Resolve `<workspace-root>/.ylva/profiles/<name>/config.toml`, then `~/.ylva/profiles/<name>/config.toml`. When `--profile` is given explicitly, a missing file at both disk layers is a hard error (exit code `2`) naming the profile. With no `--profile` flag, the implicit `default` profile uses `ProfileConfig::default()` when no disk file exists. A malformed or unreadable file at the winning layer is always an error. See `docs/configuration.md`. |
+| `--log-file <path>` | path | any writable file path | *none* | Write logs to this file. A leading `~` and `$ENVVAR`/`${ENVVAR}` tokens are expanded, as for other path arguments. The file is opened in truncate/overwrite mode on each start, so logs never accumulate across runs. |
 | `--log-level <level>` | enum | `trace`, `debug`, `info`, `warn`, `error` | `info` | Minimum severity written. Selecting a level includes it and all higher-severity levels (`trace < debug < info < warn < error`). |
 | `--log-format <format>` | enum | `text`, `json` | `text` | Output format. `text` is human-readable; `json` produces JSONL (one JSON object per line). |
 | `--agent <type>` | string | any agent type available in the selected profile | see below | Root agent type to run as. On a fresh session it defaults to `default`; on a resume it defaults to the type the session last stored. An explicit value always wins and becomes the latest stored selection, so later resumes without the flag continue under it. A type that is absent from the selected profile is a startup error (exit code `2`), unless the flag explicitly names an available type that resolves a stale stored name. See [Resuming a session](#resuming-a-session). |
@@ -39,10 +39,14 @@ value-taking flag, including `--profile`), `--clone` without
 containing directory does not exist) prints a usage error to stderr and exits
 with code `2` — the error names the attempted path or flag. Repeating
 `--color` or `--prompt` uses the last occurrence; other
-value-taking flags may not be repeated. The `init` subcommand may follow
-global flags (`ylva --no-tui init --workspace`). The `init` subcommand also
-exits with code `2` when its target root cannot be resolved or a seeded file
-cannot be written.
+value-taking flags may not be repeated.
+
+Only `--log-file`, `--log-level`, and `--log-format` are global, so they work
+before or after a subcommand. Every other top-level flag, including `--profile`
+and `--no-tui`, must come before the subcommand (`ylva --no-tui init --workspace`).
+The `init`, `session`, and `profile` subcommands ignore `--profile` and never
+load a profile. The `init` subcommand also exits with code `2` when its target
+root cannot be resolved or a seeded file cannot be written.
 
 When the CLI writes to a terminal, its section headers and tool status lines
 use the same semantic colors as the TUI. Colors are disabled automatically for
@@ -54,14 +58,14 @@ them explicitly, or `--color=yes` to force them even for non-terminal output,
 ## Exit codes
 
 Every `ylva` process ends with exactly one of these codes. The table covers chat
-runs in headless and TUI mode and the `ylva session` subcommands. The `--help`
+runs in headless and TUI mode and the `ylva session` and `ylva profile` subcommands. The `--help`
 epilog lists the same codes, generated from the same source.
 
 | Code | Meaning | Examples |
 | --- | --- | --- |
 | `0` | Successful run | The response finished, and no error, interruption, or approval denial was recorded in the latest turn. `--help` and `--version` also exit `0`. |
-| `1` | General execution error | A provider or stream failure, a root-level error such as the tool-use iteration cap, an I/O failure while a run is in progress, or a partial `ylva session` maintenance failure. |
-| `2` | Usage or startup error; no run started | An unknown flag, a missing flag value, a `--log-file` that cannot be opened, an unresolvable profile or `--agent`, an unknown `--conversation-id`, a failing `init`. |
+| `1` | General execution error | A provider or stream failure, a root-level error such as the tool-use iteration cap, an I/O failure while a run is in progress, a partial `ylva session` maintenance failure, or a non-zero exit from the editor run by `ylva profile edit`. |
+| `2` | Usage or startup error; no run started | An unknown flag, a missing flag value, a `--log-file` that cannot be opened, an unresolvable profile or `--agent`, an unknown `--conversation-id`, a failing `init`, or a `ylva profile` refusal such as an invalid name, an existing profile without `--force`, or a broken `config.toml` in scope. |
 | `3` | Approval required but denied | A tool needed approval and was denied. Headless mode cannot ask, so it denies every such call; in the TUI a user denial counts too. The run continues after a denial. |
 | `130` | User interruption (SIGINT or SIGTERM) | An external SIGINT or SIGTERM that aborts the run: Ctrl+C in headless mode, or a signal to the TUI in any state. `130` is the shell convention `128 + 2`. |
 
@@ -158,6 +162,127 @@ Logging flags work before or after session subcommands, without loading provider
 configuration. Optional logfile logging never replaces console diagnostics.
 For locking, archive recovery and platform constraints, see
 [persistence](persistence.md#manual-maintenance-and-archive-recovery).
+
+## Profile commands
+
+`ylva profile` manages profile directories. Like `init` and `session`, it runs
+before any profile is loaded and never starts a session. Without `--workspace`
+it acts on `profiles/` under `YLVA_HOME` (or `${HOME}/.ylva`); with
+`--workspace` it acts on `<workspace-root>/.ylva/profiles/`. `--workspace`
+without a discovered workspace root exits `2`. Unlike `init --workspace`, it
+does not fall back to the current directory. Profile names follow the
+`--profile` name rule.
+
+`profile list` without `--workspace` merges both locations: when the current
+directory is inside a workspace, that workspace's profiles come first, then the
+Ylva home's. Only `list` merges; `create`, `edit`, `delete`, and `shims` keep
+the home-by-default behavior above.
+
+```shell
+ylva profile list
+ylva profile create work --shim-name office
+ylva profile edit work
+ylva profile delete work --dry-run
+ylva profile shims --workspace
+```
+
+- `list` prints one line per profile directory as `<name>  <directory>`, followed
+  by any marks. Rows are grouped by scope: the workspace's rows first, then the
+  home's, with a blank line between the groups. Names are sorted within each group.
+  Names and directories are padded into aligned columns separated by two spaces,
+  with no header. A directory
+  under `$HOME` is shown with a leading `~` (for example `~/.ylva/profiles/work`),
+  and so is the `No profiles in <directory>` line. Marks:
+  - `(shadowed by workspace)` marks a home profile whose name the current
+    workspace also defines. Ylva loads the workspace profile in that case, so
+    the home row is inactive. It appears only in the merged view, and only when
+    the current directory is inside a workspace.
+  - `(implicit default)` marks the `default` row, the profile used when no
+    `--profile` flag is given. It appears only when `profiles/default/` exists,
+    because the built-in default needs no directory.
+  - `(no config.toml)` when `config.toml` is missing.
+  - `(invalid name)` for a directory whose name fails the name rule.
+  - `(invalid config)` when `config.toml` cannot be read or does not parse as TOML.
+
+  Each mark is its own parenthesized tag, with `(implicit default)` first.
+  `list` is read-only and exits `0` for all marks.
+- `create <name>` seeds `config.toml` and `.env` with the same starters that
+  `init` writes for `default`. If either file exists, it exits `2` and changes
+  nothing, unless `--force` is given; `--force` overwrites only those two files.
+  With `--workspace`, a missing `.ylva/.gitignore` is seeded too; an existing one
+  is never overwritten, but any of its missing `.env`, `.envrc`, and `chats/`
+  entries are appended. `--shim-name <shim-name>` sets the profile's shim name
+  (see [shims](#shims)). After the `Shim <path>` line, it prints the same PATH
+  hint as `shims`. Add the shims directory to `PATH` as that hint shows; for
+  per-workspace setup, see
+  [configuration](configuration.md#managing-profiles-and-shims).
+- `delete <name>` removes `profiles/<name>/` and everything in it, with no
+  prompt and no `--yes`, as `session delete` does. It prints
+  `Deleted profile "<name>" at <directory>`. `--dry-run` prints
+  `would delete "<name>" at <directory>` and changes nothing. A missing profile, or a target
+  `config.toml` that cannot be read or parsed, exits `2` with nothing removed.
+  `delete default` is allowed; the implicit default then falls back to the
+  built-in default.
+- `edit <name>` opens `profiles/<name>/config.toml` in `$VISUAL`, then
+  `$EDITOR`; blank values count as unset. It exits `2` when the profile or its
+  `config.toml` is missing (run `create` first) and when neither variable is
+  set. The editor runs through `sh -c`, so a value such as `code --wait` works.
+  A non-zero editor exit returns `1`. After a successful edit, the scope's
+  shims are reconciled.
+- `shims [--workspace]` reconciles the scope's shims (see below), then prints
+  one aligned `<profile>  <path>` row per shim, followed by a PATH hint. Add the
+  shims directory to `PATH` as that hint shows; for per-workspace setup,
+  see [configuration](configuration.md#managing-profiles-and-shims).
+
+Exit codes for `profile`: `0` on success, including an empty `list`; `1` when
+the editor exits non-zero; `2` for every refusal and I/O failure. On non-Unix
+platforms, `profile shims` exits `2`, and `create`, `edit`, and `delete` skip
+shim work.
+
+### Shims
+
+Each profile with a `config.toml` gets a shim: a POSIX `sh` script that runs
+`ylva --profile '<name>' "$@"`, so `ylva-work --help` behaves like
+`ylva --profile work --help`. Home shims go in `$YLVA_HOME/shims/`; workspace
+shims go in `<workspace-root>/.ylva/shims/`. A shim is named `ylva-<name>`
+unless the profile sets a top-level `shim_name` key in `config.toml`, which
+replaces the whole file name. `create --shim-name` writes that key for you. A
+shim name must pass the profile name rule and must not be `ylva`. `default`
+gets no shim, so a `shim_name` in `default` is an error. A home profile and a
+workspace profile with the same name are not refused or renamed; `PATH` order
+decides which shim runs.
+
+A shim sets no environment. A home shim runs `ylva` with the `YLVA_HOME` of the
+shell that launched it, so it stores chats where plain `ylva --profile <name>`
+does in that shell. Export `YLVA_HOME` before running a shim to use another Ylva
+home. A workspace shim `cd`s to the workspace root first.
+
+`create`, `edit` (after a successful editor run), `delete`, and `shims`
+reconcile their scope. Each claimed shim is written, and every other regular
+file in the shims directory is removed. Subdirectories are never touched, and
+symlinked shims are not supported. Ylva owns the shims directory, so keep other
+files out of it. `list` and `--dry-run` never reconcile.
+
+The reconcile plans every change before it writes anything. It exits `2` with
+no changes when two profiles in one scope claim the same shim name, when any
+in-scope `config.toml` is unreadable or invalid, or when any in-scope
+`shim_name` is invalid. The whole scope is checked, so a broken config in
+another profile also blocks `create`, `edit`, `delete`, and `shims`.
+
+`profile shims` first reports any shims it removed. It then lists the shims in
+scope, one row each, with the profile name first and the shim path after it.
+Names are padded into a column, as in `list`, and there is no header. The PATH
+hint follows, as `#` comment lines so it can be pasted without changing `PATH`
+by accident. It starts with `# Update your PATH to use shims:`, then
+`# export PATH="<directory>:$PATH"`, single-quoting the directory when it
+contains shell-special characters. The last line states whether the shims
+directory is on `PATH`: `# <directory> is already on PATH` or
+`# <directory> is not on PATH`. A directory under `$HOME` is shown as `~/<rest>`,
+and its export line is `# export PATH=~/<rest>:"$PATH"`: the unquoted `~` lets
+the shell expand it, and only `<rest>` is quoted when needed. With no shims in
+scope, it prints `No shims in <directory>` and no PATH hint. For per-workspace
+`PATH` setup, see
+[configuration](configuration.md#managing-profiles-and-shims).
 
 ## Resuming a session
 

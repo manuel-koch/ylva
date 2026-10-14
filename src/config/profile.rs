@@ -1037,5 +1037,25 @@ fn valid_environment_name(name: &str) -> bool {
         && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
+/// Longest accepted profile name, in characters.
+pub const MAX_PROFILE_NAME_LENGTH: usize = 64;
+
+/// Whether `name` may name a profile directory.
+///
+/// A name starts with an ASCII letter or digit and continues with ASCII
+/// letters, digits, `_`, or `-`, up to [`MAX_PROFILE_NAME_LENGTH`] characters.
+/// Because separators and dots are rejected, a valid name is always a single
+/// path component under the profiles root.
+pub fn is_valid_profile_name(name: &str) -> bool {
+    if name.len() > MAX_PROFILE_NAME_LENGTH {
+        return false;
+    }
+    let mut characters = name.chars();
+    matches!(characters.next(), Some(first) if first.is_ascii_alphanumeric())
+        && characters.all(|character| {
+            character == '_' || character == '-' || character.is_ascii_alphanumeric()
+        })
+}
+
 #[cfg(test)]
 mod tests;

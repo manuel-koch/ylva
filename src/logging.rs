@@ -21,6 +21,7 @@
 //! the binary owns all logging policy. When logging is enabled, the file the
 //! caller selected via `--log-file` receives exactly the configured format.
 
+use crate::home_relative_path::display_path;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -106,13 +107,13 @@ pub fn init_logging(config: LogConfig) -> Result<Option<LogGuards>, String> {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             return Err(format!(
                 "cannot open log file '{}': directory '{}' does not exist",
-                path.display(),
-                parent.display()
+                display_path(path),
+                display_path(parent)
             ));
         }
     }
     let file = open_truncate(path)
-        .map_err(|error| format!("cannot open log file '{}': {error}", path.display()))?;
+        .map_err(|error| format!("cannot open log file '{}': {error}", display_path(path)))?;
     let (subscriber, guards) = build_subscriber(file, config.log_format, config.log_level);
     // `try_init` tolerates a second install (e.g. under parallel tests, where
     // the process-global subscriber can only be set once); the first call
@@ -534,7 +535,7 @@ mod tests {
             "error should name the missing directory: {message}"
         );
         assert!(
-            message.contains(&path.display().to_string()),
+            message.contains(&display_path(&path)),
             "error should name the attempted file: {message}"
         );
     }
@@ -576,7 +577,7 @@ mod tests {
         });
         let message = result.expect_err("unwritable path must be an error");
         assert!(
-            message.contains(&path.display().to_string()),
+            message.contains(&display_path(&path)),
             "error should name the attempted file: {message}"
         );
     }

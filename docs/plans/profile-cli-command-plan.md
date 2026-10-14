@@ -15,8 +15,8 @@ profiles, so they must know the on-disk layout under `YLVA_HOME` and the
 
 Add a provider-independent `ylva profile` subcommand family:
 
-- `ylva profile list`: show profiles under the Ylva home, or under the
-  workspace with `--workspace`.
+- `ylva profile list`: show profiles under the Ylva home and the current
+  workspace (merged, workspace first); `--workspace` lists only the workspace's.
 - `ylva profile create <name>`: create a profile seeded with the same starter
   files `ylva init` writes for `default`.
 - `ylva profile delete <name>`: delete a profile directory and all its files;
@@ -74,7 +74,7 @@ below; templates are under [Shim templates](#shim-templates).
 Tasks are ordered. Each task is complete only when its tests pass and its
 docs are updated (see the Documentation task).
 
-1. [ ] **Add the profile name rule** in `src/config/profile.rs`.
+1. [x] **Add the profile name rule** in `src/config/profile.rs`.
     - Add `pub fn is_valid_profile_name(name: &str) -> bool`. Rule:
       `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`. Rejects path separators, `.`, `..`, empty
       names, and names that do not start with a letter or digit.
@@ -83,7 +83,7 @@ docs are updated (see the Documentation task).
       a 64-char name); rejected (`""`, `-x`, `_x`, `../x`, `a/b`, `.`, `..`,
       `has space`, `my.profile`, a 65-char name).
 
-2. [ ] **Apply the rule to `--profile`** in `src/cli.rs`. This closes the pre-existing
+2. [x] **Apply the rule to `--profile`** in `src/cli.rs`. This closes the pre-existing
    `--profile ../x` path traversal.
     - Add `value_parser = parse_profile_name` to `--profile`. `parse_profile_name`
       sits next to `parse_log_level`, wraps `is_valid_profile_name`, and returns an
@@ -99,7 +99,7 @@ docs are updated (see the Documentation task).
       resolves. Verify the existing `--profile` names in `tests/cli_profile.rs` and
       `tests/session_commands.rs` pass the rule.
 
-3. [ ] **Add CLI surface** in `src/cli.rs`.
+3. [x] **Add CLI surface** in `src/cli.rs`.
     - Add `CliCommand::Profile { command: ProfileCommand }` with a doc comment.
     - Add `ProfileCommand::{ List, Create { name }, Delete { name }, Edit { name } }`
       with clap doc comments. Each action except `List` takes `name`, parsed with
@@ -110,16 +110,16 @@ docs are updated (see the Documentation task).
     - `--shim-name` and `Shims` are added by the shim wiring task.
     - Add inline parse tests next to `init_parses_as_a_subcommand`.
 
-4. [ ] **Refactor starter seeding** in `src/init_command.rs`.
+4. [x] **Refactor starter seeding** in `src/init_command.rs`.
     - Extract a helper that writes the `config.toml` starter (`DEFAULT_PROFILE_STARTER`)
       and the `.env` starter (`DEFAULT_PROFILE_ENV_STARTER`) into an arbitrary profile
       directory, reusing `seed_file` and `InitReport`.
-    - Extract the `.ylva/.gitignore` seeding (`PROFILE_ENV_GITIGNORE_STARTER`) into a
+    - Extract the `.ylva/.gitignore` seeding (`WORKSPACE_GITIGNORE_ENTRIES`) into a
       helper that `create --workspace` can call.
     - `run_init` and `run_init_workspace` call the helpers. Their output and behavior
       must not change (`tests/cli_init.rs` must stay green unchanged).
 
-5. [ ] **Implement `list`, `create`, `delete`** in `src/profile_command.rs`.
+5. [x] **Implement `list`, `create`, `delete`** in `src/profile_command.rs`.
     - Scope: without `--workspace`, the Ylva home (`default_profiles_root()`). With
       `--workspace`, `<workspace>/.ylva/profiles/`, where the root is
       `discover_workspace_root(cwd)`. No root → exit `2`; unlike `init --workspace`,
@@ -138,11 +138,12 @@ docs are updated (see the Documentation task).
       files only; other files (for example `agents/`) are kept. An existing
       `config.toml` that is unreadable or fails to parse exits `2` before any write,
       even with `--force`; the user fixes it by hand. With `--workspace`, also seed a
-      missing `.ylva/.gitignore` from `PROFILE_ENV_GITIGNORE_STARTER` through the
-      seeding helper that `init --workspace` uses. An existing `.gitignore` is kept
-      and never overwritten, even with `--force`.
+      missing `.ylva/.gitignore` from `WORKSPACE_GITIGNORE_ENTRIES` through the
+      seeding helper that `init --workspace` uses. An existing `.gitignore` is never
+      overwritten, even with `--force`; its missing entries are appended.
     - `delete <name>`: removes `profiles/<name>/` recursively. No prompt and no
-      `--yes`, same as `session delete`. `--dry-run` prints `would delete <name>` and
+      `--yes`, same as `session delete`. Prints `Deleted profile "<name>" at <directory>`.
+      `--dry-run` prints `would delete "<name>" at <directory>` and
       changes nothing. Missing profile → exit `2`. An unreadable or unparsable target
       `config.toml` → exit `2`, nothing removed. `delete default` is allowed; the
       implicit default then falls back to the built-in default (documented in the
@@ -154,7 +155,7 @@ docs are updated (see the Documentation task).
       starter fails unless `--force`, which overwrites only those two files; create
       keeps `agents/`; create on an unreadable or invalid `config.toml` exits `2`
       with no change, even with `--force`; create with `--workspace` seeds a missing
-      `.ylva/.gitignore` and keeps an existing one; delete removes the tree;
+      `.ylva/.gitignore` and appends missing entries to an existing one; delete removes the tree;
       `--dry-run` changes nothing; delete of a missing name exits `2`; delete with an
       unreadable or invalid target `config.toml` exits `2` and removes nothing;
       `delete default` works; list sorted; list marks `(no config.toml)`,
@@ -162,7 +163,7 @@ docs are updated (see the Documentation task).
       root; `--workspace` lists only workspace profiles; `--workspace` without a
       root → exit `2`.
 
-6. [ ] **Implement `edit`** with an injected editor resolver and launcher.
+6. [x] **Implement `edit`** with an injected editor resolver and launcher.
     - Requires `profiles/<name>/config.toml`. Missing → exit `2` with a hint to run `create`.
     - Editor: `$VISUAL`, then `$EDITOR`. If neither is set or both are empty → exit `2`,
       naming both variables.
@@ -174,7 +175,7 @@ docs are updated (see the Documentation task).
     - Unit tests: VISUAL beats EDITOR; EDITOR alone works; neither → exit `2`; missing
       `config.toml` → exit `2`; launcher non-zero → exit `1`.
 
-7. [ ] **Wire the module and dispatch.**
+7. [x] **Wire the module and dispatch.**
     - `src/lib.rs`: `pub mod profile_command;`. Re-export only what integration
       tests need.
     - `src/main.rs`: dispatch `CliCommand::Profile` after logging init and
@@ -182,7 +183,7 @@ docs are updated (see the Documentation task).
       forward to `profile_command::run`.
     - `--profile` given together with a profile subcommand is ignored (as for `init`).
 
-8. [ ] **Integration tests** in `tests/cli_profile_subcommand.rs`.
+8. [x] **Integration tests** in `tests/cli_profile_subcommand.rs`.
     - Spawn `env!("CARGO_BIN_EXE_ylva")` with `env_clear()`, preserved `PATH`,
       and `YLVA_HOME` set to a tempdir.
     - Cover: `profile list` on empty and populated homes; `create` then file
@@ -193,9 +194,9 @@ docs are updated (see the Documentation task).
       a root → exit `2`; `edit` with `EDITOR=true` → exit `0`; `edit` with no editor →
       exit `2`; invalid name → exit `2`; `--profile x profile create y` creates `y`.
 
-9. [ ] **Check help snapshot.** Read `tests/cli_help.rs`. If it asserts the
+9. [x] **Check help snapshot.** Read `tests/cli_help.rs`. If it asserts the
    subcommand list, update it to include `profile`.
-10. [ ] **Shim claims and reconcile** in `src/profile_command.rs` (or `src/profile_shim.rs`
+10. [x] **Shim claims and reconcile** in `src/profile_command.rs` (or `src/profile_shim.rs`
    if it grows).
     - Shim name: `ylva-<name>` by default. A top-level `shim_name` key in the
       profile's `config.toml` overrides it; an absent key means `ylva-<name>`. The
@@ -220,7 +221,7 @@ docs are updated (see the Documentation task).
       bad-config abort with no change; prune only regular files; subdirectory
       untouched; `default` gets no shim and `ylva-default` is pruned; missing
       `config.toml` claims `ylva-<name>`; `shim_name = "ylva"` aborts.
-11. [ ] **Wire shims into commands.**
+11. [x] **Wire shims into commands.**
     - Add `ProfileCommand::Shims { workspace: bool }` and `--shim-name` on `create`
       to `src/cli.rs`.
     - `create --shim-name <name>` validates the name before any write, then writes
@@ -236,17 +237,22 @@ docs are updated (see the Documentation task).
       `profile shims` fail on any broken config in scope, not only the target. The
       checks in tasks 5 and 6 cover only the target.
     - Non-unix: `profile shims` exits `2`; the other subcommands skip shim work.
-12. [ ] **PATH hint** in `profile shims`.
-    - Prints on stdout, after the shim list, one POSIX line:
-      `export PATH="<absolute shims dir>:$PATH"`. If the directory contains
+12. [x] **PATH hint** in `profile shims`.
+    - Prints on stdout, after the shim list, as `#` comment lines:
+      `# Update your PATH to use shims:`, then
+      `# export PATH="<absolute shims dir>:$PATH"`. If the directory contains
       characters special to the shell, single-quote it instead.
-    - If the shims dir is already on `PATH`, print a confirmation line instead.
+    - The last line is `# <dir> is already on PATH` or `# <dir> is not on PATH`.
+    - `profile create` prints the same hint after its `Shim <path>` line, but only
+      when it created a shim for the profile.
+    - Shim rows are `<profile>  <shim path>`, aligned like `profile list`, with no
+      headings.
     - No shims in scope → no hint.
     - Read `PATH` only in the thin `run` entry point.
     - Tests: dir missing from `PATH` gives the `export` line; dir on `PATH` gives a
       confirmation line; no shims gives no hint; a dir with a space gets the
       single-quoted form.
-13. [ ] **Integration tests** in `tests/cli_profile_shims.rs`.
+13. [x] **Integration tests** in `tests/cli_profile_shims.rs`.
     - The generated home shim runs `ylva` with the right `--profile` and
       `YLVA_HOME`; quoted forwarded arguments (for example a value with spaces)
       survive.
@@ -263,7 +269,7 @@ docs are updated (see the Documentation task).
       also exits `2`. A valid delete leaves no shim behind.
     - Duplicate claims exit `2` with no changes.
     - A `config.toml` with `shim_name` still loads (no `deny_unknown_fields`).
-14. [ ] **Mark the implicit default in `profile list`** in `src/profile_command.rs`.
+14. [x] **Mark the implicit default in `profile list`** in `src/profile_command.rs`.
     - The implicit default is the profile used when no `--profile` flag is given:
       `DEFAULT_PROFILE_NAME` (`default`). Its name is fixed in code, so the mark labels
       the profile; it is not a setting.
@@ -279,7 +285,7 @@ docs are updated (see the Documentation task).
     - Integration test in `tests/cli_profile_subcommand.rs`: `ylva profile list` shows
       `(implicit default)` on the `default` line and on no other line.
 
-15. [ ] **Documentation** (part of the same change; not optional).
+15. [x] **Documentation** (part of the same change; not optional).
     - `docs/cli-options.md`:
       - `--profile` row: the name rule; invalid names exit `2`.
       - A `profile` section: the four actions, `--workspace`, `--force`, `--dry-run`,
@@ -296,7 +302,7 @@ docs are updated (see the Documentation task).
       `EDITOR` lookup; `delete default` falling back to the built-in default; the
       `shim_name` key; the Ylva-owned shims dir; symlinked shims are unsupported; each
       workspace's `.ylva/shims` must be on `PATH` separately; the POSIX `export` line
-      and the fish alternative (`fish_add_path <dir>`).
+      and the POSIX `export` line.
     - `docs/features.md`: entries for profile management and shims.
     - `docs/implementation-notes.md`: `profile_command.rs` and the shim module.
     - `README.md`: update only if it lists commands. Check first.
@@ -304,21 +310,21 @@ docs are updated (see the Documentation task).
     - `CONTEXT.md`: no change expected; "profile" is already defined.
     - Run `rumdl fmt` and `rumdl check` on every changed Markdown file.
 
-16. [ ] **Verify.** Run `make format lint`, then `make test-coverage`. Do not run `make test` separately.
+16. [x] **Verify.** Run `make format lint`, then `make test-coverage`. Do not run `make test` separately.
 
 ### Shim templates
 
 Shims call `ylva` from `PATH` and place `--profile '<name>'` before the forwarded
 arguments. Profile names pass the name rule, so the single quotes are safe.
-Symlinked shims are unsupported, because the shim derives `YLVA_HOME` and the
-workspace root from `$0`. Unix only.
+Symlinked shims are unsupported, because a workspace shim derives the workspace
+root from `$0`. Unix only. Home shims set no environment: they inherit the
+caller's `YLVA_HOME`, so they store chats where plain `ylva --profile <name>`
+does in the same shell.
 
 Home shim `ylva-<name>` in `$YLVA_HOME/shims/`:
 
 ```sh
 #!/bin/sh
-YLVA_HOME="$(cd "$(dirname "$0")/.." && pwd -P)"
-export YLVA_HOME
 exec ylva --profile '<name>' "$@"
 ```
 

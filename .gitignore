@@ -24,11 +24,7 @@ target
 *.mmd.*
 
 # Secure envvars
-.envrc
-.env
-
-# Test chat persistence
-tests/e2e/custom/chats
+/.envrc
 
 # Graphify output
 graphify-out

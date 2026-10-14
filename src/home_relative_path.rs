@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Home-relative path labels for help metadata.
+//! Home-relative path labels shared by the TUI help popup and CLI output.
 
 use std::path::Path;
 
-pub(super) fn format_home_relative_path(path: &Path, home_directory: Option<&Path>) -> String {
+/// Render `path` with the user's home directory replaced by `~`. Paths outside
+/// `home_directory`, or every path when it is `None`, stay as displayed.
+pub fn format_home_relative_path(path: &Path, home_directory: Option<&Path>) -> String {
     let Some(home_directory) = home_directory else {
         return path.display().to_string();
     };
@@ -28,10 +30,25 @@ pub(super) fn format_home_relative_path(path: &Path, home_directory: Option<&Pat
     }
 }
 
+/// [`format_home_relative_path`] against the current user's home directory,
+/// for every path shown to a person.
+pub fn display_path(path: &Path) -> String {
+    format_home_relative_path(path, dirs::home_dir().as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn display_path_abbreviates_the_current_home_directory() {
+        let Some(home_directory) = dirs::home_dir() else {
+            return;
+        };
+
+        assert_eq!(display_path(&home_directory.join("ylva")), "~/ylva");
+    }
 
     #[test]
     fn home_relative_path_uses_tilde_for_home_and_descendants() {
@@ -58,6 +75,25 @@ mod tests {
                 Some(Path::new("/Users/manuelkoch")),
             ),
             "/tmp/ylva-home/profiles/default/config.toml"
+        );
+    }
+
+    #[test]
+    fn home_relative_path_keeps_every_path_absolute_without_a_home() {
+        assert_eq!(
+            format_home_relative_path(Path::new("/Users/manuelkoch/.ylva"), None),
+            "/Users/manuelkoch/.ylva"
+        );
+    }
+
+    #[test]
+    fn home_relative_path_does_not_abbreviate_a_sibling_sharing_the_home_prefix() {
+        assert_eq!(
+            format_home_relative_path(
+                Path::new("/Users/manuelkoch-backup/ylva"),
+                Some(Path::new("/Users/manuelkoch")),
+            ),
+            "/Users/manuelkoch-backup/ylva"
         );
     }
 }

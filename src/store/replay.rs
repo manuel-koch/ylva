@@ -18,6 +18,7 @@ use super::archive;
 use super::{project_directory, ChildRunRecord, SessionMeta, Store, StoreError, StoreEvent};
 use crate::agent::{Message, UserMessageKind};
 use crate::child_agent_manager::FinishResultOrigin;
+use crate::home_relative_path::display_path;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -98,7 +99,7 @@ impl Store {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    diagnostics.push(format!("{}: {error}", directory.display()));
+                    diagnostics.push(format!("{}: {error}", display_path(&directory)));
                     continue;
                 }
             };
@@ -116,7 +117,7 @@ impl Store {
             if let Ok(identity) = Uuid::parse_str(identity) {
                 identities.insert(identity);
             } else {
-                diagnostics.push(format!("{}: invalid session filename", path.display()));
+                diagnostics.push(format!("{}: invalid session filename", display_path(&path)));
             }
         }
         for identity in identities {

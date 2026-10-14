@@ -7,6 +7,6 @@ line-length = 100
 code-blocks = false
 
 [per-file-ignores]
-"tests/e2e/custom/**/*.md" = [
+".ylva/profiles/**/*.md" = [
     "MD041", # First line in file should be a level 1 heading
 ]

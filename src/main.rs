@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
+use ylva::home_relative_path::display_path;
 use ylva::llm::provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
 use ylva::logging::init_logging;
 use ylva::{
@@ -28,6 +29,15 @@ use ylva::{
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
 /// the initial user turn.
 const DEFAULT_DEMO_PROMPT: &str = "What makes the sky look blue?";
+
+/// `--version` output: build provenance plus the Ylva home and workspace root
+/// this run would use, resolved the same way as the normal startup path.
+fn version_report() -> String {
+    let workspace_root = std::env::current_dir()
+        .ok()
+        .and_then(|current_directory| ylva::discover_workspace_root(&current_directory));
+    ylva::BUILD_INFO.render_with_locations(ylva::ylva_home().as_deref(), workspace_root.as_deref())
+}
 
 fn run_init_command(workspace: bool, force: bool) -> Result<ylva::InitReport, String> {
     if workspace {
@@ -72,7 +82,7 @@ fn main() {
         .skip(1)
         .any(|argument| argument == "--version")
     {
-        println!("{}", ylva::BUILD_INFO.render());
+        println!("{}", version_report());
         return;
     }
 
@@ -121,8 +131,27 @@ fn main() {
         }
     };
 
+    tracing::info!(
+        version = ylva::BUILD_INFO.version,
+        commit = ylva::BUILD_INFO.git_commit,
+        built = ylva::BUILD_INFO.build_timestamp_utc,
+        profile = ylva::BUILD_INFO.profile,
+        "build info"
+    );
+
     if let Some(CliCommand::Session { command }) = &cli.command {
         match ylva::session_command::run(command, &mut std::io::stdout(), &mut std::io::stderr()) {
+            Ok(0) => return,
+            Ok(code) => {
+                drop(log_guard.take());
+                std::process::exit(i32::from(code));
+            }
+            Err(error) => exit_with_error(&mut log_guard, error),
+        }
+    }
+
+    if let Some(CliCommand::Profile { command }) = &cli.command {
+        match ylva::profile_command::run(command, &mut std::io::stdout(), &mut std::io::stderr()) {
             Ok(0) => return,
             Ok(code) => {
                 drop(log_guard.take());
@@ -141,13 +170,6 @@ fn main() {
             std::env::var("TERM").ok().as_deref(),
             std::env::var_os("NO_COLOR").is_some(),
         );
-    tracing::info!(
-        version = ylva::BUILD_INFO.version,
-        commit = ylva::BUILD_INFO.git_commit,
-        built = ylva::BUILD_INFO.build_timestamp_utc,
-        profile = ylva::BUILD_INFO.profile,
-        "build info"
-    );
     tracing::info!(app = if use_tui { "tui" } else { "cli" }, "starting");
 
     let current_directory = std::env::current_dir().ok();
@@ -561,7 +583,7 @@ fn selected_profile_context(
 ) -> String {
     let profile_name = explicit_profile_name.unwrap_or(ylva::DEFAULT_PROFILE_NAME);
     match selected_profile_path(explicit_profile_name, workspace_root) {
-        Ok(Some(path)) => format!("profile '{profile_name}' at {}", path.display()),
+        Ok(Some(path)) => format!("profile '{profile_name}' at {}", display_path(&path)),
         Ok(None) => format!("profile '{profile_name}' (built-in default)"),
         Err(error) => format!("profile '{profile_name}' (config path unavailable: {error})"),
     }

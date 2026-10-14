@@ -43,6 +43,7 @@ fn help_flag_prints_usage_and_exits_zero() {
         "--auto-approve-spawn",
         "--max-concurrent-subagents",
         "init",
+        "profile",
     ] {
         assert!(
             stdout.contains(expected),

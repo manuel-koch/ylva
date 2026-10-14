@@ -44,6 +44,7 @@ use uuid::Uuid;
 use crate::agent::tools::agent_finish::{AgentFinishArgs, AgentFinishStatus, AgentFinishTool};
 use crate::agent::{Message, UserMessageKind};
 use crate::child_agent_manager::FinishResultOrigin;
+use crate::home_relative_path::display_path;
 use crate::sandbox::SandboxContext;
 use crate::ylva_home::ylva_home;
 
@@ -72,17 +73,17 @@ use writer::WriterCommand;
 /// pattern-matching on an opaque error string.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("invalid session representation at {}: {reason}", path.display())]
+    #[error("invalid session representation at {}: {reason}", display_path(path))]
     InvalidRepresentation { path: PathBuf, reason: String },
     #[error("session maintenance and archive restoration require Unix")]
     UnsupportedMaintenance,
-    #[error("session '{session_id}' not found at {}", path.display())]
+    #[error("session '{session_id}' not found at {}", display_path(path))]
     SessionNotFound { session_id: Uuid, path: PathBuf },
     #[error("session '{session_id}' is open in another Ylva process")]
     SessionLocked { session_id: Uuid },
     #[error("cannot resolve the home directory for ~/.ylva")]
     HomeDirectoryNotFound,
-    #[error("store I/O error at {}: {source}", path.display())]
+    #[error("store I/O error at {}: {source}", display_path(path))]
     Io {
         path: PathBuf,
         #[source]
@@ -93,12 +94,12 @@ pub enum StoreError {
     #[error(
         "session '{session_id}' is a child transcript at {}; only top-level sessions can be \
          cloned",
-        path.display()
+        display_path(path)
     )]
     SessionIsChild { session_id: Uuid, path: PathBuf },
     #[error(
         "session '{session_id}' at {} has no readable metadata header; it cannot be cloned",
-        path.display()
+        display_path(path)
     )]
     MissingSessionMeta { session_id: Uuid, path: PathBuf },
 }

@@ -8,7 +8,11 @@
 ## Build Info
 
 Use `ylva --version` to print build provenance (`Version`, `Commit`,
-`Built`, `Profile`).
+`Built`, `Profile`, `Features`), followed by the Ylva home (`YLVA_HOME`, or
+`~/.ylva`) and the workspace root discovered from the current directory. Paths
+under the operating-system home directory print with a leading `~`; other paths
+print in full. An unresolved home or undiscovered workspace prints
+`not resolved` or `not discovered`.
 
 ## Logging
 
@@ -17,13 +21,18 @@ configuration file).
 See [CLI options](./cli-options.md) for usage of `--log-file`, `--log-level`
 and `--log-format` options.
 
-At startup (when logging is enabled), two `INFO`-level events are logged
-before anything else: a `"build info"` event carrying `version`, `commit`,
-`built`, and `profile` (the same values as `ylva --version`), and a
-`"starting"` event carrying `app` (`"cli"` or `"tui"`, matching the mode
-`main.rs` selected). This makes the running app and exact build identifiable
-from the log file alone, without cross-referencing a separate `--version`
-invocation.
+At startup (when logging is enabled), an `INFO`-level `"build info"` event is
+logged before anything else, carrying `version`, `commit`, `built`, and
+`profile` (the same values as `ylva --version`). It applies to every
+invocation, including `session` and `profile` subcommands. TUI and CLI runs
+then log a `"starting"` event carrying `app` (`"cli"` or `"tui"`, matching the
+mode `main.rs` selected). This makes the exact build identifiable from the log
+file alone, without cross-referencing a separate `--version` invocation.
+
+At `DEBUG` level, `ylva session` logs one `"resolved session store"` event
+with `cwd`, `chats_root`, and `project_key`. Session listings are per project,
+so this event explains an empty `session list` run from an unexpected
+directory.
 
 Session-title generation emits structured lifecycle events when logging is
 enabled. The main stages are recorded with `stage` values such as
@@ -1091,6 +1100,22 @@ agent's `persona`; a body-less Markdown file is a load error. The same
 `persona` is written as `persona = "…"` in a `.toml` file or in an inline
 table, where an inline value replaces the file-sourced persona.
 
+### Profile management and shims
+
+`ylva profile` lists, creates, edits, and deletes profile directories in the
+home (`~/.ylva`) or the current workspace (`--workspace`). `list` without
+`--workspace` shows both in separate groups: the current workspace's profiles
+first, then the home's, with a home profile marked `(shadowed by workspace)` when
+the workspace defines the same name. `list` marks the `default` profile
+`(implicit default)`, since it is the profile used when no `--profile` flag is given.
+
+`ylva profile shims` and every `create`, `edit`, and `delete` keep a
+Ylva-owned `shims` directory in sync. Each profile gets a small launcher script
+named `ylva-<name>` (or the `shim_name` set in its `config.toml`) that runs
+`ylva --profile <name>` with the arguments it receives. The command also prints
+the `PATH` line to add. Details are in [profile commands](cli-options.md#profile-commands)
+and [managing profiles and shims](configuration.md#managing-profiles-and-shims).
+
 ### Layered global persona and initialization
 
 The top-level conversation's global persona comes from `SOUL.md`, resolved
@@ -1126,9 +1151,12 @@ initial system-prompt contract.
 `ylva init` writes `SOUL.md`, `profiles/default/config.toml`, and an annotated
 `profiles/default/.env` starter; it does not seed agent-type files.
 `ylva init --workspace` seeds the default profile config and `.env` starters
-plus `.gitignore` in the workspace. Both support write-if-missing and
-`--force` reseeding. Richer agent-type and profile examples are documented
-rather than shipped as repository templates.
+plus `.gitignore` in the workspace. The `.gitignore` lists `.env`, `.envrc`, and
+`chats/`. Both support write-if-missing and `--force` reseeding; an existing
+`.gitignore` is never overwritten, and only its missing entries are appended.
+`ylva profile create <name>` seeds the same starters for a
+named profile. Richer agent-type and profile examples are documented rather
+than shipped as repository templates.
 
 ## Slash commands
 

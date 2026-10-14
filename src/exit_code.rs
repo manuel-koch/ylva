@@ -69,10 +69,7 @@ pub fn help_epilog() -> String {
         .iter()
         .map(|code| format!("  {:<4}{}", u8::from(*code), code.description()))
         .collect();
-    format!(
-        "Exit codes:\n{}\nSee docs/cli-options.md#exit-codes for details.",
-        rows.join("\n")
-    )
+    format!("Exit codes:\n{}", rows.join("\n"))
 }
 
 #[cfg(test)]

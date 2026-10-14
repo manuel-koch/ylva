@@ -14,6 +14,7 @@
 
 //! The `ylva init` file-seeding command.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::config::soul::DEFAULT_SOUL;
@@ -21,22 +22,28 @@ use crate::config::{
     ConfigError, DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
     PROFILE_ENV_FILE_NAME,
 };
+use crate::home_relative_path::display_path;
 use crate::ylva_home::YLVA_DIR_NAME;
 
-const DEFAULT_PROFILE_STARTER: &str = r#"# Ylva profile configuration.
+pub(crate) const DEFAULT_PROFILE_STARTER: &str = r#"# Ylva profile configuration.
 # This file is a starter. Uncomment and fill in the provider connection and
 # engine examples below when this profile needs engine-specific settings.
 
 default_engine = "default"
 theme = "dark"
 
-# [provider_connections.example]
+# [provider_connections.example-ollama-local]
 # provider = "ollama"
-# api_base_url = "https://example.invalid"
-# api_key = "${OLLAMA_API_KEY}"
+# api_base_url = "http://localhost:11434"
+
+# [provider_connections.example-ollama-cloud]
+# provider = "ollama"
+# api_base_url = "https://ollama.com"
+# put this envvar into the .env file of the profile
+# api_key = "${OLLAMA_CLOUD_API_KEY}"
 
 # [engines.default]
-# provider_connection = "example"
+# provider_connection = "example-ollama-local"
 # model = "replace-me"
 "#;
 
@@ -46,8 +53,20 @@ const DEFAULT_PROFILE_ENV_STARTER: &str = r#"# Local provider secrets and other 
 # Exported process variables take precedence over values in this file.
 "#;
 
-const PROFILE_ENV_GITIGNORE_STARTER: &str =
-    "# Keep ylva profile environment files out of version control.\n.env\n";
+const WORKSPACE_GITIGNORE_HEADER: &str =
+    "# Keep ylva profile environment files and chat transcripts out of version control.\n";
+
+/// Entries every workspace `.ylva/.gitignore` must contain.
+const WORKSPACE_GITIGNORE_ENTRIES: [&str; 3] = [".env", ".envrc", "chats/"];
+
+fn workspace_gitignore_starter() -> String {
+    let mut starter = String::from(WORKSPACE_GITIGNORE_HEADER);
+    for entry in WORKSPACE_GITIGNORE_ENTRIES.iter() {
+        starter.push_str(entry);
+        starter.push('\n');
+    }
+    starter
+}
 
 /// Files written or skipped by one init operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,13 +84,13 @@ impl InitReport {
     pub fn summary(&self) -> String {
         let mut lines = vec![format!(
             "Initialized Ylva configuration in {}",
-            self.root.display()
+            display_path(&self.root)
         )];
         for path in &self.written {
-            lines.push(format!("Wrote {}", path.display()));
+            lines.push(format!("Wrote {}", display_path(path)));
         }
         for path in &self.skipped {
-            lines.push(format!("Skipped {} (already exists)", path.display()));
+            lines.push(format!("Skipped {} (already exists)", display_path(path)));
         }
         if self.written.is_empty() && self.skipped.is_empty() {
             lines.push("No files were selected".to_string());
@@ -87,9 +106,21 @@ pub fn run_init(ylva_home: &Path, force: bool) -> Result<InitReport, ConfigError
         written: Vec::new(),
         skipped: Vec::new(),
     };
-    for (relative_path, contents) in home_files() {
-        seed_file(ylva_home, &relative_path, contents, force, &mut report)?;
-    }
+    seed_file(
+        ylva_home,
+        Path::new("SOUL.md"),
+        DEFAULT_SOUL,
+        force,
+        &mut report,
+    )?;
+    seed_profile_starters(
+        &ylva_home
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME),
+        force,
+        DEFAULT_PROFILE_STARTER,
+        &mut report,
+    )?;
     Ok(report)
 }
 
@@ -101,54 +132,95 @@ pub fn run_init_workspace(workspace_root: &Path, force: bool) -> Result<InitRepo
         written: Vec::new(),
         skipped: Vec::new(),
     };
-    seed_file(
-        &workspace_config_root,
-        &default_profile_config_relative_path(),
+    seed_profile_starters(
+        &workspace_config_root
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME),
+        force,
         DEFAULT_PROFILE_STARTER,
-        force,
         &mut report,
     )?;
-    seed_file(
-        &workspace_config_root,
-        &default_profile_env_relative_path(),
-        DEFAULT_PROFILE_ENV_STARTER,
-        force,
-        &mut report,
-    )?;
-    seed_file(
-        &workspace_config_root,
-        Path::new(".gitignore"),
-        PROFILE_ENV_GITIGNORE_STARTER,
-        force,
-        &mut report,
-    )?;
+    seed_workspace_gitignore(&workspace_config_root, force, &mut report)?;
     Ok(report)
 }
 
-fn home_files() -> [(PathBuf, &'static str); 3] {
-    [
-        (PathBuf::from("SOUL.md"), DEFAULT_SOUL),
-        (
-            default_profile_config_relative_path(),
-            DEFAULT_PROFILE_STARTER,
-        ),
-        (
-            default_profile_env_relative_path(),
-            DEFAULT_PROFILE_ENV_STARTER,
-        ),
-    ]
+/// Seed the `config.toml` and `.env` starters into `profile_directory`.
+///
+/// `config_text` is written as `config.toml`. Each file is written only when
+/// missing unless `force` is set. Shared by `init` (for `default`) and
+/// `profile create` (for any name).
+pub(crate) fn seed_profile_starters(
+    profile_directory: &Path,
+    force: bool,
+    config_text: &str,
+    report: &mut InitReport,
+) -> Result<(), ConfigError> {
+    seed_file(
+        profile_directory,
+        Path::new(PROFILE_CONFIG_FILE_NAME),
+        config_text,
+        force,
+        report,
+    )?;
+    seed_file(
+        profile_directory,
+        Path::new(PROFILE_ENV_FILE_NAME),
+        DEFAULT_PROFILE_ENV_STARTER,
+        force,
+        report,
+    )
 }
 
-fn default_profile_config_relative_path() -> PathBuf {
-    PathBuf::from(PROFILES_DIRECTORY_NAME)
-        .join(DEFAULT_PROFILE_NAME)
-        .join(PROFILE_CONFIG_FILE_NAME)
-}
-
-fn default_profile_env_relative_path() -> PathBuf {
-    PathBuf::from(PROFILES_DIRECTORY_NAME)
-        .join(DEFAULT_PROFILE_NAME)
-        .join(PROFILE_ENV_FILE_NAME)
+/// Seed `<workspace_config_root>/.gitignore` so profile `.env` files and chat
+/// transcripts stay out of version control.
+///
+/// A missing file is written from the starter. An existing file is kept as is,
+/// and only the entries it lacks are appended, so custom lines survive. With
+/// `force`, the file is overwritten with the starter.
+pub(crate) fn seed_workspace_gitignore(
+    workspace_config_root: &Path,
+    force: bool,
+    report: &mut InitReport,
+) -> Result<(), ConfigError> {
+    let path = workspace_config_root.join(".gitignore");
+    if force || !path.exists() {
+        return seed_file(
+            workspace_config_root,
+            Path::new(".gitignore"),
+            &workspace_gitignore_starter(),
+            force,
+            report,
+        );
+    }
+    let existing_contents =
+        std::fs::read_to_string(&path).map_err(|source| ConfigError::Unreadable {
+            path: path.clone(),
+            source,
+        })?;
+    let existing_lines: HashSet<&str> = existing_contents.lines().map(str::trim).collect();
+    let missing_entries: Vec<&str> = WORKSPACE_GITIGNORE_ENTRIES
+        .iter()
+        .copied()
+        .filter(|entry| !existing_lines.contains(entry))
+        .collect();
+    if missing_entries.is_empty() {
+        report.skipped.push(path);
+        return Ok(());
+    }
+    let mut updated_contents = existing_contents;
+    if !updated_contents.is_empty() && !updated_contents.ends_with('\n') {
+        updated_contents.push('\n');
+    }
+    for entry in missing_entries {
+        updated_contents.push_str(entry);
+        updated_contents.push('\n');
+    }
+    std::fs::write(&path, updated_contents).map_err(|source| ConfigError::Unreadable {
+        path: path.clone(),
+        source,
+    })?;
+    report.written.push(path);
+    Ok(())
 }
 
 fn seed_file(
@@ -181,11 +253,14 @@ fn seed_file(
 mod tests {
     use super::*;
 
+    /// `SOUL.md`, the default profile's `config.toml`, and its `.env`.
+    const HOME_STARTER_FILE_COUNT: usize = 3;
+
     #[test]
     fn home_init_seeds_the_standard_files_and_is_idempotent_without_force() {
         let temporary_directory = tempfile::tempdir().expect("tempdir");
         let first = run_init(temporary_directory.path(), false).expect("initialization succeeds");
-        assert_eq!(first.written.len(), home_files().len());
+        assert_eq!(first.written.len(), HOME_STARTER_FILE_COUNT);
         assert!(first.skipped.is_empty());
         let environment_path = temporary_directory
             .path()
@@ -199,7 +274,7 @@ mod tests {
         let second =
             run_init(temporary_directory.path(), false).expect("second initialization succeeds");
         assert!(second.written.is_empty());
-        assert_eq!(second.skipped.len(), home_files().len());
+        assert_eq!(second.skipped.len(), HOME_STARTER_FILE_COUNT);
     }
 
     #[test]
@@ -233,7 +308,9 @@ mod tests {
         let expected_environment = temporary_directory
             .path()
             .join(YLVA_DIR_NAME)
-            .join(default_profile_env_relative_path());
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_ENV_FILE_NAME);
         let expected_gitignore = temporary_directory
             .path()
             .join(YLVA_DIR_NAME)
@@ -251,13 +328,109 @@ mod tests {
         assert!(!temporary_directory.path().join(".ylva/SOUL.md").exists());
         assert!(std::fs::read_to_string(expected_config)
             .expect("read placeholder")
-            .contains("example.invalid"));
+            .contains("example-ollama-local"));
         assert_eq!(
             std::fs::read_to_string(expected_environment).expect("read environment starter"),
             DEFAULT_PROFILE_ENV_STARTER
         );
         assert!(std::fs::read_to_string(expected_gitignore)
             .expect("read workspace gitignore")
-            .contains(".env"));
+            .lines()
+            .any(|line| line == ".env"));
+    }
+
+    #[test]
+    fn workspace_gitignore_starter_lists_every_entry() {
+        let starter = workspace_gitignore_starter();
+
+        for entry in WORKSPACE_GITIGNORE_ENTRIES.iter() {
+            assert!(
+                starter.lines().any(|line| line == *entry),
+                "missing {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_gitignore_appends_missing_entries_and_keeps_custom_lines() {
+        let temporary_directory = tempfile::tempdir().expect("tempdir");
+        let workspace_config_root = temporary_directory.path().join(YLVA_DIR_NAME);
+        std::fs::create_dir_all(&workspace_config_root).expect("create workspace config root");
+        let gitignore_path = workspace_config_root.join(".gitignore");
+        std::fs::write(&gitignore_path, "custom-entry\n.env\n").expect("write existing gitignore");
+        let mut report = InitReport {
+            root: workspace_config_root.clone(),
+            written: Vec::new(),
+            skipped: Vec::new(),
+        };
+
+        seed_workspace_gitignore(&workspace_config_root, false, &mut report)
+            .expect("append succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(&gitignore_path).expect("read gitignore"),
+            "custom-entry\n.env\n.envrc\nchats/\n"
+        );
+        assert_eq!(report.written, vec![gitignore_path.clone()]);
+        assert!(report.skipped.is_empty());
+
+        let mut second_report = InitReport {
+            root: workspace_config_root.clone(),
+            written: Vec::new(),
+            skipped: Vec::new(),
+        };
+        seed_workspace_gitignore(&workspace_config_root, false, &mut second_report)
+            .expect("second append succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(&gitignore_path).expect("read gitignore"),
+            "custom-entry\n.env\n.envrc\nchats/\n"
+        );
+        assert!(second_report.written.is_empty());
+        assert_eq!(second_report.skipped, vec![gitignore_path]);
+    }
+
+    #[test]
+    fn workspace_gitignore_terminates_an_unterminated_last_line_before_appending() {
+        let temporary_directory = tempfile::tempdir().expect("tempdir");
+        let workspace_config_root = temporary_directory.path().join(YLVA_DIR_NAME);
+        std::fs::create_dir_all(&workspace_config_root).expect("create workspace config root");
+        let gitignore_path = workspace_config_root.join(".gitignore");
+        std::fs::write(&gitignore_path, "custom-entry").expect("write existing gitignore");
+        let mut report = InitReport {
+            root: workspace_config_root.clone(),
+            written: Vec::new(),
+            skipped: Vec::new(),
+        };
+
+        seed_workspace_gitignore(&workspace_config_root, false, &mut report)
+            .expect("append succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(gitignore_path).expect("read gitignore"),
+            "custom-entry\n.env\n.envrc\nchats/\n"
+        );
+    }
+
+    #[test]
+    fn workspace_gitignore_force_overwrites_with_the_starter() {
+        let temporary_directory = tempfile::tempdir().expect("tempdir");
+        let workspace_config_root = temporary_directory.path().join(YLVA_DIR_NAME);
+        std::fs::create_dir_all(&workspace_config_root).expect("create workspace config root");
+        let gitignore_path = workspace_config_root.join(".gitignore");
+        std::fs::write(&gitignore_path, "custom-entry\n").expect("write existing gitignore");
+        let mut report = InitReport {
+            root: workspace_config_root.clone(),
+            written: Vec::new(),
+            skipped: Vec::new(),
+        };
+
+        seed_workspace_gitignore(&workspace_config_root, true, &mut report)
+            .expect("forced seed succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(gitignore_path).expect("read gitignore"),
+            workspace_gitignore_starter()
+        );
     }
 }

@@ -11,6 +11,8 @@ Ylva is highly customizable to adapt to user needs.
 
 - [x] Global and workspace scoped configurations
 - [x] Customize behavior using `profiles` on global and and workspace scope
+  - [x] Profile shims (`ylva-<name>`) to run a profile by name; add the shims
+        directory to `PATH`
 - [x] Layered global/workspace configuration with `ylva init` scaffolding
 - [x] A `SOUL.md` persona, and trusted `AGENTS.md` / `CLAUDE.md` instruction
       files folded into the system prompt

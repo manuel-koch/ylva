@@ -36,7 +36,20 @@ compaction notices omit them. Presenter child-view handling
 rejects manual compaction before ordinary child Enter suppression, never
 forwarding it to a child or hidden root.
 
-`session_command.rs` dispatches provider-independent nested clap commands before
+`profile_command.rs` dispatches `ylva profile` before profile/provider
+initialization, like `session_command.rs`. It resolves the scope (home or
+`--workspace`), refuses unsafe operations with exit 2 before writing, and
+runs the editor for `edit` through `sh -c` with the path as `$1`. Every
+`create`, `edit`, and `delete` reconciles shims through `profile_shim.rs`.
+`profile_shim.rs` plans the whole change before writing: it collects claims
+from each in-scope `shim_name` (or `ylva-<name>`), rejects duplicate claims,
+and prunes only unclaimed regular files in the `shims` directory. Shim scripts
+Shim scripts only `exec` `ylva --profile`, so a home shim inherits the caller's
+`YLVA_HOME`. A workspace shim first `cd`s to the workspace root, which it derives
+from its own path with `pwd -P`. `profile_command.rs` calls
+`init_command.rs::seed_profile_starters` for new profiles. Invalid names in
+profile directories are validated but get no shim claim.
+
 profile/provider initialization or stdin consumption. Its CLI listing projection
 keeps the library's descending order while using last-use timestamps: roots and
 sibling groups are rendered least recently used first. With subagents included,
@@ -747,8 +760,12 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   key hints and approval controls; `overlays.rs` owns slash/model panels,
   clarify banners and toasts; `help.rs` owns the help popup.
   Pure terminal-column selection (`chat/selection.rs`), hunk parsing
-  (`tool_bubble/diff.rs`) and home-relative labels (`help/paths.rs`) stay
-  covered alongside all rendering owners; there are no custom coverage exclusions.
+  (`tool_bubble/diff.rs`) stay covered alongside all rendering owners.
+  Home-relative labels (`home_relative_path.rs`) are shared by every user-facing
+  path: `display_path` renders the real home directory as `~` in CLI output,
+  errors, the help popup, and the PATH hint, while logs, tracing fields, dump
+  files, and agent tool results keep absolute paths. The module carries its own
+  unit tests; there are no custom coverage exclusions.
   Widget tests follow their responsibility owners. Rendering-owner tests check
   cache invalidation, layout and selection-storage reuse, and painted-row
   bounds; external TUI tests check visible rendering, selection and public

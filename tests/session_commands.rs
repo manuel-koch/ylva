@@ -298,6 +298,44 @@ fn maintenance_requires_one_valid_selector() {
 }
 
 #[test]
+fn session_list_logs_build_info_and_resolved_store_at_debug_level() {
+    let directory = tempfile::tempdir().unwrap();
+    let log_path = directory.path().join("session-list.log");
+    let output = command(directory.path())
+        .args(["--log-level", "debug", "--log-file"])
+        .arg(&log_path)
+        .args(["session", "list"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    assert!(logs.contains("build info"), "{logs}");
+    assert!(logs.contains("resolved session store"), "{logs}");
+    assert!(logs.contains(&project_key(directory.path())), "{logs}");
+}
+
+#[test]
+fn log_file_with_leading_tilde_is_written_under_home() {
+    let directory = tempfile::tempdir().unwrap();
+    let home_directory = tempfile::tempdir().unwrap();
+    let output = command(directory.path())
+        .env("HOME", home_directory.path())
+        .args([
+            "--log-level",
+            "debug",
+            "--log-file",
+            "~/session-list.log",
+            "session",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert!(home_directory.path().join("session-list.log").exists());
+    assert!(!directory.path().join("~").exists());
+}
+
+#[test]
 fn compiled_cli_logs_session_chains_in_text_and_json_without_prompt_content() {
     for format in ["text", "json"] {
         let directory = tempfile::tempdir().unwrap();

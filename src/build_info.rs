@@ -31,6 +31,9 @@
 //!
 //! The TUI's F1 Help popup renders the same [`BUILD_INFO`] values.
 
+use std::path::Path;
+
+use crate::home_relative_path::display_path;
 /// Provenance of the compiled binary. All fields are compile-time constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildInfo {
@@ -70,6 +73,23 @@ impl BuildInfo {
             self.version, self.git_commit, self.build_timestamp_utc, self.profile, features_line
         )
     }
+
+    /// [`render`](Self::render) followed by the locations this run resolved:
+    /// the Ylva home and the workspace root. Unresolved locations print the
+    /// same fallbacks as the TUI Help popup.
+    pub fn render_with_locations(
+        &self,
+        ylva_home: Option<&Path>,
+        workspace_root: Option<&Path>,
+    ) -> String {
+        let ylva_home_text = ylva_home.map_or_else(|| String::from("not resolved"), display_path);
+        let workspace_root_text =
+            workspace_root.map_or_else(|| String::from("not discovered"), display_path);
+        format!(
+            "{}\nYlva home: {ylva_home_text}\nWorkspace root: {workspace_root_text}",
+            self.render()
+        )
+    }
 }
 
 /// Returns the names of non-default Cargo features enabled in this build.
@@ -103,6 +123,24 @@ mod tests {
         assert!(rendered.contains("\nBuilt:   "));
         assert!(rendered.contains("\nProfile: "));
         assert!(rendered.contains("\nFeatures: "));
+    }
+
+    #[test]
+    fn render_with_locations_appends_the_resolved_home_and_workspace_root() {
+        let rendered = fixture().render_with_locations(
+            Some(Path::new("/tmp/ylva-home")),
+            Some(Path::new("/workspace/example")),
+        );
+        assert!(rendered.starts_with(&fixture().render()));
+        assert!(
+            rendered.ends_with("\nYlva home: /tmp/ylva-home\nWorkspace root: /workspace/example")
+        );
+    }
+
+    #[test]
+    fn render_with_locations_prints_fallbacks_for_unresolved_locations() {
+        let rendered = fixture().render_with_locations(None, None);
+        assert!(rendered.ends_with("\nYlva home: not resolved\nWorkspace root: not discovered"));
     }
 
     #[test]

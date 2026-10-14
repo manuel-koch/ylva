@@ -32,6 +32,12 @@ pub fn run(
     let current_directory = std::env::current_dir()?.canonicalize()?;
     let chats_root = default_chats_root()?;
     let project_key = project_key(&current_directory);
+    tracing::debug!(
+        cwd = %current_directory.display(),
+        chats_root = %chats_root.display(),
+        project_key = %project_key,
+        "resolved session store"
+    );
     run_for_project(command, &chats_root, &project_key, output, diagnostics)
 }
 

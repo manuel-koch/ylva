@@ -41,7 +41,9 @@ directly, matching the convention of `CARGO_HOME`/`RUSTUP_HOME`/`GOPATH`/
 `XDG_DATA_HOME`: it is *the* Ylva home. The dedicated variable exists so
 an isolated setup (a test harness, a throwaway sandbox) can redirect Ylva's own
 state. An unset or empty `YLVA_HOME` falls back to
-`~/.ylva`.
+`~/.ylva`. A workspace-local `YLVA_HOME` (for example `$(PWD)` from
+`.ylva/.envrc`) keeps chats under `<workspace>/.ylva/chats/`, which the workspace
+`.gitignore` ignores (see [configuration](configuration.md)).
 
 ### `project_key` derivation
 

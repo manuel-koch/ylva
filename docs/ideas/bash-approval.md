@@ -8,5 +8,5 @@ could be auto-approved ?
   - `find . -name "*.md" -exec rm {} +`
   - `sed -i '' 's/old_string/new_string/g' file.txt`
 
-See [bash tool config](../../tests/e2e/custom/profiles/other/config.toml)
+See [bash tool config](../../.ylva/profiles/other/config.toml)
 for some command rules.

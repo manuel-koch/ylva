@@ -25,7 +25,10 @@ use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
 use crate::agent::tools::AutoApproveTool;
+use crate::config::is_valid_profile_name;
 use crate::logging::{LogConfig, LogFormat};
+use crate::profile_shim::is_valid_shim_name;
+use crate::sandbox::expand_path_tokens;
 
 /// Color policy for headless CLI status lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,11 +69,16 @@ pub struct Cli {
     pub prompt: Option<String>,
 
     /// Configuration profile to load
-    #[arg(long, value_name = "name")]
+    #[arg(long, value_name = "name", value_parser = parse_profile_name)]
     pub profile: Option<String>,
 
     /// Write logs to this file (logging is off without it)
-    #[arg(long, value_name = "path", global = true)]
+    #[arg(
+        long,
+        value_name = "path",
+        global = true,
+        value_parser = parse_log_file,
+    )]
     pub log_file: Option<PathBuf>,
 
     /// Minimum log level: trace, debug, info, warn, or error
@@ -180,6 +188,63 @@ pub enum CliCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Manage profiles under the Ylva home or the current workspace
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum ProfileCommand {
+    /// List profiles with their directory paths; the current workspace's profiles shadow the Ylva home's
+    List {
+        /// List only the current workspace's profiles, not the merged view with the Ylva home's
+        #[arg(long)]
+        workspace: bool,
+    },
+    /// Create a profile seeded with the same starter files as `init`
+    Create {
+        /// Profile directory name
+        #[arg(value_name = "name", value_parser = parse_profile_name)]
+        name: String,
+        /// Create the profile in the current workspace instead of the Ylva home
+        #[arg(long)]
+        workspace: bool,
+        /// Overwrite the profile's config.toml and .env starter files
+        #[arg(long)]
+        force: bool,
+        /// Name the profile's shim `<shim-name>` instead of `ylva-<name>`
+        #[arg(long, value_name = "shim-name", value_parser = parse_shim_name)]
+        shim_name: Option<String>,
+    },
+    /// Delete a profile directory and all its files
+    Delete {
+        /// Profile directory name
+        #[arg(value_name = "name", value_parser = parse_profile_name)]
+        name: String,
+        /// Delete from the current workspace instead of the Ylva home
+        #[arg(long)]
+        workspace: bool,
+        /// Preview the deletion without changing any files
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Open a profile's config.toml in $VISUAL or $EDITOR
+    Edit {
+        /// Profile directory name
+        #[arg(value_name = "name", value_parser = parse_profile_name)]
+        name: String,
+        /// Edit the profile in the current workspace instead of the Ylva home
+        #[arg(long)]
+        workspace: bool,
+    },
+    /// Create, prune, and list the shim scripts that launch profiles
+    Shims {
+        /// Manage the current workspace's shims instead of the Ylva home's
+        #[arg(long)]
+        workspace: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
@@ -277,6 +342,30 @@ impl Cli {
     }
 }
 
+/// Accept a profile name only if it passes the profile name rule, so a name
+/// can never carry path separators into path construction.
+fn parse_profile_name(value: &str) -> Result<String, String> {
+    if is_valid_profile_name(value) {
+        Ok(value.to_string())
+    } else {
+        Err(format!(
+            "invalid profile name '{value}': expected 1 to 64 ASCII letters, digits, '_' or '-', starting with a letter or digit"
+        ))
+    }
+}
+
+/// Accept a shim name only if it passes the shim name rule, so a shim can never
+/// shadow the `ylva` binary itself.
+fn parse_shim_name(value: &str) -> Result<String, String> {
+    if is_valid_shim_name(value) {
+        Ok(value.to_string())
+    } else {
+        Err(format!(
+            "invalid shim name '{value}': expected a valid profile name other than 'ylva'"
+        ))
+    }
+}
+
 /// Parse a `--color` value case-insensitively.
 fn parse_color_mode(value: &str) -> Result<CliColorMode, String> {
     match value.to_ascii_lowercase().as_str() {
@@ -312,6 +401,14 @@ fn parse_log_format(value: &str) -> Result<LogFormat, String> {
             "invalid --log-format '{value}': expected text or json"
         )),
     }
+}
+
+/// Parse `--log-file <path>`, expanding a leading `~` and `$VAR` tokens. Quoted
+/// paths such as `"~/x.log"` bypass shell expansion, so Ylva must do it.
+fn parse_log_file(value: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(expand_path_tokens(value, &|variable_name| {
+        std::env::var(variable_name).ok()
+    })))
 }
 
 /// Parse `--conversation-id <uuid>`; an unparseable id is a hard error so a
@@ -444,6 +541,15 @@ mod tests {
             config.log_file.as_deref(),
             Some(std::path::Path::new("/tmp/ylva.log"))
         );
+    }
+
+    #[test]
+    fn logging_file_expands_a_leading_tilde_to_the_home_directory() {
+        let config = parse(["--log-file", "~/ylva.log"])
+            .expect("parses")
+            .log_config();
+        let home_directory = dirs::home_dir().expect("home directory");
+        assert_eq!(config.log_file, Some(home_directory.join("ylva.log")));
     }
 
     #[test]
@@ -690,5 +796,133 @@ mod tests {
     fn no_subcommand_parses_with_no_command() {
         let cli = parse(["--no-tui"]).expect("parses");
         assert_eq!(cli.command, None);
+    }
+
+    #[test]
+    fn profile_flag_rejects_names_outside_the_profile_name_rule() {
+        for value in ["../x", "a/b", ".", "my.profile", ""] {
+            let error = parse(["--profile", value, "session", "list"])
+                .expect_err("an invalid profile name must be rejected");
+            assert!(error.to_string().contains("--profile"), "{error}");
+        }
+    }
+
+    #[test]
+    fn profile_flag_accepts_names_inside_the_profile_name_rule() {
+        let cli = parse(["--profile", "work-2", "session", "list"]).expect("parses");
+        assert_eq!(cli.profile.as_deref(), Some("work-2"));
+    }
+
+    #[test]
+    fn profile_list_parses_with_and_without_workspace() {
+        let home = parse(["profile", "list"]).expect("parses");
+        assert_eq!(
+            home.command,
+            Some(CliCommand::Profile {
+                command: ProfileCommand::List { workspace: false }
+            })
+        );
+        let workspace = parse(["profile", "list", "--workspace"]).expect("parses");
+        assert_eq!(
+            workspace.command,
+            Some(CliCommand::Profile {
+                command: ProfileCommand::List { workspace: true }
+            })
+        );
+    }
+
+    #[test]
+    fn profile_create_accepts_its_flags() {
+        let cli = parse(["profile", "create", "work", "--workspace", "--force"]).expect("parses");
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Profile {
+                command: ProfileCommand::Create {
+                    name: "work".to_string(),
+                    workspace: true,
+                    force: true,
+                    shim_name: None,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn profile_delete_accepts_dry_run() {
+        let cli = parse(["profile", "delete", "work", "--dry-run"]).expect("parses");
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Profile {
+                command: ProfileCommand::Delete {
+                    name: "work".to_string(),
+                    workspace: false,
+                    dry_run: true,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn profile_edit_parses_its_name() {
+        let cli = parse(["profile", "edit", "work"]).expect("parses");
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Profile {
+                command: ProfileCommand::Edit {
+                    name: "work".to_string(),
+                    workspace: false,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn profile_create_accepts_a_shim_name() {
+        let cli = parse(["profile", "create", "work", "--shim-name", "office"]).expect("parses");
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Profile {
+                command: ProfileCommand::Create {
+                    name: "work".to_string(),
+                    workspace: false,
+                    force: false,
+                    shim_name: Some("office".to_string()),
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn profile_create_rejects_reserved_and_invalid_shim_names() {
+        parse(["profile", "create", "work", "--shim-name", "ylva"])
+            .expect_err("the binary name is reserved");
+        parse(["profile", "create", "work", "--shim-name", "../office"])
+            .expect_err("shim name must pass the profile name rule");
+    }
+
+    #[test]
+    fn profile_shims_parses_with_and_without_workspace() {
+        let home = parse(["profile", "shims"]).expect("parses");
+        assert_eq!(
+            home.command,
+            Some(CliCommand::Profile {
+                command: ProfileCommand::Shims { workspace: false }
+            })
+        );
+        let workspace = parse(["profile", "shims", "--workspace"]).expect("parses");
+        assert_eq!(
+            workspace.command,
+            Some(CliCommand::Profile {
+                command: ProfileCommand::Shims { workspace: true }
+            })
+        );
+    }
+
+    #[test]
+    fn profile_actions_reject_invalid_names_and_unknown_flags() {
+        parse(["profile", "create", "../x"]).expect_err("invalid name is rejected");
+        parse(["profile", "delete"]).expect_err("delete requires a name");
+        parse(["profile", "list", "--force"]).expect_err("list has no --force");
+        parse(["profile", "edit", "work", "--dry-run"]).expect_err("edit has no --dry-run");
     }
 }

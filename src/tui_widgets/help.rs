@@ -14,8 +14,6 @@
 
 //! Help content, popup layout and scroll/selection rendering.
 
-mod paths;
-
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
@@ -23,12 +21,12 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 
 use crate::build_info::BUILD_INFO;
+use crate::home_relative_path::display_path;
 use crate::theme::{CHAT_SELECTION_BG, HELP_POPUP_BORDER_COLOR, HELP_POPUP_HEADING_COLOR};
 use crate::tui_reducer_state::{CONFIRM_TIMEOUT, HELP_HORIZONTAL_SCROLL_COLUMNS};
 use crate::tui_render_state::TuiState;
 
 use super::chat::apply_selection_highlight_to_line;
-use paths::format_home_relative_path;
 
 struct HelpSection {
     heading: &'static str,
@@ -170,22 +168,23 @@ pub(super) fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
         all_lines.push(Line::styled(section.heading, heading_style));
         match section.heading {
             "Environment" => {
-                let home_directory = dirs::home_dir();
                 let environment_entries = [
                     (
                         "Ylva home:",
-                        state.display_metadata.ylva_home.as_deref().map_or_else(
-                            || "not resolved".to_string(),
-                            |path| format_home_relative_path(path, home_directory.as_deref()),
-                        ),
+                        state
+                            .display_metadata
+                            .ylva_home
+                            .as_deref()
+                            .map_or_else(|| "not resolved".to_string(), display_path),
                     ),
                     ("Profile:", state.display_metadata.profile_name.clone()),
                     (
                         "Profile path:",
-                        state.display_metadata.profile_path.as_deref().map_or_else(
-                            || "built-in default".to_string(),
-                            |path| format_home_relative_path(path, home_directory.as_deref()),
-                        ),
+                        state
+                            .display_metadata
+                            .profile_path
+                            .as_deref()
+                            .map_or_else(|| "built-in default".to_string(), display_path),
                     ),
                     (
                         "Workspace root:",
@@ -193,10 +192,7 @@ pub(super) fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
                             .display_metadata
                             .workspace_root
                             .as_deref()
-                            .map_or_else(
-                                || "not discovered".to_string(),
-                                |path| format_home_relative_path(path, home_directory.as_deref()),
-                            ),
+                            .map_or_else(|| "not discovered".to_string(), display_path),
                     ),
                 ];
                 let label_width = environment_entries

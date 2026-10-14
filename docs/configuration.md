@@ -23,6 +23,10 @@ load from the global configuration layer. When no marker exists, there is no
 workspace layer. The highest layer that defines the requested file replaces
 that file entirely; lower layers are not merged into it.
 
+Resolution follows the current directory, not the shim that started Ylva. A
+workspace profile with the same name as a home profile shadows that home
+profile whenever the current directory is inside the workspace.
+
 An optional `~/.ylva/profiles/<profile-name>/.env` file supplies provider
 environment variables and values for `${ENV_VAR}` interpolation in
 `config.toml`. When a workspace root is discovered, the matching
@@ -158,10 +162,51 @@ expanded secret values are never logged.
 `profiles/default/config.toml`, and `profiles/default/.env`) into `~/.ylva/`;
 it does not seed agent-type files. Use `ylva init --workspace` to seed the
 default profile config and `.env` starters plus `.gitignore` under the
-discovered workspace root. Both commands write only missing files unless
-`--force` is supplied. Global, profile-scoped, and project-scoped
+discovered workspace root. The workspace `.gitignore` lists `.env`, `.envrc`, and
+`chats/`. Both commands write only missing files unless
+`--force` is supplied; an existing `.gitignore` is never overwritten, and only
+its missing entries are appended. Global, profile-scoped, and project-scoped
 `agents/*.md` and `agents/*.toml` files are discovered while resolving profiles; richer
 examples are documented below rather than shipped as repository templates.
+
+### Managing profiles and shims
+
+`ylva profile` creates, lists, edits, and deletes profile directories. The
+actions, marks, and exit codes are in [profile commands](cli-options.md#profile-commands).
+`profile list` shows the current workspace's profiles and the Ylva home's
+together, in separate groups (workspace first), with home profiles shadowed by the
+workspace marked.
+
+- `shim_name` is an optional top-level key in `config.toml`. It must appear
+  before any `[table]`. It replaces the default `ylva-<name>` shim file name:
+
+  ```toml
+  shim_name = "office"
+  ```
+
+- `ylva profile edit <name>` opens `config.toml` in `$VISUAL`, then `$EDITOR`.
+- `ylva profile delete default` is allowed. The implicit `default` profile then
+  falls back to the built-in default described above.
+- Shims are written to `$YLVA_HOME/shims/` for home profiles and to
+  `<workspace-root>/.ylva/shims/` for workspace profiles. Ylva owns both
+  directories and removes any regular file in them that no profile claims.
+  Keep other files out of them. Subdirectories are left alone.
+- A home shim sets no environment. It runs `ylva` with the `YLVA_HOME` of the
+  shell that launched it, so chats land where plain `ylva --profile <name>` puts
+  them in that shell. To use another Ylva home, export `YLVA_HOME` before running
+  the shim. A workspace shim `cd`s to the workspace root first, because profile
+  lookup is cwd-based.
+- Symlinked shims are unsupported. A workspace shim derives the workspace root
+  from its own path, so a symlink would point it at the wrong place.
+- A home profile and a workspace profile can share a name. Both shims exist,
+  and `PATH` order decides which one runs.
+- Each workspace's `.ylva/shims` directory must be on `PATH` separately.
+  `ylva profile shims --workspace` prints the line to add as a `#` comment. For
+  POSIX shells such as bash and zsh, uncomment it:
+
+  ```shell
+  export PATH=~/.ylva/shims:"$PATH"
+  ```
 
 ### Global persona (`SOUL.md`)
 
