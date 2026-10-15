@@ -123,3 +123,36 @@ later implementation should keep the 512 KiB serialization-time failure guard
 and bound `glob` output, while context compaction handles the aggregate model
 view without rewriting the transcript. The exact `glob` ceiling remains to be
 chosen when this deferred work is planned.
+
+## Store oversized tool output to temp file for later retrieval
+
+Copilot seems to handle oversized tool results in a different way.
+It truncates the result and provides LLM with a hint that the full
+tool result can be accesed from a temporary file:
+
+Here a `bash` tool call created oversized result and Copilot instructed
+LLM how to retrieve parts of the oversized result using other tools:
+
+```text
+Output too large to read at once (626.9 KB). Saved to: 
+/var/folders/4l/pq2frs651d1ccv5rtxxmwjww0000gn/T/17920782216
+86-copilot-tool-output-59363-59e04ef8-c03d-40a7-9846-495f08d
+353e5.txt
+Consider using tools like rg (for searching), head/tail (for
+ viewing start/end), view with view_range (for specific 
+sections), or jq (for JSON) to examine portions of the 
+output.
+Preview (first 500 chars):
+
+<truncated tool result output>
+```
+
+Ylva could maintain a temporary directory bound to current session/runtime.
+Cleanup of the temp dir could happen whenever handling of a session ends
+( quitting ylva, `/clear` current session, `/session` resume or clone another
+session ).
+If LLM is actually interrested in reading the result, it could trigger a corresponding
+`read`, `search` or `bash` tool call afterwards.
+
+We could apply this oversized tool result handling for various tools:
+`bash`, `glob`, `search`, `web_fetch`, `web_search`, result of a subagent.
