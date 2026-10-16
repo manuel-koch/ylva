@@ -259,6 +259,7 @@ pub enum AgentEvent {
         id: Uuid,
         name: String,
         result: String,
+        requires_complete_delivery: bool,
         display_result: Option<String>,
         result_metadata: Option<serde_json::Value>,
         result_metadata_schema: Option<serde_json::Value>,

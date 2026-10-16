@@ -18,15 +18,20 @@ use std::path::Path;
 
 /// Render `path` with the user's home directory replaced by `~`. Paths outside
 /// `home_directory`, or every path when it is `None`, stay as displayed.
+/// Canonical paths also match a home directory reached through a symlink.
 pub fn format_home_relative_path(path: &Path, home_directory: Option<&Path>) -> String {
     let Some(home_directory) = home_directory else {
         return path.display().to_string();
     };
 
-    match path.strip_prefix(home_directory) {
-        Ok(relative_path) if relative_path.as_os_str().is_empty() => "~".to_string(),
-        Ok(relative_path) => Path::new("~").join(relative_path).display().to_string(),
-        Err(_) => path.display().to_string(),
+    let relative_path = path.strip_prefix(home_directory).ok().or_else(|| {
+        let canonical_home_directory = home_directory.canonicalize().ok()?;
+        path.strip_prefix(canonical_home_directory).ok()
+    });
+    match relative_path {
+        Some(relative_path) if relative_path.as_os_str().is_empty() => "~".to_string(),
+        Some(relative_path) => Path::new("~").join(relative_path).display().to_string(),
+        None => path.display().to_string(),
     }
 }
 
@@ -75,6 +80,29 @@ mod tests {
                 Some(Path::new("/Users/manuelkoch")),
             ),
             "/tmp/ylva-home/profiles/default/config.toml"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_relative_path_matches_canonical_sources_through_a_home_alias() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home_directory = temporary.path().join("home");
+        std::fs::create_dir(&home_directory).unwrap();
+        let alias = temporary.path().join("alias");
+        std::os::unix::fs::symlink(&home_directory, &alias).unwrap();
+        let canonical_home = home_directory.canonicalize().unwrap();
+        assert_eq!(
+            format_home_relative_path(&canonical_home.join(".agents/skills"), Some(&alias)),
+            "~/.agents/skills",
+        );
+        assert_eq!(
+            format_home_relative_path(&canonical_home, Some(&alias)),
+            "~"
+        );
+        assert_eq!(
+            format_home_relative_path(&alias.join(".agents/skills"), Some(&alias)),
+            "~/.agents/skills",
         );
     }
 

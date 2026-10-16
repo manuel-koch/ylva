@@ -14,17 +14,21 @@
 
 use super::{
     compaction, tools, AssistantStatus, Message, ToolCallRequest, ToolResult, UserMessageKind,
-    HARNESS_NOTICE_MARKER, MAX_EXECUTED_TOOL_CALLS_PER_BATCH, MINIMUM_USEFUL_RESULT_TOKENS,
-    TOOL_PROTOCOL_SYSTEM_PROMPT,
+    MAX_EXECUTED_TOOL_CALLS_PER_BATCH, MINIMUM_USEFUL_RESULT_TOKENS, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 use crate::llm::engine::Engine;
 use crate::llm::{ToolEnvelope, ToolSchema};
+use crate::prompt::{format_prompt_block, PromptBlockKind};
 use crate::store::Store;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use uuid::Uuid;
 mod projection;
 mod recovery;
+
+/// Estimated framing allowance per message and per embedded tool call.
+const TOKEN_FRAMING_OVERHEAD: usize = 8;
+
 /// Priority tier of a message in the model-facing view.
 ///
 /// Tiers describe how the *model view* treats a message when the context
@@ -71,8 +75,8 @@ fn tier_for(index: usize, message: &Message) -> MessageTier {
 
 /// Approximate token count of one message's model-visible text.
 ///
-/// Counts the payload text only (content, tool-call arguments, tool result
-/// and error text); role framing and message separators are ignored.
+/// Counts payload text, result envelopes, and [`TOKEN_FRAMING_OVERHEAD`] for
+/// each message and embedded tool call; provider-specific framing is approximate.
 /// Request budgeting separately measures the projected model view and tools
 /// with reserved response space and safety margins.
 pub(crate) fn estimate_message_tokens(
@@ -90,7 +94,8 @@ pub(crate) fn estimate_message_tokens(
             let mut tokens = estimator.estimate_tokens(content);
             for tool_call in tool_calls {
                 tokens += estimator.estimate_tokens(&tool_call.name);
-                tokens += estimator.estimate_tokens(&tool_call.id.to_string()) + 8;
+                tokens +=
+                    estimator.estimate_tokens(&tool_call.id.to_string()) + TOKEN_FRAMING_OVERHEAD;
                 tokens += estimator.estimate_tokens(&tool_call.arguments.to_string());
             }
             tokens
@@ -126,7 +131,31 @@ pub(crate) fn estimate_message_tokens(
                 )
         }
     };
-    payload + 8
+    payload + TOKEN_FRAMING_OVERHEAD
+}
+
+pub(crate) fn complete_result_fits(
+    id: uuid::Uuid,
+    name: &str,
+    result: &str,
+    metadata: Option<serde_json::Value>,
+    metadata_schema: Option<serde_json::Value>,
+    allowance: usize,
+) -> bool {
+    let estimator = crate::llm::TokenEstimator::Tiktoken;
+    let envelope = ToolEnvelope {
+        ok: true,
+        result: Some(result.into()),
+        error: None,
+        result_metadata: metadata,
+        result_metadata_schema: metadata_schema,
+    }
+    .to_string_checked();
+    estimator.estimate_tokens(name)
+        + estimator.estimate_tokens(&id.to_string())
+        + estimator.estimate_tokens(&envelope)
+        + TOKEN_FRAMING_OVERHEAD
+        <= allowance
 }
 
 #[cfg(test)]
@@ -442,11 +471,14 @@ impl Context {
     /// subagent finished/was cancelled") that arrives mid-conversation, well
     /// after the leading system-prompt block. Sent as `push_implicit_user`
     /// (`role:"user"`, hidden from the UI) rather than `push_system`, and
-    /// prefixed with `HARNESS_NOTICE_MARKER` so the model can tell it apart
+    /// wrapped as a harness-notice block so the model can tell it apart
     /// from a real user message — see that constant's doc comment for why
     /// `role:"system"` is unsafe here.
     pub fn push_async_harness_notice(&mut self, text: String) {
-        self.push_implicit_user(format!("{HARNESS_NOTICE_MARKER}\n{text}"));
+        self.push_implicit_user(format_prompt_block(
+            PromptBlockKind::HarnessNotice,
+            &format!("Harness notice; not from the user.\n{text}"),
+        ));
     }
 
     pub fn push_assistant(&mut self, content: String, status: AssistantStatus) {

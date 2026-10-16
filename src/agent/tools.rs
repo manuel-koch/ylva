@@ -43,6 +43,7 @@ pub mod bash;
 pub mod clarify;
 pub mod edit;
 pub mod glob;
+pub mod load_skill;
 pub mod read;
 pub mod search;
 pub mod spawn_subagent;
@@ -126,6 +127,10 @@ impl ToolError {
 ///   tool layer — the agent, the TUI — decide how to use these facts; the
 ///   tool itself does not know.
 pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
+    /// Reject success unless the entire serialized result fits the live allowance.
+    fn requires_complete_delivery(&self) -> bool {
+        false
+    }
     /// The text returned to the LLM as the tool's result message.
     fn text(&self) -> String;
 
@@ -689,6 +694,7 @@ pub(super) fn validate_args_with_schema(
 
 /// Names of the tools available in a CLI (headless) context.
 pub const DEFAULT_CLI_TOOLS: &[&str] = &[
+    load_skill::LoadSkillTool::NAME,
     read::ReadTool::NAME,
     write::WriteTool::NAME,
     glob::GlobTool::NAME,
@@ -702,6 +708,7 @@ pub const DEFAULT_CLI_TOOLS: &[&str] = &[
 /// Names of the tools available in a TUI (interactive) context.
 /// Superset of [`DEFAULT_CLI_TOOLS`]; adds tools that require a live terminal.
 pub const DEFAULT_TUI_TOOLS: &[&str] = &[
+    load_skill::LoadSkillTool::NAME,
     read::ReadTool::NAME,
     write::WriteTool::NAME,
     glob::GlobTool::NAME,
@@ -738,6 +745,8 @@ pub enum AutoApproveTool {
 /// [`DEFAULT_CLI_TOOLS`] or [`DEFAULT_TUI_TOOLS`] explicitly.
 #[derive(Debug)]
 pub struct ToolRegistryConfig {
+    /// Immutable, policy-filtered skills for this agent. Empty means no loader.
+    pub skills: Arc<crate::skills::policy::CallableSkills>,
     /// The set of tools whose approval prompt is bypassed (auto-approved)
     /// without a user prompt. Intended for automated / e2e testing where no
     /// human is present to approve.
@@ -776,6 +785,7 @@ impl Default for ToolRegistryConfig {
     /// Defaults to [`DEFAULT_CLI_TOOLS`] (the standard headless tool set).
     fn default() -> Self {
         Self {
+            skills: Arc::default(),
             auto_approve: std::collections::HashSet::new(),
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             include_spawn_subagent: false,
@@ -811,7 +821,17 @@ pub fn default_registry(
     let sandbox_context_for = |tool_name: &str, auto_approve_tool: AutoApproveTool| {
         let mut context = SandboxContext::new(Arc::clone(&sandbox));
         if let Some(rules) = config.tool_sandbox_rules.get(tool_name) {
-            context = context.with_configured_rules(rules.clone());
+            context = context.with_tool_rules(tool_name, rules.clone());
+        }
+        if tool_name == read::ReadTool::NAME {
+            context = context.with_skill_sources(Arc::new(
+                config
+                    .skills
+                    .skills
+                    .values()
+                    .map(|entry| entry.skill.source.canonical_path.clone())
+                    .collect(),
+            ));
         }
         if config.auto_approve.contains(&auto_approve_tool) {
             context = context.with_rule(crate::sandbox::SandboxRule {
@@ -853,6 +873,25 @@ pub fn default_registry(
     register_sandboxed_tool(edit::EditTool::NAME, AutoApproveTool::Edit, &|context| {
         Arc::new(edit::EditTool::new(context))
     });
+
+    if allowed
+        .iter()
+        .any(|name| name == load_skill::LoadSkillTool::NAME)
+        && !config.skills.skills.is_empty()
+    {
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_tool_rules(
+            load_skill::LoadSkillTool::NAME,
+            config
+                .tool_sandbox_rules
+                .get(load_skill::LoadSkillTool::NAME)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        registry.register(Arc::new(load_skill::LoadSkillTool::new(
+            config.skills.clone(),
+            context,
+        )));
+    }
 
     // `web_search` has no path or command argument, but it still resolves a
     // sandbox context: that context carries its `[tools.web_search]`

@@ -102,6 +102,8 @@ impl PendingTool {
                                     id,
                                     name,
                                     result,
+                                    requires_complete_delivery: tool_output
+                                        .requires_complete_delivery(),
                                     display_result,
                                     result_metadata,
                                     result_metadata_schema,

@@ -24,11 +24,14 @@
 use crate::agent::{Message, UserMessageKind};
 use crate::llm::token_estimate::truncate_text_to_token_budget;
 use crate::llm::TokenEstimator;
+use crate::prompt::{format_prompt_block, PromptBlockKind};
 
 /// Marker prefixing the recovery handoff in the model view. Like
 /// [`super::COMPACTION_SUMMARY_MARKER`] it is projected as a `user` message,
 /// never a mid-conversation `system` message.
-pub const RECOVERY_HANDOFF_MARKER: &str = "[context recovery handoff — not from the user]";
+#[cfg(test)]
+pub const RECOVERY_HANDOFF_MARKER: &str = PromptBlockKind::RecoveryHandoff.opening_tag();
+const LEGACY_RECOVERY_HANDOFF_MARKER: &str = "[context recovery handoff — not from the user]";
 
 /// Most recent removed tool outcomes listed in a handoff.
 const MAX_LISTED_OUTCOMES: usize = 24;
@@ -95,6 +98,36 @@ pub(crate) fn marked_text(
         prefix.pop();
     }
     format!("{prefix}{marker}")
+}
+
+/// Shorten only the body, reserving both delimiters within the allowance.
+pub(crate) fn marked_prompt_block(
+    estimator: TokenEstimator,
+    kind: PromptBlockKind,
+    content: &str,
+    marker: &str,
+    allowance: usize,
+) -> String {
+    let body = kind
+        .content(content)
+        .or_else(|| match kind {
+            PromptBlockKind::RecoveryHandoff => content
+                .strip_prefix(LEGACY_RECOVERY_HANDOFF_MARKER)
+                .map(str::trim),
+            _ => None,
+        })
+        .unwrap_or(content);
+    let mut body_allowance =
+        allowance.saturating_sub(estimator.estimate_tokens(&format_prompt_block(kind, "")));
+    loop {
+        let shortened = marked_text(estimator, body, marker, body_allowance);
+        let block = format_prompt_block(kind, &shortened);
+        let estimate = estimator.estimate_tokens(&block);
+        if estimate <= allowance || body_allowance == 0 {
+            return block;
+        }
+        body_allowance = body_allowance.saturating_sub(estimate.saturating_sub(allowance).max(1));
+    }
 }
 
 pub(crate) fn project_body(
@@ -202,12 +235,18 @@ pub(crate) fn project_body(
         Message::User { content, .. } => content,
         _ => unreachable!(),
     };
-    *body = marked_text(
-        estimator,
-        &original,
-        RESULT_OMISSION_MARKER,
-        allowance.saturating_sub(framing),
-    );
+    let body_allowance = allowance.saturating_sub(framing);
+    *body = if PromptBlockKind::HarnessNotice.content(&original).is_some() {
+        marked_prompt_block(
+            estimator,
+            PromptBlockKind::HarnessNotice,
+            &original,
+            RESULT_OMISSION_MARKER,
+            body_allowance,
+        )
+    } else {
+        marked_text(estimator, &original, RESULT_OMISSION_MARKER, body_allowance)
+    };
     // JSON escaping and BPE joins can make body-plus-envelope estimates differ.
     while crate::agent::estimate_message_tokens(estimator, &projected) > allowance {
         let excess =
@@ -265,8 +304,9 @@ fn excerpt(text: &str) -> String {
 
 fn strip_marker(handoff: &Message) -> &str {
     match handoff {
-        Message::User { content, .. } => content
-            .strip_prefix(RECOVERY_HANDOFF_MARKER)
+        Message::User { content, .. } => PromptBlockKind::RecoveryHandoff
+            .content(content)
+            .or_else(|| content.strip_prefix(LEGACY_RECOVERY_HANDOFF_MARKER))
             .unwrap_or(content)
             .trim(),
         _ => "",
@@ -334,10 +374,10 @@ pub(crate) fn build_projection(
         .collect();
     let omitted_outcomes = outcomes.len().saturating_sub(MAX_LISTED_OUTCOMES);
 
-    let mut text = format!(
-        "{RECOVERY_HANDOFF_MARKER}\n\nOlder conversation content was removed from your \
+    let mut text = String::from(
+        "Older conversation content was removed from your \
          view to fit the context window. This is lossy: details may be missing, and \
-         anything below is only what the harness recorded, not a conclusion.\n"
+         anything below is only what the harness recorded, not a conclusion or a user request.\n",
     );
     if anchor.is_some() {
         text.push_str("\nThe latest explicit user request follows this handoff.\n");
@@ -362,8 +402,9 @@ pub(crate) fn build_projection(
         }
     }
     let handoff = Message::User {
-        content: marked_text(
+        content: marked_prompt_block(
             estimator,
+            PromptBlockKind::RecoveryHandoff,
             &text,
             SUMMARY_OMISSION_MARKER,
             budget.handoff_tokens,
@@ -552,6 +593,84 @@ mod tests {
                 <= budget.handoff_tokens + 32
         );
         assert_eq!(content.matches(RECOVERY_HANDOFF_MARKER).count(), 1);
+        assert!(PromptBlockKind::RecoveryHandoff.content(content).is_some());
+    }
+
+    #[test]
+    fn prior_handoffs_accept_legacy_markers_without_rewriting_the_source() {
+        for content in [
+            format!("{LEGACY_RECOVERY_HANDOFF_MARKER}\n\noriginal outcome"),
+            format_prompt_block(PromptBlockKind::RecoveryHandoff, "original outcome"),
+        ] {
+            let prior = RecoveryProjection {
+                boundary: 0,
+                handoff: Message::User {
+                    content: content.clone(),
+                    kind: UserMessageKind::ImplicitToolNote,
+                },
+                anchor: None,
+                token_count: 0,
+            };
+            let projection = build_projection(
+                TokenEstimator::Tiktoken,
+                &[],
+                0,
+                0,
+                Some(&prior),
+                ProjectionBudget::for_target(4_000),
+            );
+            let projected = handoff_text(&projection);
+            assert!(projected.contains("original outcome"));
+            assert!(!projected.contains(LEGACY_RECOVERY_HANDOFF_MARKER));
+            assert_eq!(projected.matches(RECOVERY_HANDOFF_MARKER).count(), 1);
+            assert!(PromptBlockKind::RecoveryHandoff
+                .content(projected)
+                .is_some());
+            assert_eq!(handoff_text(&prior), content);
+        }
+    }
+
+    #[test]
+    fn shortening_prompt_blocks_preserves_delimiters_and_token_allowances() {
+        for estimator in [
+            TokenEstimator::Tiktoken,
+            TokenEstimator::FourCharactersPerToken,
+        ] {
+            for kind in [
+                PromptBlockKind::RecoveryHandoff,
+                PromptBlockKind::CompactionSummary,
+                PromptBlockKind::HarnessNotice,
+            ] {
+                let content = format_prompt_block(kind, &"long content ".repeat(500));
+                let shortened =
+                    marked_prompt_block(estimator, kind, &content, SUMMARY_OMISSION_MARKER, 128);
+                assert!(kind.content(&shortened).is_some());
+                assert!(shortened.contains(SUMMARY_OMISSION_MARKER));
+                assert!(estimator.estimate_tokens(&shortened) <= 128);
+                let repeated =
+                    marked_prompt_block(estimator, kind, &shortened, SUMMARY_OMISSION_MARKER, 128);
+                assert_eq!(repeated, shortened);
+            }
+        }
+    }
+
+    #[test]
+    fn clipped_harness_notices_keep_paired_tags_without_mutating_the_transcript() {
+        let message = Message::User {
+            content: format_prompt_block(
+                PromptBlockKind::HarnessNotice,
+                &"Harness notice; not from the user.\nresult ".repeat(500),
+            ),
+            kind: UserMessageKind::ImplicitToolNote,
+        };
+        let original = message.clone();
+        let projected = project_body(TokenEstimator::Tiktoken, &message, 128).expect("shortened");
+        let Message::User { content, .. } = &projected else {
+            panic!("notice stays a user message");
+        };
+        assert!(PromptBlockKind::HarnessNotice.content(content).is_some());
+        assert!(crate::agent::estimate_message_tokens(TokenEstimator::Tiktoken, &projected) <= 128);
+        assert_eq!(message, original);
     }
 
     #[test]

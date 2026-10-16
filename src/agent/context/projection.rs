@@ -73,7 +73,10 @@ impl Context {
         self.model_overrides.insert(
             index,
             Message::User {
-                content: format!("{HARNESS_NOTICE_MARKER}\n{notice}"),
+                content: format_prompt_block(
+                    PromptBlockKind::HarnessNotice,
+                    &format!("Harness notice; not from the user.\n{notice}"),
+                ),
                 kind: UserMessageKind::ImplicitToolNote,
             },
         );

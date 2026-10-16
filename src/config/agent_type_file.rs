@@ -253,6 +253,8 @@ pub(crate) struct AgentConfigOverrides {
     pub description: Option<String>,
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub allowed_skills: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]
     pub timeout_secs: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_optional_usize_or_string")]

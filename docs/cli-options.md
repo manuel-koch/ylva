@@ -41,10 +41,10 @@ with code `2` — the error names the attempted path or flag. Repeating
 `--color` or `--prompt` uses the last occurrence; other
 value-taking flags may not be repeated.
 
-Only `--log-file`, `--log-level`, and `--log-format` are global, so they work
+`--color`, `--log-file`, `--log-level`, and `--log-format` are global, so they work
 before or after a subcommand. Every other top-level flag, including `--profile`
 and `--no-tui`, must come before the subcommand (`ylva --no-tui init --workspace`).
-The `init`, `session`, and `profile` subcommands ignore `--profile` and never
+The `init`, `session`, `profile`, and `skill` subcommands ignore `--profile` and never
 load a profile. The `init` subcommand also exits with code `2` when its target
 root cannot be resolved or a seeded file cannot be written.
 
@@ -58,7 +58,8 @@ them explicitly, or `--color=yes` to force them even for non-terminal output,
 ## Exit codes
 
 Every `ylva` process ends with exactly one of these codes. The table covers chat
-runs in headless and TUI mode and the `ylva session` and `ylva profile` subcommands. The `--help`
+runs in headless and TUI mode and the `ylva session`, `ylva profile`, and
+`ylva skill` subcommands. The `--help`
 epilog lists the same codes, generated from the same source.
 
 | Code | Meaning | Examples |
@@ -84,6 +85,74 @@ because Ctrl+C is also how the TUI quits. An external SIGINT or SIGTERM always s
 `130` in the TUI, in any state: it quits an idle TUI at once, and it stops a running
 turn (including a live subagent) before quitting. The TUI then restores the
 terminal and prints the resume hint, as on every other TUI exit.
+
+## Skill commands
+
+`ylva skill list` discovers the complete local skill catalog without loading
+a profile, initializing providers, consuming stdin, or creating profiles or
+sessions. It ignores a preceding `--profile`. Winners sort by name:
+
+```text
+example
+  Description: Example instructions, with continuation lines aligned beneath
+               the first description line.
+  Source:      /absolute/canonical/example/SKILL.md
+  Body tokens: ~1.2K
+  Shadowed:    /other/example/SKILL.md
+
+other-skill
+  Description: Another skill.
+  Source:      /absolute/canonical/other-skill/SKILL.md
+  Body tokens: ~567
+```
+
+Entries are separated by one blank line, and label values share one aligned
+column. Descriptions preserve logical line/paragraph breaks and wrap to the
+terminal width detected at runtime, with continuation lines indented beneath
+the description text. If terminal dimensions are unavailable, wrapping uses
+80 columns. Paths and provenance remain intact on single terminal-safe lines;
+all untrusted control characters are escaped. Paths beneath the user's home
+directory use a `~` prefix, including source, shadowed/duplicate provenance,
+and warning paths. Paths outside home remain absolute; canonical source
+identities are unchanged.
+
+`Body tokens:` estimates the winning skill's instruction body using Ylva's
+shared local `cl100k_base` tokenizer. Frontmatter, the loader's source footer,
+tool-envelope framing, and sidecar resources are excluded. The `~` indicates
+an estimate, not a token limit, provider-specific count, or billed usage.
+Counts use the TUI footer's compact decimal notation: `~950`, `~1.2K`,
+or `~1.2M`. These are tokens, not bytes.
+
+`ylva skill list --color=auto|yes|no` uses the global CLI color policy, with
+`auto` as the default. Supported terminal output renders skill names in bold
+and labels underlined; redirected output, `TERM=dumb`, and `NO_COLOR` remain
+plain in auto mode. `yes` forces ANSI styling, and `no` disables it.
+The flag may also precede `skill`.
+
+`Shadowed:` identifies lower-priority same-name sources with differing content,
+or sources whose equality could not be established. These follow their winner
+in precedence order, showing only the canonical source path without root or
+discovery suffixes.
+`Duplicate:` is reserved for canonical aliases and verified identical copies of
+the winner, hidden unless `ylva skill list --with-duplicates` is requested.
+Sharing a name alone does not make a source a duplicate. Content comparison includes
+the complete instruction file and bounded resource fingerprints; see
+[skill configuration](configuration.md#agent-skills) for comparison limits
+and conservative handling of unavailable comparisons. Duplicates show only
+their location, without root or discovery suffixes: the discovered path for an
+alias of the winner's canonical file, otherwise the duplicate's canonical path.
+
+```text
+  Source:      ~/.agents/skills/example/SKILL.md
+  Duplicate:   ~/.claude/skills/example/SKILL.md
+```
+
+Full source provenance remains in the catalog, not in the listing.
+Rejected candidates produce stderr warnings, not usable
+records. Empty discovery prints `No skills discovered.`. Empty/partial listings
+still exit `0` when warnings occur; fatal initialization/output failures exit
+`2`. This is the unfiltered discovery view, not an agent's callable catalog.
+See [skill configuration](configuration.md#agent-skills).
 
 ## Session commands
 

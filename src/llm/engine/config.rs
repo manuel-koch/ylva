@@ -56,10 +56,9 @@ pub struct EngineConfig {
     /// `None` means the provider uses the model's own default; `Some(v)` overrides it.
     #[serde(default, deserialize_with = "deserialize_optional_f32_or_string")]
     pub temperature: Option<f32>,
-    /// Either a plain integer or a string carrying a `kb`/`mb` suffix (for
-    /// example `"265kb"`, meaning `265 * 1024`) — the same 1024-based units
-    /// `/models` uses to display context lengths (see
-    /// `crate::tui_reducer_state::format_context_length`).
+    /// Either a plain integer token count or a decimal string with an optional
+    /// case-insensitive `K`/`M` suffix. Fractional suffixed values must resolve
+    /// to whole tokens; byte-unit suffixes are rejected.
     ///
     /// `None` means the profile's `[engines.*]` table left this unset;
     /// [`EngineConfig::effective_context_length`] then falls back to the
@@ -166,14 +165,11 @@ where
     }
 }
 
-/// Number of context-length units per `kb`/`mb` suffix step, matching the
-/// 1024-based convention `format_context_length` uses to display these
-/// values in `/models` (see `crate::tui_reducer_state`).
-const CONTEXT_LENGTH_KILO: usize = 1024;
-const CONTEXT_LENGTH_MEGA: usize = CONTEXT_LENGTH_KILO * 1024;
+const CONTEXT_LENGTH_KILO: usize = 1_000;
+const CONTEXT_LENGTH_MEGA: usize = 1_000_000;
 
 /// Accept `context_length` as either a plain integer or a string carrying a
-/// `kb`/`mb` suffix (for example `"265kb"`, meaning `265 * 1024`). Absent
+/// `K`/`M` suffix. Absent
 /// entirely, the field deserializes to `None` via `#[serde(default)]`.
 fn deserialize_context_length<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
 where
@@ -194,27 +190,54 @@ where
     }
 }
 
-/// Parse a `context_length` string such as `"265kb"`, `"2mb"`, or a bare
-/// `"32000"` into its expanded unit count.
+/// Expand decimal token counts exactly, without floating-point rounding.
 fn parse_context_length(text: &str) -> Result<usize, String> {
     let trimmed = text.trim();
-    let lowered = trimmed.to_lowercase();
-    let (digits, multiplier) = if let Some(prefix) = lowered.strip_suffix("mb") {
+    let lowered = trimmed.to_ascii_lowercase();
+    let (digits, multiplier) = if let Some(prefix) = lowered.strip_suffix('m') {
         (prefix, CONTEXT_LENGTH_MEGA)
-    } else if let Some(prefix) = lowered.strip_suffix("kb") {
+    } else if let Some(prefix) = lowered.strip_suffix('k') {
         (prefix, CONTEXT_LENGTH_KILO)
     } else {
         (lowered.as_str(), 1)
     };
-    digits
-        .trim()
+    let invalid = || {
+        format!(
+            "invalid context_length '{text}': expected an integer token count or a decimal value \
+             with a 'K' or 'M' suffix, resolving to whole tokens within the supported integer range"
+        )
+    };
+    let digits = digits.trim();
+    let (whole, fraction) = match digits.split_once('.') {
+        Some((whole, fraction)) if multiplier > 1 && !fraction.is_empty() => (whole, fraction),
+        Some(_) => return Err(invalid()),
+        None => (digits, ""),
+    };
+    if whole.is_empty()
+        || !whole.bytes().all(|digit| digit.is_ascii_digit())
+        || !fraction.bytes().all(|digit| digit.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let whole_tokens = whole
         .parse::<usize>()
-        .map(|value| value * multiplier)
-        .map_err(|_| {
-            format!(
-                "invalid context_length '{text}': expected an integer, optionally followed by 'kb' or 'mb'"
-            )
-        })
+        .ok()
+        .and_then(|value| value.checked_mul(multiplier))
+        .ok_or_else(invalid)?;
+    let fraction = fraction.trim_end_matches('0');
+    let fractional_tokens = if fraction.is_empty() {
+        0
+    } else {
+        let divisor = (0..fraction.len())
+            .try_fold(1usize, |divisor, _| {
+                divisor.checked_mul(10).filter(|value| *value <= multiplier)
+            })
+            .ok_or_else(invalid)?;
+        fraction.parse::<usize>().map_err(|_| invalid())? * (multiplier / divisor)
+    };
+    whole_tokens
+        .checked_add(fractional_tokens)
+        .ok_or_else(invalid)
 }
 
 /// Mutable engine settings shared by an [`super::Engine`] and its [`Provider`].

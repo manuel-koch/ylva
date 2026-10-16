@@ -107,6 +107,21 @@ _Avoid_: prompt payload, request messages
 A named capability that an agent can invoke, such as reading files, editing
 files, searching, running commands, spawning agents, or asking the user for clarification.
 
+**Skill**:
+A reusable set of instructions defined by a directory's YAML-frontmatter
+`SKILL.md`. Discovery retains its name, description, instruction body, and
+canonical source identity; `load_skill` delivers the body on demand as ordinary
+tool-result content, not a system message. A skill grants no permissions.
+
+**Skill catalog**:
+The immutable per-process discovery snapshot, with deterministic winning
+sources and shadowed/duplicate/rejected provenance. Duplicates are canonical
+aliases or same-name copies matching the winner's complete instruction file
+and resource fingerprint; they do not add fallback sources or permissions.
+Each agent type resolves its own
+callable catalog through tool permissions, `allowed_skills`, sandbox rules,
+and the host's approval capability.
+
 **Sandbox**:
 The filesystem boundary that governs which paths tools may access and when user
 approval is required.
@@ -164,6 +179,8 @@ The remaining safe request budget, shared by unresolved budgeted calls after
 192 estimated tokens of error framing per queued call. Calls need at least
 256 estimated tokens to start; canonical output stays intact while its model
 projection is bounded.
+Complete-delivery results, such as skills, instead fail explicitly if their
+entire success envelope cannot fit; they are never successful partial loads.
 
 **Batch-count backstop**:
 Only the first six requested tool positions can execute, with no backfill for

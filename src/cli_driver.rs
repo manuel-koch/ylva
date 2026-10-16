@@ -23,7 +23,9 @@ use tokio::sync::mpsc;
 
 use crate::agent::tools::clarify::ClarifyTool;
 use crate::agent::tools::spawn_subagent::SpawnSubagentTool;
-use crate::agent::tools::{default_registry, Tool, ToolRegistryConfig};
+use crate::agent::tools::Tool;
+#[cfg(test)]
+use crate::agent::tools::{default_registry, ToolRegistryConfig};
 use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
@@ -32,7 +34,9 @@ use crate::exit_code::ExitCode;
 use crate::llm::engine::{EngineConfig, EngineImpl};
 use crate::llm::Provider;
 use crate::run_outcome::RunOutcome;
-use crate::sandbox::{ApprovalCheck, Sandbox};
+use crate::sandbox::ApprovalCheck;
+#[cfg(test)]
+use crate::sandbox::Sandbox;
 use crate::session_title::TitleAttempt;
 use crate::stop_signal::StopSignals;
 use crate::theme::{
@@ -318,6 +322,7 @@ impl ConsoleApp {
 /// [`AgentFactory`] builds. Both must receive the profile's `[web_search]`
 /// and `[web_fetch]` sections, otherwise the rendered title names a
 /// different backend than the one the agent actually calls.
+#[cfg(test)]
 fn display_registry_config(profile: &ProfileConfig) -> ToolRegistryConfig {
     let tool_sandbox_rules = profile
         .tools
@@ -334,14 +339,10 @@ fn display_registry_config(profile: &ProfileConfig) -> ToolRegistryConfig {
 
 impl App for ConsoleApp {
     async fn run(mut self) -> anyhow::Result<u8> {
-        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
-        let registry = Arc::new(default_registry(
-            sandbox,
-            display_registry_config(&self.profile),
-        ));
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;
+        let registry = agent.registry().clone();
         let _exit_guard = agent.exit_guard(self.exit_snapshot);
         let session_span = agent
             .store()

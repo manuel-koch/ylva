@@ -16,12 +16,14 @@ Ylva is highly customizable to adapt to user needs.
 - [x] Layered global/workspace configuration with `ylva init` scaffolding
 - [x] A `SOUL.md` persona, and trusted `AGENTS.md` / `CLAUDE.md` instruction
       files folded into the system prompt
+- [x] Local Agent Skills with per-agent catalogs
 - [x] Multiple LLM providers built-in
   - [x] Ollama
   - [x] Openrouter
   - [ ] Copilot
   - [ ] Anthropic
 - [x] Configurable `engines` ( combination of provider + model + config )
+- [x] Session / context compaction
 - [x] Concurrent subagent execution with a profile-configurable limit
 - [x] Support LLM calling tools:
   - [x] `read`, `edit` & `write` file access
@@ -35,6 +37,7 @@ Ylva is highly customizable to adapt to user needs.
     - [x] SearXNG
     - [x] Brave
   - [x] `web_fetch` to fetch data from a given URL
+  - [x] `load_skill` to load named Agent Skill instructions on demand
 - [x] Human-in-the-loop safety via a path-based tool-approval sandbox
 - [x] Per-tool configurable sandbox approval rules
 - [x] Persistent session storage
@@ -54,5 +57,3 @@ Ylva is highly customizable to adapt to user needs.
   - [x] `/compact` to manually summarize the root model view, retaining the transcript
 - [ ] Tracking billed token usage and cost totals in current context (an
       approximate context-size readout is already shown in the TUI footer)
-- [x] Session / context compaction
-- [ ] Support for skills

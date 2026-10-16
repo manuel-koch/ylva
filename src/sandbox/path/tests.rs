@@ -44,7 +44,7 @@ fn check_path_dot_path_requires_user_approval() {
         Some(ApprovalCheck::UserApprovalRequired),
         "dot-path relative to workspace should be Some(UserApprovalRequired)"
     );
-    let dot_dir_path = workspace.join(".git/config");
+    let dot_dir_path = workspace.join(crate::GIT_ENTRY_NAME).join("config");
     assert_eq!(
         context.check_path(&dot_dir_path),
         Some(ApprovalCheck::UserApprovalRequired),
@@ -58,7 +58,7 @@ fn check_path_allowing_dot_paths_abstains_inside_workspace() {
     let workspace = temporary_dir.path().to_path_buf();
     let sandbox = make_sandbox(&workspace);
     let context = SandboxContext::new(Arc::clone(&sandbox));
-    let dot_dir_path = workspace.join(".git/config");
+    let dot_dir_path = workspace.join(crate::GIT_ENTRY_NAME).join("config");
     assert_eq!(
         context.check_path_allowing_dot_paths(&dot_dir_path),
         None,

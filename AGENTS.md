@@ -82,6 +82,11 @@ Maintain configured test coverage threshold as noted in [development-workflow](.
 
 ## Coding Conventions
 
+**License headers.** Every project-authored source file must carry a valid
+copyright and Apache-2.0 license header. Follow
+[License headers](./docs/development-workflow.md#license-headers), including its
+rules for scripts, generated files, and third-party code.
+
 Use full, descriptive names for variables, functions, methods, and types — never
 abbreviations (e.g. `case_sensitive_sort` not `cs`, `config_path` not `cp`,
 `format_timestamp` not `fmt_ts`).

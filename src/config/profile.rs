@@ -216,7 +216,15 @@ fn validate_tool_sandbox_rules(
         let is_network_tool = tool_name == crate::agent::tools::web_search::WebSearchTool::NAME
             || tool_name == crate::agent::tools::web_fetch::WebFetchTool::NAME;
         for (index, rule) in tool_config.rules.iter().enumerate() {
-            if rule.has_target() && !rule.is_network_only() {
+            if rule.is_read_tool_only() && tool_name != "read" {
+                return Err(ConfigError::InvalidSandboxRuleKind {
+                    path: path.to_path_buf(),
+                    tool: tool_name.clone(),
+                    index,
+                    expected: "`skill_sidecar` is valid only for read".into(),
+                });
+            }
+            if rule.has_target() && !rule.is_network_tool_only() {
                 return Err(ConfigError::MisplacedSandboxRuleTarget {
                     path: path.to_path_buf(),
                     tool: tool_name.clone(),
@@ -234,7 +242,7 @@ fn validate_tool_sandbox_rules(
                 })?;
             }
             if is_bash {
-                if rule.is_path_only() || rule.is_network_only() {
+                if rule.is_path_tool_only() || rule.is_network_tool_only() {
                     return Err(ConfigError::InvalidSandboxRuleKind {
                         path: path.to_path_buf(),
                         tool: tool_name.clone(),
@@ -246,7 +254,7 @@ fn validate_tool_sandbox_rules(
                     });
                 }
             } else if is_network_tool {
-                if rule.is_bash_only() || rule.is_path_only() {
+                if rule.is_bash_tool_only() || rule.is_path_tool_only() {
                     return Err(ConfigError::InvalidSandboxRuleKind {
                         path: path.to_path_buf(),
                         tool: tool_name.clone(),
@@ -257,7 +265,7 @@ fn validate_tool_sandbox_rules(
                             .to_string(),
                     });
                 }
-            } else if rule.is_bash_only() || rule.is_network_only() {
+            } else if rule.is_bash_tool_only() || rule.is_network_tool_only() {
                 return Err(ConfigError::InvalidSandboxRuleKind {
                     path: path.to_path_buf(),
                     tool: tool_name.clone(),
@@ -459,6 +467,7 @@ fn default_agent_config() -> AgentConfig {
         compaction: None,
         description: None,
         allowed_tools: None,
+        allowed_skills: None,
         timeout_secs: None,
         max_tool_iterations: None,
         persona: None,
@@ -879,6 +888,7 @@ fn load_agent_types(
             compaction: None,
             description: None,
             allowed_tools: None,
+            allowed_skills: None,
             timeout_secs: None,
             max_tool_iterations: None,
             persona: None,
@@ -910,6 +920,9 @@ fn apply_agent_config_overrides(config: &mut AgentConfig, overrides: AgentConfig
     }
     if overrides.allowed_tools.is_some() {
         config.allowed_tools = overrides.allowed_tools;
+    }
+    if overrides.allowed_skills.is_some() {
+        config.allowed_skills = overrides.allowed_skills;
     }
     if overrides.timeout_secs.is_some() {
         config.timeout_secs = overrides.timeout_secs;

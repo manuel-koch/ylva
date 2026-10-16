@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod common;
+#[path = "tools_agent_loop/skills.rs"]
+mod skills;
 
 use base64::Engine as _;
 use std::sync::atomic::{AtomicUsize, Ordering};

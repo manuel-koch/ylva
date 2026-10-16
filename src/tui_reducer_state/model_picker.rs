@@ -18,6 +18,7 @@ use super::{AppState, BannerDragSelection, Focus};
 use crate::llm::engine::{
     ModelSelection, ModelSelectionTarget, ProviderModelOption, ReasoningEffortChange,
 };
+use crate::llm::token_estimate::format_token_estimate;
 use crate::llm::InputModality;
 use crate::slash_command::{slash_command_suggestions, SlashCommandInfo};
 
@@ -143,7 +144,7 @@ fn format_model_choice_label(identity: String, option: &ProviderModelOption) -> 
     {
         details.push(format!(
             "context: {}",
-            format_context_length(context_length)
+            format_token_estimate(context_length)
         ));
     }
     details.push(match option.model.reasoning_efforts.as_deref() {
@@ -189,19 +190,6 @@ fn format_input_modality_markers(input_modalities: Option<&[InputModality]>) -> 
         Some(format!("[{markers}]"))
     }
 }
-pub(crate) fn format_context_length(context_length: usize) -> String {
-    const KILOBYTE: usize = 1024;
-    const MEGABYTE: usize = KILOBYTE * 1024;
-
-    if context_length >= MEGABYTE {
-        format!("{}mb", context_length / MEGABYTE)
-    } else if context_length >= KILOBYTE {
-        format!("{}kb", context_length / KILOBYTE)
-    } else {
-        format!("{context_length} tokens")
-    }
-}
-
 /// How each `/models` entry occupies rows in the picker popup. Chosen from the
 /// terminal width at draw time, the same way the footer picks its layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -546,7 +534,7 @@ pub(crate) fn model_parameter_rows(edit: &ModelParameterEdit, choice: &ModelChoi
                         context_length_directions(context_length, edit.context_length_maximum);
                     format!(
                         "Context length:  {}",
-                        format_parameter_value(&format_context_length(context_length), directions)
+                        format_parameter_value(&format_token_estimate(context_length), directions)
                     )
                 }
                 None => "Context length:  unknown".to_string(),

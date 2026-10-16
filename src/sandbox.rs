@@ -109,6 +109,7 @@ pub struct SandboxContext {
     /// profile's `[tools.<name>]` table via
     /// [`SandboxContext::with_configured_rules`].
     configured_rules: Option<Vec<ResolvedRule>>,
+    skill_sources: Arc<Vec<PathBuf>>,
 }
 
 impl std::fmt::Debug for SandboxContext {
@@ -125,6 +126,29 @@ impl std::fmt::Debug for SandboxContext {
 }
 
 impl SandboxContext {
+    /// Callable source identities supplied only to the read tool's context.
+    pub fn with_skill_sources(mut self, sources: Arc<Vec<PathBuf>>) -> Self {
+        self.skill_sources = sources;
+        self
+    }
+
+    /// Tool-aware defense for callers that bypass profile validation.
+    pub fn with_tool_rules(self, tool_name: &str, rules: Vec<SandboxRuleConfig>) -> Self {
+        if tool_name != "read" && rules.iter().any(SandboxRuleConfig::is_read_tool_only) {
+            tracing::error!(
+                tool = tool_name,
+                "skill_sidecar rule rejected for non-read tool"
+            );
+            return self.with_rule(SandboxRule {
+                verdict: ApprovalCheck::AutoDenied {
+                    reason: "skill_sidecar is valid only for read".into(),
+                },
+                pattern: glob::Pattern::new("**").expect("valid glob"),
+            });
+        }
+        self.with_configured_rules(rules)
+    }
+
     /// Build a context with an empty rule list and no `[tools.<name>]`
     /// config, so the built-in default floor
     /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`) applies.
@@ -134,6 +158,7 @@ impl SandboxContext {
             sandbox,
             rules: vec![],
             configured_rules: None,
+            skill_sources: Arc::default(),
         }
     }
 

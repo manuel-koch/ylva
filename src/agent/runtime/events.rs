@@ -15,6 +15,37 @@
 use super::*;
 
 impl RunState {
+    pub(super) fn enforce_complete_delivery(&self, event: AgentEvent) -> AgentEvent {
+        match event {
+            AgentEvent::ToolDone {
+                id,
+                ref name,
+                ref result,
+                requires_complete_delivery: true,
+                ref result_metadata,
+                ref result_metadata_schema,
+                duration,
+                ..
+            } if tool_output_token_limit(
+                name,
+                &self.context,
+                &self.registry.schemas(),
+                self.engine.effective_context_length(),
+                &queued_tool_names(&self.pending_tools, 0),
+            ).is_some_and(|allowance| !crate::agent::context::complete_result_fits(
+                id, name, result, result_metadata.clone(), result_metadata_schema.clone(), allowance,
+            )) => AgentEvent::ToolError {
+                id,
+                name: name.clone(),
+                error: format!("Tool '{name}' failed: complete result exceeds the current result allowance; no instructions were delivered"),
+                partial_output: None,
+                duration,
+                content_sections: Vec::new(),
+            },
+            other => other,
+        }
+    }
+
     pub(super) async fn handle_agent_event(
         &mut self,
         event_generation: u64,
@@ -28,13 +59,13 @@ impl RunState {
             tracing::debug!(
                 event_generation,
                 generation = self.generation,
-                ?event,
                 "dropping stale agent event from a superseded generation \
                                      (likely produced before an AgentCommand::ClearContext)"
             );
             return LoopControl::PollAgain;
         }
-        match event {
+        // Rejection uses the ordinary error path before success persistence.
+        match self.enforce_complete_delivery(event) {
             AgentEvent::StreamDone { partial } => {
                 self.current_cancel = None;
                 self.context
@@ -205,6 +236,7 @@ impl RunState {
                 id,
                 name,
                 result,
+                requires_complete_delivery,
                 display_result,
                 result_metadata,
                 result_metadata_schema,
@@ -244,7 +276,7 @@ impl RunState {
                     content_sections: content_sections.clone(),
                     duration,
                 });
-                if let Some(allowance) = allowance {
+                if let Some(allowance) = allowance.filter(|_| !requires_complete_delivery) {
                     self.context.limit_last_model_message(allowance);
                 }
                 let _ = self

@@ -354,6 +354,12 @@ impl SandboxContext {
         self.check_path_with_dot_path_access(path, false)
     }
 
+    /// Evaluate an already-canonical snapshot identity without reopening or
+    /// following a source path that may have changed since discovery.
+    pub fn check_snapshot_path(&self, path: &Path) -> Option<ApprovalCheck> {
+        self.evaluate_path(path, false, true)
+    }
+
     /// Check whether an in-workspace enumeration may traverse `path`,
     /// allowing dot-prefixed components while retaining workspace and named
     /// rule enforcement.
@@ -396,6 +402,7 @@ impl SandboxContext {
     /// `effective`) — never cached, so a mid-session remount cannot leave a
     /// stale ID behind.
     fn evaluate_named_rule(
+        &self,
         rule: NamedSandboxRule,
         workspace_root: &Path,
         effective: &Path,
@@ -412,6 +419,7 @@ impl SandboxContext {
                 resolve_device(&canonicalize_existing_anchor(effective)),
                 resolve_device(workspace_root),
             ),
+            NamedSandboxRule::SkillSidecar => false,
             NamedSandboxRule::Backgrounded
             | NamedSandboxRule::VariableAssignmentPrefix
             | NamedSandboxRule::UnquotedGlob
@@ -425,6 +433,15 @@ impl SandboxContext {
         path: &Path,
         allow_dot_paths: bool,
     ) -> Option<ApprovalCheck> {
+        self.evaluate_path(path, allow_dot_paths, false)
+    }
+
+    fn evaluate_path(
+        &self,
+        path: &Path,
+        allow_dot_paths: bool,
+        snapshot: bool,
+    ) -> Option<ApprovalCheck> {
         let workspace_root = {
             let guard = self.sandbox.read().expect("sandbox lock poisoned");
             guard.workspace_root.clone()
@@ -434,9 +451,34 @@ impl SandboxContext {
         // This guards against macOS /var/folders → /private/var/folders mismatches.
         let workspace_root = std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root);
         let normalized = Self::normalize(&workspace_root, path);
+        let requested = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            workspace_root.join(path)
+        };
+        let sidecar_matches = !self.skill_sources.is_empty()
+            && requested
+                .file_name()
+                .is_some_and(|name| name != crate::skills::SKILL_FILE_NAME)
+            && std::fs::canonicalize(&requested).is_ok_and(|canonical| {
+                canonical
+                    .file_name()
+                    .is_some_and(|name| name != crate::skills::SKILL_FILE_NAME)
+                    && canonical.is_file()
+                    && !self.skill_sources.contains(&canonical)
+                    && self.skill_sources.iter().any(|source| {
+                        source
+                            .parent()
+                            .is_some_and(|directory| canonical.starts_with(directory))
+                    })
+            });
 
         // Resolve symlinks and non-canonical prefixes (e.g. macOS /var → /private/var).
-        let effective = Self::canonicalize_best_effort(&normalized);
+        let effective = if snapshot {
+            normalized
+        } else {
+            Self::canonicalize_best_effort(&normalized)
+        };
         let path_str = effective.to_string_lossy();
 
         // No implicit zeroth verdict — absence of a match returns None.
@@ -453,12 +495,14 @@ impl SandboxContext {
                             verdict: rule_verdict,
                             target: _,
                         } => {
-                            if Self::evaluate_named_rule(
-                                *named,
-                                &workspace_root,
-                                &effective,
-                                allow_dot_paths,
-                            ) {
+                            if (*named == NamedSandboxRule::SkillSidecar && sidecar_matches)
+                                || self.evaluate_named_rule(
+                                    *named,
+                                    &workspace_root,
+                                    &effective,
+                                    allow_dot_paths,
+                                )
+                            {
                                 verdict = Some(rule_verdict.clone());
                             }
                         }
@@ -484,7 +528,7 @@ impl SandboxContext {
                 // dot-file the model was pointed at) can be granted; the
                 // `OUTSIDE_WORKSPACE_REASON`/`DOT_PATH_REASON` texts remain
                 // the messages for a *configured* `auto_denied` named rule.
-                if Self::evaluate_named_rule(
+                if self.evaluate_named_rule(
                     NamedSandboxRule::OutsideWorkspace,
                     &workspace_root,
                     &effective,
@@ -492,7 +536,7 @@ impl SandboxContext {
                 ) {
                     verdict = Some(ApprovalCheck::UserApprovalRequired);
                 }
-                if Self::evaluate_named_rule(
+                if self.evaluate_named_rule(
                     NamedSandboxRule::DotPath,
                     &workspace_root,
                     &effective,

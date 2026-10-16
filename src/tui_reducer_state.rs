@@ -34,6 +34,7 @@ use uuid::Uuid;
 use crate::agent::AgentMode;
 pub use crate::agent::ContextUsageSource;
 use crate::llm::engine::EngineDisplayInfo;
+use crate::llm::token_estimate::format_token_estimate;
 
 mod conversation;
 mod events;
@@ -55,9 +56,9 @@ pub use layout::{
     SlashOverlayLayout,
 };
 pub(crate) use model_picker::{
-    engine_choice_parts, extract_models_filter, format_context_length, matching_model_indices,
-    model_choice_parts, model_picker_row_entries, model_picker_row_is_details,
-    model_picker_row_layout, slash_overlay_text_rows, visible_model_choices,
+    engine_choice_parts, extract_models_filter, matching_model_indices, model_choice_parts,
+    model_picker_row_entries, model_picker_row_is_details, model_picker_row_layout,
+    slash_overlay_text_rows, visible_model_choices,
 };
 pub use model_picker::{
     ChoiceLabel, InputSnapshot, ModelChoice, ModelParameterEdit, ParameterField, PickerRowLayout,
@@ -123,20 +124,6 @@ pub fn format_context_usage(estimated_tokens: usize, context_length: usize) -> S
 /// Format the footer value independently of the estimate source.
 pub fn format_context_usage_readout(context_usage: ContextUsage) -> String {
     format_context_usage(context_usage.estimated_tokens, context_usage.context_length)
-}
-
-/// Abbreviate a token estimate: `950`, `64.2K`, `1.2M`.
-fn format_token_estimate(estimated_tokens: usize) -> String {
-    const THOUSAND: f64 = 1_000.0;
-    const MILLION: f64 = 1_000_000.0;
-    let tokens = estimated_tokens as f64;
-    if tokens >= MILLION {
-        format!("{:.1}M", tokens / MILLION)
-    } else if tokens >= THOUSAND {
-        format!("{:.1}K", tokens / THOUSAND)
-    } else {
-        estimated_tokens.to_string()
-    }
 }
 
 // ─── Per-area sub-structs ──────────────────────────────────────────────────────

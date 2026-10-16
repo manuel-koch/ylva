@@ -103,7 +103,7 @@ const CONFIGURED_COMMAND_GLOB_REASON: &str = "Access denied by security policy: 
 /// reorder or change their verdict without reimplementing the underlying
 /// comparison logic. They fall into three families, each restricted to the
 /// tool kinds it applies to (enforced at config load by
-/// [`SandboxRuleConfig::is_path_only`]/[`is_bash_only`]/[`is_network_only`]):
+/// [`SandboxRuleConfig::is_path_tool_only`]/[`is_bash_tool_only`]/[`is_network_tool_only`]):
 /// the three path rules ([`NamedSandboxRule::OutsideWorkspace`],
 /// [`NamedSandboxRule::DotPath`], [`NamedSandboxRule::CrossFilesystem`]) are
 /// valid for every tool except `bash` and the network tools; the four
@@ -126,6 +126,8 @@ pub enum NamedSandboxRule {
     /// metadata on either side (or any non-unix target) never matches.
     /// Opt-in only — not part of the default floor.
     CrossFilesystem,
+    /// Opt-in read-only access to regular resources within callable skills.
+    SkillSidecar,
     /// Matches a `bash` command immediately followed by a bare `&`
     /// (backgrounding).
     Backgrounded,
@@ -318,12 +320,22 @@ pub enum SandboxRuleConfig {
 }
 
 impl SandboxRuleConfig {
+    /// Whether this rule is restricted to the `read` tool, not read-only I/O generally.
+    pub fn is_read_tool_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Named {
+                rule: NamedSandboxRule::SkillSidecar,
+                ..
+            }
+        )
+    }
     /// Returns `true` when this is the tool-restricted [`SandboxRuleConfig::CommandGlob`]
     /// variant, or a [`SandboxRuleConfig::Named`] variant referencing one of
     /// the four `bash`-only [`NamedSandboxRule`] variants. Used by
     /// `crate::config::profile::ProfileConfig`'s startup validation to
     /// reject the wrong rule kind under the wrong tool.
-    pub fn is_bash_only(&self) -> bool {
+    pub fn is_bash_tool_only(&self) -> bool {
         match self {
             SandboxRuleConfig::CommandGlob { .. } => true,
             SandboxRuleConfig::Named { rule, .. } => matches!(
@@ -342,7 +354,7 @@ impl SandboxRuleConfig {
     /// path [`NamedSandboxRule`] variants
     /// ([`NamedSandboxRule::OutsideWorkspace`], [`NamedSandboxRule::DotPath`],
     /// [`NamedSandboxRule::CrossFilesystem`]).
-    pub fn is_path_only(&self) -> bool {
+    pub fn is_path_tool_only(&self) -> bool {
         match self {
             SandboxRuleConfig::PathGlob { .. } => true,
             SandboxRuleConfig::Named { rule, .. } => matches!(
@@ -350,6 +362,7 @@ impl SandboxRuleConfig {
                 NamedSandboxRule::OutsideWorkspace
                     | NamedSandboxRule::DotPath
                     | NamedSandboxRule::CrossFilesystem
+                    | NamedSandboxRule::SkillSidecar
             ),
             SandboxRuleConfig::CommandGlob { .. } => false,
         }
@@ -363,7 +376,7 @@ impl SandboxRuleConfig {
     /// Used by
     /// `crate::config::profile::ProfileConfig`'s startup validation to
     /// reject the rule under every other tool, and vice versa.
-    pub fn is_network_only(&self) -> bool {
+    pub fn is_network_tool_only(&self) -> bool {
         matches!(
             self,
             SandboxRuleConfig::Named {
@@ -482,6 +495,7 @@ impl ResolvedRule {
                     NamedSandboxRule::OutsideWorkspace => OUTSIDE_WORKSPACE_REASON,
                     NamedSandboxRule::DotPath => DOT_PATH_REASON,
                     NamedSandboxRule::CrossFilesystem => CROSS_FILESYSTEM_REASON,
+                    NamedSandboxRule::SkillSidecar => "Access denied by skill sidecar policy",
                     NamedSandboxRule::Backgrounded => BACKGROUNDED_REASON,
                     NamedSandboxRule::VariableAssignmentPrefix => VARIABLE_ASSIGNMENT_PREFIX_REASON,
                     NamedSandboxRule::UnquotedGlob => UNQUOTED_GLOB_REASON,

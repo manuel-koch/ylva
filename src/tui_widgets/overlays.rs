@@ -534,7 +534,7 @@ fn model_picker_detail_lines(
             Line::styled(
                 format!(
                     "Compaction uses {provider_connection}/{model}, context: {}",
-                    crate::tui_reducer_state::format_context_length(context_length)
+                    crate::llm::token_estimate::format_token_estimate(context_length)
                 ),
                 Style::default().fg(color),
             )

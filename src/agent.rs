@@ -106,7 +106,7 @@ const ERROR_RESPONSE_FRAMING_TOKENS: usize = 192;
 /// via OpenRouter's "Io Net" backend). `role:"user"` is safe everywhere, so
 /// this marker lets the model tell the harness's own notice apart from
 /// something the human actually typed.
-pub const HARNESS_NOTICE_MARKER: &str = "[harness notice — not from the user]";
+pub const HARNESS_NOTICE_MARKER: &str = crate::prompt::PromptBlockKind::HarnessNotice.opening_tag();
 
 /// System-prompt snippet, injected immediately after the persona/initial
 /// system prompt, that documents the uniform tool-response envelope a model

@@ -24,7 +24,10 @@ fn harness_notice_projection_preserves_the_canonical_transcript() {
     assert_eq!(
         context.model_messages().last(),
         Some(&Message::User {
-            content: format!("{HARNESS_NOTICE_MARKER}\nbounded child result"),
+            content: format_prompt_block(
+                PromptBlockKind::HarnessNotice,
+                "Harness notice; not from the user.\nbounded child result",
+            ),
             kind: UserMessageKind::ImplicitToolNote,
         })
     );
@@ -41,6 +44,8 @@ fn model_projections_restore_exactly_on_resume_and_clone_with_rebuilt_systems() 
             .expect("store");
         let mut context = Context::new();
         context.set_store(store.clone());
+        context
+            .push_implicit_user("[harness notice — not from the user]\nlegacy notice".to_string());
         context.push_user("keep this exact task".to_string());
         let id = Uuid::new_v4();
         context.push_assistant_tool_call(
@@ -90,6 +95,11 @@ fn model_projections_restore_exactly_on_resume_and_clone_with_rebuilt_systems() 
             expected
         );
         assert_eq!(&replay.messages()[replay.leading_system_len()..], canonical);
+        assert!(matches!(
+            &replay.messages()[replay.leading_system_len()],
+            Message::User { content, .. }
+                if content == "[harness notice — not from the user]\nlegacy notice"
+        ));
         drop(replay);
         drop(resumed);
         tokio::time::sleep(Duration::from_millis(50)).await;

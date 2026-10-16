@@ -38,6 +38,9 @@ pub struct AgentConfig {
     /// registered tools are available. Tool filtering is implemented in Phase 6.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+    /// Eligible discovered skill names. Omission allows all; an empty list allows none.
+    #[serde(default)]
+    pub allowed_skills: Option<Vec<String>>,
     /// Per-tool sandbox rule lists scoped to this agent type, keyed by tool
     /// name (`[agents.<type>.tools.<name>]`/agent-type-file `[tools.<name>]`
     /// tables). When a tool name has an entry here it takes precedence over

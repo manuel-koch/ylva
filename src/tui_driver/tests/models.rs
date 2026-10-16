@@ -472,7 +472,7 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_efforts() {
     );
     assert_eq!(
         shortcut.label.single_line(),
-        "openrouter → stub/thinking  context: 31kb  reasoning: max",
+        "openrouter → stub/thinking  context: 32.0K  reasoning: max",
         "the shortcut must show its configured reasoning effort instead of 'unavailable'"
     );
 }
@@ -526,7 +526,7 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_default() {
     );
     assert_eq!(
         shortcut.label.single_line(),
-        "openrouter → stub/thinking  context: 31kb  reasoning: default (medium)",
+        "openrouter → stub/thinking  context: 32.0K  reasoning: default (medium)",
         "the shortcut's default slot must name the advertised default"
     );
 }
@@ -571,7 +571,7 @@ async fn models_lists_an_engine_shortcut_falling_back_to_the_catalogs_context_le
     assert_eq!(shortcut.catalog_context_length, Some(999_999));
     assert_eq!(
         shortcut.label.single_line(),
-        "openrouter → stub/thinking  context: 976kb  reasoning: max"
+        "openrouter → stub/thinking  context: 1000.0K  reasoning: max"
     );
 }
 

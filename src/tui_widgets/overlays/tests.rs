@@ -119,28 +119,28 @@ fn detail_text_and_color(
 fn unconfirmed_context_length_edit_previews_in_footer_when_following_conversation() {
     let overlay = picker_overlay(Some(context_length_draft(0, 128 * KB, true)));
     let (text, _) = detail_text_and_color(&overlay, &engine_display(following_compaction_engine()));
-    assert_eq!(text, "Compaction uses stub/model, context: 128kb");
+    assert_eq!(text, "Compaction uses stub/model, context: 131.1K");
 }
 
 #[test]
 fn unedited_popup_draft_keeps_stored_window_in_footer() {
     let overlay = picker_overlay(Some(context_length_draft(0, 128 * KB, false)));
     let (text, _) = detail_text_and_color(&overlay, &engine_display(following_compaction_engine()));
-    assert_eq!(text, "Compaction uses stub/model, context: 256kb");
+    assert_eq!(text, "Compaction uses stub/model, context: 262.1K");
 }
 
 #[test]
 fn draft_of_another_choice_does_not_change_highlighted_footer() {
     let overlay = picker_overlay(Some(context_length_draft(1, 128 * KB, true)));
     let (text, _) = detail_text_and_color(&overlay, &engine_display(following_compaction_engine()));
-    assert_eq!(text, "Compaction uses stub/model, context: 256kb");
+    assert_eq!(text, "Compaction uses stub/model, context: 262.1K");
 }
 
 #[test]
 fn footer_shows_stored_window_once_popup_is_left_without_confirming() {
     let overlay = picker_overlay(None);
     let (text, _) = detail_text_and_color(&overlay, &engine_display(following_compaction_engine()));
-    assert_eq!(text, "Compaction uses stub/model, context: 256kb");
+    assert_eq!(text, "Compaction uses stub/model, context: 262.1K");
 }
 
 #[test]
@@ -161,6 +161,6 @@ fn draft_window_matching_explicit_compaction_engine_clears_mismatch_highlight() 
 
     let matching = picker_overlay(Some(context_length_draft(0, 128 * KB, true)));
     let (text, matching_color) = detail_text_and_color(&matching, &display);
-    assert_eq!(text, "Compaction uses other/small, context: 128kb");
+    assert_eq!(text, "Compaction uses other/small, context: 131.1K");
     assert_eq!(matching_color, Some(MUTED_TEXT_COLOR));
 }

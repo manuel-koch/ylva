@@ -1034,7 +1034,10 @@ fn model_picker_details_show_highlighted_compaction_effect() {
                 catalog_context_length: Some(context_length),
                 label: ylva::tui_reducer_state::ChoiceLabel {
                     identity: format!("{name} → {provider_connection}/{model_id}"),
-                    details: vec![format!("context: {}kb", context_length / 1024)],
+                    details: vec![format!(
+                        "context: {}",
+                        ylva::llm::token_estimate::format_token_estimate(context_length)
+                    )],
                 },
                 selection: ProviderModelOption {
                     context_length_override: None,
@@ -1134,8 +1137,8 @@ fn model_picker_details_show_highlighted_compaction_effect() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(!rendered.contains("Conversation:"));
-    assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
-    assert!(!rendered.contains("Compaction uses mock/model-a, context: 32kb."));
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 32.8K"));
+    assert!(!rendered.contains("Compaction uses mock/model-a, context: 32.8K."));
     assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
 
     if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
@@ -1160,7 +1163,7 @@ fn model_picker_details_show_highlighted_compaction_effect() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(rendered.contains("Compaction uses mock/model-a, context: 128kb"));
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 131.1K"));
     assert_eq!(footer_foreground(&terminal), Color::DarkGray);
 
     if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
@@ -1185,8 +1188,8 @@ fn model_picker_details_show_highlighted_compaction_effect() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(rendered.contains("engine-c → mock/model-a  context: 128kb"));
-    assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
+    assert!(rendered.contains("engine-c → mock/model-a  context: 131.1K"));
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 32.8K"));
     assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
 
     if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
@@ -1211,7 +1214,7 @@ fn model_picker_details_show_highlighted_compaction_effect() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 32.8K"));
     assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
 
     for (selected, context_length) in [(4, 98_304), (2, 131_072), (3, 131_072)] {
@@ -1275,7 +1278,7 @@ fn model_picker_details_show_highlighted_compaction_effect() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(rendered.contains("Compaction uses mock/model-b, context: 64kb"));
+    assert!(rendered.contains("Compaction uses mock/model-b, context: 65.5K"));
     assert_eq!(footer_foreground(&terminal), Color::DarkGray);
     assert!(!rendered.contains("No summarizer is configured."));
 
@@ -1945,7 +1948,7 @@ fn long_model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state
                     identity: "shortcut → stub/a-very-long-model-identifier-for-narrow-terminals"
                         .to_string(),
                     details: vec![
-                        "context: 128kb".to_string(),
+                        "context: 131.1K".to_string(),
                         "reasoning: default".to_string(),
                     ],
                 }
@@ -1953,7 +1956,7 @@ fn long_model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state
                 ylva::tui_reducer_state::ChoiceLabel {
                     identity: format!("stub/other-model-{index}"),
                     details: vec![
-                        "context: 64kb".to_string(),
+                        "context: 65.5K".to_string(),
                         "reasoning: unavailable".to_string(),
                     ],
                 }
@@ -2039,7 +2042,7 @@ fn model_picker_splits_identity_and_details_into_rows_on_narrow_terminals() {
         rows[identity_row]
     );
     assert!(
-        rows[identity_row + 1].contains("context: 128kb  reasoning: default"),
+        rows[identity_row + 1].contains("context: 131.1K  reasoning: default"),
         "the details must render complete on the row below: {:?}",
         rows[identity_row + 1]
     );
@@ -2063,7 +2066,7 @@ fn model_picker_keeps_one_row_per_model_on_wide_terminals() {
     let (rows, _terminal) = draw_app_state_rows(&mut state, 120, 30);
     assert!(
         rows.iter().any(|row| row.contains(
-            "shortcut → stub/a-very-long-model-identifier-for-narrow-terminals  context: 128kb"
+            "shortcut → stub/a-very-long-model-identifier-for-narrow-terminals  context: 131.1K"
         )),
         "wide terminals must keep identity and details on one row: {rows:?}"
     );
@@ -2210,7 +2213,7 @@ fn model_picker_uses_two_rows_at_any_width_when_a_single_line_would_not_fit() {
     );
     assert!(
         rows.iter()
-            .any(|row| row.contains("context: 128kb  reasoning: default")),
+            .any(|row| row.contains("context: 131.1K  reasoning: default")),
         "the details must be rendered on their own row: {rows:?}"
     );
 
@@ -2364,7 +2367,7 @@ fn model_parameter_popup_renders_one_row_per_parameter_with_its_footer_hints() {
         text.contains("Model parameters  ·  shortcut → stub/a-very-long-model-identifier-for-narrow-terminals"),
         "the popup must be titled with the edited model: {text}"
     );
-    assert!(text.contains("Context length:  ◂ 128kb"), "{text}");
+    assert!(text.contains("Context length:  ◂ 131.1K"), "{text}");
     assert!(text.contains("Reasoning effort:    default ▸"), "{text}");
 
     assert!(

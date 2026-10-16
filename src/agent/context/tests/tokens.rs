@@ -15,6 +15,83 @@
 use super::*;
 
 #[test]
+fn message_and_tool_call_estimates_include_shared_framing_overhead() {
+    let estimator = crate::llm::TokenEstimator::FourCharactersPerToken;
+    let message = Message::User {
+        content: String::new(),
+        kind: UserMessageKind::Explicit,
+    };
+    assert_eq!(
+        estimate_message_tokens(estimator, &message),
+        TOKEN_FRAMING_OVERHEAD
+    );
+
+    let mut context = Context::with_system_prompt("");
+    let tool_call = ToolCallRequest {
+        id: Uuid::nil(),
+        name: "read".into(),
+        arguments: serde_json::Value::Null,
+        persisted_title_arguments: Vec::new(),
+    };
+    let expected = estimator.estimate_tokens(&tool_call.name)
+        + estimator.estimate_tokens(&tool_call.id.to_string())
+        + estimator.estimate_tokens(&tool_call.arguments.to_string())
+        + 2 * TOKEN_FRAMING_OVERHEAD;
+    context.set_token_estimator(estimator);
+    context.push_assistant_tool_call(String::new(), AssistantStatus::Complete, vec![tool_call]);
+    assert_eq!(
+        context.token_count(context.messages().len() - 1),
+        Some(expected)
+    );
+}
+
+#[test]
+fn complete_delivery_checks_exact_envelope_including_escaped_metadata() {
+    let id = Uuid::nil();
+    let result = "Body \"quoted\"\nwith\\escapes";
+    let metadata = Some(serde_json::json!({"source": "/a/\"b\"\nSKILL.md"}));
+    let schema = Some(serde_json::json!({"description": "metadata ".repeat(100)}));
+    let message = Message::ToolResult {
+        value: ToolResult {
+            id,
+            name: "load_skill".into(),
+            result: result.into(),
+            attachments: vec![],
+            result_section_id: None,
+            result_metadata: metadata.clone(),
+            result_metadata_schema: schema.clone(),
+            summary: vec![],
+            content_sections: vec![],
+            duration: Duration::ZERO,
+        },
+    };
+    let exact = estimate_message_tokens(crate::llm::TokenEstimator::Tiktoken, &message);
+    assert!(complete_result_fits(
+        id,
+        "load_skill",
+        result,
+        metadata.clone(),
+        schema.clone(),
+        exact
+    ));
+    assert!(!complete_result_fits(
+        id,
+        "load_skill",
+        result,
+        metadata.clone(),
+        schema,
+        exact - 1
+    ));
+    assert!(complete_result_fits(
+        id,
+        "load_skill",
+        result,
+        None,
+        None,
+        exact - 1
+    ));
+}
+#[test]
 fn token_counts_are_cached_when_messages_enter_the_context() {
     let estimator = crate::llm::TokenEstimator::FourCharactersPerToken;
     let mut context = Context::new();

@@ -32,11 +32,14 @@ pub mod markdown;
 pub mod presenter;
 pub mod profile_command;
 pub mod profile_shim;
+pub(crate) mod prompt;
 pub mod render;
 pub mod run_outcome;
 pub mod sandbox;
 pub mod session_command;
 pub(crate) mod session_title;
+pub mod skill_command;
+pub mod skills;
 pub mod slash_command;
 pub(crate) mod stop_signal;
 pub mod store;
@@ -46,6 +49,11 @@ pub mod tui_reducer_state;
 pub mod tui_render_state;
 pub mod tui_widgets;
 pub mod ylva_home;
+
+/// Git metadata entry, which may be a directory or a worktree marker file.
+pub const GIT_ENTRY_NAME: &str = ".git";
+/// Finder's per-directory metadata file on macOS.
+pub const DS_STORE_FILE_NAME: &str = ".DS_Store";
 
 #[cfg(test)]
 mod test_support;
@@ -70,7 +78,7 @@ pub use agent_factory::AgentFactory;
 pub use app::App;
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
-pub use cli::{Cli, CliColorMode, CliCommand};
+pub use cli::{Cli, CliColorMode, CliCommand, SkillCommand};
 pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
 pub use config::compaction_prompt::{load_compaction_prompt, DEFAULT_COMPACTION_PROMPT};
 pub use config::instructions::{

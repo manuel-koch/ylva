@@ -273,8 +273,13 @@ impl Context {
             stage = 4;
             if let Some(snapshot) = &self.compaction {
                 if let Message::User { content, .. } = self.projected_summary(snapshot) {
-                    let shortened =
-                        marked_text(self.estimator, &content, SUMMARY_OMISSION_MARKER, 128);
+                    let shortened = compaction::recovery::marked_prompt_block(
+                        self.estimator,
+                        PromptBlockKind::CompactionSummary,
+                        &content,
+                        SUMMARY_OMISSION_MARKER,
+                        128,
+                    );
                     if shortened != content {
                         self.summary_override = Some(shortened);
                         changed = true;
@@ -283,8 +288,13 @@ impl Context {
             }
             if let Some(recovery) = &mut self.recovery {
                 if let Message::User { content, .. } = &mut recovery.handoff {
-                    let shortened =
-                        marked_text(self.estimator, content, SUMMARY_OMISSION_MARKER, 128);
+                    let shortened = compaction::recovery::marked_prompt_block(
+                        self.estimator,
+                        PromptBlockKind::RecoveryHandoff,
+                        content,
+                        SUMMARY_OMISSION_MARKER,
+                        128,
+                    );
                     changed |= shortened != *content;
                     *content = shortened;
                 }
@@ -316,10 +326,10 @@ impl Context {
                 })
             };
             if let Some(Message::User { content, kind }) = anchor {
-                let other_tokens = self
-                    .model_view_token_count()
-                    .saturating_sub(self.estimator.estimate_tokens(&content) + 8);
-                let allowance = ceiling.saturating_sub(other_tokens + 8);
+                let other_tokens = self.model_view_token_count().saturating_sub(
+                    self.estimator.estimate_tokens(&content) + TOKEN_FRAMING_OVERHEAD,
+                );
+                let allowance = ceiling.saturating_sub(other_tokens + TOKEN_FRAMING_OVERHEAD);
                 let shortened =
                     marked_text(self.estimator, &content, REQUEST_OMISSION_MARKER, allowance);
                 changed |= shortened != content;

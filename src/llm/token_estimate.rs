@@ -53,6 +53,20 @@ impl TokenEstimator {
     }
 }
 
+/// Abbreviate a token estimate using decimal units: `950`, `64.2K`, `1.2M`.
+pub fn format_token_estimate(estimated_tokens: usize) -> String {
+    const THOUSAND: f64 = 1_000.0;
+    const MILLION: f64 = 1_000_000.0;
+    let tokens = estimated_tokens as f64;
+    if tokens >= MILLION {
+        format!("{:.1}M", tokens / MILLION)
+    } else if tokens >= THOUSAND {
+        format!("{:.1}K", tokens / THOUSAND)
+    } else {
+        estimated_tokens.to_string()
+    }
+}
+
 /// Keep the longest UTF-8 prefix of `text` whose local estimate does not
 /// exceed `max_tokens`. The returned boolean says whether content was cut.
 pub fn truncate_text_to_token_budget(
@@ -86,6 +100,23 @@ pub fn truncate_text_to_token_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_estimates_use_compact_decimal_units() {
+        for (tokens, expected) in [
+            (0, "0"),
+            (950, "950"),
+            (999, "999"),
+            (1_000, "1.0K"),
+            (1_234, "1.2K"),
+            (64_200, "64.2K"),
+            (999_000, "999.0K"),
+            (1_000_000, "1.0M"),
+            (1_234_567, "1.2M"),
+        ] {
+            assert_eq!(format_token_estimate(tokens), expected);
+        }
+    }
 
     #[test]
     fn the_character_heuristic_counts_four_characters_per_token_rounded_up() {

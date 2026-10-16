@@ -85,6 +85,36 @@ See [persistence](persistence.md) and
 
 ## Layered configuration and persona assembly
 
+`prompt.rs` owns paired `<ylva_…>` block framing for trusted instructions,
+skill-source footers, harness notices, compaction summaries, and recovery
+handoffs. Callers own wording and metadata serialization; delimiters do not
+establish trust. Recovery clips block bodies while reserving both tags and
+recognizes legacy handoff prefixes. Existing transcript text is never rewritten.
+
+Skills separate discovery, per-agent policy, and instruction delivery.
+`AgentFactory` carries one immutable discovery snapshot and the host's approval
+capability across new roots, subagents, `/clear`, and TUI session switches.
+`skills/policy.rs` resolves each agent type independently; one callable catalog
+drives its prompt advertisement, loader membership, and sidecar sandbox identities
+so these cannot drift. Subagents do not inherit their parent's filtered catalog.
+Direct library factories start with no skills.
+
+Loader approval checks use recorded canonical paths without reopening sources.
+Unlike ordinary tools, an unconfigured loader replaces the sandbox floor with
+empty rules. Duplicate detection is provenance only: resource fingerprints and
+shadowed copies never become permission grants or fallback sources. Sidecar
+access remains a separate read-policy decision, not a consequence of loading.
+
+Skill instructions enter context as ordinary tool results, not system messages.
+To prevent partial successful delivery, `requires_complete_delivery` is enforced
+in `runtime/events.rs` against the live allowance, after generation checks and
+before context insertion. It estimates the complete serialized `ToolEnvelope`,
+not just the body; accepted results bypass bounded projection.
+
+See [skill configuration](configuration.md#agent-skills) for discovery, access,
+and snapshot/replay rules, and [skill commands](cli-options.md#skill-commands)
+for provider-independent catalog listing.
+
 See [configuration](./configuration.md) for file precedence, formats, and the
 system-prompt contract.
 
@@ -495,13 +525,14 @@ bodies, drop older safe groups with a real-content handoff/anchor, clip retained
 outcomes, shorten summary/handoff, and finally shorten the request only when the
 safe ceiling still cannot fit. The ceiling subtracts 10% reply reserve, 5% safety
 margin and 512 estimated tokens of overhead. Marker costs are reserved before
-truncation; estimates include result envelopes and eight tokens of message
-framing plus schemas. The target is best-effort when protected continuity already
+truncation; estimates include result envelopes, schemas, and the shared
+`context.rs::TOKEN_FRAMING_OVERHEAD` per message and embedded tool call. The
+target is best-effort when protected continuity already
 fits the ceiling. An irreducible valid continuation fails explicitly before
 provider dispatch. Recognized provider context rejections can retry once with a
 75% request-local ceiling, only before response text or tool-call accumulation.
 No operations are replayed. `RecoveryProjection` contains an implicit-user
-handoff (`RECOVERY_HANDOFF_MARKER`, up to 24 actual removed tool outcomes with
+handoff (`<ylva_recovery_handoff>`, up to 24 actual removed tool outcomes with
 120-character excerpts, folded prior handoff) and an explicit-user anchor.
 A later summary reaching its boundary supersedes it.
 

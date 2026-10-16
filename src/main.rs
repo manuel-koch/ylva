@@ -53,9 +53,9 @@ fn run_init_command(workspace: bool, force: bool) -> Result<ylva::InitReport, St
     }
 }
 
-/// Decide whether headless CLI status lines may use ANSI colors.
+/// Decide whether CLI status lines and listings may use ANSI styling.
 ///
-/// This is intentionally evaluated only for the CLI path. The TUI keeps its
+/// This is intentionally evaluated only for CLI output. The TUI keeps its
 /// existing ratatui palette regardless of the selected CLI color mode.
 fn should_use_cli_color(
     stdout_is_terminal: bool,
@@ -161,6 +161,35 @@ fn main() {
         }
     }
 
+    if let Some(CliCommand::Skill { command }) = &cli.command {
+        let options = ylva::skill_command::SkillListOptions {
+            color: should_use_cli_color(
+                std::io::stdout().is_terminal(),
+                cli_color_mode,
+                std::env::var("TERM").ok().as_deref(),
+                std::env::var_os("NO_COLOR").is_some(),
+            ),
+            width: crossterm::terminal::size().map_or(
+                ylva::skill_command::SkillListOptions::default().width,
+                |(width, _)| usize::from(width),
+            ),
+        };
+        match ylva::skill_command::run_with_options(
+            command,
+            options,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ) {
+            Ok(_) => return,
+            Err(error) => {
+                tracing::error!(%error, "skill command failed");
+                eprintln!("error: {error}");
+                drop(log_guard.take());
+                exit_with(ExitCode::UsageError);
+            }
+        }
+    }
+
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let use_tui = stdout_is_terminal && !cli.no_tui;
     let cli_color_output = !use_tui
@@ -177,6 +206,13 @@ fn main() {
         .as_deref()
         .and_then(ylva::discover_workspace_root);
     let ylva_home = ylva::ylva_home();
+    let skills = match ylva::skill_command::discover().and_then(|catalog| {
+        ylva::skill_command::report_diagnostics(&catalog, &mut std::io::stderr())?;
+        Ok(Arc::new(catalog))
+    }) {
+        Ok(catalog) => catalog,
+        Err(error) => exit_with_error(&mut log_guard, error),
+    };
     // Export the resolved Ylva home so `$YLVA_HOME/…` sentinel sources expand
     // verbatim for path-like tools (`create_call`) and for `bash` child
     // processes alike. `ylva_home()` already answered the same question, but
@@ -296,11 +332,16 @@ fn main() {
         for tool in cli.auto_approve_tools() {
             factory = factory.with_auto_approve(tool);
         }
-        factory = factory.with_system_prompt(root_system_prompt.clone());
+        factory = factory
+            .with_system_prompt(root_system_prompt.clone())
+            .with_skill_catalog(skills, use_tui);
         factory
     };
 
-    if let Err(error) = factory_without_store.validate_profile_agent_engines(&profile) {
+    if let Err(error) = factory_without_store
+        .validate_profile_agent_engines(&profile)
+        .and_then(|()| factory_without_store.validate_profile_skills(&profile))
+    {
         exit_with_error(
             &mut log_guard,
             format!(

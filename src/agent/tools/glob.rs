@@ -1136,7 +1136,7 @@ mod tests {
     #[test]
     fn glob_needs_approval_allows_dot_paths_inside_workspace() {
         let tool = GlobTool::default();
-        let args = serde_json::json!({ "pattern": ".git/**/*" });
+        let args = serde_json::json!({ "pattern": format!("{}/**/*", crate::GIT_ENTRY_NAME) });
         assert!(matches!(
             tool.needs_approval(&args),
             ApprovalCheck::AutoApproved

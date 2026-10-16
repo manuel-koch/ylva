@@ -1,5 +1,61 @@
+// Copyright © 2026 Manuel Koch
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
+#[test]
+fn allowed_skills_preserves_omission_empty_and_replacement_across_formats() {
+    use crate::config::agent_type_file::parse_agent_type_contents;
+    let mut config = parse_agent_type_contents(
+        Path::new("worker.md"),
+        "---\nallowed_skills: [alpha, beta]\n---\nPersona",
+    )
+    .unwrap()
+    .config;
+    assert_eq!(config.allowed_skills.as_ref().unwrap(), &["alpha", "beta"]);
+    let overrides = toml::from_str::<AgentConfigOverrides>("allowed_skills = [\"gamma\"]").unwrap();
+    apply_agent_config_overrides(&mut config, overrides);
+    assert_eq!(config.allowed_skills.as_ref().unwrap(), &["gamma"]);
+    apply_agent_config_overrides(&mut config, AgentConfigOverrides::default());
+    assert_eq!(config.allowed_skills.as_ref().unwrap(), &["gamma"]);
+    apply_agent_config_overrides(&mut config, toml::from_str("allowed_skills = []").unwrap());
+    assert_eq!(config.allowed_skills, Some(vec![]));
+    assert!(
+        parse_agent_type_contents(Path::new("worker.toml"), "can_spawn = false")
+            .unwrap()
+            .config
+            .allowed_skills
+            .is_none()
+    );
+    let temporary = tempfile::tempdir().unwrap();
+    write_profile_config(
+        temporary.path(),
+        "skills",
+        "[agents.default]\nallowed_skills = [\"${SKILL_NAME}\"]",
+    );
+    let profile = ProfileConfig::load_with_environment_at_workspace_root(
+        temporary.path(),
+        "skills",
+        &HashMap::from([("SKILL_NAME".into(), "alpha".into())]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        profile.agents["default"].allowed_skills.as_ref().unwrap(),
+        &["alpha"]
+    );
+}
 #[test]
 fn a_toml_fixture_loads_into_the_expected_profile() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -34,7 +90,7 @@ context_length = 32000
 provider = "openrouter"
 model = "some/thinking-model"
 api_base_url = "https://openrouter.ai"
-context_length = "265kb"
+context_length = "265K"
 reasoning = "xhigh"
 
 [agents.default]
@@ -84,8 +140,8 @@ persona = "You explore code."
         .expect("the thinking engine");
     assert_eq!(
         thinking.context_length,
-        Some(265 * 1024),
-        "a 'kb'-suffixed context_length expands using 1024-based units"
+        Some(265_000),
+        "a 'K'-suffixed context_length expands using decimal token units"
     );
     assert_eq!(
         thinking.reasoning.as_deref(),
@@ -193,7 +249,7 @@ can_spawn = "${CAN_SPAWN}"
     );
     let environment = HashMap::from([
         ("TEMPERATURE".to_string(), "0.2".to_string()),
-        ("CONTEXT_LENGTH".to_string(), "128kb".to_string()),
+        ("CONTEXT_LENGTH".to_string(), "1.2M".to_string()),
         ("INPUT_HISTORY_LIMIT".to_string(), "17".to_string()),
         ("TIMEOUT_SECONDS".to_string(), "120".to_string()),
         ("CAN_SPAWN".to_string(), "true".to_string()),
@@ -203,7 +259,7 @@ can_spawn = "${CAN_SPAWN}"
         .expect("the typed-value profile loads");
 
     assert_eq!(profile.engines["local"].temperature, Some(0.2));
-    assert_eq!(profile.engines["local"].context_length, Some(128 * 1024));
+    assert_eq!(profile.engines["local"].context_length, Some(1_200_000));
     assert_eq!(profile.input_history_limit, 17);
     assert_eq!(profile.agents["worker"].timeout_secs, Some(120));
     assert!(profile.agents["worker"].can_spawn);
@@ -757,6 +813,7 @@ fn profile_config_field_access() {
                 compaction: None,
                 description: None,
                 allowed_tools: Some(vec!["bash".to_string()]),
+                allowed_skills: None,
                 timeout_secs: Some(120),
                 max_tool_iterations: None,
                 persona: Some("You are a helpful assistant.".to_string()),
@@ -791,6 +848,7 @@ fn agent_config_defaults_to_no_engine_override() {
         compaction: None,
         description: None,
         allowed_tools: None,
+        allowed_skills: None,
         timeout_secs: None,
         max_tool_iterations: None,
         persona: None,

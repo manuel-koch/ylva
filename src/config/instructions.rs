@@ -370,8 +370,8 @@ fn strip_byte_order_mark(contents: &str) -> &str {
 ///
 /// With no instruction files the result equals the `load_soul` output
 /// exactly — no preamble, no sentinels. Otherwise the fixed safety preamble
-/// comes first after the SOUL and every section is wrapped in bracketed
-/// sentinel markers naming its `InstructionFile::source`.
+/// comes first after the SOUL and every section is a tagged prompt block
+/// naming its `InstructionFile::source`.
 pub fn compose_root_system_prompt(
     workspace_root: Option<&Path>,
     working_directory: Option<&Path>,
@@ -386,7 +386,7 @@ pub fn compose_root_system_prompt(
 /// environment.
 ///
 /// Sections are joined with a blank line. Each section's content is
-/// `trim_end()`-ed. Sentinels are plain bracketed lines rather than Markdown
+/// `trim_end()`-ed. Sentinels are paired tags rather than Markdown
 /// headings or `---` rules because instruction files contain their own
 /// headings and frontmatter separators, which would collide with either.
 fn compose_soul_with_instructions(soul: &str, instruction_files: &[InstructionFile]) -> String {
@@ -397,10 +397,13 @@ fn compose_soul_with_instructions(soul: &str, instruction_files: &[InstructionFi
     sections.push(soul.to_string());
     sections.push(INSTRUCTION_SAFETY_PREAMBLE.to_string());
     for instruction_file in instruction_files {
-        sections.push(format!(
-            "[instructions from {source}]\n{content}\n[end of instructions from {source}]",
-            source = instruction_file.source,
-            content = instruction_file.contents.trim_end(),
+        sections.push(crate::prompt::format_prompt_block(
+            crate::prompt::PromptBlockKind::TrustedInstructions,
+            &format!(
+                "Source: {}\n\n{}",
+                serde_json::to_string(&instruction_file.source).expect("source serializes"),
+                instruction_file.contents.trim_end(),
+            ),
         ));
     }
     sections.join("\n\n")
@@ -860,15 +863,18 @@ mod tests {
             format!(
                 "soul text\n\n\
                  {INSTRUCTION_SAFETY_PREAMBLE}\n\n\
-                 [instructions from $YLVA_HOME/AGENTS.md]\n\
+                 <ylva_trusted_instructions>\n\
+                 Source: \"$YLVA_HOME/AGENTS.md\"\n\n\
                  home rules\n\
-                 [end of instructions from $YLVA_HOME/AGENTS.md]\n\n\
-                 [instructions from CLAUDE.md]\n\
+                 </ylva_trusted_instructions>\n\n\
+                 <ylva_trusted_instructions>\n\
+                 Source: \"CLAUDE.md\"\n\n\
                  claude rules\n\
-                 [end of instructions from CLAUDE.md]\n\n\
-                 [instructions from AGENTS.md]\n\
+                 </ylva_trusted_instructions>\n\n\
+                 <ylva_trusted_instructions>\n\
+                 Source: \"AGENTS.md\"\n\n\
                  agents rules\n\
-                 [end of instructions from AGENTS.md]"
+                 </ylva_trusted_instructions>"
             ),
             "SOUL, then the preamble, then every section framed by its sentinels"
         );
@@ -894,12 +900,12 @@ mod tests {
             .find(INSTRUCTION_SAFETY_PREAMBLE)
             .expect("the safety preamble follows the SOUL");
         let section_position = composed
-            .find("[instructions from AGENTS.md]")
+            .find("<ylva_trusted_instructions>")
             .expect("the instruction section follows the preamble");
         assert!(soul_position < preamble_position);
         assert!(preamble_position < section_position);
         assert!(composed.ends_with(
-            "[instructions from AGENTS.md]\nroot rules\n[end of instructions from AGENTS.md]"
+            "<ylva_trusted_instructions>\nSource: \"AGENTS.md\"\n\nroot rules\n</ylva_trusted_instructions>"
         ));
     }
 }

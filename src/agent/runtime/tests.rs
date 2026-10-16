@@ -13,6 +13,187 @@
 // limitations under the License.
 
 use super::*;
+use crate::agent::tools::Tool;
+
+fn result_event(id: Uuid, name: &str, result: String, complete: bool) -> AgentEvent {
+    AgentEvent::ToolDone {
+        id,
+        name: name.into(),
+        result: result.clone(),
+        requires_complete_delivery: complete,
+        display_result: Some(result),
+        result_metadata: Some(serde_json::json!({"source": "/skill/SKILL.md"})),
+        result_metadata_schema: None,
+        summary: vec![],
+        duration: Duration::ZERO,
+        content_sections: vec![],
+        attachments: vec![],
+    }
+}
+
+fn delivery_run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
+    let (mut state, updates) = run_state();
+    state.engine = Arc::new(crate::EngineImpl::new(
+        Arc::new(crate::MockProvider::new(vec![], Duration::ZERO)),
+        crate::EngineConfig {
+            context_length: Some(4_000),
+            ..state.engine.config()
+        },
+    ));
+    state.own_run_id = Some(Uuid::new_v4());
+    (state, updates)
+}
+
+#[test]
+fn complete_delivery_rechecks_live_allowance_and_queued_sharing() {
+    crate::test_support::run_locked(async {
+        let (mut state, _updates) = delivery_run_state();
+        let id = Uuid::new_v4();
+        let allowance = tool_output_token_limit(
+            "load_skill",
+            &state.context,
+            &[],
+            state.engine.effective_context_length(),
+            &[],
+        )
+        .unwrap();
+        let text = " instructions".repeat(allowance / 2 + 20);
+        assert!(matches!(
+            state.enforce_complete_delivery(result_event(id, "load_skill", text.clone(), true)),
+            AgentEvent::ToolDone { .. }
+        ));
+        let tool = tools::read::ReadTool::new(crate::SandboxContext::new(Arc::new(
+            std::sync::RwLock::new(crate::Sandbox::new()),
+        )));
+        state.pending_tools.push_back(PendingTool {
+            call: tool.create_call(Uuid::new_v4(), serde_json::json!({"path":"unused"})),
+        });
+        assert!(
+            matches!(state.enforce_complete_delivery(result_event(id, "load_skill", text.clone(), true)), AgentEvent::ToolError { id: error_id, .. } if id == error_id)
+        );
+        state.pending_tools.clear();
+        state
+            .context
+            .push_async_harness_notice(" live context change".repeat(allowance));
+        assert!(matches!(
+            state.enforce_complete_delivery(result_event(id, "load_skill", text.clone(), true)),
+            AgentEvent::ToolError { .. }
+        ));
+        assert!(matches!(
+            state.enforce_complete_delivery(result_event(id, "read", text.clone(), false)),
+            AgentEvent::ToolDone { .. }
+        ));
+        assert!(matches!(
+            state.enforce_complete_delivery(result_event(id, "agent_finish", text, true)),
+            AgentEvent::ToolDone { .. }
+        ));
+    });
+}
+
+#[test]
+fn complete_delivery_rejection_persists_one_error_and_never_success() {
+    crate::test_support::run_locked(async {
+        let (mut state, mut updates) = delivery_run_state();
+        state.max_tool_iterations = 0;
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::Store::create(
+            directory.path(),
+            directory.path(),
+            Uuid::new_v4(),
+            "mock",
+            "model",
+            None,
+        )
+        .unwrap();
+        state.context.set_store(store.clone());
+        let id = Uuid::new_v4();
+        state.context.push_assistant_tool_call(
+            String::new(),
+            AssistantStatus::Complete,
+            vec![ToolCallRequest {
+                id,
+                name: "load_skill".into(),
+                arguments: serde_json::json!({"name":"example"}),
+                persisted_title_arguments: vec![],
+            }],
+        );
+        state
+            .handle_agent_event(
+                1,
+                result_event(id, "load_skill", " too large".repeat(4_000), true),
+            )
+            .await;
+        assert_eq!(state.context.messages().iter().filter(|message| matches!(message, Message::ToolError { id: error_id, error, .. } if *error_id == id && error.contains("complete result exceeds"))).count(), 1);
+        assert!(!state
+            .context
+            .messages()
+            .iter()
+            .any(|message| matches!(message, Message::ToolResult { .. })));
+        assert!(
+            matches!(updates.recv().await, Some(UiUpdate::ToolError { id: error_id, .. }) if id == error_id)
+        );
+        // A title command is a writer barrier after the queued transcript events.
+        store.set_title("barrier".into()).await.unwrap();
+        let replayed = crate::Store::read_messages(store.path()).unwrap();
+        assert_eq!(replayed.iter().filter(|message| matches!(message, Message::ToolError { id: error_id, .. } if *error_id == id)).count(), 1);
+        assert!(!replayed
+            .iter()
+            .any(|message| matches!(message, Message::ToolResult { .. })));
+    });
+}
+
+#[test]
+fn complete_delivery_success_is_unprojected_ordinary_results_remain_bounded_and_stale_results_drop()
+{
+    crate::test_support::run_locked(async {
+        let (mut state, _updates) = delivery_run_state();
+        state.max_tool_iterations = 0;
+        let id = Uuid::new_v4();
+        state
+            .handle_agent_event(0, result_event(id, "load_skill", "stale".into(), true))
+            .await;
+        assert!(!state
+            .context
+            .messages()
+            .iter()
+            .any(|message| matches!(message, Message::ToolResult { .. })));
+        state
+            .handle_agent_event(
+                1,
+                result_event(id, "load_skill", "Complete body".into(), true),
+            )
+            .await;
+        assert_eq!(
+            state.context.messages().last(),
+            state.context.model_messages().last()
+        );
+        let id = Uuid::new_v4();
+        state
+            .handle_agent_event(
+                1,
+                result_event(id, "read", " ordinary output".repeat(4_000), false),
+            )
+            .await;
+        let model = state.context.model_messages();
+        let canonical_result = state
+            .context
+            .messages()
+            .iter()
+            .find(|message| matches!(message, Message::ToolResult { value } if value.id == id))
+            .unwrap();
+        let projected_result = model
+            .iter()
+            .find(|message| matches!(message, Message::ToolResult { value } if value.id == id))
+            .unwrap();
+        assert!(
+            canonical_result != projected_result,
+            "ordinary result must retain its bounded projection"
+        );
+        assert!(
+            matches!(canonical_result, Message::ToolResult { value } if value.result.len() > 50_000)
+        );
+    });
+}
 
 fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
     let (ui_tx, ui_rx) = mpsc::channel(100);

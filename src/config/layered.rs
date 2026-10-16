@@ -126,7 +126,7 @@ fn discover_workspace_root_with_home(start: &Path, ylva_home: Option<&Path>) -> 
         {
             return Some(ancestor.to_path_buf());
         }
-        if ancestor.join(".git").exists() {
+        if ancestor.join(crate::GIT_ENTRY_NAME).exists() {
             return Some(ancestor.to_path_buf());
         }
     }
@@ -268,8 +268,10 @@ mod tests {
         let inner = outer.join("inner");
         let nested = inner.join("nested");
         std::fs::create_dir_all(&nested).expect("create nested directories");
-        std::fs::write(outer.join(".git"), "gitdir: elsewhere").expect("outer git marker");
-        std::fs::write(inner.join(".git"), "gitdir: elsewhere").expect("inner git marker");
+        std::fs::write(outer.join(crate::GIT_ENTRY_NAME), "gitdir: elsewhere")
+            .expect("outer git marker");
+        std::fs::write(inner.join(crate::GIT_ENTRY_NAME), "gitdir: elsewhere")
+            .expect("inner git marker");
 
         assert_eq!(discover_workspace_root(&nested), Some(inner));
     }
@@ -282,7 +284,8 @@ mod tests {
         let nested = workspace.join("nested");
         std::fs::create_dir_all(&nested).expect("create nested directories");
         std::fs::create_dir(outer.join(YLVA_DIR_NAME)).expect("outer .ylva");
-        std::fs::write(workspace.join(".git"), "gitdir: elsewhere").expect("workspace git marker");
+        std::fs::write(workspace.join(crate::GIT_ENTRY_NAME), "gitdir: elsewhere")
+            .expect("workspace git marker");
 
         assert_eq!(discover_workspace_root(&nested), Some(workspace));
     }

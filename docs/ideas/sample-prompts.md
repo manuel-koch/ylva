@@ -410,3 +410,26 @@ Execute the steps; do not merely describe them.
 Do not edit files, install anything, access the network, or change Git state.
 
 ---
+
+Copy `docs/known-test-issues.md` to `.ylva/logs/dummy.md`
+( overwrite target file if it exists ) using a `bash` tool call.
+Use skill `unslop` to rewrite `.ylva/logs/dummy.md`.
+
+---
+
+Create an architecture-decision-record for ylva local skill feature
+in `docs/features.md`.
+Save the ADR in folder `docs/architecture-design-records`.
+
+---
+
+Perform a documenation review over the following files:
+
+- docs/development-workflow.md
+- docs/cli-options.md
+- docs/features.md
+
+Save your findings as a markdown formatted report to
+`.ylva/logs/docs-review.md`.
+
+---

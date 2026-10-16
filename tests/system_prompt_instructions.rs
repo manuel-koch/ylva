@@ -73,18 +73,12 @@ fn composed_system_prompt(server: &MockLlmServer, marker: &str) -> String {
 
 /// Assert that every anchor occurs in `haystack`, in the given order.
 fn assert_in_order(haystack: &str, anchors: &[&str]) {
-    let mut previous: Option<(usize, &str)> = None;
+    let mut remaining = haystack;
     for anchor in anchors {
-        let position = haystack
-            .find(anchor)
-            .unwrap_or_else(|| panic!("{anchor:?} is missing from the system prompt:\n{haystack}"));
-        if let Some((previous_position, previous_anchor)) = previous {
-            assert!(
-                previous_position < position,
-                "{anchor:?} must appear after {previous_anchor:?} in the system prompt"
-            );
-        }
-        previous = Some((position, anchor));
+        let position = remaining.find(anchor).unwrap_or_else(|| {
+            panic!("{anchor:?} is missing or out of order in the system prompt:\n{haystack}")
+        });
+        remaining = &remaining[position + anchor.len()..];
     }
 }
 
@@ -122,15 +116,15 @@ async fn instruction_sections_follow_the_soul_in_composition_order() {
         &[
             "workspace persona",
             INSTRUCTION_SAFETY_PREAMBLE,
-            "[instructions from $YLVA_HOME/AGENTS.md]",
+            "<ylva_trusted_instructions>\nSource: \"$YLVA_HOME/AGENTS.md\"",
             "home agent rules",
-            "[end of instructions from $YLVA_HOME/AGENTS.md]",
-            "[instructions from CLAUDE.md]",
+            "</ylva_trusted_instructions>",
+            "<ylva_trusted_instructions>\nSource: \"CLAUDE.md\"",
             "root claude rules",
-            "[end of instructions from CLAUDE.md]",
-            "[instructions from AGENTS.md]",
+            "</ylva_trusted_instructions>",
+            "<ylva_trusted_instructions>\nSource: \"AGENTS.md\"",
             "root agent rules",
-            "[end of instructions from AGENTS.md]",
+            "</ylva_trusted_instructions>",
         ],
     );
     server.abort();
@@ -166,12 +160,12 @@ async fn a_chain_subdirectory_section_follows_the_workspace_root_section() {
         &[
             "workspace persona",
             INSTRUCTION_SAFETY_PREAMBLE,
-            "[instructions from AGENTS.md]",
+            "<ylva_trusted_instructions>\nSource: \"AGENTS.md\"",
             "root agent rules",
-            "[end of instructions from AGENTS.md]",
-            "[instructions from sub/AGENTS.md]",
+            "</ylva_trusted_instructions>",
+            "<ylva_trusted_instructions>\nSource: \"sub/AGENTS.md\"",
             "sub agent rules",
-            "[end of instructions from sub/AGENTS.md]",
+            "</ylva_trusted_instructions>",
         ],
     );
     server.abort();
@@ -213,11 +207,11 @@ async fn a_byte_identical_duplicate_is_composed_exactly_once() {
         "byte-identical content must appear exactly once:\n{prompt}"
     );
     assert!(
-        prompt.contains("[instructions from CLAUDE.md]"),
+        prompt.contains("Source: \"CLAUDE.md\""),
         "the first occurrence in composition order keeps its section:\n{prompt}"
     );
     assert!(
-        !prompt.contains("[instructions from AGENTS.md]"),
+        !prompt.contains("Source: \"AGENTS.md\""),
         "the duplicate must not emit its own section:\n{prompt}"
     );
     server.abort();
@@ -247,13 +241,13 @@ async fn home_layer_instruction_files_are_composed_with_their_sentinels() {
         &prompt,
         &[
             INSTRUCTION_SAFETY_PREAMBLE,
-            "[instructions from $YLVA_HOME/AGENTS.md]",
+            "<ylva_trusted_instructions>\nSource: \"$YLVA_HOME/AGENTS.md\"",
             "home agent rules",
-            "[end of instructions from $YLVA_HOME/AGENTS.md]",
+            "</ylva_trusted_instructions>",
         ],
     );
     assert!(
-        !prompt.contains("[instructions from AGENTS.md]"),
+        !prompt.contains("Source: \"AGENTS.md\""),
         "no workspace instruction file exists in this run:\n{prompt}"
     );
     server.abort();
@@ -288,7 +282,7 @@ async fn a_soul_without_instruction_files_is_composed_unchanged() {
         "no safety preamble without instruction files:\n{prompt}"
     );
     assert!(
-        !prompt.contains("[instructions from"),
+        !prompt.contains("<ylva_trusted_instructions>"),
         "no sentinel markers without instruction files:\n{prompt}"
     );
     server.abort();

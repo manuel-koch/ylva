@@ -43,26 +43,74 @@ model = "local"
 }
 
 #[test]
-fn engine_config_context_length_accepts_kb_and_mb_suffixed_strings() {
-    let kilobytes: EngineConfig = toml::from_str(
-        r#"
-provider_connection = "openrouter"
-model = "deepseek/deepseek-v4-flash-0731"
-context_length = "265kb"
-"#,
-    )
-    .expect("a 'kb'-suffixed context_length parses");
-    assert_eq!(kilobytes.context_length, Some(265 * 1024));
+fn engine_config_context_length_accepts_exact_decimal_token_counts() {
+    for (input, expected) in [
+        ("32000", 32_000),
+        ("265K", 265_000),
+        ("128k", 128_000),
+        ("2M", 2_000_000),
+        ("1.2m", 1_200_000),
+        ("0.001K", 1),
+        ("0.000001M", 1),
+        ("98.304K", 98_304),
+        ("1.230000000000K", 1_230),
+        (" 1.5 K ", 1_500),
+        ("0K", 0),
+    ] {
+        let config: EngineConfig = toml::from_str(&format!(
+            "provider_connection = \"mock\"\nmodel = \"local\"\ncontext_length = \"{input}\""
+        ))
+        .expect("whole decimal token count");
+        assert_eq!(config.context_length, Some(expected), "{input}");
+    }
+    let config: EngineConfig = toml::from_str(&format!(
+        "provider_connection = \"mock\"\nmodel = \"local\"\ncontext_length = \"{}\"",
+        usize::MAX,
+    ))
+    .expect("largest representable token count");
+    assert_eq!(config.context_length, Some(usize::MAX));
+    let config: EngineConfig = toml::from_str(&format!(
+        "provider_connection = \"mock\"\nmodel = \"local\"\ncontext_length = \"{}.{:03}K\"",
+        usize::MAX / 1000,
+        usize::MAX % 1000,
+    ))
+    .expect("fractional scaling at the integer boundary");
+    assert_eq!(config.context_length, Some(usize::MAX));
+}
 
-    let megabytes: EngineConfig = toml::from_str(
-        r#"
-provider_connection = "openrouter"
-model = "deepseek/deepseek-v4-flash-0731"
-context_length = "2mb"
-"#,
-    )
-    .expect("an 'mb'-suffixed context_length parses");
-    assert_eq!(megabytes.context_length, Some(2 * 1024 * 1024));
+#[test]
+fn engine_config_context_length_rejects_byte_units_fractional_tokens_and_overflow() {
+    for input in [
+        "265kb".to_string(),
+        "2MB".to_string(),
+        "1KiB".to_string(),
+        "1B".to_string(),
+        "1.5".to_string(),
+        "0.0001K".to_string(),
+        "0.0000001M".to_string(),
+        "1.00000000000000000000001M".to_string(),
+        "1e3".to_string(),
+        "NaNK".to_string(),
+        "-1K".to_string(),
+        "1..2M".to_string(),
+        "K".to_string(),
+        "".to_string(),
+        ".5M".to_string(),
+        "1.K".to_string(),
+        format!("{}K", usize::MAX),
+        format!("{}0", usize::MAX),
+        format!("{}.001K", usize::MAX / 1000 + 1),
+        format!("{}.{:03}K", usize::MAX / 1000, usize::MAX % 1000 + 1),
+    ] {
+        let error = toml::from_str::<EngineConfig>(&format!(
+            "provider_connection = \"mock\"\nmodel = \"local\"\ncontext_length = \"{input}\""
+        ))
+        .expect_err("invalid or unrepresentable token count");
+        assert!(
+            error.to_string().contains("invalid context_length"),
+            "{input}: {error}"
+        );
+    }
 }
 
 #[test]

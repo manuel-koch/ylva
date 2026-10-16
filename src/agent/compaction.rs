@@ -76,7 +76,8 @@ pub(crate) fn safe_request_ceiling(context_length: usize) -> usize {
 /// this marker lets the model tell it apart from something the human typed,
 /// the same way [`crate::agent::HARNESS_NOTICE_MARKER`] does for harness
 /// notices.
-pub const COMPACTION_SUMMARY_MARKER: &str = "[compacted conversation summary — not from the user]";
+pub const COMPACTION_SUMMARY_MARKER: &str =
+    crate::prompt::PromptBlockKind::CompactionSummary.opening_tag();
 
 /// System instruction framing the prefix snapshot handed to the compact
 /// engine. The text ships as [`DEFAULT_COMPACTION_PROMPT`] and a workspace or
@@ -132,7 +133,13 @@ impl CompactionSnapshot {
     /// mid-conversation `system` message.
     pub fn summary_message(&self) -> Message {
         Message::User {
-            content: format!("{COMPACTION_SUMMARY_MARKER}\n\n{}", self.summary),
+            content: crate::prompt::format_prompt_block(
+                crate::prompt::PromptBlockKind::CompactionSummary,
+                &format!(
+                    "Compacted conversation summary; not from the user.\n\n{}",
+                    self.summary
+                ),
+            ),
             kind: UserMessageKind::ImplicitToolNote,
         }
     }

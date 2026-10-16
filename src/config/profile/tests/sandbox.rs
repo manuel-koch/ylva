@@ -1,5 +1,68 @@
+// Copyright © 2026 Manuel Koch
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 
+#[test]
+fn skill_sidecar_is_read_only_and_loader_accepts_path_rules() {
+    for tool in [
+        "bash",
+        "write",
+        "edit",
+        "glob",
+        "search",
+        "web_search",
+        "web_fetch",
+        "load_skill",
+    ] {
+        let tools = HashMap::from([(
+            tool.into(),
+            ToolSandboxConfig {
+                rules: vec![crate::sandbox::SandboxRuleConfig::Named {
+                    rule: crate::sandbox::NamedSandboxRule::SkillSidecar,
+                    verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
+                    reason: None,
+                    target: None,
+                }],
+            },
+        )]);
+        assert!(
+            validate_tool_sandbox_rules(&tools, Path::new("config.toml")).is_err(),
+            "{tool}"
+        );
+    }
+    let temporary = tempfile::tempdir().unwrap();
+    write_profile_config(
+        temporary.path(),
+        "skills",
+        r#"
+[tools.read]
+rules = [{ rule = "skill_sidecar", verdict = "auto_approved" }]
+[tools.load_skill]
+rules = [{ pattern = "**", verdict = "auto_approved" }]
+"#,
+    );
+    let profile = ProfileConfig::load_with_environment_at_workspace_root(
+        temporary.path(),
+        "skills",
+        &HashMap::new(),
+        None,
+    )
+    .unwrap();
+    assert!(profile.tools["read"].rules[0].is_read_tool_only());
+    assert!(profile.tools["load_skill"].rules[0].is_path_tool_only());
+}
 #[test]
 fn tool_sandbox_rules_table_loads_named_and_glob_rules() {
     let temp = tempfile::tempdir().expect("tempdir");

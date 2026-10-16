@@ -20,7 +20,7 @@ api_key = "${OPENROUTER_API_KEY}"
 [engines.local]
 provider_connection = "ollama-local"
 model = "gemma4:e4b-mlx"
-context_length = "96kb"
+context_length = "96K"
 compact_target_ratio = 0.4
 soft_compaction_threshold = 0.5
 hard_compaction_threshold = 0.8
@@ -28,14 +28,19 @@ hard_compaction_threshold = 0.8
 [engines.openrouterA]
 provider_connection = "openrouter"
 model = "deepseek/deepseek-v4-flash-0731"
-context_length = "256kb"
+context_length = "256K"
 reasoning = "max"
 
 [engines.openrouterB]
 provider_connection = "openrouter"
 model = "openai/gpt-6-luna"
-context_length = "256kb"
+context_length = "256K"
 reasoning = "medium"
+
+[tools.read]
+rules = [
+    { rule = "skill_sidecar", verdict = "auto_approved" },
+]
 
 [web_search]
 backend = "${YLVA_WEB_SEARCH_BACKEND}"

@@ -5,6 +5,21 @@
 - Rust-based terminal AI agent, runnable as a CLI or TUI
 - Implements agent-harness functionality
 
+## Agent Skills
+
+Agent Skills are reusable, task-specific instructions that agents load when
+needed. Ylva discovers them from local user and workspace folders.
+
+- Choose which skills each agent type can use.
+- Skills provide guidance, not extra file, shell, or subagent permissions.
+  Loading a skill does not execute scripts.
+- Restart Ylva to pick up skill changes. Previously loaded instructions remain
+  in saved conversations.
+
+See [skill configuration](configuration.md#agent-skills) for setup and access
+controls, and [skill commands](cli-options.md#skill-commands) for listing skills
+and CLI options.
+
 ## Build Info
 
 Use `ylva --version` to print build provenance (`Version`, `Commit`,
@@ -1129,8 +1144,8 @@ home and then along the workspace chain from the workspace root down to the
 working directory. This is concatenation rather than replacement, so the file
 closest to the working directory is composed last and wins conflicts. A fixed
 safety preamble precedes the first section, and every section is wrapped in
-`[instructions from <source>]` … `[end of instructions from <source>]`
-markers whose `<source>` is `$YLVA_HOME/<filename>` for a home file (the
+`<ylva_trusted_instructions>` … `</ylva_trusted_instructions>` tags with a
+JSON-quoted `Source:` line: `$YLVA_HOME/<filename>` for a home file (the
 variable's name only, never its value) or the workspace-relative path for a
 workspace file. Those sources are executable: path-like tools expand
 `~`/`$ENVVAR` before use, and startup exports the resolved `YLVA_HOME` so
@@ -1170,8 +1185,10 @@ and is sent to the model unchanged, as is any `/` that is not the first
 character of the input.
 
 The `/models` picker displays provider-reported context lengths as
-`context: <size>` labels using integer binary sizes (`2048` appears as
-`context: 2kb`; `1_048_576` appears as `context: 1mb`). Rows of models that
+`context: <count>` labels using the same compact decimal token counts as the
+TUI footer (`2048` appears as `context: 2.0K`; `131_072` appears as
+`context: 131.1K`; `1_048_576` appears as `context: 1.0M`). These are token
+counts, not byte sizes. Rows of models that
 advertise a non-text input modality append a bracketed marker with one
 upper-case letter per modality — `[I]` for image, `[F]` for file, `[IF]` for
 both; known text-only models and models whose modalities the provider did
@@ -1208,10 +1225,12 @@ The popup lists one row per parameter, each a label followed by its value: the
 effective context length and, when the model advertises selectable efforts, the
 reasoning effort. `↑`/`↓` move between the rows; `←`/`→` adjust the highlighted
 value. The context length moves by one eighth of the current window, rounded
-down to a multiple of 32kb, and never exceeds the catalog's window
+down to the fixed token-step multiple, and never exceeds the catalog's window
 when one is reported. A `◂` before a value means it can move smaller and a `▸`
 after it means it can move greater; a missing arrow marks a bound (for example
-the 32kb floor or the advertised window). Reasoning effort moves through the
+the minimum token-step floor or the advertised window). The step unit and floor
+remain 32,768 tokens; decimal display formatting does not change the values.
+Reasoning effort moves through the
 advertised efforts in order (and the provider default's slot, see above), without
 wrapping. When the advertised default is `medium`, that effort cannot be chosen
 on its own; its slot selects the provider default.

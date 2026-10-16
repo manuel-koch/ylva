@@ -17,10 +17,9 @@ sandbox rule lets users assign a verdict to sidecar reads without maintaining
 individual paths. Loading itself neither executes scripts nor changes permissions.
 Instructions are ordinary tool-result content, never additional system messages.
 
-**Status: refined and confirmed after grilling.** All design decisions below
-were confirmed by the user. This task authorizes this plan, not implementation,
-staging, branching, or commits. A new implementing session can use this document
-without reading the original idea or conversation.
+**Status: implementation and listing presentation verified.** All design
+decisions below were confirmed by the user; execution was subsequently
+authorized. Staging, branching, and commits remain separately authorized actions.
 
 ### Goal and scope
 
@@ -73,10 +72,14 @@ commands, JSON listing, aliases, and implicit sidecar grants are excluded.
   the instruction source itself and escaping symlinks. No successful prior load
   is required. Script execution and all non-read tool restrictions stay unchanged.
   A skill cannot grant any permission or inherited body to a subagent.
-- Listing shows sorted winning names/descriptions/absolute paths plus shadowed
+- Listing shows sorted winning names/descriptions/absolute paths plus differing shadowed
   provenance without loading a profile, initializing providers, consuming stdin,
   or writing sessions. Empty discovery is explicit. Reported omissions alone
   do not make a successful list fail.
+- Canonical aliases and same-name copies matching the winner's complete raw
+  instructions and bounded resource fingerprint are duplicates, hidden unless
+  `--with-duplicates` is requested. Comparison failures warn and conservatively
+  retain shadowed status; duplicates never change loading or permissions.
 - Documentation is part of implementation; final verification follows the
   repository's formatting, lint, and coverage policy.
 
@@ -87,14 +90,14 @@ that step and rewrite this file in place. Preserve checkbox states and consecuti
 numbering when revising the plan. Each completed implementation step includes
 its directly affected documentation, as required by the plan-execution workflow.
 
-1. [ ] Read `src/agent/tools.rs` first to locate `Tool`, `ToolCall`,
+1. [x] Read `src/agent/tools.rs` first to locate `Tool`, `ToolCall`,
    `ToolCallResult`, schemas, and registry construction. Run
    `cargo test --lib agent::tools::tests::registry` as the first targeted baseline.
    Check `docs/development-workflow.md`, `docs/known-test-issues.md`, and the ADR
    directory before implementation. Reconfirm the facts below against current
    code; the ADR directory was empty during planning. Ask before creating a new
    ADR or documentation file not already authorized.
-2. [ ] Add the discovery/parser owner in `src/skills.rs`, with file-per-module
+2. [x] Add the discovery/parser owner in `src/skills.rs`, with file-per-module
    children only when needed. Provide a pure explicit-root entry point taking
    workspace root, launch directory, OS home, and Ylva home; environment resolution
    stays at startup. Construct the approved ordered roots; enumerate immediate
@@ -107,7 +110,7 @@ its directly affected documentation, as required by the plan-execution workflow.
    frontmatter, invalid UTF-8, missing/unreadable/non-directory roots, symlinked
    roots/directories/files, external and broken symlinks, duplicate physical files,
    and deterministic precedence/fallback.
-3. [ ] Implement winning-catalog limits and diagnostics in the discovery owner.
+3. [x] Implement winning-catalog limits and diagnostics in the discovery owner.
    Traverse roots by precedence and child names lexicographically. Reject
    oversized candidates before unbounded allocation; skip non-fitting new winners
    and continue, permitting smaller later candidates and same-name fallback.
@@ -118,7 +121,7 @@ its directly affected documentation, as required by the plan-execution workflow.
    aggregate-budget rejection followed by a smaller candidate; and stable warnings.
    Emit visible startup/list stderr diagnostics and structured logs once per
    discovery, not repeatedly for each factory or spawned agent.
-4. [ ] Add `allowed_skills: Option<Vec<String>>` to `src/config/agent.rs` and
+4. [x] Add `allowed_skills: Option<Vec<String>>` to `src/config/agent.rs` and
    the separate `AgentConfigOverrides` in `src/config/agent_type_file.rs`.
    Wire built-in defaults, struct initializers, and field override application in
    `src/config/profile.rs`. Preserve whole-file layering and explicit-empty
@@ -126,7 +129,7 @@ its directly affected documentation, as required by the plan-execution workflow.
    advertisements. Test omission, none/subsets, file-plus-inline replacement,
    TOML/YAML authoring, and environment interpolation. Keep startup errors
    consistent with selected-profile/source-path diagnostics.
-5. [ ] Resolve skill availability per agent type using its effective
+5. [x] Resolve skill availability per agent type using its effective
    `allowed_tools`, `allowed_skills`, loader sandbox rules, and actual CLI/TUI
    approval capability. Validate all configured types, including unused ones.
    Extend path-rule-kind and registered-tool-name validation for `load_skill`
@@ -137,7 +140,7 @@ its directly affected documentation, as required by the plan-execution workflow.
    last-match-wins semantics. Test explicit unknown/denied/headless-unapprovable
    names, missing loader, empty lists/catalogs, TUI approval annotations,
    profile-versus-agent rule replacement, and no fallback after policy denial.
-6. [ ] Implement `src/agent/tools/load_skill.rs` as an ordinary tool over the
+6. [x] Implement `src/agent/tools/load_skill.rs` as an ordinary tool over the
    filtered immutable catalog. Derive typed required `name` arguments and
    result metadata schemas. Reject arbitrary paths, empty names, unknown names,
    and forbidden membership during execution; repeat canonical-path approval
@@ -147,7 +150,7 @@ its directly affected documentation, as required by the plan-execution workflow.
    Tests assert exact result shape, no frontmatter, relative-reference guidance,
    repeat-load identity, file modification/deletion after snapshot, unknown and
    forbidden names, approval denial, and no sidecar/script side effects.
-7. [ ] Add an opt-in complete-delivery policy at the existing tool-result
+7. [x] Add an opt-in complete-delivery policy at the existing tool-result
    boundary, leaving ordinary results' bounded projections unchanged.
    Reuse/extract the current tool-envelope serialization and token estimate;
    measure the entire actual envelope, including metadata/schema and escaped
@@ -160,7 +163,7 @@ its directly affected documentation, as required by the plan-execution workflow.
    sharing, changes between admission and completion, cancellation, and error
    framing. Verify ordinary tools still truncate normally and `agent_finish`
    remains unbudgeted; never raise or bypass the safe request ceiling.
-8. [ ] Add opt-in `NamedSandboxRule::SkillSidecar` in `src/sandbox/rules.rs`
+8. [x] Add opt-in `NamedSandboxRule::SkillSidecar` in `src/sandbox/rules.rs`
    and matching in `src/sandbox/path.rs`. Carry immutable canonical skill
    directory/source identities from each agent's callable catalog into its
    `read` sandbox context; avoid a mutable loaded-name set. Require the requested
@@ -175,7 +178,7 @@ its directly affected documentation, as required by the plan-execution workflow.
    in-boundary/escaping symlinks, path traversal, non-files, instruction-file
    exclusions, per-agent catalogs, before-first-load behavior, unchanged behavior
    without the rule, all three verdicts, ordering, and profile/agent overrides.
-9. [ ] Extend `src/agent/tools.rs` default CLI/TUI tool sets and
+9. [x] Extend `src/agent/tools.rs` default CLI/TUI tool sets and
    `ToolRegistryConfig` with the resolved loader catalog. Compose one sorted
    per-agent name/description advertisement in
    `src/agent_factory.rs::compose_agent_system_prompt`; include TUI approval
@@ -185,7 +188,7 @@ its directly affected documentation, as required by the plan-execution workflow.
    `src/cli_driver.rs` display-registry construction for consistency.
    Tests cover disabled loader, empty catalogs, filtered descriptions, root versus
    subagent catalogs, metadata framing, and direct adversarial calls.
-10. [ ] Discover before session creation in `src/main.rs`, then attach the
+10. [x] Discover before session creation in `src/main.rs`, then attach the
    catalog and approval capability to `AgentFactory` for configured-engine and
    environment-engine paths. Preserve them through `without_store`, root/session
    construction, and subagent-manager factory copies. Each target agent type
@@ -195,17 +198,17 @@ its directly affected documentation, as required by the plan-execution workflow.
    `/clear`, TUI session switching, resume/clone, and subagent independence with
    fake engines and temporary roots. Export required public APIs through
    `src/lib.rs`; keep main thin.
-11. [ ] Add `SkillCommand::List` to `src/cli.rs` and its read-only owner in
+11. [x] Add `SkillCommand::List` to `src/cli.rs` and its read-only owner in
     `src/skill_command.rs`; dispatch alongside existing provider-independent
     commands in `src/main.rs`. Share discovery and reports without loading a
     profile or creating a factory. Print terminal-safe sorted winner
-    name/description/absolute-path records with valid shadowed provenance.
+    name/description/absolute-path records with valid shadowed paths.
     Use the explicit empty message and exit rules below. Add binary/public tests
     for help/dispatch, exact output shape, collisions, warnings with exit 0,
     fatal/output errors, no credentials, ignored `--profile`, unread stdin,
     and no session/config writes. Re-export the owner through `src/lib.rs`
     when public tests need it.
-12. [ ] Add assembled workflow regressions for successful/error envelopes,
+12. [x] Add assembled workflow regressions for successful/error envelopes,
     transcript persistence/replay, complete-delivery rejection, compaction,
     repeat loads, and approval routing. Verify earlier transcript results survive
     missing/changed source files and new loads use the new process snapshot.
@@ -217,7 +220,7 @@ its directly affected documentation, as required by the plan-execution workflow.
     pairing survives compaction and a reload can restore previously summarized
     instructions. Follow subscriber/cwd locks and UI-channel draining guidance
     in `docs/known-test-issues.md`; no live providers or real home fixtures.
-13. [ ] Complete documentation in `README.md` (implemented status and loader),
+13. [x] Complete documentation in `README.md` (implemented status and loader),
     `CONTEXT.md` (Skill and skill catalog terms), `docs/features.md`
     (result/approval/lifecycle behavior), `docs/configuration.md`
     (roots/order/metadata/limits/allowlists/sandbox, including the read-only
@@ -228,12 +231,57 @@ its directly affected documentation, as required by the plan-execution workflow.
     in `docs/ideas/skills.md`, preserving unrelated user changes. Keep this plan
     current. `docs/keybindings.md` needs no change because no binding or slash
     command is introduced. Ask before creating any additional documentation.
-14. [ ] Format/lint changed Markdown with repository-configured `rumdl`.
+14. [x] Format/lint changed Markdown with repository-configured `rumdl`.
     For eventual code changes run `make format lint`, then the single mandatory
     gate `make test-coverage`, enforcing at least 80% aggregate line coverage.
     Do not run `make test` as a duplicate mandatory gate. Verify exact acceptance
     criteria, not merely compilation. Do not stage, branch, or commit without
     separate explicit consent.
+15. [x] Distinguish same-name clones from differing shadowed variants using
+    full raw instruction hashes and bounded, deterministic resource fingerprints.
+    Preserve canonical alias provenance as duplicates without changing winner
+    precedence, loader policy, or sidecar roots. Add `skill list --with-duplicates`;
+    hide duplicates otherwise. Cover nested resources, metadata/content/path/mode
+    differences, safe and unsafe symlinks, comparison failures and bounds, and
+    exact binary output. Update `README.md`, `CONTEXT.md`, `docs/configuration.md`,
+    `docs/cli-options.md`, `docs/features.md`, `docs/implementation-notes.md`,
+    `docs/ideas/skills.md`, and this plan.
+16. [x] Repeat the mandatory formatting/lint and coverage gates for clone
+    detection and the opt-in listing flag.
+17. [x] Exclude exact-name `.git` and `.DS_Store` entries from resource
+    fingerprints at every depth, without following them or applying Git ignore
+    rules. Preserve comparison of meaningful dotfiles and ignored resources;
+    keep special filesystem objects conservative. Add regression coverage and
+    update `docs/configuration.md`, `docs/features.md`,
+    `docs/implementation-notes.md`, and this plan.
+18. [x] Repeat mandatory formatting/lint and coverage gates after exclusions.
+19. [x] Align listing field values, separate skills with blank lines, and wrap
+    descriptions with hanging indentation at runtime terminal width. Reuse the
+    global CLI color policy for bold names and underlined labels; preserve plain
+    explicit-writer helpers and terminal-safe values. Cover exact output,
+    multiline descriptions, wrapping, color modes, and control escaping.
+    Update `docs/cli-options.md`, `docs/features.md`,
+    `docs/implementation-notes.md`, and this plan.
+20. [x] Repeat mandatory formatting/lint and coverage gates for presentation.
+21. [x] Reuse home-relative path formatting for listing sources, provenance,
+    and warning paths without altering canonical catalog or model identities.
+    Cover home aliases and outside-home paths; update `docs/cli-options.md`,
+    `docs/implementation-notes.md`, and this plan, then repeat mandatory gates.
+22. [x] Render duplicates as only their location: the discovered path for
+    canonical aliases, otherwise the duplicate's canonical path. Omit root
+    and discovery suffixes; retain full provenance internally and preserve
+    opt-in visibility.
+    Add an executable regression; update `docs/cli-options.md`,
+    `docs/implementation-notes.md`, and this plan, then repeat mandatory gates.
+23. [x] Render shadowed sources as only their canonical path, retaining
+    home-relative formatting and terminal escaping without root/discovery
+    suffixes. Preserve stored provenance and duplicate classification.
+    Update executable output regressions, `docs/cli-options.md`, and this plan,
+    then repeat mandatory formatting/lint and coverage gates.
+24. [x] Show each winning skill's estimated body token count using the shared
+    local tokenizer and the TUI footer's shared compact decimal formatter.
+    Exclude frontmatter, loader framing, and sidecars; add
+    executable regressions and update `docs/cli-options.md` and this plan.
 
 ## Implementation Hints
 
@@ -266,7 +314,9 @@ The user confirmed these choices during plan refinement on 2026-10-15.
   Broken/unreadable symlinks are rejected with diagnostics.
 - The first valid retained candidate supplies a name. Invalid, oversized, or
   aggregate-limit-rejected candidates do not claim names. Valid lower-priority
-  duplicates are shadowed; there is no body/metadata merge. Per-agent sandbox
+  differing copies are shadowed; canonical aliases and identical instruction/resource
+  copies are duplicates, hidden unless `--with-duplicates` is requested.
+  There is no body/metadata merge. Per-agent sandbox
   filtering occurs after global resolution and never selects a shadowed source.
 - Required YAML fields are string `name` and string `description`. Names are
   1-64 ASCII lowercase letters/digits/hyphens, with no edge or consecutive
@@ -371,9 +421,21 @@ A subsequent deny rule can override the sidecar verdict. Existing explicit
   policy-filtered view; it intentionally does not load profiles or sandbox rules.
   Like existing maintenance commands it ignores preceding `--profile`.
 - Winning names sort lexicographically. Each winner has its name, terminal-safe
-  description, and absolute canonical path; valid shadowed paths follow that
-  name in precedence order, with source provenance. Rejections are stderr
+  description, canonical source path (displayed with `~` beneath home), and an
+  estimated instruction-body token count (not a limit or billed usage);
+  valid shadowed paths follow that name in precedence order, using home-relative
+  formatting without root/discovery suffixes. Canonical aliases and
+  instruction/resource-identical copies are hidden unless `--with-duplicates`
+  is requested, which adds `Duplicate:` provenance lines. Resource comparison
+  and its conservative limits are defined in `docs/configuration.md`.
+  Rejections and unavailable comparisons are stderr
   diagnostics, never usable entries.
+- Entries have aligned label values and blank-line separation. Descriptions
+  wrap to the detected runtime terminal width with hanging indentation and
+  preserve logical line/paragraph breaks; unavailable dimensions use the
+  fallback width documented in `docs/cli-options.md`. The global
+  `--color=auto|yes|no` option defaults to `auto`, styling names in bold and
+  labels underlined only when enabled by the shared CLI color policy.
 - Empty discovery prints `No skills discovered.`. A successful empty/partial
   listing exits 0, even with omission warnings. Fatal initialization/output
   failures exit 2 through the command's existing-style error reporting.

@@ -1,3 +1,17 @@
+// Copyright © 2026 Manuel Koch
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FailingProvider;
@@ -441,6 +455,7 @@ fn subagent_logs_and_transcripts_use_the_replacement_parent_session() {
                 test_engine_config(),
             ));
             let mut manager = AgentFactory::build_child_agent_manager(
+                SkillRuntime::default(),
                 HashMap::from([
                     ("main".into(), engine.clone()),
                     ("fast".into(), engine.clone()),
@@ -743,6 +758,7 @@ fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
                     compaction: None,
                     description: None,
                     allowed_tools: None,
+                    allowed_skills: None,
                     timeout_secs: None,
                     max_tool_iterations: None,
                     persona: None,
@@ -778,6 +794,7 @@ fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
             finish_tx: child_finish_tx,
         };
         let (child_loop, child_ui_rx) = AgentFactory::build(
+            &SkillRuntime::default(),
             &engines,
             &[],
             &HashSet::new(),
@@ -841,6 +858,7 @@ fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
                     compaction: None,
                     description: None,
                     allowed_tools: None,
+                    allowed_skills: None,
                     timeout_secs: None,
                     max_tool_iterations: None,
                     persona: None,
@@ -867,6 +885,7 @@ fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
             finish_tx: child_finish_tx,
         };
         let (child_loop, child_ui_rx) = AgentFactory::build(
+            &SkillRuntime::default(),
             &engines,
             &[],
             &HashSet::new(),

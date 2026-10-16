@@ -45,6 +45,21 @@ or its command changes, update this section in the same commit (see
 Other documents that reference `make` targets must delegate here rather than
 re-list targets, otherwise the lists drift the next time the `Makefile` changes.
 
+## License headers
+
+Every project-authored source file must carry the project's copyright and
+Apache-2.0 license header, including Rust modules, unit and integration tests,
+build scripts, shell scripts, and the Makefile. Use the header in
+[`src/lib.rs`](../src/lib.rs) as the template, adapting the comment syntax to
+the file type. Place it before code and module documentation; for executable
+scripts, keep the shebang as the first line and put the header immediately after it.
+
+When creating, splitting, or copying source files, ensure each resulting file
+has its own header. Preserve valid existing copyright and license notices.
+Generated files are exempt; third-party code retains its upstream notices and
+must follow its own licensing terms rather than receiving the project's header.
+Check headers as part of reviewing source changes.
+
 ## Rust linter
 
 Lint suppression (clippy or rustc, e.g. `dead_code`/`unused_variables`) is a

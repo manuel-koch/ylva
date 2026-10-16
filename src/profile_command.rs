@@ -153,7 +153,10 @@ pub fn run(
         Ok(None) => {
             return refuse(
                 diagnostics,
-                "no workspace root found; run inside a directory with .git or .ylva",
+                &format!(
+                    "no workspace root found; run inside a directory with {} or .ylva",
+                    crate::GIT_ENTRY_NAME,
+                ),
             );
         }
         Err(error) => return refuse(diagnostics, &format!("{error:#}")),

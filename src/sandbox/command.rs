@@ -190,7 +190,8 @@ impl SandboxContext {
             NamedSandboxRule::OutsideWorkspace
             | NamedSandboxRule::DotPath
             | NamedSandboxRule::CrossFilesystem
-            | NamedSandboxRule::NetworkRequest => false,
+            | NamedSandboxRule::NetworkRequest
+            | NamedSandboxRule::SkillSidecar => false,
         }
     }
 

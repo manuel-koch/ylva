@@ -30,7 +30,7 @@ use crate::logging::{LogConfig, LogFormat};
 use crate::profile_shim::is_valid_shim_name;
 use crate::sandbox::expand_path_tokens;
 
-/// Color policy for headless CLI status lines.
+/// Color policy for CLI status lines and skill listings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliColorMode {
     /// Use colors when stdout is a terminal and the environment allows it.
@@ -53,9 +53,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_tui: bool,
 
-    /// Color mode for headless CLI output: auto, no, or yes (last flag wins)
+    /// Color mode for CLI output: auto, no, or yes (last flag wins)
     #[arg(
         long,
+        global = true,
         value_name = "mode",
         default_value = "auto",
         value_parser = parse_color_mode,
@@ -174,6 +175,11 @@ pub struct Cli {
 /// Subcommands of the `ylva` binary.
 #[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum CliCommand {
+    /// Discover locally installed Agent Skills without loading a profile
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
     /// Discover and maintain sessions in the current launch directory
     Session {
         #[command(subcommand)]
@@ -192,6 +198,16 @@ pub enum CliCommand {
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum SkillCommand {
+    /// List winning skills and shadowed source provenance
+    List {
+        /// Include locations of identical skill copies
+        #[arg(long)]
+        with_duplicates: bool,
     },
 }
 

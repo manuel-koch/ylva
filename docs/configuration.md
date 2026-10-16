@@ -2,6 +2,138 @@
 
 Reference for Ylva's configuration files.
 
+## Agent Skills
+
+Discovery checks exactly these roots, highest priority first:
+
+| Priority | Root |
+| --- | --- |
+| 1 | `<workspace-root>/.ylva/skills/` |
+| 2 | `<workspace-root>/.agents/skills/` |
+| 3 | `<workspace-root>/.github/skills/` |
+| 4 | `<workspace-root>/.claude/skills/` |
+| 5 | `<ylva-home>/skills/` |
+| 6 | `<os-home>/.agents/skills/` |
+| 7 | `<os-home>/.copilot/skills/` |
+| 8 | `<os-home>/.claude/skills/` |
+
+Without a workspace marker, the launch directory supplies the first four roots.
+Unavailable OS/Ylva homes omit their roots; an unavailable launch directory is
+fatal. `YLVA_HOME` relocates only the Ylva home, not other ecosystems' homes.
+Only immediate child directories with the exact-case filename `SKILL.md` are
+eligible. Roots, directories, and instruction files may be external symlinks.
+Canonical files are deduplicated; aliases are retained as duplicate provenance.
+
+A skill begins with `---` YAML frontmatter and a closing `---` line, followed
+by a nonblank Markdown body. LF/CRLF delimiters and an initial UTF-8 BOM are
+supported; the body is otherwise preserved. Required `name` and `description`
+must be strings. Names match the logical discovered directory, contain 1-64
+lowercase ASCII letters/digits/hyphens, and have no edge or consecutive hyphens.
+Descriptions are nonblank and at most 1024 Unicode characters; YAML multiline
+strings are supported. Duplicate keys, malformed/non-mapping YAML, invalid
+UTF-8, and missing delimiters are rejected.
+
+Optional `license`, `compatibility`, `metadata`, experimental `allowed-tools`,
+and unknown fields confer no runtime behavior or permissions. Frontmatter is
+not delivered with the loaded instructions.
+
+Candidates are bounded to 64 KiB raw bytes before BOM stripping. Winning
+catalogs retain at most 128 names and 4 MiB of raw source bytes; exact limits
+pass. Root precedence and lexicographic child names determine retention. The
+first valid retained source wins; invalid/over-limit candidates do not claim a
+name, so later smaller candidates and lower-priority same-name sources can
+still win. Valid shadowed sources do not charge winning budgets. Missing
+optional roots are normal absence; other omissions have path/reason warnings
+on stderr and in enabled structured logs, without logging bodies.
+
+Same-name copies matching the winner are duplicates, not shadowed variants.
+SHA-256 comparison includes the entire raw `SKILL.md` (including frontmatter)
+and a sorted recursive resource manifest: relative paths, file/directory and
+symlink structure, symlink targets, file contents, and Unix executable bits.
+Names are never merged across different skill names. Resources are scanned
+only for collisions with identical instruction bytes, not for unique skills.
+Canonical aliases need no resource comparison because they share a source.
+
+Each resource fingerprint is bounded to 1024 entries (including excluded
+instruction entries), 16 MiB of file contents, and 32 directory levels including
+the source directory. Instruction sources and files named `SKILL.md` are
+excluded from the resource manifest.
+`.git` entries and `.DS_Store` files are excluded by exact name at every depth,
+before resolving symlinks or reading contents; `.git` directories are not
+traversed. Excluded entries still count toward the traversal-entry limit.
+No `.gitignore` rules are applied: ignored resources and other dotfiles still
+participate in comparison.
+In-boundary symlinks are followed;
+escaping/broken links, cycles, unreadable or non-regular resources, and exceeded
+limits make comparison unavailable. This produces a warning and conservatively
+keeps the candidate shadowed, without rejecting the winning skill.
+Fingerprint results are cached only within discovery. Sidecar contents remain
+live; equality is established at discovery time, not guaranteed thereafter.
+
+`ylva skill list` hides duplicates; `ylva skill list --with-duplicates` includes
+their locations labeled `Duplicate`. Genuinely differing shadowed variants
+remain visible by default. Neither duplicates nor shadowed sources supply
+additional sandbox roots or fallback sources: loading, relative references,
+and policy checks always use the winning source.
+
+```toml
+[agents.reviewer]
+allowed_tools = ["read", "load_skill"]
+allowed_skills = ["code-review"]
+```
+
+`allowed_skills` works in inline tables and TOML/YAML agent-type files with
+the same environment interpolation as other configuration fields. Omission
+allows all retained names; `[]` allows none; explicit lists replace rather
+than merge. Duplicate entries have no extra effect. All configured agent
+types are validated, including unused ones. Unknown explicit names fail
+startup with rejection provenance where available. Nonempty explicit skill
+lists require `load_skill` in the effective `allowed_tools`.
+
+`[agents.<type>.tools.load_skill]` replaces `[tools.load_skill]` when present.
+Only path rules are accepted, using existing last-match-wins semantics on the
+snapshot's absolute canonical source. With neither table, or an explicit
+empty rules list, the loader auto-approves eligible instructions instead of
+inheriting the ordinary dot/outside floor. Discovery reads the snapshot before
+this delivery policy is applied: loader rules are not discovery-I/O guards.
+There is no loader auto-approval CLI flag.
+
+Auto-denied skills are not advertised. Approval-required skills are annotated
+in TUI mode and omitted headlessly. Explicitly selecting denied or headlessly
+unapprovable skills is a startup error. Filtering never falls back to a
+shadowed source. Disabled/empty loaders advertise nothing.
+
+### Skill sidecar reads
+
+Sidecars retain ordinary `read` policy unless the user explicitly configures
+the read-only `skill_sidecar` named rule. It accepts every existing verdict
+and uses ordinary last-match-wins ordering. A configured rule list still
+replaces the default floor; to preserve it while approving eligible resources:
+
+```toml
+[tools.read]
+rules = [
+  { rule = "outside_workspace", verdict = "user_approval_required" },
+  { rule = "dot_path", verdict = "user_approval_required" },
+  { rule = "skill_sidecar", verdict = "auto_approved" },
+]
+```
+
+A matching resource must resolve to a regular file beneath a canonical
+instruction-file parent directory in that agent's callable catalog. Nested
+sidecars and in-boundary symlinks qualify; escaping symlinks, missing paths,
+non-files, instruction sources, and files named `SKILL.md` do not. External
+skill directories are supported. Only immutable recorded directories are
+used, never newly discovered/retargeted roots or a mutable loaded-name set.
+The rule can match before the first load. Filtered-out skills contribute no
+directories; TUI approval-required callable skills do.
+
+The rule neither enables an absent `read` tool nor freezes sidecar contents.
+A later deny rule can override it; `--auto-approve-read` retains its existing
+final precedence. Agent-specific `tools.read` replaces profile-level rules.
+`skill_sidecar` is rejected for every other tool, including `load_skill`.
+It grants no shell execution, write/edit access, or inherited subagent body.
+
 ## Profile file
 
 One TOML file describes a Ylva profile. Ylva resolves that file through a
@@ -270,13 +402,14 @@ setup.
   The preamble and the sentinels appear only when at least one section
   exists; with no instruction files the composed prompt equals the `SOUL.md`
   resolution byte-for-byte.
-- **Sentinel markers.** Every section is wrapped in bracketed markers naming
-  its source:
+- **Sentinel markers.** Every section uses paired tags with a JSON-quoted source:
 
   ```text
-  [instructions from $YLVA_HOME/AGENTS.md]
+  <ylva_trusted_instructions>
+  Source: "$YLVA_HOME/AGENTS.md"
+
   …verbatim file content…
-  [end of instructions from $YLVA_HOME/AGENTS.md]
+  </ylva_trusted_instructions>
   ```
 
   A home source is `$YLVA_HOME/<filename>` — the environment variable's
@@ -419,7 +552,7 @@ rebuilding the provider.
 | `provider_connection` | string | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"mock"`, `"ollama"`, or `"openrouter"`. Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
 | `model` | string | Model identifier passed to the provider. May be omitted, in which case the profile's `default_model` fills it in. |
 | `temperature` | number (optional) | Sampling temperature. Omit to use the model's own default. |
-| `context_length` | number (optional) | Maximum token context window for this engine's configured model. Omitted means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. For the configured model, this value takes precedence over the provider catalog. Switching to another model uses that model's catalog window, then the built-in default of `128 000`, without retaining the configured override or the previous model's window. Selecting the configured model again reapplies its override. Compaction budgeting uses the resolved window. |
+| `context_length` | number or string (optional) | Maximum token context window for this engine's configured model. Omitted means the profile doesn't limit it explicitly. Accepts a plain integer or a decimal string with a case-insensitive `K`/`M` suffix (e.g. `"128K"` = 128,000 tokens, `"1.2M"` = 1,200,000 tokens). Bare integer strings are also accepted. Fractional suffixed values must resolve to whole tokens without rounding; overflow and byte-unit suffixes (`kb`, `mb`, `KiB`, etc.) are rejected. Configuration and display both use decimal token units. For the configured model, this value takes precedence over the provider catalog. Switching to another model uses that model's catalog window, then the built-in default of `128 000`, without retaining the configured override or the previous model's window. Selecting the configured model again reapplies its override. Compaction budgeting uses the resolved window. |
 | `api_base_url` | string (optional) | Optional engine-level override for the connection's base URL. |
 | `api_key` | string (optional) | Optional engine-level override for the connection's API key. |
 | `reasoning` | string (optional) | Initial explicit reasoning effort applied when the engine is constructed. Omitted uses the provider's own default. Validated once, lazily before the first chat, against the model catalog: an advertised value is kept; a value the model does not advertise (including models that expose no selectable alternatives at all) is dropped to the provider default with a warning naming the model and effort; when the model is absent from the catalog or the catalog fetch fails, the value is kept unvalidated. Later changes go through `/models`, which validates the effort against the model's advertised options before switching. |
@@ -471,6 +604,7 @@ A profile groups engine selection and per-agent settings for an agent session.
 | `engine` | string (optional) | Override the engine for this agent type. When absent, the profile's `default_engine` is used. |
 | `description` | string (optional) | Model-facing summary of the tasks this agent type is suited for. The root agent receives it in the `spawn_subagent` tool description. |
 | `allowed_tools` | list of strings (optional) | Restrict which tool names this agent may invoke. When absent, the caller's flat default tool list applies (the CLI's or TUI's standard tool set, whichever is unset). When set, a distinct agent type — including one used only for spawned children — can be restricted to a genuinely different tool set than the root or any other agent type. |
+| `allowed_skills` | list of strings (optional) | Restrict callable discovered skills. Omission permits all retained names; `[]` permits none; explicit values replace inherited lists. See [Agent Skills](#agent-skills). |
 | `timeout_secs` | number (optional) | Maximum wall-clock seconds before the agent is cancelled. Omitted means no timeout. |
 | `max_tool_iterations` | number (optional) | Cap on consecutive tool-use rounds one turn may spend, for this agent type's root and child loops alike. Defaults to `50` when omitted; `0` is rejected at profile load because it would trip the guard on the very first tool-use round. |
 | `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or child. |
@@ -737,6 +871,8 @@ Each `rules` entry is one of:
   reorder them or change their verdict without reimplementing the
   path-comparison logic in glob syntax. The first two are the default-floor
   checks; `cross_filesystem` is the additional opt-in check described below.
+  `skill_sidecar` is an additional opt-in rule valid only for `read`; see
+  [skill sidecar reads](#skill-sidecar-reads).
 - A **custom glob rule**, `{ pattern = "...", verdict = "...", reason = "..." }`,
   matched against the canonicalized absolute path.
 
@@ -780,7 +916,8 @@ that tool — it does not merge with it.** A profile that configures
 `[tools.read]` must include its own `{ rule = "outside_workspace", ... }`/
 `{ rule = "dot_path", ... }` entries if it still wants those protections for
 `read`; a tool with no `[tools.<name>]` table at all keeps the unconditional
-default floor.
+default floor. `load_skill` is the exception: its unconfigured default
+auto-approves callable instructions, as described in [Agent Skills](#agent-skills).
 
 **Per-agent-type `[agents.<type>.tools.<name>]` override.** An agent type
 may configure its own rule list for a tool, taking precedence over the
@@ -820,7 +957,7 @@ next (no merging across tiers):
 Both `[tools.<name>]` and `[agents.<type>.tools.<name>]` (and their
 file-authored equivalents) hard-validate their tool name against the
 registered tool set (`read`, `write`, `glob`, `bash`, `search`, `edit`,
-`clarify`, `web_search`, `web_fetch`) at startup; an unrecognized name is a
+`clarify`, `web_search`, `web_fetch`, `load_skill`) at startup; an unrecognized name is a
 hard error naming the offending agent type (or "profile-level"), the unknown
 name, and its source.
 

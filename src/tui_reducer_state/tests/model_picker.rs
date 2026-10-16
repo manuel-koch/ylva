@@ -462,7 +462,7 @@ fn two_row_fixture_choices() -> Vec<ModelChoice> {
     vec![
         choice(
             "engine → provider/model",
-            &["context: 64kb", "reasoning: unavailable"],
+            &["context: 65.5K", "reasoning: unavailable"],
             "provider",
             Some("engine"),
         ),
@@ -515,7 +515,7 @@ fn visible_model_choices_follow_filter_and_display_order() {
             .iter()
             .map(|choice| choice.label.single_line())
             .collect::<Vec<_>>(),
-        vec!["engine → provider/model  context: 64kb  reasoning: unavailable".to_string()]
+        vec!["engine → provider/model  context: 65.5K  reasoning: unavailable".to_string()]
     );
 }
 
@@ -524,15 +524,18 @@ fn choice_label_keeps_identity_and_details_as_separate_parts() {
     let label = ChoiceLabel {
         identity: "engine → p/m".to_string(),
         details: vec![
-            "context: 1kb".to_string(),
+            "context: 1.0K".to_string(),
             "reasoning: unavailable".to_string(),
         ],
     };
     assert_eq!(label.identity, "engine → p/m");
-    assert_eq!(label.details_text(), "context: 1kb  reasoning: unavailable");
+    assert_eq!(
+        label.details_text(),
+        "context: 1.0K  reasoning: unavailable"
+    );
     assert_eq!(
         label.single_line(),
-        "engine → p/m  context: 1kb  reasoning: unavailable"
+        "engine → p/m  context: 1.0K  reasoning: unavailable"
     );
     let bare = ChoiceLabel {
         identity: "p/m".to_string(),
@@ -569,7 +572,7 @@ fn two_row_layout_text_is_identity_then_details_per_entry() {
         slash_overlay_text_rows(&overlay, PickerRowLayout::TwoRows),
         vec![
             "engine → provider/model".to_string(),
-            "context: 64kb  reasoning: unavailable".to_string(),
+            "context: 65.5K  reasoning: unavailable".to_string(),
             String::new(),
             "provider/other".to_string(),
             "reasoning: unavailable".to_string(),
@@ -578,7 +581,7 @@ fn two_row_layout_text_is_identity_then_details_per_entry() {
     assert_eq!(
         slash_overlay_text_rows(&overlay, PickerRowLayout::SingleRow),
         vec![
-            "engine → provider/model  context: 64kb  reasoning: unavailable".to_string(),
+            "engine → provider/model  context: 65.5K  reasoning: unavailable".to_string(),
             String::new(),
             "provider/other  reasoning: unavailable".to_string(),
         ]
@@ -602,12 +605,12 @@ fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
 
     assert_eq!(
         model_choice_parts(&option).single_line(),
-        "openrouter/openai/gpt-oss-120b  context: 128kb  reasoning: default"
+        "openrouter/openai/gpt-oss-120b  context: 131.1K  reasoning: default"
     );
 }
 
 #[test]
-fn model_choice_label_formats_context_length_as_integer_binary_size() {
+fn model_choice_label_formats_context_length_as_compact_decimal_tokens() {
     let model_option = |context_length| ProviderModelOption {
         context_length_override: None,
         provider_connection: "stub".to_string(),
@@ -621,18 +624,21 @@ fn model_choice_label_formats_context_length_as_integer_binary_size() {
         reasoning_effort: None,
     };
 
-    assert_eq!(
-        model_choice_parts(&model_option(2_048)).single_line(),
-        "stub/model  context: 2kb  reasoning: unavailable"
-    );
-    assert_eq!(
-        model_choice_parts(&model_option(1_048_576)).single_line(),
-        "stub/model  context: 1mb  reasoning: unavailable"
-    );
-    assert_eq!(
-        model_choice_parts(&model_option(1_023)).single_line(),
-        "stub/model  context: 1023 tokens  reasoning: unavailable"
-    );
+    for (context_length, expected) in [
+        (0, "0"),
+        (999, "999"),
+        (1_000, "1.0K"),
+        (1_023, "1.0K"),
+        (2_048, "2.0K"),
+        (131_072, "131.1K"),
+        (1_000_000, "1.0M"),
+        (1_048_576, "1.0M"),
+    ] {
+        assert_eq!(
+            model_choice_parts(&model_option(context_length)).single_line(),
+            format!("stub/model  context: {expected}  reasoning: unavailable")
+        );
+    }
 }
 
 #[test]
@@ -687,7 +693,7 @@ fn model_choice_label_marks_advertised_non_text_input_modalities() {
 const KB: usize = 1024;
 
 #[test]
-fn context_length_step_is_an_eighth_rounded_to_32kb_with_a_32kb_floor() {
+fn context_length_step_is_an_eighth_rounded_to_the_token_step_with_a_floor() {
     assert_eq!(context_length_step(256 * KB), 32 * KB);
     assert_eq!(context_length_step(1024 * KB), 128 * KB);
     assert_eq!(context_length_step(64 * KB), 32 * KB);
@@ -711,7 +717,7 @@ fn adjust_context_length_steps_and_stays_within_the_bounds() {
 }
 
 #[test]
-fn adjust_context_length_moves_to_the_next_multiple_of_32kb_from_an_off_grid_value() {
+fn adjust_context_length_moves_to_the_next_token_step_from_an_off_grid_value() {
     assert_eq!(adjust_context_length(100 * KB, 1, None), 128 * KB);
     assert_eq!(adjust_context_length(100 * KB, -1, None), 96 * KB);
     assert_eq!(
@@ -948,7 +954,7 @@ fn confirming_an_edited_engine_window_relabels_the_row_with_the_override() {
     let choice = state.selected_model().expect("selected");
     assert_eq!(choice.selection.context_length_override, Some(64 * KB));
     assert!(
-        choice.label.details.contains(&"context: 64kb".to_string()),
+        choice.label.details.contains(&"context: 65.5K".to_string()),
         "the row must show the overridden window, got {:?}",
         choice.label.details
     );
@@ -1042,7 +1048,7 @@ fn parameter_rows_show_label_and_value_for_each_field() {
     assert_eq!(
         popup_rows(&state),
         vec![
-            "Context length:  ◂ 256kb ▸".to_string(),
+            "Context length:  ◂ 262.1K ▸".to_string(),
             "Reasoning effort:    default (medium) ▸".to_string(),
         ]
     );
@@ -1098,11 +1104,11 @@ fn popup_rows(state: &AppState) -> Vec<String> {
 #[test]
 fn context_length_row_marks_each_direction_that_can_still_move() {
     let cases = [
-        (128 * KB, Some(512 * KB), "Context length:  ◂ 128kb ▸"),
-        (32 * KB, Some(512 * KB), "Context length:    32kb ▸"),
-        (512 * KB, Some(512 * KB), "Context length:  ◂ 512kb"),
-        (128 * KB, None, "Context length:  ◂ 128kb ▸"),
-        (1024 * KB, Some(512 * KB), "Context length:  ◂ 1mb"),
+        (128 * KB, Some(512 * KB), "Context length:  ◂ 131.1K ▸"),
+        (32 * KB, Some(512 * KB), "Context length:    32.8K ▸"),
+        (512 * KB, Some(512 * KB), "Context length:  ◂ 524.3K"),
+        (128 * KB, None, "Context length:  ◂ 131.1K ▸"),
+        (1024 * KB, Some(512 * KB), "Context length:  ◂ 1.0M"),
     ];
     for (configured, catalog, expected) in cases {
         let mut state = engine_parameter_fixture(configured, catalog);

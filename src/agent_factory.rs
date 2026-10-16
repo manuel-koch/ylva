@@ -43,6 +43,7 @@ use crate::store::Store;
 /// agents via this very factory (recursively, one level deep — a child's own
 /// registry never contains `spawn_subagent`).
 pub struct AgentFactory {
+    skills: SkillRuntime,
     engines: HashMap<String, Arc<dyn Engine>>,
     /// The set of tools whose approval prompt is bypassed (auto-approved)
     /// without user confirmation. Intended for automated / e2e testing where
@@ -55,6 +56,12 @@ pub struct AgentFactory {
     store: Option<Store>,
     /// Resolved `SOUL.md` text used only for newly created root contexts.
     system_prompt: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct SkillRuntime {
+    catalog: Arc<crate::skills::SkillCatalog>,
+    interactive: bool,
 }
 
 #[derive(Debug)]
@@ -93,6 +100,7 @@ pub fn select_root_agent_type(
 impl AgentFactory {
     pub fn new(engines: HashMap<String, Arc<dyn Engine>>) -> Self {
         AgentFactory {
+            skills: SkillRuntime::default(),
             engines,
             auto_approve: HashSet::new(),
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
@@ -232,6 +240,7 @@ impl AgentFactory {
     /// Configuration owner for future roots, without retaining a session lock.
     pub fn without_store(&self) -> Self {
         Self {
+            skills: self.skills.clone(),
             engines: self.engines.clone(),
             auto_approve: self.auto_approve.clone(),
             allowed_tools: self.allowed_tools.clone(),
@@ -247,12 +256,14 @@ impl AgentFactory {
         agent_type: &str,
         store: Store,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
+        self.validate_profile_skills(profile)?;
         let engines = self
             .engines
             .iter()
             .map(|(name, engine)| Ok((name.clone(), engine.configured_copy()?)))
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
         Self::build(
+            &self.skills,
             &engines,
             &self.allowed_tools,
             &self.auto_approve,
@@ -271,6 +282,37 @@ impl AgentFactory {
     pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(system_prompt.into());
         self
+    }
+
+    /// Supply the process snapshot and the host's actual approval capability.
+    /// Library construction otherwise starts with an empty catalog.
+    pub fn with_skill_catalog(
+        mut self,
+        catalog: Arc<crate::skills::SkillCatalog>,
+        interactive: bool,
+    ) -> Self {
+        self.skills = SkillRuntime {
+            catalog,
+            interactive,
+        };
+        self
+    }
+
+    pub fn validate_profile_skills(&self, profile: &ProfileConfig) -> anyhow::Result<()> {
+        let sandbox = Arc::new(std::sync::RwLock::new(Sandbox::new()));
+        let mut types: Vec<_> = profile.agents.keys().collect();
+        types.sort();
+        for agent_type in types {
+            crate::skills::policy::CallableSkills::resolve(
+                &self.skills.catalog,
+                profile,
+                agent_type,
+                &self.allowed_tools,
+                self.skills.interactive,
+                sandbox.clone(),
+            )?;
+        }
+        Ok(())
     }
 
     /// Enable automatic approval of the given tool's calls (no user prompt).
@@ -311,7 +353,9 @@ impl AgentFactory {
         agent_type: &str,
         role: Role,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
+        self.validate_profile_skills(profile)?;
         Self::build(
+            &self.skills,
             &self.engines,
             &self.allowed_tools,
             &self.auto_approve,
@@ -331,6 +375,7 @@ impl AgentFactory {
     /// whole factory.
     #[expect(clippy::too_many_arguments)]
     fn build(
+        skills: &SkillRuntime,
         engines: &HashMap<String, Arc<dyn Engine>>,
         allowed_tools: &[String],
         auto_approve: &HashSet<AutoApproveTool>,
@@ -399,6 +444,14 @@ impl AgentFactory {
         // `[tools.<name>]` table, then (absent from both) the built-in default
         // floor handled by `default_registry`/`SandboxContext`.
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
+        let callable_skills = Arc::new(crate::skills::policy::CallableSkills::resolve(
+            &skills.catalog,
+            profile,
+            agent_type,
+            allowed_tools,
+            skills.interactive,
+            sandbox.clone(),
+        )?);
         let agent_type_tools = profile
             .agents
             .get(agent_type)
@@ -419,6 +472,7 @@ impl AgentFactory {
         let registry = Arc::new(default_registry(
             sandbox,
             ToolRegistryConfig {
+                skills: callable_skills.clone(),
                 auto_approve: auto_approve.clone(),
                 allowed_tools: configured_allowed_tools,
                 include_spawn_subagent: can_spawn,
@@ -435,9 +489,11 @@ impl AgentFactory {
             .with_inherited_parent_runtime(inherits_parent_runtime)
             .with_agent_type(agent_type)
             .with_max_tool_iterations(profile.max_tool_iterations_for(agent_type));
-        if let Some(system_prompt) =
-            compose_agent_system_prompt(system_prompt.as_deref(), profile.agents.get(agent_type))
-        {
+        if let Some(system_prompt) = compose_agent_system_prompt(
+            system_prompt.as_deref(),
+            profile.agents.get(agent_type),
+            &callable_skills,
+        ) {
             agent_loop = agent_loop.with_system_prompt(system_prompt);
         }
 
@@ -445,6 +501,7 @@ impl AgentFactory {
             agent_loop = agent_loop.with_child_role(child_role_config);
         } else if can_spawn {
             let mut manager = Self::build_child_agent_manager(
+                skills.clone(),
                 engines.clone(),
                 allowed_tools.to_vec(),
                 auto_approve.clone(),
@@ -561,6 +618,7 @@ impl AgentFactory {
     /// different name still use their configured engine selection.
     #[expect(clippy::too_many_arguments)]
     fn build_child_agent_manager(
+        skills: SkillRuntime,
         engines: HashMap<String, Arc<dyn Engine>>,
         allowed_tools: Vec<String>,
         auto_approve: HashSet<AutoApproveTool>,
@@ -579,6 +637,7 @@ impl AgentFactory {
                   cancel: CancellationToken,
                   forward_ui_tx: mpsc::UnboundedSender<UiUpdate>| {
                 let engines = engines.clone();
+                let skills = skills.clone();
                 let allowed_tools = allowed_tools.clone();
                 let auto_approve = auto_approve.clone();
                 let profile = profile.clone();
@@ -624,6 +683,7 @@ impl AgentFactory {
                 // below (unchanged apart from being split out) moves into the
                 // spawned task.
                 let built = AgentFactory::build(
+                    &skills,
                     &engines,
                     &allowed_tools,
                     &auto_approve,
@@ -707,6 +767,7 @@ impl AgentFactory {
 fn compose_agent_system_prompt(
     global_system_prompt: Option<&str>,
     agent_config: Option<&crate::config::AgentConfig>,
+    skills: &crate::skills::policy::CallableSkills,
 ) -> Option<String> {
     let mut prompt_sections = Vec::new();
     if let Some(global_system_prompt) = global_system_prompt {
@@ -716,6 +777,13 @@ fn compose_agent_system_prompt(
         if let Some(persona) = agent_config.persona.as_deref() {
             prompt_sections.push(persona);
         }
+    }
+    let advertisement = skills.advertisement();
+    if let Some(advertisement) = &advertisement {
+        if prompt_sections.is_empty() {
+            prompt_sections.push(crate::config::soul::DEFAULT_SOUL);
+        }
+        prompt_sections.push(advertisement);
     }
     (!prompt_sections.is_empty()).then(|| prompt_sections.join("\n\n"))
 }
