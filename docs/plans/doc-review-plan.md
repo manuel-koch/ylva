@@ -303,7 +303,7 @@ line coverage.
 
 ### D08 - Context-estimate refresh descriptions disagree
 
-- [ ] Reconcile context-estimate refresh descriptions.
+- [x] Reconcile context-estimate refresh descriptions.
 
 **Priority: Low. Category: contradiction.**
 
@@ -317,6 +317,12 @@ line coverage.
   model-selection, or compaction updates; link rather than duplicate its lifecycle.
   Do not incorrectly promise an immediate baseline after `/clear`, whose handler
   has a different lifecycle.
+- Applied: centralized the readout lifecycle in `docs/features.md`'s TUI
+  architecture section and linked to it from the token-estimate explanation.
+  Clarified that startup, model-selection, and compaction updates can replace
+  the last-request estimate; `/clear` removes the readout without emitting an
+  immediate startup baseline. Verified against runtime update paths and Markdown
+  lint; runtime behavior is unchanged.
 
 ### D09 - General shim descriptions omit the default-profile exception
 

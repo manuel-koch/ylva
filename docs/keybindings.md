@@ -78,7 +78,7 @@ conversation. The original draft returns after all approvals are resolved.
 |---|---|---|
 | `/` as the first character | Input focused | Open the command overlay; it narrows as more of the command is typed |
 | `↑` / `↓` | Command overlay open | Move the highlighted command |
-| `tab` | Command overlay open | Complete the highlighted command |
+| `tab` | Command overlay open | Complete the highlighted command spelling, including aliases such as `/reset` |
 | `enter` | Input holds a recognized command or a highlighted command suggestion | Run the selected command instead of sending the draft to the model (see [features](./features.md#slash-commands)) |
 | `esc` | Command overlay open | Close the overlay and clear the input (otherwise the still-matching draft would immediately reopen it) |
 | `↑` / `↓` | `/models` picker open | Move the highlighted provider-connection/model |

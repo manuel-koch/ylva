@@ -249,13 +249,10 @@ without losing anything the user can still read.
   sent by OpenAI-compatible providers, including its roles, JSON structure,
   tools, and provider-specific fields. It counts the JSON body as text. It does
   not reproduce provider-side request processing or the selected model's
-  tokenizer, so it is not the serving model's actual input-token count. It
-  updates when each request starts and remains the last request's estimate
-  until another request is sent. `/clear` (alias `/reset`) removes the previous
-  session's readout; it stays hidden until the new session reports an estimate.
-  After compaction applies a summary or drops
-  context, the footer switches to the refreshed model-view estimate (including
-  active tool definitions) until another request starts. The footer shows the
+  tokenizer, so it is not the serving model's actual input-token count.
+  The footer can also show a model-view estimate; see the
+  [context-usage readout lifecycle](#tui-architecture) for request, startup,
+  model-selection, compaction, and clear updates. The footer shows the
   token count and percentage without an estimate-source label. With
   `YLVA_TOKEN_USAGE_DUMP_PATH` set, Ylva appends a metadata-only JSONL record
   with the same local estimate, a UTC
@@ -266,7 +263,6 @@ without losing anything the user can still read.
   count different representations.
   Providers may omit usage, and interrupted streams retain an unavailable value
   rather than reporting zero. See [CLI options — Debug](./cli-options.md#debug).
-  A `/models` switch changes the window used for the next request.
 - **Automatic compaction.** A completed turn or tool outcome at the soft
   threshold (default `0.7`) schedules one useful completed-prefix summary,
   including the prior summary/handoff as source. An open tool-call group is
@@ -916,15 +912,20 @@ for the full mechanics.
   See the [resume contract](persistence.md#resume-contract) for how
   the model view and the transcript stay separate.
 - **Context-usage readout:** the key-hints row (or tool-approval button row)
-  right-aligns the local estimate
-  of the latest serialized model request against the active context window —
+  right-aligns the latest available local estimate against the active context window —
   e.g. `64.2K (45%)`. It updates as each request starts, before the provider
-  responds. Before any turn, a fresh or resumed session shows a baseline
+  responds, and retains that serialized-request estimate unless a startup,
+  model-selection, or compaction update replaces it. Before any turn, a fresh
+  or resumed session shows a baseline
   model-view estimate (system prompt, restored messages, and tool schemas),
   so the readout is populated immediately. A `/models` switch re-reports the
   same model-view estimate against the new active window, so the percentage
-  follows the window change. While drilled into a child
-  transcript, it shows that child's latest request estimate and context
+  follows the window change. When compaction applies a summary or drops context,
+  the readout switches to the refreshed model-view estimate, including active
+  tool definitions. `/clear` (alias `/reset`) removes the previous session's
+  readout; it stays hidden until the new session reports an estimate, without
+  an immediate startup baseline. While drilled into a child
+  transcript, it shows that child's latest estimate and context
   window; child updates remain isolated from the root and other child
   readouts. A finished child's last readout remains
   available while its transcript is browsed. The estimate is not billed usage
@@ -1207,6 +1208,9 @@ than shipped as repository templates.
 
 Typing `/` as the **first character** of the draft-message input opens a
 command overlay above the conversation; it narrows as the command is typed.
+Canonical command names appear first, followed by aliases as separate selectable
+entries. `/reset` appears alongside `/clear` and invokes the same action;
+typing `/re` suggests `/reset`, and `Tab` preserves that spelling.
 `↑`/`↓` highlight a command, `Tab` completes the highlighted command, and
 `Enter` activates it even when only a partial command has been typed.
 The command set is a fixed allowlist — a leading `/` that matches nothing in

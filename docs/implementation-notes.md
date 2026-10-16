@@ -971,8 +971,12 @@ selection/copy data, and absolute bottom offsets beyond `u16::MAX`.
 
 ## Slash commands
 
-`src/slash_command.rs` owns the pure parser and fixed command allowlist. The
-TUI driver handles engine-dependent effects separately from reducer effects.
+`src/slash_command.rs` owns shared command-name constants, the pure parser,
+and the fixed command allowlist. Draft normalization and model-filter extraction
+use those constants rather than repeating command strings. Suggestions and
+the help popup derive selectable spellings from the allowlist, listing canonical
+names first and then aliases; alias entries retain the same command action.
+The TUI driver handles engine-dependent effects separately from reducer effects.
 The `/models` request runs in a cancellable background task, so the driver can
 continue handling input and agent updates.
 
