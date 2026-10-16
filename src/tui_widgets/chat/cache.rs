@@ -74,7 +74,10 @@ fn cached_tool(
         .saturating_sub(if header { 4 } else { 5 })
         .max(1);
     let mut body_key = key.clone();
-    body_key.title = bubble.subtype_argument.map(str::to_owned);
+    body_key.title = Some(format!(
+        "{:?}/{:?}",
+        bubble.subtype_argument, bubble.path_like_arguments
+    ));
     let body = cache.get_or_build(body_key, || {
         let mut layout = EntryLayout::default();
         let body_start = append_tool_layout(
@@ -151,7 +154,9 @@ pub(in crate::tui_widgets) fn prepare_cached_header(
             collapsed,
         );
         key.title = Some(format!(
-            "{title:?}/{subtype:?}/{}",
+            "{title:?}/{subtype:?}/{:?}/{}",
+            tool.as_ref()
+                .map_or(&[][..], |tool| tool.path_like_arguments()),
             conversation
                 .source
                 .title_revisions
@@ -174,6 +179,7 @@ pub(in crate::tui_widgets) fn prepare_cached_header(
                     .map(|started| started.elapsed().as_secs()),
                 display_title_override: title.as_deref(),
                 subtype_argument: subtype,
+                path_like_arguments: tool.as_ref().map_or(&[], |tool| tool.path_like_arguments()),
             },
             true,
         );
@@ -376,7 +382,9 @@ pub(in crate::tui_widgets) fn draw_cached_chat(
             let subtype = tool.as_ref().and_then(|tool| tool.subtype_argument());
             let mut key = key;
             key.title = Some(format!(
-                "{title:?}/{subtype:?}/{}",
+                "{title:?}/{subtype:?}/{:?}/{}",
+                tool.as_ref()
+                    .map_or(&[][..], |tool| tool.path_like_arguments()),
                 source.title_revisions.get(id).copied().unwrap_or_default()
             ));
             let rows = cached_tool(
@@ -394,6 +402,9 @@ pub(in crate::tui_widgets) fn draw_cached_chat(
                         .map(|started| started.elapsed().as_secs()),
                     display_title_override: title.as_deref(),
                     subtype_argument: subtype,
+                    path_like_arguments: tool
+                        .as_ref()
+                        .map_or(&[], |tool| tool.path_like_arguments()),
                 },
                 false,
             );

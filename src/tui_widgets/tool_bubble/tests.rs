@@ -15,6 +15,303 @@
 use super::*;
 
 #[test]
+fn tool_bubble_abbreviates_only_declared_home_path_attributes() {
+    use crate::tui_reducer_state::ResultSection;
+
+    let home = dirs::home_dir().expect("home directory");
+    let home_path = home.join("ylva-render-test/file.rs").display().to_string();
+    let sibling_path = format!("{}-backup/file.rs", home.display());
+    for (path, expected_path) in [
+        (home.display().to_string(), "~".to_string()),
+        (home_path.clone(), "~/ylva-render-test/file.rs".to_string()),
+        (sibling_path.clone(), sibling_path),
+        (
+            "relative/file.rs".to_string(),
+            "relative/file.rs".to_string(),
+        ),
+    ] {
+        for primary in [true, false] {
+            for declared in [true, false] {
+                let expected = if declared { &expected_path } else { &path };
+                let mut title_arguments = vec![("path".into(), serde_json::json!(path))];
+                if !primary {
+                    title_arguments.insert(0, ("pattern".into(), serde_json::json!("needle")));
+                }
+                title_arguments.push(("label".into(), serde_json::json!(home_path)));
+                let state = ToolCallState::Done {
+                    arguments: serde_json::json!({"path": path, "label": home_path}),
+                    title_arguments,
+                    content_sections: vec![],
+                    result_section: ResultSection::plain(""),
+                    summary: vec![
+                        ("path".into(), path.clone()),
+                        ("label".into(), home_path.clone()),
+                    ],
+                    duration: std::time::Duration::ZERO,
+                };
+                for collapsed in [true, false] {
+                    let mut lines = vec![];
+                    append_tool_bubble_lines(
+                        &mut lines,
+                        ToolBubbleArgs {
+                            id: uuid::Uuid::new_v4(),
+                            name: "read",
+                            state: &state,
+                            collapsed,
+                            spinner_frame: 0,
+                            elapsed_seconds: None,
+                            display_title_override: None,
+                            subtype_argument: None,
+                            path_like_arguments: if declared { &["path"] } else { &[] },
+                        },
+                        &mut vec![],
+                        1024,
+                    );
+                    let rendered = lines
+                        .iter()
+                        .flat_map(|line| &line.spans)
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>();
+                    assert!(rendered.contains(&format!("path={expected}")), "{rendered}");
+                    assert!(
+                        rendered.contains(&format!("label={home_path}")),
+                        "{rendered}"
+                    );
+                    let invocation = if primary && collapsed {
+                        format!("Read {expected} label=")
+                    } else if primary {
+                        format!("{expected} label=")
+                    } else {
+                        format!("path={expected} label=")
+                    };
+                    assert!(rendered.contains(&invocation), "{rendered}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn skill_source_uses_home_label_without_rewriting_instructions() {
+    use crate::agent::tools::{ContentSection, Section};
+    use crate::tui_reducer_state::ResultSection;
+
+    let source = dirs::home_dir()
+        .expect("home directory")
+        .join(".agents/skills/example/SKILL.md")
+        .display()
+        .to_string();
+    let instructions = format!("Keep this absolute reference: {source}");
+    let state = ToolCallState::Done {
+        arguments: serde_json::json!({"name": "example"}),
+        title_arguments: vec![("name".into(), serde_json::json!("example"))],
+        result_section: ResultSection::plain(instructions.clone()),
+        summary: vec![],
+        duration: std::time::Duration::ZERO,
+        content_sections: vec![
+            Section::Content(ContentSection {
+                label: Some("Source".into()),
+                content: source,
+                file_extension: None,
+                line_number_offset: None,
+            }),
+            Section::Content(ContentSection {
+                label: Some("Skill instructions".into()),
+                content: instructions.clone(),
+                file_extension: Some("md".into()),
+                line_number_offset: None,
+            }),
+        ],
+    };
+    let mut lines = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "load_skill",
+            state: &state,
+            collapsed: false,
+            spinner_frame: 0,
+            elapsed_seconds: None,
+            display_title_override: None,
+            subtype_argument: None,
+            path_like_arguments: &[],
+        },
+        &mut vec![],
+        1024,
+    );
+    let rendered = lines
+        .iter()
+        .flat_map(|line| &line.spans)
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(rendered.contains("~/.agents/skills/example/SKILL.md"));
+    assert!(rendered.contains(&instructions), "{rendered}");
+}
+
+#[test]
+fn load_skill_bubble_keeps_name_primary_and_source_in_expanded_body() {
+    use crate::agent::tools::{load_skill::LoadSkillTool, Tool};
+    use crate::skills::policy::{loader_context, CallableSkills};
+    use std::sync::{Arc, RwLock};
+
+    crate::test_support::run_locked(async {
+        let directory = tempfile::tempdir().unwrap();
+        let source_directory = directory.path().join(".ylva/skills/unslop");
+        std::fs::create_dir_all(&source_directory).unwrap();
+        let source = source_directory.join("SKILL.md");
+        std::fs::write(
+            &source,
+            "---\nname: unslop\ndescription: Improve prose\n---\nSkill body",
+        )
+        .unwrap();
+        let snapshot =
+            crate::skills::SkillCatalog::discover(None, directory.path(), None, None).unwrap();
+        let profile = crate::ProfileConfig::default();
+        let sandbox = Arc::new(RwLock::new(crate::Sandbox::with_root(
+            directory.path().to_owned(),
+        )));
+        let callable = CallableSkills::resolve(
+            &snapshot,
+            &profile,
+            "default",
+            &[LoadSkillTool::NAME.into()],
+            false,
+            sandbox.clone(),
+        )
+        .unwrap();
+        let tool = LoadSkillTool::new(
+            Arc::new(callable),
+            loader_context(sandbox, &profile, "default"),
+        );
+        let arguments = serde_json::json!({"name": "unslop"});
+        let result = tool
+            .create_call(uuid::Uuid::new_v4(), arguments.clone())
+            .run()
+            .await
+            .unwrap();
+        let canonical_source = source
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(result.metadata().unwrap()["name"], "unslop");
+        assert!(result
+            .metadata_schema()
+            .unwrap()
+            .schema
+            .object
+            .unwrap()
+            .properties
+            .contains_key("name"));
+        let legacy_sections = result
+            .content_sections()
+            .into_iter()
+            .filter(|section| {
+                !matches!(section, crate::agent::tools::Section::Content(content)
+                    if content.label.as_deref() == Some("Source"))
+            })
+            .collect::<Vec<_>>();
+        let legacy_summary = vec![
+            ("name".to_string(), "unslop".to_string()),
+            ("source".to_string(), canonical_source.clone()),
+        ];
+        for (summary, content_sections, metadata) in [
+            (
+                result.display_summary(),
+                result.content_sections(),
+                result.metadata(),
+            ),
+            (
+                legacy_summary.clone(),
+                legacy_sections.clone(),
+                result.metadata(),
+            ),
+            (legacy_summary, legacy_sections, None),
+        ] {
+            let call_id = uuid::Uuid::new_v4();
+            let messages = vec![
+                crate::agent::Message::Assistant {
+                    content: String::new(),
+                    status: crate::agent::AssistantStatus::Complete,
+                    tool_calls: vec![crate::agent::ToolCallRequest {
+                        id: call_id,
+                        name: LoadSkillTool::NAME.into(),
+                        arguments: arguments.clone(),
+                        persisted_title_arguments: tool.non_default_redacted_arguments(&arguments),
+                    }],
+                },
+                crate::agent::Message::ToolResult {
+                    value: crate::agent::ToolResult {
+                        id: call_id,
+                        name: LoadSkillTool::NAME.into(),
+                        result: result.text(),
+                        attachments: vec![],
+                        result_section_id: None,
+                        result_metadata: metadata,
+                        result_metadata_schema: None,
+                        summary,
+                        content_sections,
+                        duration: std::time::Duration::ZERO,
+                    },
+                },
+            ];
+            let persisted = serde_json::to_value(&messages).unwrap();
+            let entries = crate::tui_reducer_state::project_messages(&messages);
+            assert_eq!(serde_json::to_value(&messages).unwrap(), persisted);
+            let crate::tui_reducer_state::ChatEntry::ToolBubble { state, .. } = &entries[0] else {
+                panic!("expected replayed skill bubble");
+            };
+            for collapsed in [true, false] {
+                let mut lines = vec![];
+                append_tool_bubble_lines(
+                    &mut lines,
+                    ToolBubbleArgs {
+                        id: uuid::Uuid::new_v4(),
+                        name: LoadSkillTool::NAME,
+                        state,
+                        collapsed,
+                        spinner_frame: 0,
+                        elapsed_seconds: None,
+                        display_title_override: None,
+                        subtype_argument: None,
+                        path_like_arguments: &[],
+                    },
+                    &mut vec![],
+                    512,
+                );
+                let title = lines[0]
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                let expected_title = if collapsed {
+                    "▶ Load Skill unslop → 0.000s"
+                } else {
+                    "▼ Load Skill → 0.000s"
+                };
+                assert!(title.ends_with(expected_title), "{title}");
+                assert!(!title.contains(&canonical_source), "{title}");
+                assert!(!title.contains("name="), "{title}");
+                let body = lines[1..]
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                if collapsed {
+                    assert!(body.is_empty(), "{body}");
+                } else {
+                    assert_eq!(body.matches("Source:").count(), 1, "{body}");
+                    assert!(body.contains(&canonical_source), "{body}");
+                    assert!(body.contains("Skill instructions:"), "{body}");
+                    assert!(body.contains("Skill body"), "{body}");
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn split_tool_layout_preserves_chrome_body_and_hit_ranges() {
     use crate::agent::tools::{ContentSection, Section};
     use crate::tui_reducer_state::ResultSection;
@@ -81,6 +378,7 @@ fn split_tool_layout_preserves_chrome_body_and_hit_ranges() {
                     elapsed_seconds: None,
                     display_title_override: None,
                     subtype_argument: None,
+                    path_like_arguments: &[],
                 };
                 let mut complete = vec![Line::from("preceding entry")];
                 let mut hit_ranges = vec![];
@@ -176,6 +474,7 @@ fn tool_bubble_renders_markdown_content_section_as_prose_not_code() {
             elapsed_seconds: None,
             display_title_override: None,
             subtype_argument: None,
+            path_like_arguments: &[],
         },
         &mut bubble_title_rows,
         80,
@@ -238,6 +537,7 @@ fn tool_bubble_renders_execution_error_content_literally() {
             elapsed_seconds: None,
             display_title_override: None,
             subtype_argument: None,
+            path_like_arguments: &[],
         },
         &mut bubble_title_rows,
         80,
@@ -289,6 +589,7 @@ fn failed_subagent_status_is_red_in_root_and_header_bubble_titles() {
                     elapsed_seconds: None,
                     display_title_override,
                     subtype_argument: None,
+                    path_like_arguments: &[],
                 },
                 &mut bubble_title_rows,
                 80,
@@ -335,6 +636,7 @@ fn queued_subagent_bubble_shows_static_glyph_not_spinner() {
             elapsed_seconds: None,
             display_title_override: None,
             subtype_argument: None,
+            path_like_arguments: &[],
         },
         &mut bubble_title_rows,
         80,
@@ -385,6 +687,7 @@ fn running_subagent_bubble_shows_spinner_not_queued_glyph() {
             elapsed_seconds: None,
             display_title_override: None,
             subtype_argument: None,
+            path_like_arguments: &[],
         },
         &mut bubble_title_rows,
         80,
@@ -433,6 +736,7 @@ fn subagent_bubble_hides_run_id_from_title() {
             elapsed_seconds: None,
             display_title_override: None,
             subtype_argument: None,
+            path_like_arguments: &[],
         },
         &mut bubble_title_rows,
         80,
@@ -487,6 +791,7 @@ fn display_title_override_replaces_title_cased_tool_name() {
             elapsed_seconds: None,
             display_title_override: Some("Subagent"),
             subtype_argument: None,
+            path_like_arguments: &[],
         },
         &mut bubble_title_rows,
         80,

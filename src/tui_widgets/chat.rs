@@ -145,6 +145,9 @@ pub(super) fn draw_chat(
                             .map(|started| started.elapsed().as_secs()),
                         display_title_override: display_title_override.as_deref(),
                         subtype_argument,
+                        path_like_arguments: bubble_tool
+                            .as_ref()
+                            .map_or(&[], |tool| tool.path_like_arguments()),
                     },
                     &mut bubble_title_rows_out,
                     bubble_row_width.saturating_sub(4).max(1),
@@ -250,6 +253,9 @@ pub(super) fn draw_chat(
                     .map(|started| started.elapsed().as_secs()),
                 display_title_override: display_title_override.as_deref(),
                 subtype_argument,
+                path_like_arguments: pending_tool
+                    .as_ref()
+                    .map_or(&[], |tool| tool.path_like_arguments()),
             },
             &mut bubble_title_rows_out,
             bubble_row_width.saturating_sub(4).max(1),

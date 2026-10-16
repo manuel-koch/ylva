@@ -53,6 +53,8 @@ pub(super) struct ToolBubbleArgs<'a> {
     /// folded into the title as `({value})` and dropped from the props by
     /// `display_title_with_subtype`; `None` for a tool without one.
     pub(super) subtype_argument: Option<&'a str>,
+    /// Declared filesystem argument keys; also identify matching result attributes.
+    pub(super) path_like_arguments: &'static [&'static str],
 }
 
 impl ToolBubbleArgs<'_> {

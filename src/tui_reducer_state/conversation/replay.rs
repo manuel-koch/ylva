@@ -109,6 +109,7 @@ pub(in crate::tui_reducer_state) fn project_messages_with_child_runs(
                         name,
                         result,
                         result_section_id,
+                        result_metadata,
                         summary,
                         content_sections,
                         duration,
@@ -121,6 +122,39 @@ pub(in crate::tui_reducer_state) fn project_messages_with_child_runs(
                         (arguments.clone(), title_arguments.clone())
                     })
                     .unwrap_or((serde_json::Value::Null, vec![]));
+                let mut display_summary = summary.clone();
+                let mut display_sections = content_sections.clone();
+                if name == crate::agent::tools::load_skill::LoadSkillTool::NAME {
+                    use crate::agent::tools::{ContentSection, Section};
+
+                    if !display_sections.iter().any(|section| {
+                        matches!(section, Section::Content(content)
+                            if content.label.as_deref() == Some("Source"))
+                    }) {
+                        let source = result_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get("source"))
+                            .and_then(serde_json::Value::as_str)
+                            .or_else(|| {
+                                summary
+                                    .iter()
+                                    .find(|(key, _)| key == "source")
+                                    .map(|(_, value)| value.as_str())
+                            });
+                        if let Some(source) = source {
+                            display_sections.insert(
+                                0,
+                                Section::Content(ContentSection {
+                                    label: Some("Source".into()),
+                                    content: source.to_string(),
+                                    file_extension: None,
+                                    line_number_offset: None,
+                                }),
+                            );
+                        }
+                    }
+                    display_summary.retain(|(key, _)| key != "name" && key != "source");
+                }
                 replace_or_append_tool_bubble(
                     &mut entries,
                     *id,
@@ -140,8 +174,8 @@ pub(in crate::tui_reducer_state) fn project_messages_with_child_runs(
                                 result.clone()
                             },
                         },
-                        content_sections: content_sections.clone(),
-                        summary: summary.clone(),
+                        content_sections: display_sections,
+                        summary: display_summary,
                         duration: *duration,
                         title_arguments,
                     },

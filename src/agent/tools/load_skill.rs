@@ -85,13 +85,30 @@ impl ToolCallResult for LoadSkillResult {
         Some(schema_for!(LoadSkillMetadata))
     }
 
+    fn display_summary(&self) -> Vec<(String, String)> {
+        vec![]
+    }
+
     fn content_sections(&self) -> Vec<Section> {
-        vec![Section::Content(ContentSection {
-            label: Some("Skill instructions".into()),
-            content: self.text(),
-            file_extension: Some("md".into()),
-            line_number_offset: None,
-        })]
+        vec![
+            Section::Content(ContentSection {
+                label: Some("Source".into()),
+                content: self
+                    .skill
+                    .source
+                    .canonical_path
+                    .to_string_lossy()
+                    .into_owned(),
+                file_extension: None,
+                line_number_offset: None,
+            }),
+            Section::Content(ContentSection {
+                label: Some("Skill instructions".into()),
+                content: self.text(),
+                file_extension: Some("md".into()),
+                line_number_offset: None,
+            }),
+        ]
     }
 }
 

@@ -15,6 +15,106 @@
 use super::*;
 
 #[test]
+fn resumed_tool_paths_use_home_labels_in_cached_and_uncached_rendering() {
+    use std::sync::{Arc, RwLock};
+    use ylva::agent::tools::read::ReadTool;
+
+    let home = dirs::home_dir().expect("home directory");
+    let path = home.join("ylva-render-test/file.rs").display().to_string();
+    let arguments = serde_json::json!({"path": path});
+    let call_id = uuid::Uuid::new_v4();
+    let messages = vec![
+        ylva::Message::Assistant {
+            content: String::new(),
+            status: ylva::AssistantStatus::Complete,
+            tool_calls: vec![ylva::ToolCallRequest {
+                id: call_id,
+                name: "read".into(),
+                arguments: arguments.clone(),
+                persisted_title_arguments: vec![("path".into(), serde_json::json!(path))],
+            }],
+        },
+        ylva::Message::ToolResult {
+            value: ylva::ToolResult {
+                id: call_id,
+                name: "read".into(),
+                result: "File content stays verbatim".into(),
+                attachments: vec![],
+                result_section_id: None,
+                result_metadata: Some(serde_json::json!({"path": path})),
+                result_metadata_schema: None,
+                summary: vec![("path".into(), path.clone())],
+                content_sections: vec![],
+                duration: Duration::ZERO,
+            },
+        },
+    ];
+    let original = serde_json::to_value(&messages).unwrap();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ReadTool::new(ylva::SandboxContext::new(
+        Arc::new(RwLock::new(ylva::Sandbox::with_root(home))),
+    ))));
+    for cached in [false, true] {
+        for collapsed in [false, true] {
+            let mut state = ylva::AppState::new();
+            if cached {
+                state.enable_render_cache();
+            }
+            state.replay_messages(&messages, &[], None);
+            let ChatEntry::ToolBubble {
+                collapsed: bubble_collapsed,
+                ..
+            } = &mut state.chat_entries[0]
+            else {
+                panic!("expected replayed read bubble");
+            };
+            *bubble_collapsed = collapsed;
+            let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
+            let mut textarea = ratatui_textarea::TextArea::default();
+            for _ in 0..2 {
+                terminal
+                    .draw(|frame| {
+                        ylva::render::render(
+                            frame,
+                            &mut state,
+                            &mut textarea,
+                            None,
+                            None,
+                            &registry,
+                        );
+                    })
+                    .unwrap();
+                let rendered = state.conversation.chat_rendered_lines.join("\n");
+                assert!(
+                    rendered.contains("path=~/ylva-render-test/file.rs"),
+                    "{rendered}"
+                );
+                assert!(!rendered.contains(&path), "{rendered}");
+                if collapsed {
+                    assert!(rendered.contains("Read ~/ylva-render-test/file.rs"));
+                } else {
+                    assert!(rendered.contains("File content stays verbatim"));
+                }
+            }
+            assert_eq!(serde_json::to_value(&messages).unwrap(), original);
+            let ChatEntry::ToolBubble { state, .. } = &state.chat_entries[0] else {
+                panic!("expected read bubble");
+            };
+            let ylva::ToolCallState::Done {
+                arguments: saved,
+                summary,
+                ..
+            } = state.as_ref()
+            else {
+                panic!("expected completed read");
+            };
+            assert_eq!(saved, &arguments);
+            assert_eq!(summary, &vec![("path".to_string(), path.clone())]);
+        }
+    }
+}
+
+#[test]
 fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
     use ylva::DomainEvent;
 

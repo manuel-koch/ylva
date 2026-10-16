@@ -122,6 +122,16 @@ pub(super) fn append_tool_body(
                 lines.push(Line::from(vec![bar.clone(), margin.clone()]));
                 match section {
                     crate::agent::tools::Section::Content(content_section) => {
+                        let display_content = if name
+                            == crate::agent::tools::load_skill::LoadSkillTool::NAME
+                            && content_section.label.as_deref() == Some("Source")
+                        {
+                            std::borrow::Cow::Owned(crate::home_relative_path::display_path(
+                                std::path::Path::new(&content_section.content),
+                            ))
+                        } else {
+                            std::borrow::Cow::Borrowed(content_section.content.as_str())
+                        };
                         // Label header (only when multiple sections).
                         if show_labels {
                             if let Some(label) = &content_section.label {
@@ -148,8 +158,7 @@ pub(super) fn append_tool_body(
                         // prose, not source code.
                         if content_section.file_extension.as_deref() == Some("md") {
                             let content_width = wrap_width.saturating_sub(2).max(1);
-                            let mut md_lines =
-                                render_markdown(&content_section.content, content_width);
+                            let mut md_lines = render_markdown(&display_content, content_width);
                             if md_lines.is_empty() {
                                 md_lines.push(Line::from(""));
                             }
@@ -166,14 +175,14 @@ pub(super) fn append_tool_body(
                         }
 
                         // Determine line-number gutter width.
-                        let line_count = content_section.content.lines().count();
+                        let line_count = display_content.lines().count();
                         let offset = content_section.line_number_offset.unwrap_or(0);
                         let last_line_num = offset + line_count;
                         let digits = last_line_num.to_string().len();
 
                         // Fetch highlighted lines from cache (content-addressed, computed once).
                         let all_highlighted = highlighted_lines_cached(
-                            &content_section.content,
+                            &display_content,
                             content_section.file_extension.as_deref(),
                             active_theme(),
                         );

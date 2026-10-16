@@ -13,6 +13,8 @@ needed. Ylva discovers them from local user and workspace folders.
 - Choose which skills each agent type can use.
 - Skills provide guidance, not extra file, shell, or subagent permissions.
   Loading a skill does not execute scripts.
+- Load-skill bubbles show the name and duration; expand to see the source and
+  instructions, including in resumed conversations.
 - Restart Ylva to pick up skill changes. Previously loaded instructions remain
   in saved conversations.
 
@@ -1015,6 +1017,8 @@ for the full mechanics.
   left-border bar toggles whether the bubble's arguments and result are shown
   (expanded, `▼`) or hidden (collapsed, `▶`). Collapsed bubbles display only
   the title line, useful for decluttering long conversations.
+- **Home-relative tool paths:** TUI path labels use `~` for the home directory,
+  without changing execution or saved data.
 - **Expansion feedback:** expanding a tool or thinking bubble first shows
   `Expanding…` on its collapsed title, before rendering the body. This also
   applies to subagent transcripts and their header bubble. The static indicator

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Home-relative path labels shared by the TUI help popup and CLI output.
+//! Home-relative path labels shared by CLI output and TUI rendering.
 
 use std::path::Path;
 

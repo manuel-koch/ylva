@@ -961,7 +961,8 @@ fn loader_delivers_snapshot_and_rejects_adversarial_names_without_side_effects()
         assert!(!first.text().contains("description:"));
         assert_eq!(first.metadata().unwrap()["name"], "alpha");
         assert!(first.metadata_schema().is_some());
-        assert_eq!(first.content_sections().len(), 1);
+        assert_eq!(first.content_sections().len(), 2);
+        assert!(first.display_summary().is_empty());
         assert_eq!(first.display_text(), Some(first.text()));
         std::fs::remove_file(temporary.path().join("alpha/SKILL.md")).unwrap();
         let repeated = tool

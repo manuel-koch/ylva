@@ -51,6 +51,7 @@ pub(super) fn append_tool_chrome(
         elapsed_seconds,
         display_title_override,
         subtype_argument,
+        path_like_arguments,
     } = bubble;
     let [bar, margin] = style.prefix_spans();
 
@@ -113,6 +114,13 @@ pub(super) fn append_tool_chrome(
         &title_arguments,
     );
     let title_arguments = title_arguments.as_slice();
+    let display_value = |key: &str, value: String| {
+        if path_like_arguments.contains(&key) {
+            crate::home_relative_path::display_path(std::path::Path::new(&value))
+        } else {
+            value
+        }
+    };
     // Only strings and numbers qualify as the bare (keyless) primary arg.
     // Booleans need their key name to be meaningful, so they stay in props.
     let scalar_primary = |v: &serde_json::Value| -> Option<String> {
@@ -161,6 +169,7 @@ pub(super) fn append_tool_chrome(
         iter.next_if(|(_, v)| scalar_primary(v).is_some())
             .and_then(|(k, v)| {
                 scalar_primary(v).map(|s| {
+                    let s = display_value(k, s);
                     if s.contains('\n') {
                         multiline_section(k, &s);
                         sanitize_inline(&s)
@@ -172,6 +181,7 @@ pub(super) fn append_tool_chrome(
     let props_text: String = iter
         .filter_map(|(k, v)| {
             scalar_prop_value(v).map(|value| {
+                let value = display_value(k, value);
                 let display_value = if value.contains('\n') {
                     multiline_section(k, &value);
                     sanitize_inline(&value)
@@ -252,7 +262,7 @@ pub(super) fn append_tool_chrome(
             let duration_formatted = format!("{duration_seconds:.3}s");
             let mut parts: Vec<String> = summary
                 .iter()
-                .map(|(key, value)| format!("{key}={value}"))
+                .map(|(key, value)| format!("{key}={}", display_value(key, value.clone())))
                 .collect();
             parts.push(duration_formatted);
             for (index, (key, value)) in summary.iter().enumerate() {
@@ -263,7 +273,7 @@ pub(super) fn append_tool_chrome(
                     });
                 }
                 summary_segments.push(SummarySegment {
-                    text: format!("{key}={value}"),
+                    text: format!("{key}={}", display_value(key, value.clone())),
                     style: if is_subagent && key == "status" && value == "failure" {
                         failure_status
                     } else {
