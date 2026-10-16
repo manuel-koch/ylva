@@ -23,7 +23,7 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
     let dir = TempDir::new().expect("tempdir");
     let output_path = dir.path().join("out.txt").to_string_lossy().to_string();
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
-        workspace_root: dir.path().to_path_buf(),
+        sandbox_root: dir.path().to_path_buf(),
     }));
     let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);
@@ -82,13 +82,16 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
 
 #[tokio::test(start_paused = true)]
 async fn two_tool_calls_drain_serially_with_single_reprompt() {
-    let dir = TempDir::new().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("ylva-")
+        .tempdir()
+        .expect("tempdir");
     let a = scratch_file(&dir, "a.txt", "AAAA");
     let b = scratch_file(&dir, "b.txt", "BBBB");
-    // Phase 6.0: reads inside the workspace are auto-approved. Use the tmpdir as
-    // the workspace root so both scratch files are within the sandbox.
+    // Reads of visible in-workspace files auto-approve. Use a visible temporary
+    // directory as the sandbox root so both scratch files are inside it.
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
-        workspace_root: dir.path().to_path_buf(),
+        sandbox_root: dir.path().to_path_buf(),
     }));
     let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);
@@ -234,13 +237,16 @@ async fn failing_tool_emits_tool_error_and_still_reprompts() {
 
 #[tokio::test(start_paused = true)]
 async fn base64_read_result_stays_in_model_context_but_not_tool_bubble() {
-    let dir = TempDir::new().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("ylva-")
+        .tempdir()
+        .expect("tempdir");
     let path = dir.path().join("image.png");
     let bytes = [137, 80, 78, 71, 13, 10, 26, 10, 0, 255];
     std::fs::write(&path, bytes).expect("write fixture");
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
-        workspace_root: dir.path().to_path_buf(),
+        sandbox_root: dir.path().to_path_buf(),
     }));
     let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);

@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 /// before dispatch, so both the executed argument and the on-screen
 /// tool-call rendering are short and workspace-portable. `base` is expected
 /// to be the process's actual current working directory, not necessarily a
-/// [`super::Sandbox`]'s configured `workspace_root`: relative paths in tool
+/// [`super::Sandbox`]'s configured `sandbox_root`: relative paths in tool
 /// execution (e.g. `std::fs::read`) resolve against cwd, and the two need
 /// not coincide (e.g. in tests that point a sandbox at a tempdir without
 /// changing the process's cwd).
@@ -203,13 +203,13 @@ fn resolve_device(path: &Path) -> Option<u64> {
 
 /// Pure comparison for the `cross_filesystem` rule: `true` only when both
 /// device IDs are known and differ. Any `None` on either side — metadata
-/// unavailable for the candidate anchor or the workspace root — means "no
+/// unavailable for the candidate anchor or the sandbox root — means "no
 /// positively established difference" and yields `false` (the rule does not
 /// match; `outside_workspace`/`dot_path` remain the boundary guards).
-fn is_cross_device(candidate: Option<u64>, workspace_root: Option<u64>) -> bool {
+fn is_cross_device(candidate: Option<u64>, sandbox_root: Option<u64>) -> bool {
     matches!(
-        (candidate, workspace_root),
-        (Some(candidate), Some(workspace_root)) if candidate != workspace_root
+        (candidate, sandbox_root),
+        (Some(candidate), Some(sandbox_root)) if candidate != sandbox_root
     )
 }
 
@@ -291,10 +291,10 @@ impl SandboxContext {
     /// tail. This ensures that a path like `/var/folders/ws/new_file.rs` is
     /// resolved to `/private/var/folders/ws/new_file.rs` on macOS even though
     /// `new_file.rs` has not been created yet — which is necessary for
-    /// workspace-membership comparisons when `workspace_root` is canonical.
+    /// path comparisons when `sandbox_root` is canonical.
     /// On macOS, `/var` is a symlink to `/private/var`; canonicalizing the
     /// existing ancestor `/var/folders/ws` follows that symlink, producing
-    /// the `/private/…` prefix that matches a canonical `workspace_root`.
+    /// the `/private/…` prefix that matches a canonical `sandbox_root`.
     pub(crate) fn canonicalize_best_effort(path: &Path) -> PathBuf {
         if let Ok(canonical) = std::fs::canonicalize(path) {
             return canonical;
@@ -343,8 +343,8 @@ impl SandboxContext {
     ///    config table), evaluate exactly that list, in order, last match
     ///    wins — this *replaces* the default floor rather than merging with
     ///    it. Otherwise evaluate the built-in default floor: outside-workspace
-    ///    → `Some(UserApprovalRequired)`, then any component of the path
-    ///    relative to the workspace root starting with `.` →
+    ///    → `Some(UserApprovalRequired)`, then any component of the resolved
+    ///    absolute path starting with `.` →
     ///    `Some(UserApprovalRequired)`.
     /// 2. Named glob rules (from `self.rules`) are evaluated last; last match
     ///    wins. This is what `--auto-approve-write`/`--auto-approve-edit`'s
@@ -367,57 +367,48 @@ impl SandboxContext {
         self.check_path_with_dot_path_access(path, true)
     }
 
-    /// Returns `true` when `effective` normalizes outside `workspace_root`.
-    /// Shared by the default floor and the `outside_workspace` named rule so
-    /// the underlying comparison exists in exactly one place.
-    fn matches_outside_workspace(workspace_root: &Path, effective: &Path) -> bool {
+    /// Compare against the workspace discovered from the sandbox root, falling
+    /// back to that root when no workspace marker exists. Shared by the default
+    /// floor and configured `outside_workspace` rules; path resolution and
+    /// filesystem-device comparisons keep their launch-directory anchor.
+    fn matches_outside_workspace(sandbox_root: &Path, effective: &Path) -> bool {
+        let discovered_workspace = crate::config::layered::discover_workspace_root(sandbox_root);
+        let workspace_root = discovered_workspace.as_deref().unwrap_or(sandbox_root);
         !effective.starts_with(workspace_root)
     }
 
-    /// Returns `true` when the portion of `effective` relative to
-    /// `workspace_root` has a dot-prefixed component, unless `allow_dot_paths`
-    /// bypasses the check (used by `glob` enumeration). A path outside the
-    /// workspace (whose `strip_prefix` fails) never matches here — the
-    /// `outside_workspace` rule is responsible for that case. Shared by the
-    /// default floor and the `dot_path` named rule so the underlying
-    /// comparison exists in exactly one place.
-    fn matches_dot_path(workspace_root: &Path, effective: &Path, allow_dot_paths: bool) -> bool {
-        if allow_dot_paths {
-            return false;
-        }
-        match effective.strip_prefix(workspace_root) {
-            Ok(relative) => Self::is_dot_path(relative),
-            Err(_) => false,
-        }
+    /// Match hidden components anywhere in the resolved absolute path, unless
+    /// `allow_dot_paths` bypasses the check for enumeration. Shared by the
+    /// default floor and configured `dot_path` rules.
+    fn matches_dot_path(effective: &Path, allow_dot_paths: bool) -> bool {
+        !allow_dot_paths && Self::is_dot_path(effective)
     }
 
     /// Evaluate one of the three path-based [`NamedSandboxRule`] variants
-    /// against `workspace_root`/`effective`. The four `bash`-only variants
+    /// against `sandbox_root`/`effective`. The four `bash`-only variants
     /// are never valid under a path tool (rejected by config validation);
     /// defensively `false` here if one slips through.
     ///
     /// `CrossFilesystem` resolves both device IDs fresh on every evaluation
-    /// (workspace root: the defensively re-canonicalized `workspace_root`;
+    /// (sandbox root: the defensively re-canonicalized `sandbox_root`;
     /// candidate: [`resolve_device`] of [`canonicalize_existing_anchor`] of
     /// `effective`) — never cached, so a mid-session remount cannot leave a
     /// stale ID behind.
     fn evaluate_named_rule(
         &self,
         rule: NamedSandboxRule,
-        workspace_root: &Path,
+        sandbox_root: &Path,
         effective: &Path,
         allow_dot_paths: bool,
     ) -> bool {
         match rule {
             NamedSandboxRule::OutsideWorkspace => {
-                Self::matches_outside_workspace(workspace_root, effective)
+                Self::matches_outside_workspace(sandbox_root, effective)
             }
-            NamedSandboxRule::DotPath => {
-                Self::matches_dot_path(workspace_root, effective, allow_dot_paths)
-            }
+            NamedSandboxRule::DotPath => Self::matches_dot_path(effective, allow_dot_paths),
             NamedSandboxRule::CrossFilesystem => is_cross_device(
                 resolve_device(&canonicalize_existing_anchor(effective)),
-                resolve_device(workspace_root),
+                resolve_device(sandbox_root),
             ),
             NamedSandboxRule::SkillSidecar => false,
             NamedSandboxRule::Backgrounded
@@ -442,19 +433,19 @@ impl SandboxContext {
         allow_dot_paths: bool,
         snapshot: bool,
     ) -> Option<ApprovalCheck> {
-        let workspace_root = {
+        let sandbox_root = {
             let guard = self.sandbox.read().expect("sandbox lock poisoned");
-            guard.workspace_root.clone()
+            guard.sandbox_root.clone()
         };
-        // Ensure workspace_root is canonical even when the Sandbox was built via
+        // Ensure sandbox_root is canonical even when the Sandbox was built via
         // direct struct construction rather than Sandbox::new() / Sandbox::with_root().
         // This guards against macOS /var/folders → /private/var/folders mismatches.
-        let workspace_root = std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root);
-        let normalized = Self::normalize(&workspace_root, path);
+        let sandbox_root = std::fs::canonicalize(&sandbox_root).unwrap_or(sandbox_root);
+        let normalized = Self::normalize(&sandbox_root, path);
         let requested = if path.is_absolute() {
             path.to_owned()
         } else {
-            workspace_root.join(path)
+            sandbox_root.join(path)
         };
         let sidecar_matches = !self.skill_sources.is_empty()
             && requested
@@ -498,7 +489,7 @@ impl SandboxContext {
                             if (*named == NamedSandboxRule::SkillSidecar && sidecar_matches)
                                 || self.evaluate_named_rule(
                                     *named,
-                                    &workspace_root,
+                                    &sandbox_root,
                                     &effective,
                                     allow_dot_paths,
                                 )
@@ -530,7 +521,7 @@ impl SandboxContext {
                 // the messages for a *configured* `auto_denied` named rule.
                 if self.evaluate_named_rule(
                     NamedSandboxRule::OutsideWorkspace,
-                    &workspace_root,
+                    &sandbox_root,
                     &effective,
                     allow_dot_paths,
                 ) {
@@ -538,7 +529,7 @@ impl SandboxContext {
                 }
                 if self.evaluate_named_rule(
                     NamedSandboxRule::DotPath,
-                    &workspace_root,
+                    &sandbox_root,
                     &effective,
                     allow_dot_paths,
                 ) {

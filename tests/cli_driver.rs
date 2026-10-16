@@ -978,7 +978,10 @@ async fn run_cli_closes_thinking_section_before_tool_call() {
 
 #[tokio::test]
 async fn run_cli_auto_approves_read_and_runs_it() {
-    let dir = TempDir::new().expect("tempdir");
+    let dir = tempfile::Builder::new()
+        .prefix("ylva-")
+        .tempdir()
+        .expect("tempdir");
     let path = write_scratch(&dir, "doc.md", "file body");
     let provider = Arc::new(MockProviderWithScript {
         phase_one: vec![tool_call("read", serde_json::json!({ "path": path }))],

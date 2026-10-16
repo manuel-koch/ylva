@@ -110,12 +110,14 @@ structural sandbox rules (backgrounded commands, variable-assignment
 prefixes, unquoted glob/brace expansion) and configurable `[tools.bash]`
 rules — see "`bash` command rules" in
 [configuration](./configuration.md#bash-command-rules). Every path tool also
-honors a built-in floor: a path outside the workspace — or a dot-prefixed
-component, except for `glob` enumeration, which only lists paths — requires
+honors a built-in floor: a path outside the workspace root (the launch directory
+when no workspace marker exists) — or a dot-prefixed
+component anywhere in the resolved absolute path, except for `glob` enumeration,
+which only lists paths — requires
 user approval instead of being auto-approved or rejected outright. Path
 tools additionally honor configurable `[tools.<name>]` rule lists, including
 the opt-in `cross_filesystem` rule that matches paths on a different
-filesystem (device) than the workspace root — see
+filesystem (device) than the sandbox root — see
 [Sandbox (tool-approval rules)](./configuration.md#sandbox-tool-approval-rules).
 
 Unknown tool names return per-call errors to the model without interrupting
@@ -520,10 +522,11 @@ tool's byte cap. The later `read result size` event records
 truncation flag. Source line counts are unavailable for binary reads and
 partial byte ranges.
 Continue a capped read with `offset`/`limit`. Reads auto-approve when the sandbox abstains; a path
-outside the workspace or with a dot-prefixed component requires user
+outside the workspace root (the launch directory when no workspace marker exists)
+or with a dot-prefixed component anywhere in its resolved absolute path requires user
 approval instead. Any explicit verdict from a configured `[tools.read]`
 rule list — including the opt-in `cross_filesystem` rule (a path on a
-different filesystem than the workspace root) — is honored as-is.
+different filesystem than the sandbox root) — is honored as-is.
 
 ### `write`
 
@@ -609,16 +612,19 @@ CLI/TUI summaries use a tool-provided display projection: `glob` omits zero-valu
 `directories` and `truncated=false`. It omits `total` when either type count is zero, because
 the total is then inferable, except that an empty result displays `total=0`; the complete
 metadata remains available to the LLM/API.
-Paths inside the workspace are auto-approved; paths outside require user
+Paths inside the workspace root (the launch directory when no workspace marker exists)
+are auto-approved; paths outside require user
 approval. A configured `cross_filesystem` rule is evaluated against the
 pattern's root directory, not against each match.
 
 ### `bash`
 
 Execute a shell command or multi-line script via `bash -c` from the
-current working directory, which is the workspace root during normal operation.
-Use relative paths directly; do not prefix commands with a redundant `cd` to
-the workspace root. Requires explicit human approval before execution. An
+launch directory, which anchors tool execution even when the discovered
+configuration workspace root is above it. Use relative paths directly; change
+directories only when the command needs a different working directory. See
+[sandbox roots and nested launches](configuration.md#sandbox-tool-approval-rules).
+Requires explicit human approval before execution. An
 optional `label` (3–6 word purpose of the command) describes what the
 command will do: the collapsed bubble title and the CLI status line show
 it as a `label=…` prop — including while the call is pending approval —
@@ -660,8 +666,10 @@ absolute result paths. Output is capped at 1000 whole output lines (`truncated` 
 present in result metadata when capped). Existing line/byte caps bound source
 output; context pressure separately reduces its model-only body without changing
 canonical output or metadata, using advisory `cl100k_base` estimates.
-Paths inside the
-workspace are auto-approved; paths outside require user approval.
+Paths inside the workspace root (the launch directory when no workspace marker exists)
+are auto-approved unless another rule requires approval, such as `dot_path`
+for a dot-prefixed component anywhere in the resolved absolute path; paths outside require
+user approval.
 
 ### `web_search`
 
@@ -1158,7 +1166,9 @@ JSON-quoted `Source:` line: `$YLVA_HOME/<filename>` for a home file (the
 variable's name only, never its value) or the workspace-relative path for a
 workspace file. Those sources are executable: path-like tools expand
 `~`/`$ENVVAR` before use, and startup exports the resolved `YLVA_HOME` so
-`$YLVA_HOME/AGENTS.md` can be passed to `read` verbatim. Empty,
+`$YLVA_HOME/AGENTS.md` can be passed to `read` verbatim. Workspace-relative source
+labels require adjustment when launching below the workspace root; see
+[trusted instruction files](configuration.md#trusted-instruction-files). Empty,
 whitespace-only, and byte-identical duplicate files are skipped; oversized
 (over 64 KiB), unreadable, non-UTF-8, symlink-escaping, and unlistable-chain
 files fail startup. With no instruction file the prompt is the resolved SOUL

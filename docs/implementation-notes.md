@@ -311,7 +311,7 @@ behavior.
 
 ## Sandbox policy ownership and `cross_filesystem` rule
 
-`sandbox.rs` retains `Sandbox`, `SandboxContext`, their shared workspace
+`sandbox.rs` retains `Sandbox`, `SandboxContext`, their shared sandbox
 handle and ordered rule storage, with explicit re-exports for existing public
 rule and path-helper names. Private `sandbox/rules.rs` owns serialized and
 compiled rules, `sandbox/path.rs` owns expansion/canonicalization/device
@@ -323,7 +323,19 @@ configured rules replace the floor and appended rules still run last.
 
 Owner-local suites live under `sandbox/{rules,path,command,network}/tests.rs`,
 sharing the sandbox fixture from `sandbox/tests.rs`. The facade suite checks
-shared workspace updates and rule replacement/precedence across owners.
+shared sandbox-root updates and rule replacement/precedence across owners.
+
+`Sandbox::sandbox_root` stores the canonicalized launch directory.
+`matches_outside_workspace` derives `workspace_root` from that anchor using the
+shared workspace-discovery helper on evaluation. When no marker exists, the
+workspace root defaults to the sandbox root, so both roots are the same path.
+Both the default floor and configured `outside_workspace` rules use this
+comparison, including snapshot checks. Relative paths and `cross_filesystem`
+keep their launch-directory anchor. `matches_dot_path` instead checks every
+component of the resolved absolute path without stripping either root, including
+hidden launch ancestors and paths outside the workspace. Snapshot checks use the
+same predicate; enumeration retains its explicit dot-path bypass. Configured
+rules still replace the default floor, with last-match-wins precedence.
 
 `sandbox/path.rs`'s `resolve_device` reads Unix `st_dev` on each check and
 returns no device on other platforms. A nonexistent target uses its deepest existing canonicalized

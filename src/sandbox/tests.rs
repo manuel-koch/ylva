@@ -16,8 +16,8 @@ use super::*;
 use std::path::Path;
 
 #[test]
-fn context_clones_observe_the_same_updated_workspace_root() {
-    let temporary_directory = tempfile::tempdir().expect("temporary directory");
+fn context_clones_observe_the_same_updated_sandbox_root() {
+    let temporary_directory = make_visible_temporary_directory().expect("temporary directory");
     let first_workspace = temporary_directory.path().join("first");
     let second_workspace = temporary_directory.path().join("second");
     std::fs::create_dir_all(&first_workspace).expect("first workspace created");
@@ -33,8 +33,8 @@ fn context_clones_observe_the_same_updated_workspace_root() {
         Some(ApprovalCheck::UserApprovalRequired)
     );
 
-    sandbox.write().expect("sandbox writable").workspace_root =
-        Sandbox::with_root(second_workspace).workspace_root;
+    sandbox.write().expect("sandbox writable").sandbox_root =
+        Sandbox::with_root(second_workspace).sandbox_root;
     for current_context in [&context, &other_context] {
         assert_eq!(current_context.check_path(&second_path), None);
         assert_eq!(
@@ -131,6 +131,10 @@ pub(super) fn make_sandbox(root: &Path) -> Arc<RwLock<Sandbox>> {
     Arc::new(RwLock::new(Sandbox::with_root(root.to_path_buf())))
 }
 
+pub(super) fn make_visible_temporary_directory() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new().prefix("ylva-").tempdir()
+}
+
 #[test]
 fn sandbox_context_debug_shows_rules_count() {
     let temporary_dir = tempfile::tempdir().unwrap();
@@ -153,5 +157,5 @@ fn sandbox_default_uses_current_dir() {
     let sandbox = Sandbox::default();
     let cwd = std::env::current_dir().expect("cwd");
     let canonical_cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-    assert_eq!(sandbox.workspace_root, canonical_cwd);
+    assert_eq!(sandbox.sandbox_root, canonical_cwd);
 }

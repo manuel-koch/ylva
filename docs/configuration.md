@@ -155,6 +155,10 @@ load from the global configuration layer. When no marker exists, there is no
 workspace layer. The highest layer that defines the requested file replaces
 that file entirely; lower layers are not merged into it.
 
+Discovery does not change the working directory. Relative tool paths and shell
+commands remain anchored at the launch directory, which also supplies the
+[sandbox root](#sandbox-tool-approval-rules), even when the workspace root is above it.
+
 Resolution follows the current directory, not the shim that started Ylva. A
 workspace profile with the same name as a home profile shadows that home
 profile whenever the current directory is inside the workspace.
@@ -425,8 +429,10 @@ setup.
   Startup exports the resolved `YLVA_HOME` into the process environment so
   that expansion resolves even when the default `~/.ylva` home would
   otherwise exist only inside Ylva's own resolution; `bash` child processes
-  see the same variable. Workspace-relative sources need no expansion in the
-  default case, because the workspace root is the tool path anchor.
+  see the same variable. Workspace-relative `Source:` labels describe locations
+  relative to the discovered workspace root; tools do not automatically rebase
+  them. When launching below that root, convert such a label to a launch-relative
+  or absolute path before passing it to a tool.
 - **Size limit.** A file whose raw on-disk bytes exceed 64 KiB is a hard
   startup error naming the path and the limit. There is no combined cap
   across files.
@@ -813,12 +819,29 @@ An absent `[web_fetch]` table behaves exactly like the written-out default.
 
 ## Sandbox (tool-approval rules)
 
-The sandbox holds the workspace root (canonicalized cwd at
-startup) that path-based tool-approval rules are evaluated against. A
-candidate path is normalized against that root (collapsing `..` without
+The sandbox root is the canonicalized launch directory, not necessarily the
+discovered configuration workspace root. Relative tool paths and
+`cross_filesystem` remain anchored to this sandbox root. `outside_workspace`
+uses the workspace root: the nearest ancestor with `.ylva/` or `.git`, or the
+launch directory when neither marker exists. Without a marker, workspace root
+and sandbox root are the same path. `dot_path` checks every component
+of the resolved absolute path, regardless of either boundary, including hidden
+ancestors of the launch directory. A
+candidate path is normalized against the sandbox root (collapsing `..` without
 touching the filesystem, resolving symlinked prefixes such as macOS's
 `/var` → `/private/var`) and either gets an explicit verdict or no rule
 applies, letting the calling tool fall back to its own default.
+
+For example, with a workspace marker at `project/.git` and no nearer marker,
+launching Ylva from `project/service/` still discovers configuration under
+`project/.ylva/`. Tools and `bash` run from `project/service/`; a relative
+`README.md` names `project/service/README.md`, not `project/README.md`.
+Reading `../README.md` targets the latter and does not match `outside_workspace`,
+because it is inside the discovered workspace. A path outside `project/` still
+matches that rule. `dot_path` matches `.env` in either `project/service/` or
+`project/`, and also matches hidden paths outside the workspace.
+Launching from `project/` instead also uses
+a different session group; see [project-key derivation](persistence.md#project_key-derivation).
 
 **Default floor.** When a tool has no `[tools.<name>]` config table (see
 below) at any resolved layer, two rules apply unconditionally, evaluated in
@@ -827,11 +850,11 @@ this order, before any custom rule added by a CLI flag (e.g.
 
 | Rule | Verdict | Notes |
 |---|---|---|
-| `outside_workspace` | `user_approval_required` | Any path that normalizes outside the workspace root. |
-| `dot_path` | `user_approval_required` | Any content-tool path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). `glob` enumeration may inspect dot-prefixed paths inside the workspace. |
+| `outside_workspace` | `user_approval_required` | Any resolved path outside the workspace root. Without a workspace marker, the workspace root is the launch directory, the same path as the sandbox root. |
+| `dot_path` | `user_approval_required` | Any content-tool path whose resolved absolute form has a component starting with `.`, inside or outside the workspace (including hidden launch ancestors). `glob` enumeration bypasses this rule but retains other rule checks. |
 
 Both floor rules hand the call to the user instead of rejecting it outright,
-so a deliberate out-of-workspace read or a dot-file the model was pointed at
+so a deliberate read outside the workspace boundary or a dot-file the model was pointed at
 can be granted. A configured rule list may still set either rule to
 `auto_denied` for a hard rejection.
 
@@ -840,10 +863,10 @@ floor — it only applies when a `[tools.<name>]` rule list configures it.
 
 This floor is built in, not parsed from any embedded TOML file, so it can
 never be broken by a missing or corrupted config file. `search` with no
-`path` given (cwd, never leaves the workspace by construction) skips the
+`path` given (cwd, the sandbox root) skips the
 sandbox check entirely and is auto-approved; when a `path` is given, it goes
 through the same `dot_path`/`outside_workspace` evaluation as `read`,
-`write`, and `edit`. `glob` uses the same workspace boundary and named-rule
+`write`, and `edit`. `glob` uses the same sandbox boundary and named-rule
 checks but allows dot-prefixed paths because it only enumerates paths.
 
 **Per-tool `[tools.<name>]` config.** A profile's `config.toml` may configure
@@ -882,10 +905,10 @@ Each `rules` entry is one of:
 generic message for a custom glob rule) when omitted.
 
 **The `cross_filesystem` rule.** Matches when the candidate path lives on a
-different filesystem (device) than the canonical workspace root — catching
+different filesystem (device) than the sandbox root — catching
 reads of files on mounted shares/volumes that `outside_workspace` cannot
-see, because the path may still be lexically inside the workspace (e.g. a
-mount point under the workspace root). Semantics:
+see, because the path may still be lexically inside the sandbox (e.g. a
+mount point under the sandbox root). Semantics:
 
 - One candidate path is compared per call: the `path` argument for
   `read`/`write`/`edit`/`search`, and for `glob` the pattern's root
@@ -901,7 +924,7 @@ mount point under the workspace root). Semantics:
 - When the candidate path does not exist yet, the deepest existing ancestor
   is used as the device anchor.
 - The rule fires only on a positively established device difference: if
-  neither the target nor any ancestor yields metadata, or the workspace
+  neither the target nor any ancestor yields metadata, or the sandbox
   root's device cannot be read, the rule does **not** match —
   `outside_workspace` and `dot_path` remain the boundary guards.
 - It is **opt-in only** and not part of the default floor; add it to a

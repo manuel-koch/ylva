@@ -45,23 +45,23 @@ pub use rules::{
     ApprovalCheck, ApprovalVerdictConfig, NamedSandboxRule, SandboxRule, SandboxRuleConfig,
 };
 
-/// Shared workspace sandbox. Holds the workspace root used to evaluate
-/// path-based rules.
+/// Shared sandbox. Holds the launch-directory anchor used to resolve relative
+/// paths and discover the workspace boundary.
 pub struct Sandbox {
-    /// Absolute path of the workspace root (cwd at startup).
-    pub workspace_root: PathBuf,
+    /// Absolute path of the sandbox root (cwd at startup).
+    pub sandbox_root: PathBuf,
 }
 
 impl Sandbox {
     /// Create a new sandbox rooted at the current working directory.
     ///
-    /// The workspace root is canonicalized (symlinks resolved) so that
+    /// The sandbox root is canonicalized (symlinks resolved) so that
     /// `check_path` comparisons are consistent on platforms where temp
     /// directories live behind symlinks (e.g. macOS `/private/var/…`).
     pub fn new() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Sandbox {
-            workspace_root: std::fs::canonicalize(&cwd).unwrap_or(cwd),
+            sandbox_root: std::fs::canonicalize(&cwd).unwrap_or(cwd),
         }
     }
 
@@ -72,7 +72,7 @@ impl Sandbox {
     /// directory does not yet exist).
     pub fn with_root(root: PathBuf) -> Self {
         Sandbox {
-            workspace_root: std::fs::canonicalize(&root).unwrap_or(root),
+            sandbox_root: std::fs::canonicalize(&root).unwrap_or(root),
         }
     }
 }
@@ -86,10 +86,10 @@ impl Default for Sandbox {
 /// Per-tool sandbox context. Carries an `Arc<RwLock<Sandbox>>` so it always
 /// sees the latest sandbox state, plus a tool-specific ordered rule list.
 ///
-/// Evaluation: normalize path (workspace_root.join(path), collapse ".."
+/// Evaluation: normalize path (sandbox_root.join(path), collapse ".."
 /// without hitting the filesystem) → walk rules in order → last match wins.
-/// Path does not need to exist on disk; normalization alone determines
-/// workspace membership.
+/// Path does not need to exist on disk; existing ancestors are canonicalized
+/// before evaluating the workspace and hidden-path rules.
 ///
 /// Returns `None` when no rule fires (sandbox abstains); the calling tool
 /// applies its own default.

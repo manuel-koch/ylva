@@ -110,7 +110,7 @@ reported as broken merely because they are illustrative or unimplemented.
 
 ### D02 - Discovered workspace root and launch-directory sandbox are conflated
 
-- [ ] Distinguish discovered workspace and execution/sandbox roots.
+- [x] Distinguish discovered workspace and execution/sandbox roots.
 
 **Priority: Medium. Category: terminology and behavioral contradiction.**
 
@@ -130,6 +130,65 @@ reported as broken merely because they are illustrative or unimplemented.
   execution/sandbox anchor explicitly. Include a nested-directory example and link
   to [project-key derivation](../persistence.md#project_key-derivation).
   Do not change runtime anchoring as an incidental documentation fix.
+- Applied: defined the sandbox root separately in `CONTEXT.md`; corrected
+  configuration, tool, trusted-source-path, and persistence wording; added a
+  nested-launch example linked to project-key derivation. Runtime anchoring is
+  unchanged. Verified against startup/sandbox code, Markdown lint, and local links.
+
+**Follow-up: workspace-based `outside_workspace` evaluation (requested).**
+
+- [x] Add regression coverage for nested launches, discovered and missing workspace
+  markers, configured/default rules, snapshot paths, and symlink escapes.
+- [x] Change only the `outside_workspace` comparison to use the nearest discovered
+  workspace, falling back to the launch directory when no marker is found.
+  Preserve relative-path resolution, `dot_path`, and `cross_filesystem` anchoring.
+- [x] Update `CONTEXT.md`, `docs/configuration.md`, `docs/features.md`, and
+  `docs/implementation-notes.md` to describe the changed rule boundary.
+- [x] Run `make format lint` and `make test-coverage`.
+
+Applied: only `matches_outside_workspace` changes runtime behavior. The new
+regression cases failed before the fix and pass afterward; the full coverage
+gate passes with 88.80% aggregate line coverage. At that stage, `dot_path` did not
+match paths outside the launch-directory sandbox root, even if they contained a
+dot-prefixed component. The separately requested follow-up below supersedes that
+behavior.
+
+**Follow-up: location-independent `dot_path` (requested).**
+
+- [x] Cover dot-prefixed components inside and outside the workspace, hidden
+  launch ancestors, snapshot paths, and the existing enumeration exception.
+- [x] Check all components of the resolved absolute path without stripping the
+  sandbox root. Preserve rule ordering and `outside_workspace` behavior.
+- [x] Update affected test fixtures to use non-hidden temporary directories when
+  the test requires ordinary visible paths.
+- [x] Update `CONTEXT.md`, `docs/configuration.md`, `docs/features.md`,
+  `docs/implementation-notes.md`, and `docs/known-test-issues.md`.
+- [x] Run `make format lint` and `make test-coverage`.
+
+Applied: `dot_path` now checks every component of the resolved absolute path,
+including hidden ancestors and paths outside the workspace. The enumeration
+exception and configured-rule precedence are unchanged. Regression tests failed
+before the change and pass afterward. Visible-path fixtures use non-hidden
+temporary directories so the default `.tmp` prefix does not change their intent.
+
+**Follow-up: consistent sandbox-root naming (requested).**
+
+- [x] Rename the stored launch-directory field and its dependent parameters,
+  diagnostics, comments, and callers to `sandbox_root`. Reserve `workspace_root`
+  for the discovered-or-defaulted workspace boundary.
+- [x] Preserve the workspace rule, universal dot-path rule, relative-path
+  resolution, and sandbox-relative filesystem-device checks.
+- [x] Update `docs/implementation-notes.md` to describe the names directly,
+  without a historical-name qualification.
+- [x] Verify constructor, shared-root update, rule, and integration coverage
+  with `make format lint` and `make test-coverage`.
+
+Applied: `Sandbox::sandbox_root` and dependent path-evaluator names now identify
+the launch-directory anchor; `workspace_root` names the effective workspace
+boundary. Without a marker, both roots have the same path. Updated callers,
+filesystem-device diagnostics, and implementation notes. Both follow-ups pass
+`make format lint` and the full `make test-coverage` gate with 88.80% aggregate
+line coverage.
 
 ### D03 - Inline default-agent overrides are described as whole replacements
 
@@ -609,7 +668,8 @@ Keep the original review summary as the audit baseline.
 
 - [ ] Reconcile current behavioral contracts first: D01-D07 and D11.
   Update `docs/features.md`, `docs/configuration.md`, `docs/cli-options.md`,
-  `docs/development-workflow.md`, and `CONTEXT.md` in the same documentation change.
+  `docs/development-workflow.md`, `docs/persistence.md`, and `CONTEXT.md` in the same
+  documentation change.
   Verify default-agent inheritance and nested-launch-directory examples against
   the existing implementation before finalizing wording.
 - [ ] Resolve M01-M02 against authoritative current references.

@@ -54,7 +54,7 @@ const DOT_PATH_REASON: &str =
 /// rule denies a path.
 pub(super) const CROSS_FILESYSTEM_REASON: &str =
     "Access denied by security policy: path resides on a \
-                                       different filesystem (device) than the workspace root";
+                                       different filesystem (device) than the sandbox root";
 
 /// Default reason shown when the built-in (or a configured, reason-less)
 /// `backgrounded` rule denies a `bash` command.
@@ -116,11 +116,11 @@ const CONFIGURED_COMMAND_GLOB_REASON: &str = "Access denied by security policy: 
 pub enum NamedSandboxRule {
     /// Matches any path that normalizes outside the workspace root.
     OutsideWorkspace,
-    /// Matches any content-tool path whose relative-to-root form has a
+    /// Matches any content-tool path whose resolved absolute form has a
     /// component starting with `.` (unless `allow_dot_paths` bypasses it).
     DotPath,
     /// Matches any path whose filesystem device ID (unix `st_dev`) differs
-    /// from the canonical workspace root's, using the deepest existing
+    /// from the canonical sandbox root's, using the deepest existing
     /// ancestor as the anchor when the target itself does not exist.
     /// Fires only on a positively established device difference: unknown
     /// metadata on either side (or any non-unix target) never matches.
@@ -428,7 +428,7 @@ impl SandboxRuleConfig {
 
 /// An entry in [`super::SandboxContext`]'s resolved per-tool rule list: either a
 /// named structural check (re-evaluated dynamically against the current
-/// `workspace_root`/path) or a fixed glob pattern. Built from
+/// sandbox root/path) or a fixed glob pattern. Built from
 /// [`SandboxRuleConfig`] by [`super::SandboxContext::with_configured_rules`]; kept
 /// distinct from the public [`SandboxRule`] type (which stays glob-only) so
 /// that `SandboxRule`'s existing field shape — relied on by pre-existing

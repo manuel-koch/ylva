@@ -79,10 +79,10 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
     let a = dir.path().join("a.txt").to_string_lossy().to_string();
     let b = dir.path().join("b.txt").to_string_lossy().to_string();
     // Phase 6.0: writes always require user approval (UserApprovalRequired), so
-    // both calls will produce ToolPending.  Use tmpdir as workspace root so
-    // the sandbox abstains for these paths.
+    // both calls will produce ToolPending. The temporary directory is the
+    // sandbox root.
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
-        workspace_root: dir.path().to_path_buf(),
+        sandbox_root: dir.path().to_path_buf(),
     }));
     let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);

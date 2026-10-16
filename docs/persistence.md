@@ -50,7 +50,7 @@ state. An unset or empty `YLVA_HOME` falls back to
 `project_key` is the SHA-256 hex digest of the **canonicalized** launch
 directory (symlinks resolved, `..` collapsed, using the same
 `SandboxContext::canonicalize_best_effort` helper the sandbox uses for its
-workspace root). Two paths that resolve to one directory — a symlink and its
+sandbox root). Two paths that resolve to one directory — a symlink and its
 target, or macOS's `/var` and `/private/var` — therefore share one key, while
 two genuinely different directories never collide.
 

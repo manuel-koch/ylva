@@ -93,6 +93,17 @@ let _lock = crate::test_support::SUBSCRIBER_LOCK
 let cwd = std::env::current_dir().expect("cwd");
 ```
 
+## Hidden temporary-directory ancestors affect path approval
+
+`dot_path` checks every component of the resolved absolute path, including
+ancestors above the launch directory. The default `tempfile::tempdir()` prefix
+is `.tmp`, so otherwise ordinary files below that directory match the rule.
+For tests that require visible paths, use a non-hidden temporary-directory
+prefix, such as `tempfile::Builder::new().prefix("ylva-").tempdir()`. The sandbox
+suites share `make_visible_temporary_directory` for this purpose. Tests of hidden
+files should create explicit dot-prefixed components rather than accidentally
+matching a hidden fixture ancestor.
+
 ## Paused Tokio sleep rounds fractional deadlines
 
 Tokio's millisecond timer granularity also applies with a paused clock. A

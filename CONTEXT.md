@@ -7,8 +7,16 @@ delegated work. This glossary defines the canonical terms for that domain.
 
 **Workspace root**:
 The top-level directory that defines the active workspace for a Ylva run.
-Workspace-local configuration and filesystem access are scoped to it.
+It is identified by the nearest workspace marker, or defaults to the launch
+directory when no marker exists. Workspace-local configuration is scoped to
+the marked workspace when present.
 _Avoid_: project root, repository root
+
+**Sandbox root**:
+The canonicalized launch directory anchoring relative tool paths and
+filesystem-device comparisons. It may be below the workspace root or exist
+at the same path; without a workspace marker, both roots are the launch directory.
+Hidden-path checks are independent of either boundary.
 
 **Ylva home**:
 The per-user Ylva home that contains user-level configuration and persisted
