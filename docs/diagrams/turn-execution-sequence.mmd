@@ -1,0 +1,84 @@
+---
+title: Ylva - a conversation turn and tool-loop continuation
+---
+
+sequenceDiagram
+    autonumber
+    actor User
+    participant Host as CLI / TUI driver
+    participant Run as Outer loop / RunState
+    participant Context as Context + Store
+    participant Request as Request / stream task
+    participant Engine as Engine / Provider
+    participant Tool as Tool execution task
+
+    %% Sources: agent/runtime/{commands,events}.rs, agent/request.rs,
+    %% agent/tool_queue.rs, agent/tool_execution.rs, cli_driver.rs, tui_driver/effects.rs.
+    %% Ordinary tools only; spawn_subagent has a separate lifecycle diagram.
+
+    User->>Host: Submit prompt
+    Host->>Run: AgentCommand::Prompt
+    alt Root idle
+        Run->>Context: Commit explicit user message
+    else Root busy
+        Run->>Run: Queue steer without cancelling current request
+        Run-->>Host: SteerQueued
+        Note over Run,Context: Inject queued steers after a tool batch settles<br/>or a tool-free response completes.
+    end
+
+    loop Initial request and permitted continuations
+        Run->>Run: Startup / compaction / safe-ceiling preflight
+        Run->>Context: Build immutable model view and persist projection
+        Run->>Request: Start request with snapshot, schemas, generation
+        Request->>Engine: Chat with cancellation and estimate callback
+        Engine-->>Request: Stream events
+        Request-->>Host: StreamStarted, text / thinking, context estimate
+        Note over Request,Run: Stream task assembles tool-call fragments.<br/>Only the outer loop mutates Context.<br/>Stale-generation events are discarded.
+
+        alt Response requests tools
+            Request-->>Run: AgentEvent::ToolCall (assembled batch)
+            Run->>Context: Commit assistant tool calls
+            Run->>Run: Batch-position and result-budget admission
+            loop Serial advancement of admitted calls
+                Run->>Run: Validate arguments and evaluate tool approval policy
+                alt Invalid, denied, or insufficient allowance
+                    Run->>Context: Commit one error / not-executed outcome
+                    Run-->>Host: ToolAutoDenied
+                else Interactive approval required
+                    Run-->>Host: ToolPending
+                    Host-->>User: Approval controls
+                    User->>Host: Approve or deny
+                    Host->>Run: ApproveTool / DenyTool
+                    alt Approved
+                        Run->>Tool: Execute with cancellation and result allowance
+                        Tool-->>Run: ToolDone / ToolError
+                        Run->>Context: Commit canonical outcome and bound model projection
+                    else Denied
+                        Run->>Context: Commit tool error and optional denial reason
+                    end
+                else Auto-approved
+                    Run->>Tool: Execute with cancellation and result allowance
+                    Tool-->>Run: ToolDone / ToolError
+                    Run->>Context: Commit canonical outcome and bound model projection
+                end
+            end
+            Run->>Context: Inject queued steers at settled batch boundary
+            Run->>Run: Check iteration limit and sweep compaction before continuation
+        else Tool-free response completes
+            Request-->>Run: AgentEvent::StreamDone
+            Run->>Context: Commit complete assistant message
+            Run-->>Host: UiUpdate::StreamDone (after commit)
+            alt Queued steer or deferred final subagent notice
+                Run->>Context: Inject queued steers, if any
+                Run->>Run: Continue with applicable iteration guard
+            else No continuation
+                Run->>Run: Settle root turn and sweep compaction
+            end
+        else Request fails or is cancelled
+            Request-->>Run: StreamError / StreamCancelled
+            Run-->>Host: Error / cancellation updates
+            Note over Run,Context: Stop cancels work and queued steers. Interrupted text<br/>is retained when committed. Failed preflight never dispatches.
+        end
+    end
+
+    Note over Host,Tool: Clarify uses a separate question/answer pause, not ordinary approval.<br/>A continuation is a new model request, never a replay of executed tools.

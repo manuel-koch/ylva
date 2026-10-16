@@ -29,11 +29,11 @@ conversation. The original draft returns after all approvals are resolved.
 | `shift-enter` / `alt-enter` | Input focused | Insert newline |
 | `home` / `fn-left` | Input focused | Move to start of line; if already at column 0, move to end of previous line |
 | `end` / `fn-right` | Input focused | Move to end of line; if already at line end, move to start of next line |
-| `esc` (×1) | Streaming / ToolPending, input empty | Show `"Press again to cancel"` hint |
-| `esc` (×2, same key, ≤ 2 s) | Streaming / ToolPending, input empty | Interrupt conversation; TUI stays open |
-| `ctrl-c` (×1) | Streaming / ToolPending, input empty | Show `"Press again to cancel & quit"` hint |
-| `ctrl-c` (×2, same key, ≤ 2 s) | Streaming / ToolPending, input empty | Interrupt conversation, then quit TUI |
-| `ctrl-c` or `esc` | Streaming / ToolPending, input non-empty | Clear input field and exit history browsing (no interrupt) |
+| `esc` (×1) | Pending / Streaming, normal root input empty | Show `"Press again to cancel"` hint |
+| `esc` (×2, same key, ≤ 2 s) | Pending / Streaming, normal root input empty | Interrupt conversation; TUI stays open |
+| `ctrl-c` (×1) | Pending / Streaming, normal root input empty | Show `"Press again to cancel & quit"` hint |
+| `ctrl-c` (×2, same key, ≤ 2 s) | Pending / Streaming, normal root input empty | Interrupt conversation, then quit TUI |
+| `ctrl-c` or `esc` | Pending / Streaming, normal root input non-empty | Clear input field and exit history browsing (no interrupt) |
 | `ctrl-c` (×1) | Idle, input empty | Show `"Press again to quit"` hint |
 | `ctrl-c` (×2, same key, ≤ 2 s) | Idle, input empty | Quit TUI |
 | `ctrl-c` (×1) | Idle, input non-empty | Show `"Press again to quit"` hint (draft is *not* cleared) |
@@ -44,10 +44,9 @@ conversation. The original draft returns after all approvals are resolved.
 | `ctrl-c` (×2, same key, ≤ 2 s) | Help popup open | Quit when idle; interrupt and quit while busy |
 | Left-click inside popup | Help popup open | No effect (stays open) |
 | Left-click outside popup | Help popup open | Close popup |
-| `enter` | Approval sub-mode | Approve tool |
-| `esc` | Approval sub-mode | Deny tool |
-| `ctrl-c` (×1) | Approval sub-mode | Show cancel hint |
-| `ctrl-c` (×2 ≤ 2 s) | Approval sub-mode | Interrupt conversation |
+| `enter` | Approval sub-mode, input empty | Approve tool |
+| `enter` | Approval sub-mode, input non-empty | Deny tool with the input text as the reason |
+| `esc` or `ctrl-c` | Approval sub-mode | Deny tool immediately without a reason, even with non-empty input; no confirmation, conversation interrupt, or quit |
 | click choice | Clarify sub-mode with choices | Copy the clicked choice into the input field |
 | `enter` | Clarify sub-mode | Send the current input as the clarify answer |
 | `ctrl-c` | Clarify sub-mode | Abort the clarify prompt; sends a tool error to the model |

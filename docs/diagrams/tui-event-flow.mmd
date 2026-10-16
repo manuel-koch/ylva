@@ -1,0 +1,68 @@
+---
+title: Ylva - terminal events, pure reduction, effects, and rendering
+config:
+  layout: elk
+---
+
+flowchart LR
+    %% Sources: events.rs, tui_driver.rs, tui_driver/{input,effects,updates,models,sessions}.rs,
+    %% presenter.rs, presenter/{keyboard,mouse,domain}.rs, render.rs, tui_widgets.rs.
+
+    Terminal["Terminal input / mouse / paste / resize<br/>External SIGINT / SIGTERM relay"]
+    Bridge["Crossterm bridge / AppAction"]
+    Agent["AgentLoop<br/>AgentCommand in / UiUpdate out"]
+    Tasks["Catalog, title, session tasks<br/>Identity-scoped results"]
+    Timer["Frame ticks / confirm expiry / bubble-click expiry"]
+
+    subgraph Driver["tui_driver: async orchestration and I/O"]
+        Select["Select loop"]
+        Map["Map actions / UI updates to TuiEvent<br/>Track pending tool/clarify run IDs"]
+        Snapshot["TextareaContext<br/>Read-only text / cursor facts"]
+        Execute["Execute ordered Effect values"]
+        RuntimeSync["Apply current async results<br/>Picker / replay / engine / title synchronization"]
+        Textarea["Textarea and input snapshots"]
+        IO["Clipboard / terminal / task control"]
+    end
+
+    subgraph Reducer["Pure presenter and reducer-owned state"]
+        Update["presenter::update"]
+        Keyboard["Keyboard routing<br/>Focus first; clarify / picker / navigation priority"]
+        Mouse["Mouse routing<br/>Overlays, layout hit-tests, selection, drill-in"]
+        Domain["Domain routing<br/>Root stream / tool state<br/>Subagent bookkeeping keyed by run_id"]
+        State["AppState<br/>TuiMode, Focus, ConversationView, SlashOverlay<br/>Transcripts, queues, usage, layout, render cache"]
+        Effects["Vec of Effect<br/>No channel sends or terminal I/O in presenter"]
+    end
+
+    subgraph View["Rendering"]
+        Render["render::render<br/>Borrow active transcript; project for draw"]
+        Widgets["tui_widgets<br/>Layout cache + visible-row painting<br/>Bubbles / footer / overlays / help"]
+        Frame["Terminal frame"]
+    end
+
+    Terminal --> Bridge --> Select
+    Agent -->|"UiUpdate"| Select
+    Tasks --> Select
+    Timer --> Select
+    Select --> Map --> Update
+    Textarea --> Snapshot --> Update
+    Update --> Keyboard
+    Update --> Mouse
+    Update --> Domain
+    Keyboard -->|"mutate"| State
+    Mouse -->|"mutate"| State
+    Domain -->|"mutate"| State
+    Keyboard --> Effects
+    Mouse --> Effects
+    Domain --> Effects
+    Effects --> Execute
+    Execute -->|"AgentCommand; wrap child replies in ForChild"| Agent
+    Execute --> Textarea
+    Execute --> IO
+    Execute -->|"local bubble / approval bookkeeping"| State
+    Select -->|"non-reducer async results"| RuntimeSync --> State
+    State --> Render
+    Textarea --> Render
+    Render --> Widgets --> Frame
+    Widgets -->|"draw geometry / moved selection buffers"| Render
+    Render -->|"synchronize layout and selection"| State
+    Frame -.->|"next input uses current hit-test geometry"| Map

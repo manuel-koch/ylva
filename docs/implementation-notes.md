@@ -758,6 +758,44 @@ behavior.
 
 ## TUI module layout
 
+### Diagram scope
+
+- [Interface and ownership diagram](diagrams/class-diagram.mmd): selected application,
+  agent, engine/provider, configuration, and driver relationships. Boxes marked
+  `module` are Rust modules, not structs. Members are selective and signatures
+  omit async/channel wrappers. `RunState`, not the retained `AgentLoop` handle,
+  owns the running context; shared handles use aggregation.
+- [Reducer state diagram](diagrams/tui-reducer-state-diagram.mmd): separate projections
+  of `TuiMode` and `Focus`, not an exhaustive product of valid combinations.
+  `ConversationView`, `SlashOverlay`, compaction activity, and per-subagent
+  state are independent dimensions. An idle root mode does not imply that
+  all subagents have finished. Edges describe the current presenter, including
+  immediate Ctrl+C denial in approval focus.
+- [Turn-execution sequence](diagrams/turn-execution-sequence.mmd): model requests,
+  serial tool advancement, approval/error paths, and safe steer injection.
+- [Subagent lifecycle](diagrams/subagent-lifecycle-sequence.mmd): admission versus
+  completion, FIFO scheduling, routed interaction, cancellation, and the final
+  aggregate continuation.
+- [Compaction data flow](diagrams/compaction-data-flow.mmd): immutable transcript
+  versus model-only summaries, bounded projections, preflight, recovery, and replay.
+- [Session lifecycle](diagrams/session-lifecycle-state-diagram.mmd): root startup,
+  clear, and TUI picker preparation/publication.
+- [Session storage](diagrams/session-storage-state-diagram.mmd): the separate
+  offline raw/archive representation lifecycle and explicit deletion.
+- [Configuration and policy flow](diagrams/configuration-policy-flow.mmd): distinct
+  resource precedence rules, per-agent engine/tool/skill resolution, prompt
+  composition, and approval enforcement.
+- [TUI event flow](diagrams/tui-event-flow.mmd): driver orchestration, pure
+  reduction, ordered effects, asynchronous result handling, and render feedback.
+
+All Mermaid sources live in `docs/diagrams/` and are authoritative; these are
+selective implementation guides, not generated inventories or exhaustive state
+machines. See the [diagram README](diagrams/README.md#generate-svg) for Docker
+commands to render one or all sources. Existing local SVG exports are not
+regenerated with this source-only update.
+
+### Module responsibilities
+
 The TUI renders the same headless `AgentLoop`; it does not own agent state.
 
 - `src/tui_reducer_state.rs` retains `AppState`, construction, render revisions

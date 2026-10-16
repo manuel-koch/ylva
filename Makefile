@@ -23,7 +23,8 @@ endif
 # and `make test-coverage-missing` without project-specific file exclusions.
 COVERAGE_THRESHOLD := 80
 
-.PHONY: lint format format-rust format-markdown \
+.PHONY: render-all-diagrams \
+	lint format format-rust format-markdown \
 	create-logs-dir \
 	graphify-update graphify-watch \
     clean \
@@ -32,6 +33,16 @@ COVERAGE_THRESHOLD := 80
 	test test-e2e-persistence test-coverage test-coverage-missing \
 	install tag-version \
 	outdated-dependencies upgrade-dependencies
+
+docs/diagrams/%.svg: docs/diagrams/%.mmd
+	docker run --rm --network none \
+	    --user "$$(id -u):$$(id -g)" \
+	    --env PUPPETEER_CACHE_DIR=/home/mermaidcli/.cache/puppeteer \
+	    --volume "$(REPO_ROOT)/docs/diagrams:/data" \
+	    minlag/mermaid-cli \
+	    -i "$(notdir $<)" -o "$(notdir $@)"
+
+render-all-diagrams: $(patsubst %.mmd,%.svg,$(wildcard docs/diagrams/*.mmd))
 
 # Run cargo check/clippy and report all warnings
 lint:

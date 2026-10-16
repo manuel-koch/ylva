@@ -225,10 +225,10 @@ Use markdown table to structure your findings.
 
 ---
 
-Run each the following task(s) in subagent(s) and let them report their findings back:
 
 Analyze the given tool functionality implemented in source code
 and list currently implemented features in a brief markdown descriptions.
+Use a subagent per tool and let subagent report findings back.
 
 - `read` tool
 - `write` tool
@@ -239,8 +239,8 @@ and list currently implemented features in a brief markdown descriptions.
 
 ONLY use `bash` tool to search for relevant files!
 
-Save the complete summary to `logs/summary.md`, don't edit an existing file nor use
-its current content. If file exists, override it.
+Save the complete summary to `.ylva/logs/summary.md`, don't edit an existing
+file nor use its current content. If file exists, override it.
 
 ---
 

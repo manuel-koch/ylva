@@ -1,0 +1,134 @@
+---
+title: Ylva TUI - execution mode and independent input focus
+config:
+  layout: elk
+  elk:
+    mergeEdges: false
+    nodePlacementStrategy: LINEAR_SEGMENTS
+---
+
+stateDiagram-v2
+    direction LR
+
+    %% Scope and companion diagrams: ../implementation-notes.md#diagram-scope.
+    %% Projections of AppState, not an exhaustive Cartesian-product machine.
+    %% Sources: tui_reducer_state/events.rs, presenter/{keyboard,domain,tool_bubbles}.rs,
+    %% tui_reducer_state/conversation/{navigation,tools}.rs, tui_driver/effects.rs.
+    %% SlashOverlay and ConversationView are separate state dimensions, omitted here.
+
+    state "AppState projections" as Reducer {
+        state "Execution / interaction mode (TuiMode)" as Mode {
+            [*] --> Idle
+
+            Idle --> Pending : SubmitPrompt (root, non-empty)
+            Idle --> Streaming : StreamStarted (including subagent continuation)
+            Pending --> Streaming : StreamStarted
+            Pending --> Idle : StreamDone / StreamCancelled / AgentIdle / root Error
+            Streaming --> Idle : StreamDone / StreamCancelled / AgentIdle / root Error
+            Streaming --> Streaming : Enter / queue steer (root, non-empty)
+
+            Idle --> ClarifyPending : ClarifyPending
+            Pending --> ClarifyPending : ClarifyPending
+            Streaming --> ClarifyPending : ClarifyPending
+            ClarifyPending --> Pending : Enter / AnswerClarify
+            ClarifyPending --> Pending : CtrlC or empty-input Esc / AbortClarify
+            ClarifyPending --> Pending : ToolDone
+            ClarifyPending --> Streaming : StreamStarted
+            ClarifyPending --> Idle : StreamCancelled / AgentIdle
+
+            Idle --> DoublePressAbort : CtrlC
+            Pending --> DoublePressAbort : CtrlC / Esc (empty input)
+            Streaming --> DoublePressAbort : CtrlC / Esc (empty input)
+            Aborting --> DoublePressAbort : CtrlC / Esc (empty input)
+            ClarifyPending --> DoublePressAbort : CtrlC while help has focus
+
+            DoublePressAbort --> Idle : ConfirmExpired (return_to Idle)
+            DoublePressAbort --> Pending : ConfirmExpired (return_to Pending)
+            DoublePressAbort --> Streaming : ConfirmExpired (return_to Streaming)
+            DoublePressAbort --> ClarifyPending : ConfirmExpired (return_to ClarifyPending)
+            DoublePressAbort --> Aborting : ConfirmExpired (return_to Aborting)
+            DoublePressAbort --> [*] : second CtrlC (return_to Idle) / Quit
+            DoublePressAbort --> Aborting : second CtrlC (non-Idle) / StopAgent, exit=true
+            DoublePressAbort --> Aborting : second Esc (non-Idle) / StopAgent, stay open
+            DoublePressAbort --> DoublePressAbort : other confirm key while non-Idle / re-arm
+            DoublePressAbort --> Idle : Esc (return_to Idle) / clear input
+
+            state SignalDecision <<choice>>
+            Idle --> SignalDecision : StopSignal
+            Pending --> SignalDecision : StopSignal
+            Streaming --> SignalDecision : StopSignal
+            ClarifyPending --> SignalDecision : StopSignal
+            DoublePressAbort --> SignalDecision : StopSignal
+            Aborting --> SignalDecision : StopSignal
+            SignalDecision --> [*] : agent_mode() == Idle / Quit
+            SignalDecision --> Aborting : otherwise / StopAgent, exit=true
+
+            Aborting --> Idle : StreamCancelled / AgentIdle / ToolKilled (exit=false)
+            Aborting --> [*] : StreamCancelled / AgentIdle / ToolKilled (exit=true) / Quit
+            Aborting --> Idle : StreamDone / root Error
+
+            note right of DoublePressAbort
+                Stores return_to, armed_by, and pressed_at.
+                Only the same key within the window confirms.
+                Domain events run against return_to.
+                A changed underlying mode replaces the confirm;
+                otherwise the confirm window remains armed.
+            end note
+
+            note right of Idle
+                Idle describes the root's local mode, not all work.
+                Running subagent/tool bubbles can still make
+                agent_mode() report ToolRunning.
+                Subagent tokens and lifecycle bookkeeping
+                do not change the root mode.
+            end note
+
+            note right of Streaming
+                Main-input busy CtrlC/Esc with a non-empty draft
+                clears it without interrupting.
+                Help, approvals, clarify, slash overlays, and
+                subagent navigation take routing priority.
+                Tool approval changes Focus, not TuiMode.
+            end note
+        }
+
+        --
+
+        state "Input routing target (Focus)" as InputFocus {
+            [*] --> MainInput
+            MainInput --> HelpPopup : F1
+            ToolApproval --> HelpPopup : F1
+            HelpPopup --> MainInput : F1 / Esc / outside click (no pending approval)
+            HelpPopup --> ToolApproval : F1 / Esc / outside click (pending approval)
+
+            MainInput --> ToolApproval : ToolPending (first outstanding approval)
+            HelpPopup --> ToolApproval : ToolPending (first outstanding approval)
+            ToolApproval --> MainInput : Enter (empty) / ApproveTool
+            ToolApproval --> MainInput : Enter (non-empty) / DenyTool with reason
+            ToolApproval --> MainInput : Esc / CtrlC / DenyTool
+            ToolApproval --> MainInput : matching ToolStart / ToolKilled / ToolDenied
+            MainInput --> ToolApproval : restore next queued approval
+            ToolApproval --> ToolApproval : further ToolPending / enqueue
+            HelpPopup --> MainInput : ClarifyPending / show question
+            HelpPopup --> MainInput : AgentIdle (Idle / Pending / Streaming)
+            ToolApproval --> MainInput : AgentIdle (Idle / Pending / Streaming)
+
+            note right of ToolApproval
+                Root/subagent approvals share a FIFO queue.
+                Resolving one may immediately focus the next.
+                Draft, overlay, and prior conversation view
+                are restored after the interactive pause.
+                CtrlC denies immediately here; no confirm.
+                While Aborting, new ToolPending is denied.
+                New approvals/clarifications enter through
+                Idle, Pending, or Streaming domain handlers.
+            end note
+
+            note right of HelpPopup
+                StopSignal bypasses focus and confirmation.
+                CtrlC uses generic confirmation while help is open.
+                ClarifyPending uses MainInput unless help is open;
+                its answer/abort restores the saved input.
+            end note
+        }
+    }

@@ -1,0 +1,74 @@
+---
+title: Ylva - transcript preservation, compaction, and bounded model views
+config:
+  layout: elk
+---
+
+flowchart TD
+    %% Sources: agent/context.rs, agent/context/{projection,recovery}.rs,
+    %% agent/compaction.rs, agent/compaction/recovery.rs, agent/request.rs,
+    %% agent/runtime/compaction_updates.rs, store/replay.rs.
+
+    subgraph Durable["Canonical conversation and durable state"]
+        Committed["Committed messages / tool outcomes"]
+        Transcript["Context transcript<br/>Original messages are never pruned"]
+        Store["Store events<br/>message, compaction, model_projection"]
+        Replay["Resume / clone replay<br/>Rebuild current system block and rebase persisted coordinates"]
+        Committed --> Transcript
+        Transcript -->|"append canonical events"| Store
+        Store --> Replay
+    end
+
+    subgraph Summary["Background compaction"]
+        Evaluate["Safe-boundary sweep<br/>Measure model view + active tool schemas"]
+        Eligible{"Useful completed prefix<br/>eligible for summary?"}
+        Trigger["Automatic soft-threshold trigger<br/>or root /compact"]
+        Snapshot["Immutable prefix snapshot<br/>Include prior summary / recovery handoff<br/>Retain latest explicit task and safe tail"]
+        SummaryRequest["Resolved summary engine + COMPACTION.md<br/>Tool-free request with its own deadline"]
+        Outcome["Outcome tagged by generation + request ID"]
+        Apply{"Current, successful result<br/>at safe application boundary?"}
+        SummaryState["Advance compaction boundary<br/>Store summary separately from transcript"]
+        NoApply["No stale or failed summary applied<br/>Clear activity; manual failure is reported"]
+        Evaluate --> Trigger --> Eligible
+        Eligible -->|"yes"| Snapshot --> SummaryRequest --> Outcome --> Apply
+        Eligible -->|"no"| NoApply
+        Apply -->|"yes"| SummaryState
+        Apply -->|"stale / failed / timed out"| NoApply
+        SummaryState -->|"append compaction event"| Store
+    end
+
+    subgraph Projection["Model-only projection"]
+        View["Context::model_messages()<br/>Leading systems + summary / recovery handoff<br/>+ latest task anchor + retained tail"]
+        Overrides["Transcript-indexed bounded result overrides<br/>Canonical outcomes stay intact"]
+        Preflight{"Within advisory safe request ceiling?"}
+        Wait{"Existing summary can still help<br/>within its original deadline?"}
+        Deferred["Defer continuation without replaying tools<br/>Outer loop keeps processing commands"]
+        Recovery["Measured lossy recovery<br/>Clip older outcomes; drop safe groups with handoff<br/>Clip retained outcomes; shorten summary / request"]
+        Fits{"Valid continuation fits?"}
+        PersistProjection["Persist model_projection before dispatch"]
+        Provider["Engine / Provider request<br/>Model view + tool schemas"]
+        Error["Explicit failure before provider dispatch"]
+        View --> Preflight
+        Overrides --> View
+        Preflight -->|"yes"| PersistProjection --> Provider
+        Preflight -->|"no"| Wait
+        Wait -->|"yes"| Deferred
+        Deferred -->|"outcome or deadline; re-evaluate"| Evaluate
+        Wait -->|"no"| Recovery --> Fits
+        Fits -->|"yes; update bounded projection"| View
+        Fits -->|"no"| Error
+        Recovery -->|"model-only overrides / handoff"| Overrides
+        PersistProjection --> Store
+    end
+
+    Transcript -->|"completed prefixes only"| Snapshot
+    Transcript --> View
+    Transcript --> Evaluate
+    SummaryState --> View
+    Replay --> Transcript
+    Replay -->|"restore latest valid summary and projection"| View
+    NoApply -->|"automatic preflight still enforces ceiling"| Preflight
+    Provider -->|"recognized context rejection before output: one tighter retry"| Recovery
+
+    Boundary["Invariant: a boundary never splits a tool call from its matching result.<br/>Compaction changes what the model sees, not what the user can browse.<br/>Stop / clear cancels summaries; stale outcomes cannot change the live view."]
+    SummaryState -.-> Boundary

@@ -922,17 +922,21 @@ for the full mechanics.
   staged steers as cancelled (not sent), retaining the text in input history
   so it can be recovered with `↑`.
 - **Tool approval sub-mode:** when a tool awaits approval the footer switches
-  to `[ ✓ Approve (Enter) ]  [ ✗ Deny (Esc) ]` (mouse-clickable). `Enter`
-  approves, `Esc` denies immediately; `Ctrl+C` still uses the double-press
-  confirm. The input field is available to type a reason for denial. The
-  user's draft is snapshotted when approval sub-mode starts and restored
-  automatically after the tool is approved or denied.
-- **Double-press `Ctrl+C`/`Esc` to quit/cancel:** while streaming/tool-pending
-  the first press shows a per-key hint (`Esc`: cancel only; `Ctrl+C`: cancel
-  & quit) and a second press within 2 seconds confirms that key's action;
-  while idle, `Ctrl+C` double-press quits and `Esc` immediately clears the
-  input. After an interrupt, the TUI waits for the agent's terminal idle
-  update before applying the selected quit-or-stay-open behavior. An external
+  to `[ ✓ Approve (Enter) ]  [ ✗ Deny (Esc) ]` (mouse-clickable). With approval
+  focus, `Enter` approves when the input is empty; typing a reason and pressing
+  `Enter` denies with that reason. `Esc` or `Ctrl+C` denies immediately without
+  a reason, even when text is present; neither uses double-press confirmation
+  or interrupts the whole conversation. The user's draft is snapshotted when
+  approval sub-mode starts and restored after all outstanding approvals resolve.
+- **Double-press `Ctrl+C`/`Esc` to quit/cancel:** while pending or streaming,
+  with normal root input focused and empty, the first press shows a per-key
+  hint (`Esc`: cancel only; `Ctrl+C`: cancel & quit) and a second press within
+  2 seconds confirms that key's action. A non-empty busy draft is cleared
+  instead. Approval, clarify, and overlay controls take precedence; see
+  [keybindings](keybindings.md). While idle, `Ctrl+C` double-press quits and
+  `Esc` immediately clears the input. After an interrupt, the TUI waits for the
+  agent's terminal idle update before applying the selected quit-or-stay-open
+  behavior. An external
   SIGINT or SIGTERM skips the double-press: an idle TUI quits at once, and a
   running turn is stopped before the TUI quits with exit code `130`.
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding

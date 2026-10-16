@@ -1,0 +1,58 @@
+---
+title: Ylva - root session activation and switching
+config:
+  layout: elk
+---
+
+stateDiagram-v2
+    direction LR
+
+    %% Sources: main.rs (open_store), store.rs,
+    %% tui_driver.rs, tui_driver/sessions.rs, agent/runtime/commands.rs.
+    %% Conceptual lifecycle, not an enum or an exhaustive error-state machine.
+
+    state "Root session activation (CLI startup / TUI)" as Runtime {
+        [*] --> Opening
+        Opening --> Active : Fresh / resume / clone succeeds
+        Opening --> StartupError : Invalid selection, lock, or storage error
+        StartupError --> [*]
+
+        Active --> Clearing : /clear
+        Clearing --> Active : Cancel old work / replace context with new session ID
+        note right of Clearing
+            Old transcript is retained, not deleted.
+            Clear invalidates old events and cancels summaries/subagents.
+            If replacement storage fails, current implementation logs
+            a warning and continues without a persisted replacement.
+        end note
+
+        Active --> Loading : /session (TUI only)
+        Loading --> Ready : Current root / picker result accepted
+        Loading --> Active : Cancel
+        Loading --> Ready : Discovery failure shown in picker
+        Ready --> Preparing : Confirm Resume / Clone
+        Ready --> Active : Cancel
+        Preparing --> Ready : Barrier refused or target preparation fails
+        Preparing --> Active : Cancel / release old root barrier
+        Preparing --> Publishing : Target prepared / barrier rechecked / identities current
+        Publishing --> Active : Join old loop / replace channels, state, store / start target
+        Publishing --> [*] : Shutdown failure / report error
+        Active --> [*] : Quit / process exit
+
+        note right of Preparing
+            PrepareSessionSwitch freezes mutations only when quiescent:
+            no root, subagent, pending tool/steer, or compaction work.
+            Open target under lock; resolve stored root agent type;
+            rebuild engines, transcript, child references, and input history.
+            Cancelled/stale results cannot publish.
+            A durable clone already created is kept and its ID reported.
+        end note
+
+        note right of Opening
+            Fresh creates a new root ID.
+            Resume appends to the selected root.
+            Clone creates a new ID with cloned_from.
+            Clone reads but never repairs or rewrites its source.
+            Referenced subagent transcripts remain shared.
+        end note
+    }

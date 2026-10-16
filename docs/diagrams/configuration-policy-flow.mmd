@@ -1,0 +1,77 @@
+---
+title: Ylva - configuration precedence, prompt assembly, and capability policy
+config:
+  layout: elk
+---
+
+flowchart TD
+    %% Sources: config/{layered,profile,agent_type_file,soul,instructions}.rs,
+    %% config.rs, agent_factory.rs, skills/policy.rs, sandbox.rs, agent/tool_queue.rs.
+    %% Different resources use different precedence rules; this is not one global merge.
+
+    subgraph Resolution["Resolve configuration resources"]
+        Roots["Discover workspace root from cwd<br/>Resolve Ylva home"]
+        Profile["Profile config.toml: first existing file wins<br/>Workspace > Ylva home > implicit built-in default<br/>Explicit missing / malformed profile is an error"]
+        Environment["Profile environment: merge home then workspace .env<br/>Exported process values win<br/>Used for interpolation / provider discovery"]
+        AgentFiles["Agent-type base files: whole-definition replacement<br/>Workspace > selected home profile > global home"]
+        Agents["Apply inline profile agent fields afterward<br/>Reject conflicting same-scope base definitions<br/>Keep built-in default when not replaced"]
+        Validate["Validate profile, engines, agent references,<br/>compaction settings, and skill selections"]
+        Roots --> Profile
+        Roots --> Environment
+        Environment -->|"interpolate selected file"| Profile
+        Roots --> AgentFiles --> Agents
+        Profile --> Agents --> Validate
+    end
+
+    subgraph Execution["Resolve each agent independently"]
+        Engine["Conversation engine<br/>Agent engine > profile default_engine<br/>Bind named provider connection and model"]
+        Compact["Summary engine / timeout<br/>Each agent override inherits independently from profile<br/>No explicit summary engine: follow conversation engine<br/>Explicit engine: independent configured copy"]
+        Tools["Role + allowed_tools<br/>Root can_spawn gates spawn_subagent<br/>Subagents cannot spawn; receive agent_finish"]
+        Rules["Per-tool sandbox rule list<br/>Agent entry > profile entry > built-in floor<br/>A configured list replaces, not merges, the lower list"]
+        Catalog["Immutable process skill discovery snapshot"]
+        Callable["Per-agent callable skills<br/>load_skill permission + allowed_skills<br/>+ loader sandbox verdict + host approval capability"]
+        Validate --> Engine
+        Validate --> Compact
+        Validate --> Tools
+        Validate --> Rules
+        Roots --> Catalog
+        Tools --> Callable
+        Rules --> Callable
+        Catalog --> Callable
+    end
+
+    subgraph Prompt["Assemble model instructions"]
+        Soul["Global SOUL: workspace > home > built-in<br/>Whole-file replacement"]
+        Trusted["Trusted instructions: concatenate eligible files<br/>Home, then workspace root through cwd<br/>CLAUDE.md before AGENTS.md in each directory"]
+        Persona["Agent persona extends global baseline"]
+        System["System instructions<br/>Global baseline + persona + callable skill advertisement<br/>+ code-owned tool protocol<br/>Subagent briefing / constraints when applicable"]
+        Roots --> Soul
+        Roots --> Trusted
+        Soul --> System
+        Trusted --> System
+        Agents --> Persona --> System
+        Callable -->|"names / descriptions only"| System
+    end
+
+    subgraph Enforcement["Enforce at tool use, not through prompt text"]
+        Call["Model requests a registered tool"]
+        Admission["Batch-position / result-budget gate<br/>Argument validation; tool-specific approval check"]
+        Verdict{"Effective verdict"}
+        Approved["Execute / deliver result"]
+        Denied["Explicit tool error / not-executed outcome"]
+        Approval["Host requests user approval when supported"]
+        Loaded["load_skill: complete instructions as tool result<br/>Never a system message or permission grant"]
+        Call --> Admission --> Verdict
+        Tools -->|"callable registry / schemas"| Call
+        Rules --> Admission
+        Callable -->|"loader membership and recorded source identity"| Admission
+        Verdict -->|"auto-approved"| Approved
+        Verdict -->|"auto-denied"| Denied
+        Verdict -->|"approval required"| Approval
+        Approval -->|"approve"| Approved
+        Approval -->|"deny"| Denied
+        Approved -->|"successful load_skill; entire envelope must fit"| Loaded
+    end
+
+    System -.->|"guides model; cannot override policy"| Call
+    Loaded -.->|"sidecar reads still need their own read policy"| Rules

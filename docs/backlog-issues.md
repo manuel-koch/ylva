@@ -1,11 +1,9 @@
 # Backlog of issues discovered while testing
 
-- [ ] Diagrams are likely out-of-date:
-  - [ ] docs/class-diagram.mmd
-  - [ ] docs/tui-reducer-state-diagram.mmd
-
-- [ ] Noticed that when many subagents have been spawned and the last subagent
-      finishes, TUI shows idle status and it seems to take several seconds
-      before TUI eventually shows streaming/thinking status afterwards.
-      We send the finished subagent trigger to LLM, why does agent go to idle
-      in the first place ( or is this just a TUI glitch ) ?
+- [x] Review and update Mermaid diagrams against the current implementation
+      (sources only; existing SVG exports were not regenerated):
+  - [x] docs/diagrams/class-diagram.mmd
+  - [x] docs/diagrams/tui-reducer-state-diagram.mmd
+- [x] Add turn, subagent, compaction, session, configuration/policy, and TUI
+      event-flow diagrams under docs/diagrams/; index their scope in
+      docs/implementation-notes.md.

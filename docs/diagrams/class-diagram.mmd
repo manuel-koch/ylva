@@ -1,0 +1,198 @@
+---
+title: Ylva - selected interfaces, runtime owners, and modules
+config:
+  layout: elk
+---
+
+classDiagram
+    direction LR
+
+    %% Scope and companion diagrams: ../implementation-notes.md#diagram-scope.
+    %% Selected members only; method signatures omit async wrappers and channel types.
+    %% Shared Arc references use aggregation, not exclusive composition.
+    %% Sources: app.rs, agent_factory.rs, agent.rs, agent/runtime.rs,
+    %% llm.rs, llm/engine/*.rs, config/*.rs, and the named TUI modules.
+
+    namespace Application {
+        class App {
+            <<trait>>
+            +run() Result~u8~
+        }
+        class TuiApp {
+            +run() Result~u8~
+        }
+        class ConsoleApp {
+            +run() Result~u8~
+        }
+    }
+
+    namespace Agent {
+        class AgentFactory {
+            +create(profile, agent_type, role) Result
+            +create_root_for_store(profile, agent_type, store) Result
+        }
+        class Role {
+            <<enum>>
+            Root
+            Child(ChildRoleConfig)
+        }
+        class ChildAgentManager {
+            -running: Vec~RunningChild~
+            -queue: VecDeque~SpawnRequest~
+            -max_concurrent_children: Option~usize~
+            -spawn_fn: SpawnFn
+        }
+        class AgentLoop {
+            +command_sender() Sender
+            +run() JoinHandle
+        }
+        class RunState {
+            <<private>>
+            -context: Context
+            -compaction: CompactionRuntime
+            -mode: AgentMode
+        }
+        class ToolRegistry {}
+        class Context {}
+        class CompactionRuntime {}
+        class Store {}
+        class SkillCatalog {}
+    }
+
+    namespace EngineExecution {
+        class EngineImpl {
+            -provider: Arc~dyn Provider~
+            -config: EngineConfig
+        }
+        class EngineRouter {
+            -active_engine: RwLock~String~
+        }
+        class Engine {
+            <<trait>>
+            +chat(messages, tools, cancel) Future
+            +config() EngineConfig
+            +configured_copy() Result
+            +select_model(selection) Result
+        }
+        class EngineRuntimeConfig {
+            +model: String
+            +context_length: usize
+            +reasoning_effort: Option~String~
+        }
+    }
+
+    namespace Backends {
+        class Provider {
+            <<trait>>
+            +chat(messages, tools, cancel) Future
+            +list_models() Future
+        }
+        class ModelInfo {
+            +id: String
+            +context_length: Option~usize~
+            +reasoning_efforts: Option
+            +input_modalities: Option
+        }
+        class OpenAiCompatibleProvider {}
+        class OllamaProvider {}
+        class OpenRouterProvider {}
+    }
+
+    namespace Config {
+        class EngineConfig {
+            +provider_connection: String
+            +model: String
+            +temperature: Option~f32~
+            +context_length: Option~usize~
+            +reasoning: Option~String~
+        }
+        class ProfileConfig {
+            +default_engine: String
+            +compaction: CompactionConfig
+            +utility_engine: Option~String~
+            +max_concurrent_subagents: Option~usize~
+        }
+        class AgentConfig {
+            +engine: Option~String~
+            +compaction: Option~AgentCompactionConfig~
+            +allowed_tools: Option~Vec~String~~
+            +allowed_skills: Option~Vec~String~~
+            +max_tool_iterations: Option~usize~
+            +persona: Option~String~
+            +can_spawn: bool
+        }
+        class ProviderConnectionConfig {}
+    }
+
+    namespace DriversAndTUI {
+        class AppState {
+            +mode: TuiMode
+            +focus: Focus
+            +active_view: ConversationView
+            +slash_overlay: SlashOverlay
+            +layout: AppLayout
+        }
+        class Presenter["presenter"] {
+            <<module>>
+            +update(state, event, textarea) Vec~Effect~
+        }
+        class RenderView["render"] {
+            <<module>>
+            +render(frame, state, ...)
+        }
+        class TuiDriver["tui_driver"] {
+            <<module>>
+            +run_tui(terminal, agent, ui_rx, ...)
+        }
+        class CliDriver["cli_driver"] {
+            <<module>>
+            +run_cli(agent, ui_rx, prompt, writer)
+        }
+    }
+
+    TuiApp ..|> App
+    ConsoleApp ..|> App
+    TuiApp o-- AgentFactory
+    ConsoleApp o-- AgentFactory
+    TuiApp ..> TuiDriver : runs
+    ConsoleApp ..> CliDriver : runs
+    TuiDriver ..> AgentLoop : commands / UI updates
+    CliDriver ..> AgentLoop : commands / UI updates
+    TuiDriver ..> AppState : owns reducer state
+    TuiDriver ..> Presenter : calls update()
+    TuiDriver ..> RenderView : calls render()
+    Presenter ..> AppState : mutates
+    RenderView ..> AppState : reads / writes layout
+    AgentFactory ..> AgentLoop : creates
+    AgentFactory ..> Role : reads
+    AgentFactory ..> ProfileConfig : resolves agent settings
+    AgentFactory o-- Engine : configured engines
+    AgentFactory o-- SkillCatalog : discovery snapshot
+    AgentFactory ..> ChildAgentManager : wires spawn closure
+    ChildAgentManager ..> AgentLoop : starts subagent via closure
+    AgentLoop ..> RunState : run() starts outer-loop task
+    AgentLoop o-- Engine
+    AgentLoop o-- ToolRegistry
+    RunState o-- Engine
+    RunState o-- ToolRegistry
+    RunState *-- Context : sole writer
+    RunState *-- CompactionRuntime
+    RunState *-- ChildAgentManager : optional root scheduler
+    Context o-- Store : optional persistence handle
+    CompactionRuntime o-- Engine : summary engine
+    EngineImpl ..|> Engine
+    EngineRouter ..|> Engine
+    EngineRouter o-- Engine : routes to active named engine
+    EngineImpl *-- EngineConfig
+    EngineImpl o-- Provider
+    EngineImpl o-- EngineRuntimeConfig : shared handle
+    OpenAiCompatibleProvider o-- EngineRuntimeConfig : same request settings
+    OpenAiCompatibleProvider ..|> Provider
+    OllamaProvider ..|> Provider
+    OpenRouterProvider ..|> Provider
+    OllamaProvider *-- OpenAiCompatibleProvider : shared transport implementation
+    OpenRouterProvider *-- OpenAiCompatibleProvider : shared transport implementation
+    Provider ..> ModelInfo : returns
+    ProfileConfig *-- AgentConfig
+    ProfileConfig *-- EngineConfig
+    ProfileConfig *-- ProviderConnectionConfig

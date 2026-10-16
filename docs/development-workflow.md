@@ -36,6 +36,7 @@ make install                         # cargo install --path . → ~/.cargo/bin/y
 make tag-version                     # tag HEAD with version from Cargo.toml
 make outdated-dependencies           # cargo update --dry-run — show available upgrades
 make upgrade-dependencies            # cargo update — apply dependency upgrades to Cargo.lock
+make render-all-diagrams             # Render missing or outdated diagram SVGs with Docker
 ```
 
 The `Makefile` at the workspace root is the source of truth for `make` targets.
@@ -44,6 +45,23 @@ or its command changes, update this section in the same commit (see
 [AGENTS](../AGENTS.md) → *Docs are part of the change set*).
 Other documents that reference `make` targets must delegate here rather than
 re-list targets, otherwise the lists drift the next time the `Makefile` changes.
+
+## Diagram rendering
+
+With Docker running, render a Mermaid source from the repository root:
+
+```shell
+make docs/diagrams/class-diagram.svg
+```
+
+Use `make render-all-diagrams` to render every `docs/diagrams/*.mmd` source
+through the same `docs/diagrams/%.svg` pattern recipe. Each SVG depends on its
+matching `.mmd` source and renders only when missing or older. Add `-B` to
+force rendering. Generated `docs/diagrams/*.svg` files are ignored by Git.
+
+The recipe uses `$<` for the source and `$@` for the target, with `$(notdir ...)`
+to select container-relative filenames. Shell command substitutions use `$$`
+so Make passes them through to the shell.
 
 ## License headers
 

@@ -1,0 +1,27 @@
+---
+title: Ylva - durable session representations and offline maintenance
+config:
+  layout: elk
+---
+
+stateDiagram-v2
+    direction LR
+
+    %% Sources: store.rs, store/{archive,maintenance}.rs.
+    %% Conceptual storage lifecycle, not TuiMode or an exhaustive error-state machine.
+
+    state "Durable representation (offline maintenance, not TuiMode)" as Representation {
+        [*] --> Raw
+        Raw --> Archived : Explicit compress under identity lock / verify before removing raw
+        Archived --> Raw : Explicit decompress or resume restores writable transcript
+        Raw --> Deleted : Explicit delete / selectors and shared references checked
+        Archived --> Deleted : Explicit delete / selectors and shared references checked
+        Deleted --> [*]
+
+        note right of Archived
+            Lossless gzip + metadata sidecar; not context compaction.
+            Listing/replay/clone can read archives without changing the source.
+            Active writer locks exclude maintenance.
+            Divergent or corrupt representations fail explicitly.
+        end note
+    }
