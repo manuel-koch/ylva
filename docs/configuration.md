@@ -238,12 +238,14 @@ description = "Read-only repository exploration: locate relevant files and symbo
 engine = "ollama/local"
 ```
 
+### Top-level profile fields
+
 | Key | Type | Description |
 |---|---|---|
-| `default_engine` | string | Name of the `[engines.*]` entry used when an agent type names none. Defaults to `default`. |
+| `default_engine` | string (optional) | Name of the engine used when an agent type names none. Defaults to `default` when omitted. |
 | `[compaction].engine` | string (optional) | Explicit profile-level compaction engine, overridden by an explicit per-agent compaction engine. When absent at both levels, summaries follow that agent's active conversation engine, including later `/models` switches. |
 | `[compaction].timeout_sec` | number (optional) | Wall-clock seconds allowed for each summary request made by the selected compaction engine (default `60`; must be greater than `0`). This is separate from the active conversation engine's settings. |
-| `utility_engine` | string (optional) | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent. |
+| `utility_engine` | string (optional) | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent and does not follow Engine runtime changes through `/models`. |
 | `default_model` | string (optional) | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Syntax-highlighting theme. Defaults to `dark`. See [features — rendering](./features.md#tui-architecture). |
 | `input_history_limit` | number | Maximum number of explicit messages from prior root sessions loaded into TUI input history. Defaults to `50`; `0` disables prior-session history. |
@@ -254,7 +256,10 @@ engine = "ollama/local"
 | `[agents.<type>]` | table | Per-agent-type settings — see [Per-agent configuration](#per-agent-configuration) below. |
 
 When at least one `[engines.*]` table is present, those engines are what Ylva
-uses to create agents. Every named provider connection is also made available
+uses to create agents. The resolved `default_engine` must name one of those
+entries: omitting the field is valid only if an `[engines.default]` entry exists;
+otherwise, set it to an engine name that is defined.
+Every named provider connection is also made available
 to `/models`, including connections that are not referenced by an engine. A
 profile with provider connections but no engines gets one implicit engine per
 connection. Only a profile with neither explicit engines nor provider
@@ -593,15 +598,8 @@ violated rule.
 ## Profile configuration
 
 A profile groups engine selection and per-agent settings for an agent session.
-
-| Field | Type | Description |
-|---|---|---|
-| `default_engine` | string | Name of the engine used when no agent-level override is present (required). |
-| `[compaction].engine` | string (optional) | Explicit profile-level compaction engine, overridden by an explicit per-agent compaction engine. When absent at both levels, summaries follow that agent's active conversation engine, including later `/models` switches. Session-title generation uses `utility_engine`. |
-| `utility_engine` | string (optional) | Isolated engine used for utility tasks such as session-title generation. Resolves to `default_engine` when absent and does not follow Engine runtime changes through `/models`. |
-| `provider_connections` | table | Named provider connections, keyed by connection name. |
-| `engines` | table | Named model configurations, keyed by engine name. |
-| `agents` | table | Per-agent-type settings, keyed by agent-type name. |
+See [Top-level profile fields](#top-level-profile-fields) for the authoritative
+field table, defaults, and engine-reference requirements.
 
 ### Per-agent configuration
 

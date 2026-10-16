@@ -241,7 +241,7 @@ line coverage.
 
 ### D05 - Duplicate profile tables disagree about whether `default_engine` is required
 
-- [ ] Consolidate profile tables and correct `default_engine` requirements.
+- [x] Consolidate profile tables and correct `default_engine` requirements.
 
 **Priority: Medium. Category: contradiction and duplication.**
 
@@ -252,6 +252,12 @@ line coverage.
 - Resolution: keep one authoritative top-level profile-field table and link to it
   from the other section. Explain separately that a resolved engine reference must
   exist when explicit engines are configured.
+- Applied: consolidated the profile-field reference in `docs/configuration.md`
+  and linked to it from the profile configuration section. Documented that
+  `default_engine` is optional and defaults to `default`, while explicit engine
+  tables must define the resolved name. Preserved utility-engine runtime isolation.
+  Verified against deserialization and engine-reference validation and Markdown
+  lint; runtime behavior is unchanged.
 
 ### D06 - Workspace-shim instructions show the home-shim PATH
 
