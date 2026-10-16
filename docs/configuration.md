@@ -343,7 +343,15 @@ workspace marked.
   and `PATH` order decides which one runs.
 - Each workspace's `.ylva/shims` directory must be on `PATH` separately.
   `ylva profile shims --workspace` prints the line to add as a `#` comment. For
-  POSIX shells such as bash and zsh, uncomment it:
+  POSIX shells such as bash and zsh, uncomment and use the exact line printed
+  for that workspace. For example, for a workspace at `/path/to/workspace`:
+
+  ```shell
+  export PATH="/path/to/workspace/.ylva/shims:$PATH"
+  ```
+
+  For home-scope shims, `ylva profile shims` prints the corresponding line.
+  With the default Ylva home (`~/.ylva`), it is:
 
   ```shell
   export PATH=~/.ylva/shims:"$PATH"

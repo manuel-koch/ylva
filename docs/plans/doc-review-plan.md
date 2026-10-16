@@ -261,7 +261,7 @@ line coverage.
 
 ### D06 - Workspace-shim instructions show the home-shim PATH
 
-- [ ] Correct the workspace-shim PATH example.
+- [x] Correct the workspace-shim PATH example.
 
 **Priority: Medium. Category: incorrect command context.**
 
@@ -271,6 +271,10 @@ line coverage.
 - Impact: following the example does not put that workspace's generated shims on PATH.
 - Resolution: show a clearly labeled workspace path or instruct users to use the
   exact path emitted by their command. Keep the home-scope example separately labeled.
+- Applied: updated `docs/configuration.md` with a labeled workspace-path example
+  and instructions to use the exact line emitted by `ylva profile shims --workspace`.
+  Kept the default home-scope example separate, paired with `ylva profile shims`.
+  Verified against shim PATH output and Markdown lint; runtime behavior is unchanged.
 
 ### D07 - Profile-edit refusal guarantees overstate preflight and rollback
 
