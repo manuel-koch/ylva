@@ -109,16 +109,24 @@ default; `bash` requires user approval by default but is subject to
 structural sandbox rules (backgrounded commands, variable-assignment
 prefixes, unquoted glob/brace expansion) and configurable `[tools.bash]`
 rules — see "`bash` command rules" in
-[configuration](./configuration.md#bash-command-rules). Every path tool also
-honors a built-in floor: a path outside the workspace root (the launch directory
+[configuration](./configuration.md#bash-command-rules). For ordinary path tools,
+when no tool-specific rules are configured, a built-in floor applies: a path
+outside the workspace root (the launch directory
 when no workspace marker exists) — or a dot-prefixed
 component anywhere in the resolved absolute path, except for `glob` enumeration,
 which only lists paths — requires
 user approval instead of being auto-approved or rejected outright. Path
-tools additionally honor configurable `[tools.<name>]` rule lists, including
-the opt-in `cross_filesystem` rule that matches paths on a different
-filesystem (device) than the sandbox root — see
-[Sandbox (tool-approval rules)](./configuration.md#sandbox-tool-approval-rules).
+tools can instead use configurable rule lists, including the opt-in
+`cross_filesystem` rule that matches paths on a different filesystem (device)
+than the sandbox root. A profile-level `[tools.<name>]` or higher-precedence
+`[agents.<type>.tools.<name>]` table fully replaces, rather than supplements,
+the default floor for that tool — see
+[sandbox rule replacement and precedence](./configuration.md#sandbox-tool-approval-rules).
+`load_skill` is an exception: without configured rules, it auto-approves eligible
+skill instructions instead of applying the ordinary floor — see
+[skill loader policy](./configuration.md#agent-skills).
+`--auto-approve-write` and `--auto-approve-edit` append catch-all approval rules
+after the applicable rule list, so these flags retain final precedence.
 
 Unknown tool names return per-call errors to the model without interrupting
 other calls in the batch. The next model request starts only after the batch's

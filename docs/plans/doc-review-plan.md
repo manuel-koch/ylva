@@ -218,7 +218,7 @@ line coverage.
 
 ### D04 - Feature overview presents the sandbox floor as unconditional
 
-- [ ] Qualify the default sandbox floor.
+- [x] Qualify the default sandbox floor.
 
 **Priority: Medium. Category: contradiction.**
 
@@ -232,6 +232,12 @@ line coverage.
 - Resolution: qualify the overview with "when no tool-specific rules are configured"
   and link to replacement semantics and the loader exception. Preserve CLI
   auto-approval flags' documented final precedence.
+- Applied: updated `docs/features.md` to qualify the ordinary path-tool default
+  floor, explain profile-level and per-agent rule replacement, and link to the
+  configuration reference and `load_skill` exception. Explicitly retained final
+  precedence for `--auto-approve-write` and `--auto-approve-edit`. Verified against
+  sandbox and skill-loader policy code and Markdown lint; runtime behavior is
+  unchanged.
 
 ### D05 - Duplicate profile tables disagree about whether `default_engine` is required
 
