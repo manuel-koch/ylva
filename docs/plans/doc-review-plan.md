@@ -278,7 +278,7 @@ line coverage.
 
 ### D07 - Profile-edit refusal guarantees overstate preflight and rollback
 
-- [ ] Clarify profile-edit refusal and rollback guarantees.
+- [x] Clarify profile-edit refusal and rollback guarantees.
 
 **Priority: Medium. Category: implementation mismatch.**
 
@@ -294,6 +294,12 @@ line coverage.
 - Resolution: limit "no changes" to reconciliation's own planned writes.
   Explicitly state that editor changes persist even if subsequent validation or
   shim reconciliation fails. Changing edit transactionality would be separate work.
+- Applied: updated `docs/cli-options.md` to distinguish shim-planning refusals
+  from editor changes and application-time I/O failures. Clarified that `edit`
+  runs the editor before scope-wide reconciliation validation and never rolls
+  back its changes, while `create` and `delete` check before changing profile
+  files. Verified against command ordering, shim planning/application, and
+  Markdown lint; runtime behavior is unchanged.
 
 ### D08 - Context-estimate refresh descriptions disagree
 

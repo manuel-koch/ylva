@@ -297,7 +297,9 @@ ylva profile shims --workspace
   `config.toml` is missing (run `create` first) and when neither variable is
   set. The editor runs through `sh -c`, so a value such as `code --wait` works.
   A non-zero editor exit returns `1`. After a successful edit, the scope's
-  shims are reconciled.
+  shims are reconciled. Scope-wide configuration validation for reconciliation
+  happens after the editor runs. Editor changes persist even if subsequent
+  validation or shim reconciliation fails; Ylva does not roll them back.
 - `shims [--workspace]` reconciles the scope's shims (see below), then prints
   one aligned `<profile>  <path>` row per shim, followed by a PATH hint. Add the
   shims directory to `PATH` as that hint shows; for per-workspace setup,
@@ -332,11 +334,15 @@ file in the shims directory is removed. Subdirectories are never touched, and
 symlinked shims are not supported. Ylva owns the shims directory, so keep other
 files out of it. `list` and `--dry-run` never reconcile.
 
-The reconcile plans every change before it writes anything. It exits `2` with
-no changes when two profiles in one scope claim the same shim name, when any
-in-scope `config.toml` is unreadable or invalid, or when any in-scope
-`shim_name` is invalid. The whole scope is checked, so a broken config in
-another profile also blocks `create`, `edit`, `delete`, and `shims`.
+Shim reconciliation plans every shim write and removal before applying them.
+Planning exits `2` without writing or removing shims when two profiles in one
+scope claim the same shim name, when any in-scope `config.toml` is unreadable
+or invalid, or when any in-scope `shim_name` is invalid. The whole scope is
+checked, so a broken config in another profile also blocks reconciliation.
+`create` and `delete` perform this check before changing profile files;
+`edit` runs the editor first and retains its changes even when this check fails.
+The planning guarantee is not a rollback guarantee for editor changes or for
+I/O failures while applying an accepted shim plan.
 
 `profile shims` first reports any shims it removed. It then lists the shims in
 scope, one row each, with the profile name first and the shim path after it.
