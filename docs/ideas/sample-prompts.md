@@ -225,7 +225,6 @@ Use markdown table to structure your findings.
 
 ---
 
-
 Analyze the given tool functionality implemented in source code
 and list currently implemented features in a brief markdown descriptions.
 Use a subagent per tool and let subagent report findings back.
