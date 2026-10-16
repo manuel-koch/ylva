@@ -678,13 +678,23 @@ Requests estimated to exceed the compaction engine's context window produce a wa
 before dispatch, without changing the prefix or preventing the attempt.
 These local estimates remain advisory, not provider-token guarantees.
 
-Every loaded profile has a `default` agent type. If `[agents.default]` is
-absent, Ylva supplies the built-in default configuration: it uses
+Every loaded profile has a `default` agent type. Without a file-authored
+`default` definition, Ylva supplies the built-in configuration: it uses
 `default_engine`, the normal tool set, and `can_spawn = true` for the root
-agent. A present `[agents.default]` table replaces that built-in
-configuration, so set `can_spawn = true` there when customizing the default
-agent and retaining child-agent delegation. Other agent-type tables do not
-remove the implicit `default` agent.
+agent. An inline `[agents.default]` table overrides only the fields it supplies;
+omitted fields retain their resolved values. For example, without a replacing
+agent-type file, this customization retains child-agent delegation:
+
+```toml
+[agents.default]
+persona = "Explain your reasoning clearly."
+```
+
+Set `can_spawn = false` explicitly in that table to disable delegation.
+A file-authored `default` definition instead replaces the built-in configuration
+as a whole, following the [agent-type file precedence](#agent-type-files);
+any permitted inline overrides then apply field by field to that definition.
+Other agent-type tables do not remove the implicit `default` agent.
 
 An agent type's `engine` selects a complete named engine; it is not a
 field-by-field override layer. An agent cannot adjust that engine's model,

@@ -1116,11 +1116,14 @@ children receive all configured agent types and descriptions in the
 
 Profiles use the project/home/built-in resolution chain described in
 [configuration](./configuration.md#profile-file) for the supported keys.
-The `default` agent type is always available; when `[agents.default]` is
-omitted, it uses the built-in root configuration with child spawning enabled.
-Defining other agent types, such as `local-discovery`, does not disable the
-default agent. If `[agents.default]` is defined, its settings replace the
-built-in defaults.
+The `default` agent type is always available. Unless an agent-type file replaces
+its built-in definition, it starts with child spawning enabled. Inline
+`[agents.default]` settings override individual fields: a persona-only
+customization retains spawning permission; set `can_spawn = false` explicitly
+to disable it. Defining other agent types, such as `local-discovery`, does not
+disable the default agent. See
+[per-agent configuration](configuration.md#per-agent-configuration) for the
+default-agent override contract.
 
 Agent types can also be authored as standalone `.md` or `.toml` files in the
 global `~/.ylva/agents/`, selected profile `agents/`, or project

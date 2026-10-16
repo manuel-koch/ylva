@@ -192,7 +192,7 @@ line coverage.
 
 ### D03 - Inline default-agent overrides are described as whole replacements
 
-- [ ] Correct default-agent override semantics.
+- [x] Correct default-agent override semantics.
 
 **Priority: Medium. Category: implementation mismatch.**
 
@@ -210,6 +210,11 @@ line coverage.
 - Resolution: distinguish whole-file source precedence from field-level inline
   overrides, including the special built-in default and explicit
   `can_spawn = false` needed to disable its delegation.
+- Applied: updated `docs/configuration.md` and `docs/features.md` to distinguish
+  whole-file replacement from field-level inline overrides. Added a persona-only
+  example that retains the built-in spawning permission and documented explicit
+  `can_spawn = false` to disable delegation. Verified against the configuration
+  loader and Markdown lint; runtime behavior is unchanged.
 
 ### D04 - Feature overview presents the sandbox floor as unconditional
 
