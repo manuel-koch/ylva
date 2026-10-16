@@ -16,7 +16,9 @@
 
 use super::TextareaContext;
 use crate::agent::AgentMode;
-use crate::slash_command::{parse_slash_command_invocation, SlashCommand, SlashCommandInvocation};
+use crate::slash_command::{
+    parse_slash_command_invocation, SlashCommand, SlashCommandInvocation, MODELS_COMMAND_NAME,
+};
 use crate::tui_reducer_state::{
     AppState, ConfirmKey, ConversationView, Effect, Focus, HistoryDirection, InputEvent,
     SlashOverlay, TuiMode, UserMessageState, HELP_HORIZONTAL_SCROLL_COLUMNS,
@@ -424,7 +426,10 @@ fn slash_command_effects(state: &mut AppState, invocation: SlashCommandInvocatio
     match invocation.command {
         SlashCommand::Models => {
             let filter = invocation.argument;
-            let normalized_draft = format!("/models {}", filter.clone().unwrap_or_default());
+            let normalized_draft = format!(
+                "{MODELS_COMMAND_NAME} {}",
+                filter.clone().unwrap_or_default()
+            );
             vec![
                 Effect::SetInputText(normalized_draft),
                 Effect::ListModels { filter },

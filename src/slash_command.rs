@@ -21,6 +21,13 @@
 //! ordinary chat text and is sent to the model unchanged, so the parser can
 //! never swallow a user's message.
 
+pub const CLEAR_COMMAND_NAME: &str = "/clear";
+pub const RESET_COMMAND_NAME: &str = "/reset";
+pub const MODELS_COMMAND_NAME: &str = "/models";
+pub const TOOLS_COMMAND_NAME: &str = "/tools";
+pub const COMPACT_COMMAND_NAME: &str = "/compact";
+pub const SESSION_COMMAND_NAME: &str = "/session";
+
 /// A recognized slash command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlashCommand {
@@ -39,7 +46,8 @@ pub enum SlashCommand {
 /// Static description of one entry in the slash-command allowlist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlashCommandInfo {
-    /// The canonical, typed name including the leading slash.
+    /// The typed spelling including the leading slash: canonical in the
+    /// allowlist, or an alias when returned as a suggestion.
     pub name: &'static str,
     /// Alternative spellings that select the same command.
     pub aliases: &'static [&'static str],
@@ -61,38 +69,39 @@ pub struct SlashCommandInvocation {
     pub argument: Option<String>,
 }
 
-/// The complete allowlist, in the order the suggestion overlay lists them.
+/// The complete allowlist. Suggestions list canonical names in this order,
+/// followed by their aliases.
 pub const SLASH_COMMANDS: &[SlashCommandInfo] = &[
     SlashCommandInfo {
-        name: "/clear",
-        aliases: &["/reset"],
+        name: CLEAR_COMMAND_NAME,
+        aliases: &[RESET_COMMAND_NAME],
         description: "Clear the conversation and start a new session",
         command: SlashCommand::Clear,
         accepts_argument: false,
     },
     SlashCommandInfo {
-        name: "/models",
+        name: MODELS_COMMAND_NAME,
         aliases: &[],
         description: "List available models and switch the active one",
         command: SlashCommand::Models,
         accepts_argument: true,
     },
     SlashCommandInfo {
-        name: "/tools",
+        name: TOOLS_COMMAND_NAME,
         aliases: &[],
         description: "Show the tools the agent may call",
         command: SlashCommand::Tools,
         accepts_argument: false,
     },
     SlashCommandInfo {
-        name: "/compact",
+        name: COMPACT_COMMAND_NAME,
         aliases: &[],
         description: "Compact the root conversation without deleting its transcript",
         command: SlashCommand::Compact,
         accepts_argument: false,
     },
     SlashCommandInfo {
-        name: "/session",
+        name: SESSION_COMMAND_NAME,
         aliases: &[],
         description: "Resume or clone a recent session",
         command: SlashCommand::Session,
@@ -141,7 +150,8 @@ pub fn parse_slash_command_invocation(input: &str) -> Option<SlashCommandInvocat
     })
 }
 
-/// Return the commands whose name starts with the partially typed `input`.
+/// Return each command spelling that starts with the partially typed `input`.
+/// Aliases are separate selectable entries that invoke the same command.
 ///
 /// Drives the overlay shown *while typing*: `/` lists everything, `/m` narrows
 /// to `/models`, and a completed `/models` still matches itself so the overlay
@@ -156,10 +166,13 @@ pub fn slash_command_suggestions(input: &str) -> Vec<SlashCommandInfo> {
     }
     SLASH_COMMANDS
         .iter()
-        .filter(|info| {
-            info.name.starts_with(word) || info.aliases.iter().any(|alias| alias.starts_with(word))
-        })
         .copied()
+        .chain(SLASH_COMMANDS.iter().flat_map(|info| {
+            info.aliases
+                .iter()
+                .map(move |&name| SlashCommandInfo { name, ..*info })
+        }))
+        .filter(|info| info.name.starts_with(word))
         .collect()
 }
 
@@ -243,7 +256,16 @@ mod tests {
     #[test]
     fn a_bare_slash_suggests_every_command() {
         let suggestions = slash_command_suggestions("/");
-        assert_eq!(suggestions.len(), SLASH_COMMANDS.len());
+        assert_eq!(
+            suggestions.iter().map(|info| info.name).collect::<Vec<_>>(),
+            ["/clear", "/models", "/tools", "/compact", "/session", "/reset"]
+        );
+        for suggestion in suggestions {
+            assert_eq!(
+                parse_slash_command(suggestion.name),
+                Some(suggestion.command)
+            );
+        }
     }
 
     #[test]
@@ -257,6 +279,7 @@ mod tests {
     fn an_alias_prefix_suggests_its_command() {
         let suggestions = slash_command_suggestions("/re");
         assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].name, "/reset");
         assert_eq!(suggestions[0].command, SlashCommand::Clear);
     }
 

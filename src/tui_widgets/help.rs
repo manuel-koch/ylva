@@ -105,8 +105,8 @@ fn help_sections() -> Vec<HelpSection> {
         },
         HelpSection {
             heading: "Slash commands",
-            entries: crate::slash_command::SLASH_COMMANDS
-                .iter()
+            entries: crate::slash_command::slash_command_suggestions("/")
+                .into_iter()
                 .map(|command| help_entry(command.name, command.description))
                 .collect(),
         },

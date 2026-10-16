@@ -20,7 +20,7 @@ use crate::llm::engine::{
 };
 use crate::llm::token_estimate::format_token_estimate;
 use crate::llm::InputModality;
-use crate::slash_command::{slash_command_suggestions, SlashCommandInfo};
+use crate::slash_command::{slash_command_suggestions, SlashCommandInfo, MODELS_COMMAND_NAME};
 
 // ─── slash-command overlay ───────────────────────────────────────────────────
 
@@ -638,7 +638,7 @@ pub(crate) fn slash_overlay_text_rows(
 pub(crate) fn extract_models_filter(draft: &str) -> String {
     let trimmed = draft.trim_start();
     trimmed
-        .strip_prefix("/models")
+        .strip_prefix(MODELS_COMMAND_NAME)
         .unwrap_or(trimmed)
         .trim()
         .to_string()

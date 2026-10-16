@@ -483,6 +483,37 @@ fn clear_and_reset_reach_the_same_handler() {
 }
 
 #[test]
+fn reset_is_selectable_from_the_bare_slash_popup_and_clears_the_conversation() {
+    let (mut state, _textarea, _cmd_tx, _cmd_rx) = setup();
+    state.refresh_slash_overlay("/");
+    let SlashOverlay::Suggestions { choices, .. } = &state.slash_overlay else {
+        panic!("expected slash-command suggestions");
+    };
+    let reset_index = choices
+        .iter()
+        .position(|choice| choice.name == "/reset")
+        .expect("the popup must list /reset separately from /clear");
+    for _ in 0..reset_index {
+        state.move_slash_selection(1);
+    }
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &TextareaContext {
+            is_empty: false,
+            text: "/".to_string(),
+            cursor_row: 0,
+            cursor_row_is_last: true,
+        },
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::ClearTextarea, Effect::ClearConversation]
+    );
+    assert!(state.chat_entries.is_empty());
+}
+
+#[test]
 fn a_command_is_only_recognized_as_the_first_character_of_the_input() {
     let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
 
@@ -753,7 +784,7 @@ fn tab_completes_the_only_matching_command_and_is_normal_input_without_suggestio
             cursor_row_is_last: true,
         },
     );
-    assert_eq!(completion, vec![Effect::SetInputText("/clear".to_string())]);
+    assert_eq!(completion, vec![Effect::SetInputText("/reset".to_string())]);
 
     state.slash_overlay = SlashOverlay::Hidden;
     let tab = key_event(KeyCode::Tab);

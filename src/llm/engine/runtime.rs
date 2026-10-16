@@ -355,7 +355,8 @@ impl Engine for EngineImpl {
                         model = %active_model,
                         error = %error,
                         "failed to discover active model input modalities; \
-                         staying unknown until a /models selection"
+                         staying unknown until a {} selection",
+                        crate::slash_command::MODELS_COMMAND_NAME
                     );
                 }
             }
