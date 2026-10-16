@@ -92,7 +92,7 @@ reported as broken merely because they are illustrative or unimplemented.
 
 ### D01 - Manual compaction is both absent and implemented
 
-- [ ] Reconcile manual-compaction availability.
+- [x] Reconcile manual-compaction availability.
 
 **Priority: Medium. Category: contradiction.**
 
@@ -105,6 +105,8 @@ reported as broken merely because they are illustrative or unimplemented.
 - Resolution: replace the obsolete sentence with a link to the authoritative
   slash-command contract; retain the distinction between root manual compaction
   and independent automatic subagent compaction.
+- Applied: the scope overview now describes TUI `/compact` as root-only and links
+  to the slash-command contract. Verified against that contract and Markdown lint.
 
 ### D02 - Discovered workspace root and launch-directory sandbox are conflated
 

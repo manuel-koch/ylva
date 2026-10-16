@@ -310,7 +310,8 @@ without losing anything the user can still read.
 - **Scope.** Root and child agent contexts compact independently using the
   settings resolved for their agent type. Children wait for pending summaries
   before reporting completion and resume work after compaction changes their
-  model view. There is no manual `/compact` command ( for now ).
+  model view. In the TUI, `/compact` requests manual compaction of the root
+  conversation only; see [slash commands](#slash-commands).
 - **Persistence and resume.** Each applied snapshot appends a `compaction`
   event (never a rewrite); bounded overrides/handoffs append `model_projection`
   events, selected by revision even at the same boundary. Resume and clone
