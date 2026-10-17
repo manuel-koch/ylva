@@ -24,7 +24,7 @@ endif
 COVERAGE_THRESHOLD := 80
 
 .PHONY: render-all-diagrams \
-	lint format format-rust format-markdown \
+	lint audit format format-rust format-markdown \
 	create-logs-dir \
 	graphify-update graphify-watch \
     clean \
@@ -52,6 +52,9 @@ lint:
 	cargo clippy \
  	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
 	    --all-targets --all-features
+
+audit:
+	cargo audit --quit
 
 # Run rumdl to enforce consistent formatting of Markdown files
 format-markdown:
