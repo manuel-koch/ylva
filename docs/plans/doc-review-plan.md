@@ -709,7 +709,7 @@ evidence that current behavior should change.
 
 ### I06 - Sample prompt assumes unimplemented structured CLI conversation output
 
-- [ ] Clarify the sample prompt's expected JSONL input.
+- [x] Clarify the sample prompt's expected JSONL input.
 - Evidence: [sample prompts](../ideas/sample-prompts.md), lines 176-178,
   asks to parse conversation JSONL output from a CLI run. Current headless output
   is streamed assistant text, diagnostic JSONL is separate, and conversation
