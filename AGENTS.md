@@ -24,6 +24,7 @@ A Rust-based terminal UI that implements an agent-harness.
    run `make format lint` and the single mandatory test gate `make test-coverage`.
    `make test-coverage` runs the full test suite and enforces the coverage
    threshold, so do not also run `make test` as a mandatory duplicate.
+   When dependencies change (`Cargo.toml`/`Cargo.lock`), also run `make audit`.
 4. **Plan execution:** Planned implementations are executed from their plan file
    in [development-workflow](./docs/development-workflow.md) → *Plan execution*;
    update the named docs in the same commit.

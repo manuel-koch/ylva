@@ -108,30 +108,47 @@ impl Drop for TerminalTitleGuard {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static GUARD_DROP_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// RAII guard restoring the terminal to its pre-TUI state.
 pub(super) struct TerminalGuard;
 
 pub(super) fn initialize_terminal(
 ) -> io::Result<(TerminalGuard, Terminal<CrosstermBackend<io::Stdout>>)> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        Hide,
-        EnableMouseCapture,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-        EnableBracketedPaste,
-        SetTitle(format_terminal_title(None)),
-    )?;
+    initialize_with_guard(enable_raw_mode, || {
+        let mut stdout = io::stdout();
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            Hide,
+            EnableMouseCapture,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            EnableBracketedPaste,
+            SetTitle(format_terminal_title(None)),
+        )?;
+        Terminal::new(CrosstermBackend::new(stdout))
+    })
+}
+
+/// Creates the restoring guard as soon as raw mode is enabled, so a failure in
+/// any later setup step still restores the terminal.
+fn initialize_with_guard<T>(
+    enable_raw: impl FnOnce() -> io::Result<()>,
+    setup: impl FnOnce() -> io::Result<T>,
+) -> io::Result<(TerminalGuard, T)> {
+    enable_raw()?;
     let guard = TerminalGuard;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok((guard, terminal))
+    let value = setup()?;
+    Ok((guard, value))
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        #[cfg(test)]
+        GUARD_DROP_COUNT.with(|count| count.set(count.get() + 1));
         let _ = execute!(
             io::stdout(),
             LeaveAlternateScreen,
@@ -160,4 +177,30 @@ pub(super) fn install_stop_signal_relay(action_tx: mpsc::Sender<AppAction>) -> a
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_setup_after_raw_mode_drops_the_guard() {
+        GUARD_DROP_COUNT.with(|count| count.set(0));
+
+        let result =
+            initialize_with_guard(|| Ok(()), || Err::<(), _>(io::Error::other("setup failed")));
+
+        assert!(result.is_err());
+        assert_eq!(GUARD_DROP_COUNT.with(std::cell::Cell::get), 1);
+    }
+
+    #[test]
+    fn failed_raw_mode_does_not_create_a_guard() {
+        GUARD_DROP_COUNT.with(|count| count.set(0));
+
+        let result = initialize_with_guard(|| Err(io::Error::other("no tty")), || Ok(()));
+
+        assert!(result.is_err());
+        assert_eq!(GUARD_DROP_COUNT.with(std::cell::Cell::get), 0);
+    }
 }

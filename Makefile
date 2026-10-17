@@ -54,7 +54,7 @@ lint:
 	    --all-targets --all-features
 
 audit:
-	cargo audit --quit
+	cargo audit --quiet
 
 # Run rumdl to enforce consistent formatting of Markdown files
 format-markdown:

@@ -55,44 +55,44 @@ debt. Findings that touch the same file are kept adjacent.
 
 ### Phase 1: quick wins
 
-1. [ ] **D1 (Medium)** - Drop `reqwest 0.11`/`hyper 0.14`/`h2 0.3` via `jsonschema`.
-   1. [ ] Confirm `jsonschema` is used only at `src/agent/tools.rs:686`
+1. [x] **D1 (Medium)** - Drop `reqwest 0.11`/`hyper 0.14`/`h2 0.3` via `jsonschema`.
+   1. [x] Confirm `jsonschema` is used only at `src/agent/tools.rs:686`
       (`JSONSchema::compile`) and that no tool schema uses external `$ref`.
-   2. [ ] Set `jsonschema = { version = "0.17", default-features = false }` in
+   2. [x] Set `jsonschema = { version = "0.17", default-features = false }` in
       `Cargo.toml`; run `cargo tree -i h2` to confirm `h2 0.3` is gone.
-   3. [ ] Confirm tool-argument validation tests still pass (add a test that a
+   3. [x] Confirm tool-argument validation tests still pass (add a test that a
       schema with an external `$ref` is not resolved, if cheap).
-   4. [ ] Docs: none beyond the H01 note (remote/file `$ref` resolution is now
+   4. [x] Docs: none beyond the H01 note (remote/file `$ref` resolution is now
       off).
-   5. [ ] Gate.
-2. [ ] **D2 (Medium)** - Update `h2 0.4.15` to `>=0.4.16` (RUSTSEC-2026-0258).
-   1. [ ] `cargo update -p h2`; verify only `Cargo.lock` changed for h2.
-   2. [ ] `cargo update -p rustls` to `>=0.23.46`. Not compiled (lockfile
+   5. [x] Gate.
+2. [x] **D2 (Medium)** - Update `h2 0.4.15` to `>=0.4.16` (RUSTSEC-2026-0258).
+   1. [x] `cargo update -p h2`; verify only `Cargo.lock` changed for h2.
+   2. [x] `cargo update -p rustls` to `>=0.23.46`. Not compiled (lockfile
       only), but `cargo audit` fails on it, so it is required for a clean
       `make audit`.
-   3. [ ] Gate.
-3. [ ] **D3 (Low)** - Add `cargo audit` to the verification workflow.
-   1. [ ] The `audit` target already exists in `Makefile` (`cargo audit --quit`,
+   3. [x] Gate.
+3. [x] **D3 (Low)** - Add `cargo audit` to the verification workflow.
+   1. [x] The `audit` target already exists in `Makefile` (`cargo audit --quit`, typo fixed to `--quiet`,
       committed in 5944f37); keep it and wire it into the documented
       workflow and CI.
-   2. [ ] Add `audit.toml` (or `.cargo/audit.toml`) ignoring accepted warnings
+   2. [x] Add `audit.toml` (or `.cargo/audit.toml`) ignoring accepted warnings
       `RUSTSEC-2025-0141` (`bincode`, via `syntect`) and, temporarily,
       `RUSTSEC-2024-0449` (`unsafe-libyaml`, via `serde_yaml`; removed again by
       D4), each with a reason comment. Ask the user before creating it as a
       new file if unsure of location.
-   3. [ ] Docs: `docs/development-workflow.md` - `cargo audit` step and
+   3. [x] Docs: `docs/development-workflow.md` - `cargo audit` step and
       `audit.toml` policy.
-   4. [ ] Gate.
-4. [ ] **H02 (High)** - Terminal left in raw mode if initialization fails midway.
+   4. [x] Gate.
+4. [x] **H02 (High)** - Terminal left in raw mode if initialization fails midway.
    Where: `src/tui_driver/terminal.rs:114-131` (**verified**).
-   1. [ ] Test (or extract a testable seam) proving cleanup runs when a step
+   1. [x] Test (or extract a testable seam) proving cleanup runs when a step
       after `enable_raw_mode()` fails.
-   2. [ ] Create the restore guard immediately after `enable_raw_mode()`; its
+   2. [x] Create the restore guard immediately after `enable_raw_mode()`; its
       `Drop` undoes raw mode, alternate screen and mouse capture, whichever
       were enabled.
-   3. [ ] Docs: `docs/implementation-notes.md` if terminal lifecycle is
+   3. [x] Docs: `docs/implementation-notes.md` if terminal lifecycle is
       described.
-   4. [ ] Gate.
+   4. [x] Gate.
 5. [ ] **M07 (Medium)** - Secret-bearing files use default permissions.
    Where: `src/init_command.rs:239-247`,
    `src/store/session_file.rs:121-136,214-229` (**verified**: no `0o600`/`mode(...)`

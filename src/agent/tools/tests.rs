@@ -115,3 +115,16 @@ impl Tool for TestTool {
 mod registry;
 mod sections;
 mod titles;
+
+#[test]
+fn validate_args_with_schema_does_not_resolve_external_references() {
+    let schema: RootSchema = serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "properties": { "field": { "$ref": "http://127.0.0.1:1/schema.json" } }
+    }))
+    .expect("schema should deserialize");
+
+    let result = validate_args_with_schema(&schema, &serde_json::json!({ "field": "value" }));
+
+    assert!(result.is_err(), "external $ref must not be resolved");
+}

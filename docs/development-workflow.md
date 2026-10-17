@@ -34,6 +34,7 @@ make build-release                   # cargo build (release)
 make build-release-and-run           # build release binary and launch it
 make install                         # cargo install --path . → ~/.cargo/bin/ylva
 make tag-version                     # tag HEAD with version from Cargo.toml
+make audit                           # cargo audit — fails on RustSec vulnerabilities in Cargo.lock
 make outdated-dependencies           # cargo update --dry-run — show available upgrades
 make upgrade-dependencies            # cargo update — apply dependency upgrades to Cargo.lock
 make render-all-diagrams             # Render missing or outdated diagram SVGs with Docker
@@ -77,6 +78,14 @@ has its own header. Preserve valid existing copyright and license notices.
 Generated files are exempt; third-party code retains its upstream notices and
 must follow its own licensing terms rather than receiving the project's header.
 Check headers as part of reviewing source changes.
+
+## Dependency audit
+
+`make audit` runs `cargo audit` against `Cargo.lock` and must exit 0 before
+release. Accepted advisories are listed with a reason comment in
+[`.cargo/audit.toml`](../.cargo/audit.toml).
+Add an entry only with a reason; vulnerabilities are fixed by updating the
+dependency, not ignored.
 
 ## Rust linter
 
