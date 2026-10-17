@@ -1108,104 +1108,49 @@ model, sampling parameters, and connection details. Multiple engines can be defi
 and referenced by name, for example a fast local Ollama engine for chat and
 a more capable OpenRouter model for heavier tasks.
 
-Engines are read from the resolved profile file:
-`<workspace-root>/.ylva/profiles/<name>/config.toml`, then
-`~/.ylva/profiles/<name>/config.toml`, then the code-owned defaults for the
-implicit `default` profile. The `--profile <name>` value selects the profile
-name. With no disk file for the implicit default profile, the code defaults
-leave provider discovery to the environment variables as before.
-
-See [configuration](./configuration.md) for all available fields.
+See [engine configuration](configuration.md#engine-configuration) for fields
+and [profile file resolution](configuration.md#profile-file) for discovery,
+precedence, and provider fallback behavior.
 
 ### Profile selection and resolution
 
-A profile groups a default engine with optional per-agent overrides. Each agent
-type may also define a model-facing `description`; root agents that can spawn
-children receive all configured agent types and descriptions in the
-`spawn_subagent` tool definition.
+A profile groups engine settings with optional per-agent overrides. Agent types
+customize personas, tools, and delegation; their descriptions are advertised in
+the `spawn_subagent` tool definition. The `default` agent type is always available.
 
-Profiles use the project/home/built-in resolution chain described in
-[configuration](./configuration.md#profile-file) for the supported keys.
-The `default` agent type is always available. Unless an agent-type file replaces
-its built-in definition, it starts with child spawning enabled. Inline
-`[agents.default]` settings override individual fields: a persona-only
-customization retains spawning permission; set `can_spawn = false` explicitly
-to disable it. Defining other agent types, such as `local-discovery`, does not
-disable the default agent. See
-[per-agent configuration](configuration.md#per-agent-configuration) for the
-default-agent override contract.
-
-Agent types can also be authored as standalone `.md` or `.toml` files in the
-global `~/.ylva/agents/`, selected profile `agents/`, or project
-`.ylva/agents/` directories. Project files shadow profile files, and profile
-files shadow global files for the same type; file definitions are replaced
-whole before inline profile fields are applied. A Markdown file uses strict
-`+++` TOML or `---` YAML frontmatter followed by its body, which *is* the
-agent's `persona`; a body-less Markdown file is a load error. The same
-`persona` is written as `persona = "…"` in a `.toml` file or in an inline
-table, where an inline value replaces the file-sourced persona.
+See [profile file resolution](configuration.md#profile-file) for profile
+selection and fallback rules,
+[agent-type files](configuration.md#agent-type-files) for supported formats and
+source precedence, and
+[per-agent configuration](configuration.md#per-agent-configuration) for field
+overrides, including the built-in default agent's spawning permission.
 
 ### Profile management and shims
 
-`ylva profile` lists, creates, edits, and deletes profile directories in the
-home (`~/.ylva`) or the current workspace (`--workspace`). `list` without
-`--workspace` shows both in separate groups: the current workspace's profiles
-first, then the home's, with a home profile marked `(shadowed by workspace)` when
-the workspace defines the same name. `list` marks the `default` profile
-`(implicit default)`, since it is the profile used when no `--profile` flag is given.
+`ylva profile` lists, creates, edits, and deletes home or workspace profiles.
+Profile shims provide launcher scripts for named profiles.
 
-`ylva profile shims` and every `create`, `edit`, and `delete` keep a
-Ylva-owned `shims` directory in sync. Each non-default profile with a
-`config.toml` gets a small launcher script that runs
-`ylva --profile <name>` with the arguments it receives. The command also prints
-the `PATH` line to add. Naming and default-profile restrictions are in the
-[shim reference](cli-options.md#shims). Other details are in
-[profile commands](cli-options.md#profile-commands)
-and [managing profiles and shims](configuration.md#managing-profiles-and-shims).
+See [profile commands](cli-options.md#profile-commands) for command behavior,
+the [shim reference](cli-options.md#shims) for naming and restrictions, and
+[managing profiles and shims](configuration.md#managing-profiles-and-shims)
+for scope, environment, and `PATH` setup.
 
 ### Layered global persona and initialization
 
-The top-level conversation's global persona comes from `SOUL.md`, resolved
-from the project `.ylva/`, home `~/.ylva/`, and the code-owned built-in value
-in that order — whole-file replacement, the first existing layer wins. The
-resolved SOUL is inherited exactly once by both root and child contexts.
+Root and subagent contexts share a global SOUL enriched by trusted `AGENTS.md`
+and `CLAUDE.md` instructions. Each agent type can add a persona that extends
+this baseline. Instruction content steers the model without overriding
+code-enforced tool policy or sandbox constraints.
 
-Ylva then appends the trusted instruction files it discovers: exactly
-`AGENTS.md` and `CLAUDE.md`, matched case-sensitively, first from the Ylva
-home and then along the workspace chain from the workspace root down to the
-working directory. This is concatenation rather than replacement, so the file
-closest to the working directory is composed last and wins conflicts. A fixed
-safety preamble precedes the first section, and every section is wrapped in
-`<ylva_trusted_instructions>` … `</ylva_trusted_instructions>` tags with a
-JSON-quoted `Source:` line: `$YLVA_HOME/<filename>` for a home file (the
-variable's name only, never its value) or the workspace-relative path for a
-workspace file. Those sources are executable: path-like tools expand
-`~`/`$ENVVAR` before use, and startup exports the resolved `YLVA_HOME` so
-`$YLVA_HOME/AGENTS.md` can be passed to `read` verbatim. Workspace-relative source
-labels require adjustment when launching below the workspace root; see
-[trusted instruction files](configuration.md#trusted-instruction-files). Empty,
-whitespace-only, and byte-identical duplicate files are skipped; oversized
-(over 64 KiB), unreadable, non-UTF-8, symlink-escaping, and unlistable-chain
-files fail startup. With no instruction file the prompt is the resolved SOUL
-alone, byte-for-byte. Instruction content steers the model but can never
-override tool policy, approval floors, or the sandbox, which are enforced in
-code.
+See [global persona](configuration.md#global-persona-soulmd) for SOUL resolution
+and system-prompt composition, and
+[trusted instruction files](configuration.md#trusted-instruction-files) for exact
+discovery, precedence, framing, source-path handling, limits, and failure rules.
 
-The agent-type `persona` — one section, extending the baseline rather than
-replacing it — is then appended, followed by the tool protocol; a child
-additionally receives its task briefing and execution-budget constraints. See
-[configuration](./configuration.md#global-persona-soulmd) for the complete
-initial system-prompt contract.
-
-`ylva init` writes `SOUL.md`, `profiles/default/config.toml`, and an annotated
-`profiles/default/.env` starter; it does not seed agent-type files.
-`ylva init --workspace` seeds the default profile config and `.env` starters
-plus `.gitignore` in the workspace. The `.gitignore` lists `.env`, `.envrc`, and
-`chats/`. Both support write-if-missing and `--force` reseeding; an existing
-`.gitignore` is never overwritten, and only its missing entries are appended.
-`ylva profile create <name>` seeds the same starters for a
-named profile. Richer agent-type and profile examples are documented rather
-than shipped as repository templates.
+`ylva init` scaffolds home or workspace configuration, and
+`ylva profile create <name>` scaffolds a named profile. See
+[configuration](configuration.md#profile-file) for generated files and reseeding
+behavior.
 
 ## Slash commands
 

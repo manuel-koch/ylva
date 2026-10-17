@@ -437,6 +437,8 @@ line coverage.
 
 ### D15 - Two non-idea pages have no inbound Markdown link
 
+WON'T FIX: These are no relevant documents for current review.
+
 - [ ] Resolve non-idea orphan-page disposition.
 
 **Priority: Low. Category: discoverability; author decision required.**
@@ -451,7 +453,7 @@ line coverage.
 
 ### D16 - Detailed configuration contracts are maintained in multiple references
 
-- [ ] Consolidate duplicated configuration contracts.
+- [x] Consolidate duplicated configuration contracts.
 
 **Priority: Low. Category: single-source-of-truth risk.**
 
@@ -464,6 +466,12 @@ line coverage.
 - Resolution: retain user-visible capability summaries in features, but link to
   configuration for exact discovery/precedence/limit contracts. Consolidate the
   duplicate table as part of D05, without counting that repair twice.
+- Applied: reduced the engine/profile, agent-type, shim, persona, and initialization
+  sections in `docs/features.md` to capability summaries with targeted links to
+  the owning configuration and CLI references. Detailed trusted-instruction
+  discovery, precedence, framing, limits, and failures remain in
+  `docs/configuration.md`. Preserved feature headings and their anchors; the
+  duplicate profile table was already consolidated under D05.
 
 ### D17 - User-facing terminology does not follow the glossary
 
