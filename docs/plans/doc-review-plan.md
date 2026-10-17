@@ -600,7 +600,7 @@ WON'T FIX: This is not a relevant documents for current review.
 
 ### M02 - Subagent sequence reverses event enqueue and task launch
 
-- [ ] Correct subagent event-enqueue/task-launch ordering.
+- [x] Correct subagent event-enqueue/task-launch ordering.
 
 **Priority: Low. Category: sequence ordering mismatch.**
 
@@ -612,6 +612,10 @@ WON'T FIX: This is not a relevant documents for current review.
   paths use that method.
 - Resolution: move each parent event arrow before its child-launch arrow.
   Label this enqueueing/publication order, not guaranteed disk synchronization.
+- Applied: both startup paths in the diagram now enqueue the parent
+  `subagent_start` event before launching the child; the immediate-start arrow
+  is labelled as publication order, not disk sync. No other docs describe this
+  ordering.
 
 No finding is raised for deliberately selective member inventories, omitted
 independent state dimensions, or non-exhaustive failure paths already described

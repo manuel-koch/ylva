@@ -16,8 +16,8 @@ sequenceDiagram
 
     Root->>Manager: Approved spawn_subagent(task, type, briefing, call_id)
     alt Concurrency slot available
+        Manager->>Store: Enqueue parent subagent_start event (publication order, not disk sync)
         Manager->>Subagent: Start via factory-built spawn closure
-        Manager->>Store: Parent subagent_start event
         Manager-->>Root: Started(run_id)
     else Cap reached
         Manager->>Manager: Enqueue SpawnRequest FIFO
@@ -54,8 +54,8 @@ sequenceDiagram
         Manager->>Store: Parent subagent_result event
         Manager->>Manager: Free only this slot
         loop FIFO requests while slots are free
+            Manager->>Store: Enqueue parent subagent_start event
             Manager->>Subagent: Start next queued subagent
-            Manager->>Store: Parent subagent_start event
         end
         alt Other running or queued runs remain
             Root->>Root: Record completion without a completion-only reprompt
