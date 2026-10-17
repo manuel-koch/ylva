@@ -677,12 +677,14 @@ evidence that current behavior should change.
 
 ### I04 - Tirith proposal still depends on an implemented prerequisite
 
-- [ ] Update the Tirith prerequisite status.
+- [x] Update the Tirith prerequisite status.
 - Evidence: [shell hardening](../ideas/shell-hardening-with-tirith.md), lines 69-74,
   waits for `CommandGlob`; [configuration](../configuration.md), lines 970-1042,
   already describes command-shape rules, structural parsing, and aggregation.
 - Resolution: link the existing command-rule capability and identify Tirith
   integration itself as deferred. Do not imply that Tirith has shipped.
+- Applied: the status section now links the existing command-rule capability as
+  the satisfied prerequisite and states Tirith integration is deferred, unshipped.
 
 ### I05 - Copilot verification examples were damaged by redaction and editing
 

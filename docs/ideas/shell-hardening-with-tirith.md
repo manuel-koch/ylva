@@ -69,6 +69,7 @@ usable independently or together:
 ## Status
 
 Idea only — not yet scoped into a `docs/plans/*.md` implementation plan.
-Depends on `CommandGlob` existing first, since that's
-what establishes the `check_command` extraction/verdict pipeline this
-would hook into.
+Tirith integration is deferred and has not shipped. Its prerequisite, the
+command-shape rule capability (structural parsing and verdict aggregation),
+already exists; see [`bash` command rules](../configuration.md#bash-command-rules).
+That pipeline is what this integration would hook into.
