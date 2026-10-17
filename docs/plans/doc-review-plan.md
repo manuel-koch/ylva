@@ -518,6 +518,8 @@ WON'T FIX: These are no relevant documents for current review.
 
 ### D18 - Naming research infers namespace ownership from absent resources
 
+WON'T FIX: This is not a relevant documents for current review.
+
 - [ ] Correct unsupported namespace-availability conclusions.
 
 **Priority: Low. Category: unsupported conclusion.**
@@ -535,6 +537,8 @@ WON'T FIX: These are no relevant documents for current review.
 
 ### D19 - Naming-research reproducibility command uses an unsupported flag
 
+WON'T FIX: This is not a relevant documents for current review.
+
 - [ ] Correct the unsupported naming-research command.
 
 **Priority: Low. Category: invalid documented command.**
@@ -547,6 +551,8 @@ WON'T FIX: These are no relevant documents for current review.
   names for equality. Do not present `in:name` alone as exact-name matching.
 
 ### D20 - Naming research mixes historical exploration with current decisions
+
+WON'T FIX: This is not a relevant documents for current review.
 
 - [ ] Reconcile historical naming status and conclusions.
 
@@ -566,7 +572,7 @@ WON'T FIX: These are no relevant documents for current review.
 
 ### M01 - Configuration diagram applies the ordinary floor to skill loading
 
-- [ ] Show the skill-loader policy exception.
+- [x] Show the skill-loader policy exception.
 
 **Priority: Medium. Category: policy contradiction.**
 
@@ -584,6 +590,13 @@ WON'T FIX: These are no relevant documents for current review.
 - Resolution: qualify the ordinary-tool fallback and show the `load_skill`
   empty-rules/eligible-instruction auto-approval exception explicitly. Keep skill
   sidecar reads governed by independent `read` policy.
+- Applied: the diagram now distinguishes tool-specific defaults, showing the
+  ordinary floor and the loader's empty-rules auto-approval exception separately.
+  Its scope description in `docs/implementation-notes.md` names the exception and
+  independent sidecar policy; `docs/diagrams/README.md` links to that catalog.
+  Verified against configuration, implementation notes, and both loader rule
+  resolution paths; affected Markdown passed `rumdl check`, and the diagram
+  rendered through its Make target. Generated SVGs remain outside the change set.
 
 ### M02 - Subagent sequence reverses event enqueue and task launch
 

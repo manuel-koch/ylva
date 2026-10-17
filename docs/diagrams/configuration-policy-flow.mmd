@@ -27,7 +27,7 @@ flowchart TD
         Engine["Conversation engine<br/>Agent engine > profile default_engine<br/>Bind named provider connection and model"]
         Compact["Summary engine / timeout<br/>Each agent override inherits independently from profile<br/>No explicit summary engine: follow conversation engine<br/>Explicit engine: independent configured copy"]
         Tools["Role + allowed_tools<br/>Root can_spawn gates spawn_subagent<br/>Subagents cannot spawn; receive agent_finish"]
-        Rules["Per-tool sandbox rule list<br/>Agent entry > profile entry > built-in floor<br/>A configured list replaces, not merges, the lower list"]
+        Rules["Per-tool sandbox rule list<br/>Agent entry > profile entry > tool-specific default<br/>Ordinary tools default: built-in floor<br/>load_skill default: empty rules; eligible instructions auto-approved<br/>A configured list replaces, not merges, the lower list"]
         Catalog["Immutable process skill discovery snapshot"]
         Callable["Per-agent callable skills<br/>load_skill permission + allowed_skills<br/>+ loader sandbox verdict + host approval capability"]
         Validate --> Engine

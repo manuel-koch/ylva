@@ -769,7 +769,10 @@ waits until no approval owns the input.
 See [features](./features.md#drill-in-tui-conversation-view) for the visible
 behavior.
 
-## TUI module layout
+## Implementation diagrams
+
+These diagrams describe internal code structure and selected implemented behavior,
+not user-facing workflows, planned features, or exhaustive generated inventories.
 
 ### Diagram scope
 
@@ -797,15 +800,16 @@ behavior.
   offline raw/archive representation lifecycle and explicit deletion.
 - [Configuration and policy flow](diagrams/configuration-policy-flow.mmd): distinct
   resource precedence rules, per-agent engine/tool/skill resolution, prompt
-  composition, and approval enforcement.
+  composition, and approval enforcement, including the loader's empty-rules
+  default and independent sidecar read policy.
 - [TUI event flow](diagrams/tui-event-flow.mmd): driver orchestration, pure
   reduction, ordered effects, asynchronous result handling, and render feedback.
 
-All Mermaid sources live in `docs/diagrams/` and are authoritative; these are
-selective implementation guides, not generated inventories or exhaustive state
-machines. See the [diagram README](diagrams/README.md#generate-svg) for Docker
-commands to render one or all sources. Existing local SVG exports are not
-regenerated with this source-only update.
+All Mermaid sources live in `docs/diagrams/` and are authoritative. See
+[diagram rendering](development-workflow.md#diagram-rendering) for generating
+SVGs from one or all sources; generated SVGs are ignored by Git.
+
+## TUI module layout
 
 ### Module responsibilities
 
