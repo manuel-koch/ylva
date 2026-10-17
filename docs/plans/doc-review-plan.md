@@ -418,7 +418,7 @@ line coverage.
 
 ### D14 - The entry point has no setup path or documentation navigation
 
-- [ ] Add or clarify entry-point setup and navigation.
+- [x] Add or clarify entry-point setup and navigation.
 
 **Priority: Low. Category: entry-point gap.**
 
@@ -429,6 +429,11 @@ line coverage.
 - Resolution: add a small getting-started/navigation section linking existing
   authoritative references. Avoid copying their large option/target tables.
   Correct the "quickstart" description if setup guidance remains elsewhere.
+- Applied: added a short source-install and TUI-launch quickstart to `README.md`,
+  including prerequisites and links to provider/profile setup. Added navigation
+  to the existing CLI, configuration, keybindings, features, domain language,
+  development workflow, and implementation notes without duplicating their
+  detailed tables. The `AGENTS.md` quickstart description now matches the README.
 
 ### D15 - Two non-idea pages have no inbound Markdown link
 

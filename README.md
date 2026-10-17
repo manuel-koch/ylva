@@ -3,6 +3,43 @@
 Ylva (Old Norse for "she-wolf") is a Rust TUI and CLI agent-harness
 that coordinates model tool calls and schedules subagent runs.
 
+## Getting started
+
+Install a current stable [Rust toolchain](https://rustup.rs/) (including Cargo)
+and native build tools for your platform. From a checkout of this repository:
+
+```shell
+cargo install --path . --locked
+```
+
+Ensure Cargo's installation directory (normally `~/.cargo/bin`) is on `PATH`.
+Inspect the available commands, then launch Ylva in a terminal to open the TUI:
+
+```shell
+ylva --help
+ylva
+```
+
+For real model responses, configure Ollama or OpenRouter using the
+[provider environment variables](docs/cli-options.md#environment-variables)
+or [profile configuration](docs/configuration.md#profile-file).
+Without configured engines or providers, Ylva uses a deterministic mock provider,
+not a real model.
+
+## Documentation
+
+- [CLI reference](docs/cli-options.md): flags, subcommands, and headless usage.
+- [Configuration](docs/configuration.md): profiles, engines, provider connections,
+  and approval rules.
+- [Keybindings](docs/keybindings.md): TUI controls.
+- [Features](docs/features.md): implemented behavior.
+
+## Contribution
+
+- [Domain language](CONTEXT.md): canonical project terminology.
+- [Development workflow](docs/development-workflow.md): build, install, and test
+  targets; [implementation notes](docs/implementation-notes.md) explain internals.
+
 ## Ylva's features
 
 Ylva aims to support lean set of features.
