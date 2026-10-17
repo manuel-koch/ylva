@@ -81,18 +81,21 @@ Check headers as part of reviewing source changes.
 ## Rust linter
 
 Lint suppression (clippy or rustc, e.g. `dead_code`/`unused_variables`) is a
-case-by-case call by the user — never a blanket `#![allow(...)]` — applied to
-the specific item that triggers it:
+case-by-case call by the user, applied to the specific item that triggers it.
+Blanket `#![allow(...)]` attributes are prohibited except for the required
+`#![allow(dead_code)]` in
+[integration-test shared helpers](#integration-test-shared-helpers-testscommon).
+That narrow exception does not apply to ordinary production code.
 
 ```rust
 #[expect(clippy::too_many_arguments)]
 fn some_fn(...) { ... }
 ```
 
-Use `#[expect(...)]`, not `#[allow(...)]`: it only suppresses the lint while
-the lint actually fires. Once the code changes so it no longer fires, rustc
-warns `unfulfilled_lint_expectations` — remove the now-obsolete attribute (or
-replace it with a freshly justified one).
+Outside that shared-helper exception, use `#[expect(...)]`, not `#[allow(...)]`:
+it only suppresses the lint while the lint actually fires. Once the code changes
+so it no longer fires, rustc warns `unfulfilled_lint_expectations` — remove the
+now-obsolete attribute (or replace it with a freshly justified one).
 
 `make lint` runs `--all-features`; also check default-features `cargo clippy`
 for suppressions near `#[cfg(feature = ...)]` code, since expectations can be
@@ -323,7 +326,9 @@ integration test (`tests/*.rs`) via `mod common;`, with helpers reached as
   declares `mod common;`, so any helper unused by a given test crate would warn
   as dead code. Therefore `tests/common.rs` and every submodule under
   `tests/common/` must start with `#![allow(dead_code)]`
-  (see `tests/common/mock_llm_server.rs` for the established form).
+  (see `tests/common/mock_llm_server.rs` for the established form). This is the
+  narrow exception to the [Rust linter](#rust-linter) suppression rules;
+  those rules still apply outside these shared helpers.
 - **No duplication.** Add a new shared helper to `tests/common.rs` (small) or a
   new `tests/common/<name>.rs` submodule (larger); never copy a helper across
   test files. SSOT applies here.

@@ -367,7 +367,7 @@ line coverage.
 
 ### D11 - Blanket lint-suppression prohibition conflicts with a required exception
 
-- [ ] Document the shared-helper lint-suppression exception.
+- [x] Document the shared-helper lint-suppression exception.
 
 **Priority: Medium. Category: contributor-rule contradiction.**
 
@@ -377,6 +377,11 @@ line coverage.
 - Resolution: document the already-established shared-helper exception in the
   general rule and cross-link it. Preserve the prohibition for ordinary
   production code; do not remove the helper requirement as an incidental cleanup.
+- Applied: updated `docs/development-workflow.md` to name the required
+  shared-helper `#![allow(dead_code)]` as the narrow exception to both the blanket
+  suppression prohibition and the `#[expect(...)]` preference. Cross-linked the
+  general rule and shared-helper convention, preserving ordinary production-code
+  restrictions and the existing helper requirement. Markdown lint passes.
 
 ### D12 - Queue indicator still describes a single subagent slot
 
