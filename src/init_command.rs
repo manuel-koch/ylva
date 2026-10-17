@@ -215,10 +215,12 @@ pub(crate) fn seed_workspace_gitignore(
         updated_contents.push_str(entry);
         updated_contents.push('\n');
     }
-    std::fs::write(&path, updated_contents).map_err(|source| ConfigError::Unreadable {
-        path: path.clone(),
-        source,
-    })?;
+    crate::private_fs::replace_file(&path, updated_contents.as_bytes(), 0o644).map_err(
+        |source| ConfigError::Unreadable {
+            path: path.clone(),
+            source,
+        },
+    )?;
     report.written.push(path);
     Ok(())
 }

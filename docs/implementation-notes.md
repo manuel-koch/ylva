@@ -653,6 +653,17 @@ Replay never owns or updates title-generation state. The writer retains its
 lock after replacing the metadata inode and drains queued events when the
 last shared handle is dropped.
 
+`private_fs.rs` holds the crate's file-creation helpers. `replace_file(path,
+contents, unix_mode)` is the single atomic and durable publish path: it writes
+a create-new temporary file `<name>.<uuid>.tmp` beside the target, sets the
+exact mode before publishing, `fsync`s it, `rename()`s it over the target and
+`fsync`s the directory, removing the temporary file on failure so the old file
+stays intact. The title rewrite (`store/writer.rs`, `0600`), archive and
+decompression transitions (`store/archive.rs`, `0600`), the workspace
+`.gitignore` update (`init_command.rs`, `0644`) and shim scripts
+(`profile_shim.rs`, `0755`) all use it. `private_open_options` and
+`create_private_dir_all` create new files `0600` and directories `0700` on Unix.
+
 For finished subagents, the title snapshot correlates `agent_finish` call
 arguments with matching `ToolResult` IDs and names. Its terminal result/error
 uses `AgentFinishArgs::resolved_status`, shared with execution, and takes

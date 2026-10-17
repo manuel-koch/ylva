@@ -162,15 +162,11 @@ impl SessionWriter {
 
         let new_line =
             serde_json::to_string(&StoreEvent::Meta(meta.clone())).expect("meta always serializes");
-        let temp_path = self.path.with_extension("jsonl.rewrite-tmp");
-        {
-            let mut temp_file = std::fs::File::create(&temp_path)?;
-            temp_file.write_all(new_line.as_bytes())?;
-            temp_file.write_all(b"\n")?;
-            temp_file.write_all(&remainder)?;
-            temp_file.flush()?;
-        }
-        std::fs::rename(&temp_path, &self.path)?;
+        let mut contents = Vec::with_capacity(new_line.len() + 1 + remainder.len());
+        contents.extend_from_slice(new_line.as_bytes());
+        contents.push(b'\n');
+        contents.extend_from_slice(&remainder);
+        crate::private_fs::replace_file(&self.path, &contents, 0o600)?;
 
         self.file.reopen(&self.path)?;
         Ok(())

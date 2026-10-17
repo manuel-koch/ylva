@@ -171,25 +171,7 @@ fn sync_directory(path: &Path) -> Result<(), StoreError> {
 }
 
 fn publish(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    let temporary_path = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .map_err(|source| io_error(&temporary_path, source))?;
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|source| io_error(&temporary_path, source))?;
-        std::fs::rename(&temporary_path, path).map_err(|source| io_error(path, source))?;
-        sync_directory(path)
-    })();
-    if temporary_path.exists() {
-        if let Err(error) = std::fs::remove_file(&temporary_path) {
-            tracing::warn!(path = %temporary_path.display(), %error, "failed to remove transition temporary file");
-        }
-    }
-    result
+    crate::private_fs::replace_file(path, bytes, 0o600).map_err(|source| io_error(path, source))
 }
 
 fn remove(path: &Path) -> Result<(), StoreError> {

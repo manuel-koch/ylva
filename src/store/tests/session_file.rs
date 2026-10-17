@@ -192,4 +192,14 @@ async fn created_session_files_and_directories_are_owner_only() {
     );
     assert_eq!(mode_of(project_directory), 0o700, "project directory");
     assert_eq!(mode_of(&chats_root), 0o700, "chats root");
+
+    store
+        .set_title("Rewritten".to_string())
+        .await
+        .expect("title persisted");
+    assert_eq!(
+        mode_of(&session_path),
+        0o600,
+        "session file after title rewrite"
+    );
 }

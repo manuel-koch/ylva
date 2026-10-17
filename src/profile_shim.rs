@@ -164,10 +164,8 @@ pub fn apply_shim_plan(directories: &ShimDirectories, plan: &ShimPlan) -> anyhow
         })?;
     }
     for shim in &plan.shims {
-        std::fs::write(&shim.path, &shim.script)
+        crate::private_fs::replace_file(&shim.path, shim.script.as_bytes(), 0o755)
             .with_context(|| format!("cannot write {}", display_path(&shim.path)))?;
-        make_executable(&shim.path)
-            .with_context(|| format!("cannot make {} executable", display_path(&shim.path)))?;
     }
     for path in &plan.prunes {
         std::fs::remove_file(path)
@@ -312,17 +310,6 @@ fn shell_word(text: &str) -> String {
 
 fn single_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
-}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

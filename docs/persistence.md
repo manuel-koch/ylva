@@ -491,6 +491,8 @@ never waits on disk. Every line is written and flushed immediately, but **not**
 line already survives a process crash. The one exception is the `meta` line's
 `title`, which is intentionally rewritten once, in place, after it is first
 written empty — see "The header is written to disk immediately…" above; the
-rewrite itself is a temp-file-plus-`rename()` swap, so a crash mid-rewrite
-never corrupts the file (the reader either still sees the old, empty-titled
-line or the new one, never a torn mix of both).
+rewrite itself goes through the shared `private_fs::replace_file` helper (see
+[implementation-notes](./implementation-notes.md)): temp file, `fsync`, `rename()`,
+directory `fsync`. A crash mid-rewrite never corrupts the file (the reader either
+still sees the old, empty-titled line or the new one, never a torn mix of both),
+and the replacement is durable once the title is reported as persisted.

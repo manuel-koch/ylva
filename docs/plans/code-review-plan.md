@@ -104,23 +104,23 @@ debt. Findings that touch the same file are kept adjacent.
       `DirBuilderExt::mode(0o700)` under `#[cfg(unix)]`.
    3. [x] Docs: guarantee in `docs/persistence.md` and `docs/configuration.md`.
    4. [x] Gate.
-6. [ ] **M08 + S07 (Medium/Low)** - One atomic, durable replace helper (SSOT).
+6. [x] **M08 + S07 (Medium/Low)** - One atomic, durable replace helper (SSOT).
    Where: `src/store/writer.rs:158-176` (no `sync_all` before `rename`),
    `src/init_command.rs:196-218` (`.gitignore` written in place),
    `src/profile_shim.rs:159-171` (written, then made executable),
    `src/store/archive.rs:171-191` (the model: create-new temp, `sync_all`,
    rename, directory sync).
-   1. [ ] Add a shared helper (temp file in same directory, `sync_all`,
+   1. [x] Add a shared helper (temp file in same directory, `sync_all`,
       permissions, `rename`, directory sync), extracted from the archive
       publisher. Put it in an existing suitable module (ask before adding a new
       doc; a new source file is fine with license header).
-   2. [ ] Tests: success, rename failure leaves original intact, mode applied
+   2. [x] Tests: success, rename failure leaves original intact, mode applied
       before publish.
-   3. [ ] Migrate `writer.rs`, `init_command.rs`, `profile_shim.rs` and
+   3. [x] Migrate `writer.rs`, `init_command.rs`, `profile_shim.rs` and
       `archive.rs` to the helper.
-   4. [ ] Docs: `docs/persistence.md`, `docs/implementation-notes.md`
+   4. [x] Docs: `docs/persistence.md`, `docs/implementation-notes.md`
       (durability guarantees, helper).
-   5. [ ] Gate.
+   5. [x] Gate.
 
 ### Phase 2: security design
 
