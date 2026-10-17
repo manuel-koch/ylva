@@ -736,12 +736,14 @@ evidence that current behavior should change.
 
 ### I08 - Redaction proposal contradicts its own absolute guarantee
 
-- [ ] Qualify the redaction proposal's guarantee.
+- [x] Qualify the redaction proposal's guarantee.
 - Evidence: [redaction](../ideas/redact-sensitive-info.md), lines 3-5, says
   sensitive values can never reach an LLM, but lines 7-10 acknowledge that
   alternative encodings can evade the proposed exact-value filter.
 - Resolution: describe best-effort defense in depth and keep variable-selection
   policy as an unresolved design question, not a guarantee of prevention.
+- Applied: the proposal now describes best-effort defense in depth, states it is
+  not a guarantee, and labels variable selection as an unresolved design question.
 
 ### I09 - Sample-prompt Markdown fails the configured linter
 
