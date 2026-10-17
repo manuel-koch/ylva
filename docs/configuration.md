@@ -318,8 +318,10 @@ actions, marks, and exit codes are in [profile commands](cli-options.md#profile-
 together, in separate groups (workspace first), with home profiles shadowed by the
 workspace marked.
 
-- `shim_name` is an optional top-level key in `config.toml`. It must appear
-  before any `[table]`. It replaces the default `ylva-<name>` shim file name:
+- `shim_name` customizes a non-default profile's launcher file name. See
+  [shim naming and restrictions](cli-options.md#shims) for its placement in
+  `config.toml`, default naming, and reserved-name and default-profile rules.
+  For example:
 
   ```toml
   shim_name = "office"

@@ -1154,10 +1154,12 @@ the workspace defines the same name. `list` marks the `default` profile
 `(implicit default)`, since it is the profile used when no `--profile` flag is given.
 
 `ylva profile shims` and every `create`, `edit`, and `delete` keep a
-Ylva-owned `shims` directory in sync. Each profile gets a small launcher script
-named `ylva-<name>` (or the `shim_name` set in its `config.toml`) that runs
+Ylva-owned `shims` directory in sync. Each non-default profile with a
+`config.toml` gets a small launcher script that runs
 `ylva --profile <name>` with the arguments it receives. The command also prints
-the `PATH` line to add. Details are in [profile commands](cli-options.md#profile-commands)
+the `PATH` line to add. Naming and default-profile restrictions are in the
+[shim reference](cli-options.md#shims). Other details are in
+[profile commands](cli-options.md#profile-commands)
 and [managing profiles and shims](configuration.md#managing-profiles-and-shims).
 
 ### Layered global persona and initialization

@@ -326,7 +326,7 @@ line coverage.
 
 ### D09 - General shim descriptions omit the default-profile exception
 
-- [ ] Document the default-profile shim exception consistently.
+- [x] Document the default-profile shim exception consistently.
 
 **Priority: Low. Category: contradiction.**
 
@@ -339,6 +339,12 @@ line coverage.
   explicit shim name.
 - Resolution: qualify the general statements as non-default profiles and centralize
   shim naming and default-profile restrictions in the CLI reference.
+- Applied: qualified launcher descriptions in `docs/features.md` and
+  `docs/cli-options.md` as non-default profiles with a `config.toml`.
+  Centralized shim naming, key placement, and default-profile restrictions in
+  the CLI shim reference, linking to it from `docs/configuration.md` and the
+  feature overview. Verified against shim planning and Markdown lint; runtime
+  behavior is unchanged.
 
 ### D10 - Request-dump format follows the token-dump paragraph without a named subject
 

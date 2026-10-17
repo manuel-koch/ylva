@@ -312,16 +312,17 @@ shim work.
 
 ### Shims
 
-Each profile with a `config.toml` gets a shim: a POSIX `sh` script that runs
+Each non-default profile with a `config.toml` gets a shim: a POSIX `sh` script that runs
 `ylva --profile '<name>' "$@"`, so `ylva-work --help` behaves like
 `ylva --profile work --help`. Home shims go in `$YLVA_HOME/shims/`; workspace
 shims go in `<workspace-root>/.ylva/shims/`. A shim is named `ylva-<name>`
-unless the profile sets a top-level `shim_name` key in `config.toml`, which
-replaces the whole file name. `create --shim-name` writes that key for you. A
-shim name must pass the profile name rule and must not be `ylva`. `default`
-gets no shim, so a `shim_name` in `default` is an error. A home profile and a
-workspace profile with the same name are not refused or renamed; `PATH` order
-decides which shim runs.
+unless the profile sets a top-level `shim_name` key in `config.toml`, before
+any `[table]`, which replaces the whole file name. `create --shim-name` writes
+that key for you. A shim name must pass the profile name rule and must not be
+`ylva`. 
+Profile `default` gets no shim, so a `shim_name` in `default` is an error.
+A home profile and a workspace profile with the same name are not refused
+or renamed, `PATH` order decides which shim runs.
 
 A shim sets no environment. A home shim runs `ylva` with the `YLVA_HOME` of the
 shell that launched it, so it stores chats where plain `ylva --profile <name>`
