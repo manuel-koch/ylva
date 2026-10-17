@@ -43,14 +43,15 @@ runs the editor for `edit` through `sh -c` with the path as `$1`. Every
 `create`, `edit`, and `delete` reconciles shims through `profile_shim.rs`.
 `profile_shim.rs` plans the whole change before writing: it collects claims
 from each in-scope `shim_name` (or `ylva-<name>`), rejects duplicate claims,
-and prunes only unclaimed regular files in the `shims` directory. Shim scripts
+and prunes only unclaimed regular files in the `shims` directory.
 Shim scripts only `exec` `ylva --profile`, so a home shim inherits the caller's
 `YLVA_HOME`. A workspace shim first `cd`s to the workspace root, which it derives
 from its own path with `pwd -P`. `profile_command.rs` calls
 `init_command.rs::seed_profile_starters` for new profiles. Invalid names in
 profile directories are validated but get no shim claim.
 
-profile/provider initialization or stdin consumption. Its CLI listing projection
+`session_command.rs` dispatches `ylva session` before profile/provider
+initialization or stdin consumption. Its CLI listing projection
 keeps the library's descending order while using last-use timestamps: roots and
 sibling groups are rendered least recently used first. With subagents included,
 an iterative traversal follows

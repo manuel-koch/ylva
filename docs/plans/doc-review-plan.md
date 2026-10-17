@@ -401,7 +401,7 @@ line coverage.
 
 ### D13 - Implementation notes contain an interrupted session-command explanation
 
-- [ ] Repair the interrupted session-command explanation.
+- [x] Repair the interrupted session-command explanation.
 
 **Priority: Low. Category: incomplete prose.**
 
@@ -411,6 +411,10 @@ line coverage.
   The missing subject obscures the transition from profile handling to session listing.
 - Resolution: remove the duplicate fragment and restore an explicit
   `session_command.rs` subject using the surrounding lifecycle explanation.
+- Applied: removed the repeated "Shim scripts" fragment from
+  `docs/implementation-notes.md` and restored the explicit `session_command.rs`
+  dispatch explanation before the session-listing details. Verified against
+  startup dispatch ordering and Markdown lint; runtime behavior is unchanged.
 
 ### D14 - The entry point has no setup path or documentation navigation
 
