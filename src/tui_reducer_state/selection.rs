@@ -167,7 +167,7 @@ impl AppState {
             return None;
         }
         Some((
-            self.child_view.header_bubble_scroll_offset + row.saturating_sub(area.y) as usize,
+            self.subagent_view.header_bubble_scroll_offset + row.saturating_sub(area.y) as usize,
             column.saturating_sub(area.x) as usize,
         ))
     }
@@ -184,7 +184,7 @@ impl AppState {
         let clamped_column = column.clamp(area.x, max_column);
         let clamped_row = row.clamp(area.y, max_row);
         Some((
-            self.child_view.header_bubble_scroll_offset
+            self.subagent_view.header_bubble_scroll_offset
                 + clamped_row.saturating_sub(area.y) as usize,
             clamped_column.saturating_sub(area.x) as usize,
         ))
@@ -208,12 +208,12 @@ impl AppState {
         )
     }
 
-    /// Extract the text covered by the current child-view header selection.
+    /// Extract the text covered by the current subagent-view header selection.
     pub fn extract_header_selection_text(&self) -> Option<String> {
         extract_selection_text(
-            self.child_view.header_selection.as_ref(),
-            &self.child_view.header_rendered_lines,
-            &self.child_view.header_rendered_line_prefix_widths,
+            self.subagent_view.header_selection.as_ref(),
+            &self.subagent_view.header_rendered_lines,
+            &self.subagent_view.header_rendered_line_prefix_widths,
         )
     }
 }

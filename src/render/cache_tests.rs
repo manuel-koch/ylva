@@ -75,7 +75,7 @@ fn present_render_event(state: &mut AppState, event: crate::DomainEvent) {
     );
 }
 
-fn running_child_fixture(state: &mut AppState, collapsed: bool) -> (uuid::Uuid, uuid::Uuid) {
+fn running_subagent_fixture(state: &mut AppState, collapsed: bool) -> (uuid::Uuid, uuid::Uuid) {
     let bubble_id = uuid::Uuid::new_v4();
     let run_id = uuid::Uuid::new_v4();
     present_render_event(
@@ -98,7 +98,7 @@ fn running_child_fixture(state: &mut AppState, collapsed: bool) -> (uuid::Uuid, 
     }
     present_render_event(
         state,
-        crate::DomainEvent::ChildAgentStarted {
+        crate::DomainEvent::SubagentStarted {
             run_id,
             call_id: bubble_id,
             agent_type: "default".into(),
@@ -111,21 +111,21 @@ fn running_child_fixture(state: &mut AppState, collapsed: bool) -> (uuid::Uuid, 
 
 #[test]
 fn live_thinking_subsecond_redraws_reuse_chrome_and_body() {
-    for child_view in [false, true] {
+    for subagent_view in [false, true] {
         for collapsed in [false, true] {
             let mut state = AppState::new();
             state.enable_render_cache();
-            let run_id = if child_view {
-                let (_, run_id) = running_child_fixture(&mut state, collapsed);
+            let run_id = if subagent_view {
+                let (_, run_id) = running_subagent_fixture(&mut state, collapsed);
                 present_render_event(
                     &mut state,
-                    crate::DomainEvent::ChildAgentToken {
+                    crate::DomainEvent::SubagentToken {
                         run_id,
                         text: "reasoning".into(),
                         is_thinking: true,
                     },
                 );
-                state.switch_to_child_view(run_id);
+                state.switch_to_subagent_view(run_id);
                 Some(run_id)
             } else {
                 present_render_event(&mut state, crate::DomainEvent::StreamStarted);
@@ -139,7 +139,7 @@ fn live_thinking_subsecond_redraws_reuse_chrome_and_body() {
             for elapsed_millis in [9_100, 9_600, 10_100] {
                 let turn_buffer = if let Some(run_id) = run_id {
                     &mut state
-                        .child_conversations
+                        .subagent_conversations
                         .get_mut(&run_id)
                         .unwrap()
                         .turn_buffer
@@ -166,17 +166,17 @@ fn live_thinking_subsecond_redraws_reuse_chrome_and_body() {
 
 #[test]
 fn running_subagent_subsecond_redraws_reuse_chrome_and_body() {
-    for child_view in [false, true] {
+    for subagent_view in [false, true] {
         for collapsed in [false, true] {
             let mut state = AppState::new();
             state.enable_render_cache();
-            let (bubble_id, run_id) = running_child_fixture(&mut state, collapsed);
-            if child_view {
-                state.switch_to_child_view(run_id);
+            let (bubble_id, run_id) = running_subagent_fixture(&mut state, collapsed);
+            if subagent_view {
+                state.switch_to_subagent_view(run_id);
             }
             for elapsed_seconds in [12, 22] {
                 state
-                    .child_conversations
+                    .subagent_conversations
                     .get_mut(&run_id)
                     .unwrap()
                     .started_at = Some(
@@ -190,20 +190,20 @@ fn running_subagent_subsecond_redraws_reuse_chrome_and_body() {
                     },
                 );
                 render_offline(&mut state, 80, 20);
-                let previous_layouts = if child_view {
+                let previous_layouts = if subagent_view {
                     state.render_cache.header.layouts.clone()
                 } else {
                     state.render_cache.conversation.layouts.clone()
                 };
                 state
-                    .child_conversations
+                    .subagent_conversations
                     .get_mut(&run_id)
                     .unwrap()
                     .started_at = Some(
                     std::time::Instant::now() - Duration::from_millis(elapsed_seconds * 1000 + 600),
                 );
                 render_offline(&mut state, 80, 20);
-                let current_layouts = if child_view {
+                let current_layouts = if subagent_view {
                     &state.render_cache.header.layouts
                 } else {
                     &state.render_cache.conversation.layouts
@@ -295,7 +295,7 @@ fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
     );
     present_render_event(
         &mut state,
-        DomainEvent::ChildAgentStarted {
+        DomainEvent::SubagentStarted {
             run_id,
             call_id: bubble_id,
             agent_type: "reviewer".into(),
@@ -305,15 +305,15 @@ fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
     );
     present_render_event(
         &mut state,
-        DomainEvent::ChildAgentToken {
+        DomainEvent::SubagentToken {
             run_id,
-            text: "child transcript\n\n".repeat(3_000),
+            text: "subagent transcript\n\n".repeat(3_000),
             is_thinking: false,
         },
     );
     present_render_event(
         &mut state,
-        DomainEvent::ChildAgentDone {
+        DomainEvent::SubagentDone {
             run_id,
             status: "success".into(),
             result: None,
@@ -328,15 +328,15 @@ fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
     ) {
         state.toggle_tool_bubble_collapsed(bubble_id);
     }
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
     render_offline(&mut state, 120, 40);
     let header_body = Arc::clone(&state.render_cache.header.layouts[1]);
-    let child_body = Arc::clone(&state.render_cache.conversation.layouts[1]);
+    let subagent_body = Arc::clone(&state.render_cache.conversation.layouts[1]);
     let builds = state.render_cache.body_layout_builds;
     assert!(state.render_cache.header.height > 3_000);
     assert_eq!(state.layout.header_bubble.height, 16);
     state.spinner_frame += 1;
-    state.child_view.header_bubble_scroll_offset = 1_500;
+    state.subagent_view.header_bubble_scroll_offset = 1_500;
     render_offline(&mut state, 120, 40);
     assert_eq!(builds, state.render_cache.body_layout_builds);
     assert!(Arc::ptr_eq(
@@ -344,7 +344,7 @@ fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
         &state.render_cache.header.layouts[1]
     ));
     assert!(Arc::ptr_eq(
-        &child_body,
+        &subagent_body,
         &state.render_cache.conversation.layouts[1]
     ));
     present_render_event(
@@ -364,14 +364,14 @@ fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
         &state.render_cache.header.layouts[1]
     ));
     assert!(state
-        .child_view
+        .subagent_view
         .header_rendered_lines
         .iter()
         .any(|line| line.contains("details=")));
     let second_run = uuid::Uuid::new_v4();
     present_render_event(
         &mut state,
-        DomainEvent::ChildAgentStarted {
+        DomainEvent::SubagentStarted {
             run_id: second_run,
             call_id: uuid::Uuid::new_v4(),
             agent_type: "reviewer".into(),
@@ -381,7 +381,7 @@ fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
     );
     present_render_event(
         &mut state,
-        DomainEvent::ChildAgentToken {
+        DomainEvent::SubagentToken {
             run_id: second_run,
             text: "background text".into(),
             is_thinking: false,
@@ -409,7 +409,7 @@ fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
     state.switch_to_root_view();
     assert!(state.render_cache.header.layouts.is_empty());
     assert!(state.render_cache.conversation.layouts.is_empty());
-    assert!(state.child_view.header_rendered_lines.is_empty());
+    assert!(state.subagent_view.header_rendered_lines.is_empty());
     render_offline(&mut state, 120, 40);
     assert!(state.render_cache.header.layouts.is_empty());
     assert!(state.pending_scroll_to_bubble.is_none());

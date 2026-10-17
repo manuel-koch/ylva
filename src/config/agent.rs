@@ -31,7 +31,7 @@ pub struct AgentConfig {
     pub compaction: Option<AgentCompactionConfig>,
     /// Optional model-facing summary of the tasks this agent type is suited
     /// for. The root agent receives this in the `spawn_subagent` tool
-    /// description when choosing a child type.
+    /// description when choosing a subagent type.
     #[serde(default)]
     pub description: Option<String>,
     /// Subset of tool names the agent is permitted to invoke. When `None`, all
@@ -71,8 +71,8 @@ pub struct AgentConfig {
     /// `.md` agent-type file — the body *is* the persona.
     #[serde(default)]
     pub persona: Option<String>,
-    /// When `true` the agent is permitted to spawn child agents via
-    /// `AgentFactory::create` with `Role::Child`. Checked in Phase 6.
+    /// When `true` the agent is permitted to spawn subagents via
+    /// `AgentFactory::create` with `Role::Subagent`. Checked in Phase 6.
     #[serde(default, deserialize_with = "deserialize_bool_or_string")]
     pub can_spawn: bool,
 }

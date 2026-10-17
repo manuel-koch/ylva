@@ -77,15 +77,15 @@ fn route_domain_logs_correlation_id_for_tool_events() {
 }
 
 #[test]
-fn child_agent_started_does_not_auto_switch_the_active_view() {
-    // Spawning a child must not yank focus away from whatever the user
+fn subagent_started_does_not_auto_switch_the_active_view() {
+    // Spawning a subagent must not yank focus away from whatever the user
     // was looking at — only an *interactive pause* (ToolPending /
-    // ClarifyPending) belonging to the child does that.
+    // ClarifyPending) belonging to the subagent does that.
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();
     update(
         &mut state,
-        TuiEvent::Domain(DomainEvent::ChildAgentStarted {
+        TuiEvent::Domain(DomainEvent::SubagentStarted {
             run_id,
             call_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
@@ -95,16 +95,16 @@ fn child_agent_started_does_not_auto_switch_the_active_view() {
         &empty_textarea(),
     );
     assert_eq!(state.active_view, ConversationView::Root);
-    assert!(!state.auto_switched_to_child);
+    assert!(!state.auto_switched_to_subagent);
 }
 
 #[test]
-fn cancelled_child_releases_its_pending_tools_and_resumes_the_next_approval() {
+fn cancelled_subagent_releases_its_pending_tools_and_resumes_the_next_approval() {
     let mut state = AppState::new();
     let first_run_id = Uuid::new_v4();
     let second_run_id = Uuid::new_v4();
     for (run_id, task) in [(first_run_id, "first task"), (second_run_id, "second task")] {
-        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+        state.start_subagent_run(crate::tui_reducer_state::SubagentRunInfo {
             run_id,
             bubble_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
@@ -119,7 +119,7 @@ fn cancelled_child_releases_its_pending_tools_and_resumes_the_next_approval() {
         (second_run_id, second_tool_id),
     ] {
         state
-            .child_conversations
+            .subagent_conversations
             .get_mut(&run_id)
             .unwrap()
             .messages
@@ -143,7 +143,7 @@ fn cancelled_child_releases_its_pending_tools_and_resumes_the_next_approval() {
 
     update(
         &mut state,
-        TuiEvent::Domain(DomainEvent::ChildAgentDone {
+        TuiEvent::Domain(DomainEvent::SubagentDone {
             run_id: first_run_id,
             status: "cancelled".to_string(),
             result: None,
@@ -152,11 +152,11 @@ fn cancelled_child_releases_its_pending_tools_and_resumes_the_next_approval() {
     );
 
     assert!(matches!(
-        state.child_conversations[&first_run_id].messages.first(),
+        state.subagent_conversations[&first_run_id].messages.first(),
         Some(ChatEntry::ToolBubble { state, .. }) if matches!(state.as_ref(), ToolCallState::Killed)
     ));
-    assert!(!state.running_children.contains_key(&first_run_id));
-    assert!(state.running_children.contains_key(&second_run_id));
+    assert!(!state.running_subagents.contains_key(&first_run_id));
+    assert!(state.running_subagents.contains_key(&second_run_id));
     assert_eq!(state.pending_approval_order, vec![second_tool_id]);
     assert!(matches!(
         state.focus,
@@ -164,21 +164,21 @@ fn cancelled_child_releases_its_pending_tools_and_resumes_the_next_approval() {
     ));
     assert!(matches!(
         state.active_view,
-        ConversationView::Child { run_id, .. } if run_id == second_run_id
+        ConversationView::Subagent { run_id, .. } if run_id == second_run_id
     ));
 }
 
 #[test]
-fn child_agent_started_clears_transcript_without_seeding_a_synthetic_task_message() {
+fn subagent_started_clears_transcript_without_seeding_a_synthetic_task_message() {
     // The task is shown via the real root `spawn_subagent` bubble
-    // re-rendered as the child-view header (see
-    // `render::project_for_draw`'s `child_view_bubble`) — the transcript
-    // itself starts empty and only accumulates the child's own turns.
+    // re-rendered as the subagent-view header (see
+    // `render::project_for_draw`'s `subagent_view_bubble`) — the transcript
+    // itself starts empty and only accumulates the subagent's own turns.
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();
     update(
         &mut state,
-        TuiEvent::Domain(DomainEvent::ChildAgentStarted {
+        TuiEvent::Domain(DomainEvent::SubagentStarted {
             run_id,
             call_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
@@ -187,14 +187,14 @@ fn child_agent_started_clears_transcript_without_seeding_a_synthetic_task_messag
         }),
         &empty_textarea(),
     );
-    assert!(state.child_conversations[&run_id].messages.is_empty());
+    assert!(state.subagent_conversations[&run_id].messages.is_empty());
 }
 
 #[test]
-fn child_tool_pending_auto_switches_view_and_arms_auto_return() {
+fn subagent_tool_pending_auto_switches_view_and_arms_auto_return() {
     let mut state = AppState::new();
     state.mode = TuiMode::Streaming;
-    let run_id = tracked_child(&mut state);
+    let run_id = tracked_subagent(&mut state);
     let id = Uuid::new_v4();
     update(
         &mut state,
@@ -209,11 +209,11 @@ fn child_tool_pending_auto_switches_view_and_arms_auto_return() {
         &empty_textarea(),
     );
     assert!(
-        matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == run_id),
-        "expected auto-switch to the child's view, got {:?}",
+        matches!(state.active_view, ConversationView::Subagent { run_id: r, .. } if r == run_id),
+        "expected auto-switch to the subagent's view, got {:?}",
         state.active_view
     );
-    assert!(state.auto_switched_to_child);
+    assert!(state.auto_switched_to_subagent);
 
     // Resolving the pause (denial) auto-returns since the switch was
     // automatic, not a manual navigation.
@@ -223,32 +223,32 @@ fn child_tool_pending_auto_switches_view_and_arms_auto_return() {
         &empty_textarea(),
     );
     assert_eq!(state.active_view, ConversationView::Root);
-    assert!(!state.auto_switched_to_child);
+    assert!(!state.auto_switched_to_subagent);
 }
 
 #[test]
-fn child_tool_pending_for_a_different_running_child_auto_switches_away_from_a_finished_childs_view_and_restores_it_on_resolve(
+fn subagent_tool_pending_for_a_different_running_subagent_auto_switches_away_from_a_finished_subagents_view_and_restores_it_on_resolve(
 ) {
     // Regression: with two subagents spawned, one already finished (and
     // the user manually drilled into its transcript) and a second still
-    // running, an approval belonging to the *second* (background) child
-    // must not be stranded behind the finished child's transcript — it
-    // has to switch to the child that actually needs the approval, then
+    // running, an approval belonging to the *second* (background) subagent
+    // must not be stranded behind the finished subagent's transcript — it
+    // has to switch to the subagent that actually needs the approval, then
     // return to exactly the view the user was on before.
     let mut state = AppState::new();
     state.mode = TuiMode::Streaming;
 
-    // First child finishes; user manually drills into its (now static)
+    // First subagent finishes; user manually drills into its (now static)
     // transcript.
-    let finished_run_id = tracked_child(&mut state);
-    state.running_children.clear();
-    state.switch_to_child_view(finished_run_id);
-    assert!(!state.auto_switched_to_child);
+    let finished_run_id = tracked_subagent(&mut state);
+    state.running_subagents.clear();
+    state.switch_to_subagent_view(finished_run_id);
+    assert!(!state.auto_switched_to_subagent);
 
-    // Second child starts running in the background and hits a bash
+    // Second subagent starts running in the background and hits a bash
     // approval.
     let running_run_id = Uuid::new_v4();
-    state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+    state.start_subagent_run(crate::tui_reducer_state::SubagentRunInfo {
         run_id: running_run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
@@ -270,13 +270,13 @@ fn child_tool_pending_for_a_different_running_child_auto_switches_away_from_a_fi
     );
 
     assert!(
-        matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == running_run_id),
-        "expected auto-switch to the child awaiting approval, got {:?}",
+        matches!(state.active_view, ConversationView::Subagent { run_id: r, .. } if r == running_run_id),
+        "expected auto-switch to the subagent awaiting approval, got {:?}",
         state.active_view
     );
-    assert!(state.auto_switched_to_child);
+    assert!(state.auto_switched_to_subagent);
 
-    // Resolving the approval must return to the finished child's view —
+    // Resolving the approval must return to the finished subagent's view —
     // not Root, since that's what the user was actually looking at.
     update(
         &mut state,
@@ -284,11 +284,11 @@ fn child_tool_pending_for_a_different_running_child_auto_switches_away_from_a_fi
         &empty_textarea(),
     );
     assert!(
-        matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == finished_run_id),
-        "expected to return to the previously-viewed finished child, got {:?}",
+        matches!(state.active_view, ConversationView::Subagent { run_id: r, .. } if r == finished_run_id),
+        "expected to return to the previously-viewed finished subagent, got {:?}",
         state.active_view
     );
-    assert!(!state.auto_switched_to_child);
+    assert!(!state.auto_switched_to_subagent);
 }
 
 #[test]
@@ -357,18 +357,18 @@ fn domain_streaming_clarify_pending_resets_scroll_to_bottom() {
 }
 
 #[test]
-fn child_engine_configuration_is_retained_for_its_conversation_view() {
+fn subagent_engine_configuration_is_retained_for_its_conversation_view() {
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();
 
     update(
         &mut state,
-        TuiEvent::Domain(DomainEvent::ChildAgentEngineConfigured {
+        TuiEvent::Domain(DomainEvent::SubagentEngineConfigured {
             run_id,
             engine: crate::llm::engine::EngineDisplayInfo {
                 engine_name: "ollama/local2".to_string(),
                 provider_connection: "ollama".to_string(),
-                model: "child-model".to_string(),
+                model: "subagent-model".to_string(),
                 reasoning_effort: None,
                 compaction_engine: None,
                 inherits_parent_runtime: false,
@@ -378,11 +378,11 @@ fn child_engine_configuration_is_retained_for_its_conversation_view() {
     );
 
     assert_eq!(
-        state.child_engine_displays.get(&run_id),
+        state.subagent_engine_displays.get(&run_id),
         Some(&crate::llm::engine::EngineDisplayInfo {
             engine_name: "ollama/local2".to_string(),
             provider_connection: "ollama".to_string(),
-            model: "child-model".to_string(),
+            model: "subagent-model".to_string(),
             reasoning_effort: None,
             compaction_engine: None,
             inherits_parent_runtime: false,
@@ -401,7 +401,7 @@ fn header_bubble_stays_expanded_after_the_subagent_finishes() {
 
     update(
         &mut state,
-        TuiEvent::Domain(DomainEvent::ChildAgentStarted {
+        TuiEvent::Domain(DomainEvent::SubagentStarted {
             run_id,
             call_id: bubble_id,
             agent_type: "reviewer".to_string(),
@@ -428,7 +428,7 @@ fn header_bubble_stays_expanded_after_the_subagent_finishes() {
     );
 
     // User manually expands the header bubble while the subagent runs.
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
     state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
     update(
         &mut state,
@@ -456,7 +456,7 @@ fn header_bubble_stays_expanded_after_the_subagent_finishes() {
     );
 
     // The subagent finishes: its final `ToolDone` (the spawn_subagent
-    // call itself completing) and `ChildAgentDone` (bookkeeping) arrive.
+    // call itself completing) and `SubagentDone` (bookkeeping) arrive.
     update(
         &mut state,
         TuiEvent::Domain(DomainEvent::ToolDone {
@@ -472,7 +472,7 @@ fn header_bubble_stays_expanded_after_the_subagent_finishes() {
     );
     update(
         &mut state,
-        TuiEvent::Domain(DomainEvent::ChildAgentDone {
+        TuiEvent::Domain(DomainEvent::SubagentDone {
             run_id,
             status: "done".to_string(),
             result: None,
@@ -591,16 +591,16 @@ fn domain_streaming_interleaved_thinking_and_response_flush_into_separate_bubble
 }
 
 #[test]
-fn child_agent_token_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order() {
+fn subagent_token_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order() {
     // Mirrors `domain_streaming_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order`
-    // for a child conversation: `ChildAgentToken`'s `is_thinking` flag must
-    // route each fragment to the child's own `TurnBuffer` the same way the
+    // for a subagent conversation: `SubagentToken`'s `is_thinking` flag must
+    // route each fragment to the subagent's own `TurnBuffer` the same way the
     // root's `StreamThinkingChunk`/`StreamChunk` do, rather than merging
     // thinking and response text into a single blob (the bug this test
     // guards against).
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
@@ -615,7 +615,7 @@ fn child_agent_token_interleaved_thinking_and_response_flush_into_separate_bubbl
     ] {
         update(
             &mut state,
-            TuiEvent::Domain(DomainEvent::ChildAgentToken {
+            TuiEvent::Domain(DomainEvent::SubagentToken {
                 run_id,
                 text: text.to_string(),
                 is_thinking,
@@ -623,10 +623,10 @@ fn child_agent_token_interleaved_thinking_and_response_flush_into_separate_bubbl
             &empty_textarea(),
         );
     }
-    state.flush_child_partial_text(run_id);
+    state.flush_subagent_partial_text(run_id);
 
     let conversation = state
-        .child_conversations
+        .subagent_conversations
         .get(&run_id)
         .expect("conversation");
     assert_eq!(
@@ -654,12 +654,12 @@ fn child_agent_token_interleaved_thinking_and_response_flush_into_separate_bubbl
 }
 
 #[test]
-fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
+fn subagent_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
     let mut state = AppState::new();
     let first_run_id = Uuid::new_v4();
     let second_run_id = Uuid::new_v4();
     for (run_id, label) in [(first_run_id, "First"), (second_run_id, "Second")] {
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
@@ -669,7 +669,7 @@ fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
     }
     update(
         &mut state,
-        TuiEvent::Domain(DomainEvent::ChildContextUsage {
+        TuiEvent::Domain(DomainEvent::SubagentContextUsage {
             run_id: first_run_id,
             estimated_tokens: 2_000,
             context_length: 16_000,
@@ -679,7 +679,7 @@ fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
     );
     update(
         &mut state,
-        TuiEvent::Domain(DomainEvent::ChildContextUsage {
+        TuiEvent::Domain(DomainEvent::SubagentContextUsage {
             run_id: second_run_id,
             estimated_tokens: 6_000,
             context_length: 32_000,
@@ -690,7 +690,7 @@ fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
 
     assert_eq!(
         state.context_usage, None,
-        "a background child's report must not overwrite root usage"
+        "a background subagent's report must not overwrite root usage"
     );
     assert_eq!(
         state.active_context_usage(),
@@ -698,7 +698,7 @@ fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
         "root view selects root usage"
     );
 
-    state.switch_to_child_view(first_run_id);
+    state.switch_to_subagent_view(first_run_id);
     assert_eq!(
         state.active_context_usage(),
         Some(ContextUsage {
@@ -707,7 +707,7 @@ fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
             source: ContextUsageSource::SerializedRequest,
         })
     );
-    state.switch_to_child_view(second_run_id);
+    state.switch_to_subagent_view(second_run_id);
     assert_eq!(
         state.active_context_usage(),
         Some(ContextUsage {
@@ -737,10 +737,10 @@ fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
         "root view returns to root usage"
     );
 
-    state.switch_to_child_view(first_run_id);
+    state.switch_to_subagent_view(first_run_id);
     update(
         &mut state,
-        TuiEvent::Domain(DomainEvent::ChildAgentDone {
+        TuiEvent::Domain(DomainEvent::SubagentDone {
             run_id: first_run_id,
             status: "success".to_string(),
             result: Some("done".to_string()),
@@ -754,7 +754,7 @@ fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
             context_length: 16_000,
             source: ContextUsageSource::SerializedRequest,
         }),
-        "finished child readout remains available while its transcript is drilled in"
+        "finished subagent readout remains available while its transcript is drilled in"
     );
 }
 
@@ -762,11 +762,11 @@ fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
 fn compaction_activity_is_scoped_and_preserves_agent_mode() {
     let mut state = AppState::new();
     let root_request_id = Uuid::new_v4();
-    let child_run_id = Uuid::new_v4();
-    let child_request_id = Uuid::new_v4();
+    let subagent_run_id = Uuid::new_v4();
+    let subagent_request_id = Uuid::new_v4();
     for (run_id, request_id) in [
         (None, root_request_id),
-        (Some(child_run_id), child_request_id),
+        (Some(subagent_run_id), subagent_request_id),
     ] {
         update(
             &mut state,
@@ -796,8 +796,8 @@ fn compaction_activity_is_scoped_and_preserves_agent_mode() {
     }
     assert!(!state.compaction_requests.contains_key(&None));
     assert_eq!(
-        state.compaction_requests.get(&Some(child_run_id)),
-        Some(&child_request_id)
+        state.compaction_requests.get(&Some(subagent_run_id)),
+        Some(&subagent_request_id)
     );
     state.clear_conversation();
     assert!(state.compaction_requests.is_empty());

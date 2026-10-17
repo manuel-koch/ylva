@@ -44,13 +44,13 @@ impl Provider for FailingProvider {
 }
 
 #[derive(Default)]
-struct ChildCompactionProvider {
+struct SubagentCompactionProvider {
     requests: AtomicUsize,
 }
 
-impl Provider for ChildCompactionProvider {
+impl Provider for SubagentCompactionProvider {
     fn name(&self) -> &str {
-        "child-compaction"
+        "subagent-compaction"
     }
 
     fn chat<'a>(
@@ -71,7 +71,7 @@ impl Provider for ChildCompactionProvider {
                     let _ = sender
                         .send(StreamEvent::Delta(crate::agent::DeltaChunk {
                             tool_call_index: 0,
-                            tool_call_id: Some("finish-child".to_string()),
+                            tool_call_id: Some("finish-subagent".to_string()),
                             function_name: Some("agent_finish".to_string()),
                             arguments_fragment: Some(
                                 r#"{"status":"success","result":"finished"}"#.to_string(),
@@ -95,11 +95,11 @@ impl Provider for ChildCompactionProvider {
 }
 
 #[derive(Default, Clone)]
-struct ChildSummaryProvider {
+struct SubagentSummaryProvider {
     summary_requests: Arc<AtomicUsize>,
 }
 
-impl Provider for ChildSummaryProvider {
+impl Provider for SubagentSummaryProvider {
     fn with_runtime_config(
         &self,
         _runtime_config: crate::llm::engine::EngineRuntimeConfigHandle,
@@ -108,7 +108,7 @@ impl Provider for ChildSummaryProvider {
     }
 
     fn name(&self) -> &str {
-        "child-summary"
+        "subagent-summary"
     }
 
     fn chat<'a>(
@@ -122,7 +122,9 @@ impl Provider for ChildSummaryProvider {
             let (sender, receiver) = mpsc::channel(2);
             tokio::spawn(async move {
                 let _ = sender
-                    .send(StreamEvent::Text("summarized the child work".to_string()))
+                    .send(StreamEvent::Text(
+                        "summarized the subagent work".to_string(),
+                    ))
                     .await;
                 let _ = sender.send(StreamEvent::Done).await;
             });
@@ -138,7 +140,7 @@ impl Provider for ChildSummaryProvider {
 use super::*;
 
 #[test]
-fn child_with_over_context_task_compacts_and_finishes() {
+fn subagent_with_over_context_task_compacts_and_finishes() {
     crate::test_support::run_locked_paused(async {
         let mut profile = two_engine_profile();
         profile.compaction.engine = Some("main".to_string());
@@ -149,14 +151,14 @@ fn child_with_over_context_task_compacts_and_finishes() {
             .expect("quick agent")
             .allowed_tools = Some(vec!["agent_finish".to_string()]);
 
-        let provider = Arc::new(ChildCompactionProvider::default());
-        let compact_provider = Arc::new(ChildSummaryProvider::default());
-        let mut child_engine_config = test_engine_config();
-        child_engine_config.model = "child-model".to_string();
-        child_engine_config.context_length = Some(3000);
-        child_engine_config.compact_target_ratio = 0.2;
-        child_engine_config.soft_compaction_threshold = 0.3;
-        child_engine_config.hard_compaction_threshold = 0.9;
+        let provider = Arc::new(SubagentCompactionProvider::default());
+        let compact_provider = Arc::new(SubagentSummaryProvider::default());
+        let mut subagent_engine_config = test_engine_config();
+        subagent_engine_config.model = "subagent-model".to_string();
+        subagent_engine_config.context_length = Some(3000);
+        subagent_engine_config.compact_target_ratio = 0.2;
+        subagent_engine_config.soft_compaction_threshold = 0.3;
+        subagent_engine_config.hard_compaction_threshold = 0.9;
         let summary_engine_config = EngineConfig {
             model: "summary-model".to_string(),
             context_length: Some(3000),
@@ -172,40 +174,41 @@ fn child_with_over_context_task_compacts_and_finishes() {
             ),
             (
                 "fast".to_string(),
-                Arc::new(EngineImpl::new(provider.clone(), child_engine_config)) as Arc<dyn Engine>,
+                Arc::new(EngineImpl::new(provider.clone(), subagent_engine_config))
+                    as Arc<dyn Engine>,
             ),
         ]));
         let (finish_tx, mut finish_rx) = mpsc::unbounded_channel();
-        let (child_finish_tx, child_finish_rx) = mpsc::channel(1);
+        let (subagent_finish_tx, subagent_finish_rx) = mpsc::channel(1);
         let (forward_ui_tx, mut forwarded_updates) = mpsc::unbounded_channel();
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
-        let child_role = Role::Child(ChildRoleConfig {
+        let subagent_role = Role::Subagent(SubagentRoleConfig {
             run_id,
             call_id,
             session_id: None,
             briefing: None,
             parent_cancel: CancellationToken::new(),
             subagent_ui_tx: forward_ui_tx,
-            finish_tx: child_finish_tx,
+            finish_tx: subagent_finish_tx,
         });
 
-        let (child_loop, child_ui_rx) = factory
-            .create(&profile, "quick", child_role)
-            .expect("child factory builds");
-        let transcript_target = ChildTranscriptTarget {
+        let (subagent_loop, subagent_ui_rx) = factory
+            .create(&profile, "quick", subagent_role)
+            .expect("subagent factory builds");
+        let transcript_target = SubagentTranscriptTarget {
             parent_store: None,
-            engine_config: Some(child_loop.engine().config()),
+            engine_config: Some(subagent_loop.engine().config()),
             utility_engine: None,
         };
         let task = format!(
             "Inspect this material and finish: {}",
             "detail ".repeat(700)
         );
-        let drive_task = tokio::spawn(drive_child_to_completion(
-            child_loop,
-            child_ui_rx,
-            child_finish_rx,
+        let drive_task = tokio::spawn(drive_subagent_to_completion(
+            subagent_loop,
+            subagent_ui_rx,
+            subagent_finish_rx,
             task,
             run_id,
             call_id,
@@ -217,22 +220,22 @@ fn child_with_over_context_task_compacts_and_finishes() {
 
         let finish = tokio::time::timeout(Duration::from_secs(5), finish_rx.recv())
             .await
-            .expect("child finishes after compaction")
+            .expect("subagent finishes after compaction")
             .expect("finish event is sent");
         assert_eq!(
             finish.status,
             "success",
-            "finish={finish:?}, summary_requests={}, child_requests={}",
+            "finish={finish:?}, summary_requests={}, subagent_requests={}",
             compact_provider.summary_requests.load(Ordering::SeqCst),
             provider.requests.load(Ordering::SeqCst)
         );
         assert!(
             compact_provider.summary_requests.load(Ordering::SeqCst) >= 2,
-            "child can compact more than once while continuing its task"
+            "subagent can compact more than once while continuing its task"
         );
         assert!(
             provider.requests.load(Ordering::SeqCst) >= 3,
-            "child continues after repeated compaction and sends a finishing request"
+            "subagent continues after repeated compaction and sends a finishing request"
         );
         assert!(
             tokio::time::timeout(Duration::from_secs(1), async {
@@ -246,18 +249,18 @@ fn child_with_over_context_task_compacts_and_finishes() {
             })
             .await
             .is_ok(),
-            "child compaction notices are forwarded with the child run id"
+            "subagent compaction notices are forwarded with the subagent run id"
         );
-        drive_task.await.expect("child driver task joins");
+        drive_task.await.expect("subagent driver task joins");
     });
 }
 
 #[derive(Default)]
-struct FinishOnlyChildProvider;
+struct FinishOnlySubagentProvider;
 
-impl Provider for FinishOnlyChildProvider {
+impl Provider for FinishOnlySubagentProvider {
     fn name(&self) -> &str {
-        "child-finish-only"
+        "subagent-finish-only"
     }
 
     fn chat<'a>(
@@ -272,7 +275,7 @@ impl Provider for FinishOnlyChildProvider {
                 let _ = sender
                     .send(StreamEvent::Delta(crate::agent::DeltaChunk {
                         tool_call_index: 0,
-                        tool_call_id: Some("finish-child".to_string()),
+                        tool_call_id: Some("finish-subagent".to_string()),
                         function_name: Some("agent_finish".to_string()),
                         arguments_fragment: Some(
                             r#"{"status":"success","result":"finished"}"#.to_string(),
@@ -291,7 +294,7 @@ impl Provider for FinishOnlyChildProvider {
 }
 
 #[test]
-fn terminal_finish_is_received_only_after_the_child_agent_finish_tool_done_is_forwarded() {
+fn terminal_finish_is_received_only_after_the_subagent_finish_tool_done_is_forwarded() {
     crate::test_support::run_locked_paused(async {
         let mut profile = two_engine_profile();
         profile
@@ -300,38 +303,38 @@ fn terminal_finish_is_received_only_after_the_child_agent_finish_tool_done_is_fo
             .expect("quick agent")
             .allowed_tools = Some(vec!["agent_finish".to_string()]);
 
-        let provider = Arc::new(FinishOnlyChildProvider);
+        let provider = Arc::new(FinishOnlySubagentProvider);
         let factory = AgentFactory::new(HashMap::from([(
             "fast".to_string(),
             Arc::new(EngineImpl::new(provider, test_engine_config())) as Arc<dyn Engine>,
         )]));
         let (finish_tx, mut finish_rx) = mpsc::unbounded_channel();
-        let (child_finish_tx, child_finish_rx) = mpsc::channel(1);
+        let (subagent_finish_tx, subagent_finish_rx) = mpsc::channel(1);
         let (forward_ui_tx, mut forwarded_updates) = mpsc::unbounded_channel();
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
-        let child_role = Role::Child(ChildRoleConfig {
+        let subagent_role = Role::Subagent(SubagentRoleConfig {
             run_id,
             call_id,
             session_id: None,
             briefing: None,
             parent_cancel: CancellationToken::new(),
             subagent_ui_tx: mpsc::unbounded_channel().0,
-            finish_tx: child_finish_tx,
+            finish_tx: subagent_finish_tx,
         });
 
-        let (child_loop, child_ui_rx) = factory
-            .create(&profile, "quick", child_role)
-            .expect("child factory builds");
-        let transcript_target = ChildTranscriptTarget {
+        let (subagent_loop, subagent_ui_rx) = factory
+            .create(&profile, "quick", subagent_role)
+            .expect("subagent factory builds");
+        let transcript_target = SubagentTranscriptTarget {
             parent_store: None,
-            engine_config: Some(child_loop.engine().config()),
+            engine_config: Some(subagent_loop.engine().config()),
             utility_engine: None,
         };
-        let drive_task = tokio::spawn(drive_child_to_completion(
-            child_loop,
-            child_ui_rx,
-            child_finish_rx,
+        let drive_task = tokio::spawn(drive_subagent_to_completion(
+            subagent_loop,
+            subagent_ui_rx,
+            subagent_finish_rx,
             "finish now".to_string(),
             run_id,
             call_id,
@@ -343,7 +346,7 @@ fn terminal_finish_is_received_only_after_the_child_agent_finish_tool_done_is_fo
 
         let finish = tokio::time::timeout(Duration::from_secs(5), finish_rx.recv())
             .await
-            .expect("child finishes")
+            .expect("subagent finishes")
             .expect("finish event is sent");
         assert_eq!(finish.status, "success");
 
@@ -354,14 +357,14 @@ fn terminal_finish_is_received_only_after_the_child_agent_finish_tool_done_is_fo
             });
         assert!(
             agent_finish_tool_done_forwarded,
-            "the terminal finish must not overtake the child's agent_finish ToolDone"
+            "the terminal finish must not overtake the subagent's agent_finish ToolDone"
         );
-        drive_task.await.expect("child driver task joins");
+        drive_task.await.expect("subagent driver task joins");
     });
 }
 
 #[test]
-fn child_context_called_finish_detects_finish_tool_result() {
+fn subagent_context_called_finish_detects_finish_tool_result() {
     let mut context = Context::new();
     context.push_tool_result(crate::agent::ToolResult {
         id: Uuid::new_v4(),
@@ -375,11 +378,11 @@ fn child_context_called_finish_detects_finish_tool_result() {
         content_sections: vec![],
         duration: std::time::Duration::ZERO,
     });
-    assert!(child_context_called_finish(&context));
+    assert!(subagent_context_called_finish(&context));
 }
 
 #[test]
-fn child_context_called_finish_is_false_without_finish_tool_result() {
+fn subagent_context_called_finish_is_false_without_finish_tool_result() {
     let mut context = Context::new();
     context.push_tool_result(crate::agent::ToolResult {
         id: Uuid::new_v4(),
@@ -393,7 +396,7 @@ fn child_context_called_finish_is_false_without_finish_tool_result() {
         content_sections: vec![],
         duration: std::time::Duration::ZERO,
     });
-    assert!(!child_context_called_finish(&context));
+    assert!(!subagent_context_called_finish(&context));
 }
 
 #[test]
@@ -449,12 +452,12 @@ fn subagent_logs_and_transcripts_use_the_replacement_parent_session() {
             let current_store = Arc::new(std::sync::Mutex::new(Some(root.clone())));
             let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
                 Arc::new(MockProvider::new(
-                    vec!["PRIVATE CHILD ANSWER".into()],
+                    vec!["PRIVATE SUBAGENT ANSWER".into()],
                     Duration::ZERO,
                 )),
                 test_engine_config(),
             ));
-            let mut manager = AgentFactory::build_child_agent_manager(
+            let mut manager = AgentFactory::build_subagent_manager(
                 SkillRuntime::default(),
                 HashMap::from([
                     ("main".into(), engine.clone()),
@@ -474,7 +477,7 @@ fn subagent_logs_and_transcripts_use_the_replacement_parent_session() {
                 manager
                     .manager
                     .spawn(
-                        "PRIVATE CHILD TASK".into(),
+                        "PRIVATE SUBAGENT TASK".into(),
                         None,
                         "quick".into(),
                         "label".into(),
@@ -495,18 +498,18 @@ fn subagent_logs_and_transcripts_use_the_replacement_parent_session() {
             assert_eq!(finish.run_id, run_id);
             replacement
                 .span()
-                .in_scope(|| manager.manager.record_child_result(&finish));
+                .in_scope(|| manager.manager.record_subagent_result(&finish));
             replacement.flush().await;
-            let child_path =
+            let subagent_path =
                 crate::store::session_path(directory.path(), replacement.project_key(), run_id);
             assert_eq!(
-                Store::read_session_meta(&child_path)
+                Store::read_session_meta(&subagent_path)
                     .unwrap()
                     .unwrap()
                     .parent_session,
                 Some(replacement.session_id())
             );
-            assert!(Store::read_child_runs(root.path()).unwrap().is_empty());
+            assert!(Store::read_subagent_runs(root.path()).unwrap().is_empty());
             captured_identities
                 .lock()
                 .unwrap()
@@ -516,14 +519,14 @@ fn subagent_logs_and_transcripts_use_the_replacement_parent_session() {
             drop(replacement);
             tokio::time::sleep(Duration::from_millis(20)).await;
         });
-        assert!(!logs.contains("PRIVATE CHILD TASK"));
-        assert!(!logs.contains("PRIVATE CHILD ANSWER"));
+        assert!(!logs.contains("PRIVATE SUBAGENT TASK"));
+        assert!(!logs.contains("PRIVATE SUBAGENT ANSWER"));
         let identities = identities.lock().unwrap();
         let persisted_line = logs
             .lines()
-            .find(|line| line.contains("persisted child agent transcript"))
+            .find(|line| line.contains("persisted subagent transcript"))
             .unwrap_or_else(|| {
-                panic!("missing child transcript event in {format:?} logs:\n{logs}")
+                panic!("missing subagent transcript event in {format:?} logs:\n{logs}")
             });
         assert!(
             persisted_line.contains(&identities[0].to_string()),
@@ -546,7 +549,7 @@ fn subagent_logs_and_transcripts_use_the_replacement_parent_session() {
 }
 
 #[test]
-fn tool_only_child_outcomes_receive_generated_session_titles() {
+fn tool_only_subagent_outcomes_receive_generated_session_titles() {
     crate::test_support::run_locked(async {
         use crate::agent::tools::agent_finish::AgentFinishTool;
         use crate::agent::tools::Tool;
@@ -612,8 +615,8 @@ fn tool_only_child_outcomes_receive_generated_session_titles() {
                 )),
                 test_engine_config(),
             ));
-            write_child_transcript(
-                &ChildTranscriptTarget {
+            write_subagent_transcript(
+                &SubagentTranscriptTarget {
                     parent_store: Some(parent_store.clone()),
                     engine_config: Some(test_engine_config()),
                     utility_engine: Some(utility_engine),
@@ -622,11 +625,11 @@ fn tool_only_child_outcomes_receive_generated_session_titles() {
                 &context,
             )
             .await;
-            let child_path =
+            let subagent_path =
                 crate::store::session_path(&chats_root, parent_store.project_key(), run_id);
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
-                    if Store::read_session_meta(&child_path)
+                    if Store::read_session_meta(&subagent_path)
                         .unwrap()
                         .unwrap()
                         .title
@@ -638,9 +641,9 @@ fn tool_only_child_outcomes_receive_generated_session_titles() {
                 }
             })
             .await
-            .expect("a completed tool-only child receives a utility-generated title");
+            .expect("a completed tool-only subagent receives a utility-generated title");
             assert_eq!(
-                Store::read_messages(&child_path).unwrap(),
+                Store::read_messages(&subagent_path).unwrap(),
                 context.messages()
             );
         }
@@ -648,7 +651,7 @@ fn tool_only_child_outcomes_receive_generated_session_titles() {
 }
 
 #[test]
-fn a_finished_child_transcript_is_written_to_its_own_session_file() {
+fn a_finished_subagent_transcript_is_written_to_its_own_session_file() {
     crate::test_support::run_locked(async {
         let temp = tempfile::tempdir().expect("tempdir");
         let chats_root = temp.path().join("chats");
@@ -661,36 +664,39 @@ fn a_finished_child_transcript_is_written_to_its_own_session_file() {
             None,
         )
         .expect("parent store created");
-        let mut child_context = Context::new();
-        child_context.push_user("summarize the module".to_string());
-        child_context.push_assistant("the child's answer".to_string(), AssistantStatus::Complete);
+        let mut subagent_context = Context::new();
+        subagent_context.push_user("summarize the module".to_string());
+        subagent_context.push_assistant(
+            "the subagent's answer".to_string(),
+            AssistantStatus::Complete,
+        );
         let utility_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
             Arc::new(MockProvider::new(
-                vec!["Child Module Summary".to_string()],
+                vec!["Subagent Module Summary".to_string()],
                 Duration::ZERO,
             )),
             test_engine_config(),
         ));
 
-        write_child_transcript(
-            &ChildTranscriptTarget {
+        write_subagent_transcript(
+            &SubagentTranscriptTarget {
                 parent_store: Some(parent_store.clone()),
                 engine_config: Some(test_engine_config()),
                 utility_engine: Some(utility_engine),
             },
             Uuid::new_v4(),
-            &child_context,
+            &subagent_context,
         )
         .await;
 
-        let child_summary = tokio::time::timeout(Duration::from_secs(1), async {
+        let subagent_summary = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let sessions =
                     crate::store::Store::list_sessions(&chats_root, parent_store.project_key())
                         .expect("sessions listable");
                 if let Some(summary) = sessions.into_iter().find(|summary| {
                     summary.session_id != parent_store.session_id()
-                        && summary.title == "Child Module Summary"
+                        && summary.title == "Subagent Module Summary"
                 }) {
                     break summary;
                 }
@@ -698,52 +704,53 @@ fn a_finished_child_transcript_is_written_to_its_own_session_file() {
             }
         })
         .await
-        .expect("the child title is generated by the utility engine");
+        .expect("the subagent title is generated by the utility engine");
         assert_eq!(
-            child_summary.parent_session,
+            subagent_summary.parent_session,
             Some(parent_store.session_id()),
-            "the listed child summary names its parent session"
+            "the listed subagent summary names its parent session"
         );
-        let transcript = std::fs::read_to_string(&child_summary.path).expect("transcript readable");
+        let transcript =
+            std::fs::read_to_string(&subagent_summary.path).expect("transcript readable");
         assert!(
-            transcript.contains("the child's answer"),
-            "the child's messages are persisted: {transcript}"
+            transcript.contains("the subagent's answer"),
+            "the subagent's messages are persisted: {transcript}"
         );
         assert!(
             transcript.contains(r#""provider_connection":"mock""#)
                 && transcript.contains(r#""model":"test-model""#),
-            "the child's own initial provider/model is recorded: {transcript}"
+            "the subagent's own initial provider/model is recorded: {transcript}"
         );
     });
 }
 
 #[test]
-fn a_finished_child_transcript_is_skipped_when_persistence_is_disabled() {
+fn a_finished_subagent_transcript_is_skipped_when_persistence_is_disabled() {
     crate::test_support::run_locked(async {
-        let mut child_context = Context::new();
-        child_context.push_assistant("unpersisted".to_string(), AssistantStatus::Complete);
-        write_child_transcript(
-            &ChildTranscriptTarget {
+        let mut subagent_context = Context::new();
+        subagent_context.push_assistant("unpersisted".to_string(), AssistantStatus::Complete);
+        write_subagent_transcript(
+            &SubagentTranscriptTarget {
                 parent_store: None,
                 engine_config: Some(test_engine_config()),
                 utility_engine: None,
             },
             Uuid::new_v4(),
-            &child_context,
+            &subagent_context,
         )
         .await;
     });
 }
 
 #[test]
-fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
+fn run_subagent_sends_unstructured_finish_result_when_finish_never_called() {
     crate::test_support::run_locked(async {
-        // The child's mock script produces only plain assistant text (no
-        // tool call), so the child loop goes idle without ever calling
-        // `agent_finish`; `run_child` must synthesize an "unstructured"
-        // `FinishResult` from the child's last assistant text.
+        // The subagent's mock script produces only plain assistant text (no
+        // tool call), so the subagent loop goes idle without ever calling
+        // `agent_finish`; `run_subagent` must synthesize an "unstructured"
+        // `FinishResult` from the subagent's last assistant text.
         let provider = Arc::new(MockProvider::new(
-            vec!["child's final answer".to_string()],
+            vec!["subagent's final answer".to_string()],
             Duration::from_millis(0),
         ));
         let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, test_engine_config()));
@@ -773,51 +780,51 @@ fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
         let (forward_ui_tx, mut forward_ui_rx) = mpsc::unbounded_channel::<UiUpdate>();
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
-        let (child_finish_tx, child_finish_rx) = mpsc::channel::<FinishResult>(1);
+        let (subagent_finish_tx, subagent_finish_rx) = mpsc::channel::<FinishResult>(1);
         let request = SpawnRequest {
             run_id,
             call_id,
-            task: "do the child task".to_string(),
+            task: "do the subagent task".to_string(),
             briefing: None,
             agent_type: "default".to_string(),
             label: "label".to_string(),
         };
         let cancel = CancellationToken::new();
 
-        let child_role_config = ChildRoleConfig {
+        let subagent_role_config = SubagentRoleConfig {
             run_id,
             call_id,
             session_id: None,
             briefing: request.briefing.clone(),
             parent_cancel: cancel.clone(),
             subagent_ui_tx: forward_ui_tx.clone(),
-            finish_tx: child_finish_tx,
+            finish_tx: subagent_finish_tx,
         };
-        let (child_loop, child_ui_rx) = AgentFactory::build(
+        let (subagent_loop, subagent_ui_rx) = AgentFactory::build(
             &SkillRuntime::default(),
             &engines,
             &[],
             &HashSet::new(),
             &profile,
             &request.agent_type,
-            Role::Child(child_role_config),
+            Role::Subagent(subagent_role_config),
             None,
             None,
             None,
         )
-        .expect("child agent should construct successfully");
+        .expect("subagent should construct successfully");
 
-        drive_child_to_completion(
-            child_loop,
-            child_ui_rx,
-            child_finish_rx,
+        drive_subagent_to_completion(
+            subagent_loop,
+            subagent_ui_rx,
+            subagent_finish_rx,
             request.task,
             run_id,
             call_id,
             cancel,
             finish_tx,
             forward_ui_tx,
-            ChildTranscriptTarget {
+            SubagentTranscriptTarget {
                 parent_store: None,
                 engine_config: None,
                 utility_engine: None,
@@ -825,7 +832,7 @@ fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
         )
         .await;
 
-        // Drain (and ignore) any forwarded UI updates from the child's run.
+        // Drain (and ignore) any forwarded UI updates from the subagent's run.
         while forward_ui_rx.try_recv().is_ok() {}
 
         let finish_result = tokio::time::timeout(Duration::from_secs(1), finish_rx.recv())
@@ -837,13 +844,13 @@ fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
         assert_eq!(finish_result.status, "unstructured");
         assert_eq!(
             finish_result.result.as_deref(),
-            Some("child's final answer")
+            Some("subagent's final answer")
         );
     });
 }
 
 #[test]
-fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
+fn run_subagent_reports_stream_error_as_failure_instead_of_unstructured_result() {
     crate::test_support::run_locked(async {
         let provider = Arc::new(FailingProvider);
         let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, test_engine_config()));
@@ -874,41 +881,41 @@ fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
         let cancel = CancellationToken::new();
-        let (child_finish_tx, child_finish_rx) = mpsc::channel::<FinishResult>(1);
-        let child_role_config = ChildRoleConfig {
+        let (subagent_finish_tx, subagent_finish_rx) = mpsc::channel::<FinishResult>(1);
+        let subagent_role_config = SubagentRoleConfig {
             run_id,
             call_id,
             session_id: None,
             briefing: None,
             parent_cancel: cancel.clone(),
             subagent_ui_tx: forward_ui_tx.clone(),
-            finish_tx: child_finish_tx,
+            finish_tx: subagent_finish_tx,
         };
-        let (child_loop, child_ui_rx) = AgentFactory::build(
+        let (subagent_loop, subagent_ui_rx) = AgentFactory::build(
             &SkillRuntime::default(),
             &engines,
             &[],
             &HashSet::new(),
             &profile,
             "default",
-            Role::Child(child_role_config),
+            Role::Subagent(subagent_role_config),
             None,
             None,
             None,
         )
-        .expect("child agent should construct successfully");
+        .expect("subagent should construct successfully");
 
-        drive_child_to_completion(
-            child_loop,
-            child_ui_rx,
-            child_finish_rx,
-            "do the child task".to_string(),
+        drive_subagent_to_completion(
+            subagent_loop,
+            subagent_ui_rx,
+            subagent_finish_rx,
+            "do the subagent task".to_string(),
             run_id,
             call_id,
             cancel,
             finish_tx,
             forward_ui_tx,
-            ChildTranscriptTarget {
+            SubagentTranscriptTarget {
                 parent_store: None,
                 engine_config: None,
                 utility_engine: None,
@@ -933,7 +940,7 @@ fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
 }
 
 #[test]
-fn interleaved_child_streams_keep_their_own_run_id() {
+fn interleaved_subagent_streams_keep_their_own_run_id() {
     let first_run_id = uuid::Uuid::new_v4();
     let second_run_id = uuid::Uuid::new_v4();
     let interleaved = [
@@ -948,34 +955,34 @@ fn interleaved_child_streams_keep_their_own_run_id() {
 
     let attributed: Vec<UiUpdate> = interleaved
         .into_iter()
-        .map(|(run_id, update)| attribute_child_update(run_id, update))
+        .map(|(run_id, update)| attribute_subagent_update(run_id, update))
         .collect();
 
     assert!(matches!(
         &attributed[0],
-        UiUpdate::ChildAgentToken { run_id, text, is_thinking: false }
+        UiUpdate::SubagentToken { run_id, text, is_thinking: false }
             if *run_id == first_run_id && text == "alpha "
     ));
     assert!(matches!(
         &attributed[1],
-        UiUpdate::ChildAgentToken { run_id, text, is_thinking: false }
+        UiUpdate::SubagentToken { run_id, text, is_thinking: false }
             if *run_id == second_run_id && text == "beta "
     ));
     assert!(matches!(
         &attributed[2],
-        UiUpdate::ChildAgentToken { run_id, text, is_thinking: true }
+        UiUpdate::SubagentToken { run_id, text, is_thinking: true }
             if *run_id == first_run_id && text == "first-thought"
     ));
     assert!(matches!(
         &attributed[3],
-        UiUpdate::ChildAgentToken { run_id, text, is_thinking: false }
+        UiUpdate::SubagentToken { run_id, text, is_thinking: false }
             if *run_id == second_run_id && text == "gamma"
     ));
 }
 
 #[test]
-fn non_text_child_updates_pass_through_unchanged() {
+fn non_text_subagent_updates_pass_through_unchanged() {
     let run_id = uuid::Uuid::new_v4();
-    let passed = attribute_child_update(run_id, UiUpdate::StreamDone);
+    let passed = attribute_subagent_update(run_id, UiUpdate::StreamDone);
     assert!(matches!(passed, UiUpdate::StreamDone));
 }

@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::agent::{AgentCommand, AgentLoop, UiUpdate};
 use crate::agent_factory::{select_root_agent_type, AgentFactory};
 use crate::config::ProfileConfig;
-use crate::store::{ChildRunRecord, SessionState, Store};
+use crate::store::{SessionState, Store, SubagentRunRecord};
 use crate::tui_reducer_state::{
     AppState, SessionAction, SessionChoice, SessionPicker, SessionPickerPhase, SlashOverlay,
 };
@@ -35,7 +35,7 @@ pub(super) struct PreparedSession {
     pub agent: AgentLoop,
     pub updates: mpsc::Receiver<UiUpdate>,
     pub transcript: SessionState,
-    pub child_runs: Vec<ChildRunRecord>,
+    pub subagent_runs: Vec<SubagentRunRecord>,
     pub input_history: Vec<String>,
 }
 
@@ -317,7 +317,7 @@ pub(super) fn prepare_target(
             .map_err(anyhow::Error::msg)?;
         anyhow::ensure!(!cancellation.is_cancelled(), "Session selection cancelled.");
         let transcript = Store::read_session_state(store.path())?;
-        let child_runs = Store::read_child_runs(store.path())?;
+        let subagent_runs = Store::read_subagent_runs(store.path())?;
         let input_history = store.read_past_explicit_user_messages(profile.input_history_limit)?;
         let (agent, updates) =
             factory.create_root_for_store(profile, &selection.agent_type, store)?;
@@ -326,7 +326,7 @@ pub(super) fn prepare_target(
             agent,
             updates,
             transcript,
-            child_runs,
+            subagent_runs,
             input_history,
         })
     })();

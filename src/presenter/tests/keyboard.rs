@@ -16,13 +16,13 @@ use super::*;
 
 #[test]
 fn session_and_compact_commands_never_submit_prompts_in_either_view() {
-    for child in [false, true] {
+    for subagent in [false, true] {
         for command in ["/session", "/compact"] {
             for suggestions in [false, true] {
                 let mut state = AppState::new();
-                if child {
-                    let run_id = tracked_child(&mut state);
-                    state.switch_to_child_view(run_id);
+                if subagent {
+                    let run_id = tracked_subagent(&mut state);
+                    state.switch_to_subagent_view(run_id);
                 }
                 let textarea = TextareaContext {
                     text: if suggestions {
@@ -45,7 +45,7 @@ fn session_and_compact_commands_never_submit_prompts_in_either_view() {
                     .any(|effect| matches!(effect, Effect::SubmitPrompt { .. })));
                 if command == "/session" {
                     assert!(effects.contains(&Effect::ListSessions));
-                } else if child {
+                } else if subagent {
                     assert!(!effects.contains(&Effect::Compact));
                     assert!(state.chat_entries.iter().any(|entry| matches!(entry,
                         ChatEntry::Notice { text } if text.contains("only in the root"))));
@@ -210,16 +210,16 @@ fn model_picker_pages_selection_with_page_keys() {
 }
 
 #[test]
-fn manual_navigation_to_child_view_prevents_auto_return() {
+fn manual_navigation_to_subagent_view_prevents_auto_return() {
     // A user who already drilled in manually (e.g. clicked the spawn
-    // bubble) should not get yanked back to Root the moment the child's
+    // bubble) should not get yanked back to Root the moment the subagent's
     // pending tool call resolves — only an *auto*-switch re-arms
     // auto-return.
     let mut state = AppState::new();
     state.mode = TuiMode::Streaming;
-    let run_id = tracked_child(&mut state);
-    state.switch_to_child_view(run_id);
-    assert!(!state.auto_switched_to_child);
+    let run_id = tracked_subagent(&mut state);
+    state.switch_to_subagent_view(run_id);
+    assert!(!state.auto_switched_to_subagent);
 
     let id = Uuid::new_v4();
     update(
@@ -234,8 +234,11 @@ fn manual_navigation_to_child_view_prevents_auto_return() {
         }),
         &empty_textarea(),
     );
-    assert!(matches!(state.active_view, ConversationView::Child { .. }));
-    assert!(!state.auto_switched_to_child);
+    assert!(matches!(
+        state.active_view,
+        ConversationView::Subagent { .. }
+    ));
+    assert!(!state.auto_switched_to_subagent);
 
     update(
         &mut state,
@@ -243,24 +246,24 @@ fn manual_navigation_to_child_view_prevents_auto_return() {
         &empty_textarea(),
     );
     assert!(
-        matches!(state.active_view, ConversationView::Child { .. }),
+        matches!(state.active_view, ConversationView::Subagent { .. }),
         "manual navigation must not auto-return: {:?}",
         state.active_view
     );
 }
 
 #[test]
-fn root_tool_pending_while_drilled_into_a_child_auto_switches_to_root_and_restores_the_child_view_on_resolve(
+fn root_tool_pending_while_drilled_into_a_subagent_auto_switches_to_root_and_restores_the_subagent_view_on_resolve(
 ) {
     // Regression: a root-owned approval must not be stranded behind a
     // subagent's transcript the user happens to be drilled into — it
-    // has to pull the view back to Root, then restore the child view
+    // has to pull the view back to Root, then restore the subagent view
     // once the approval resolves.
     let mut state = AppState::new();
     state.mode = TuiMode::Streaming;
-    let run_id = tracked_child(&mut state);
-    state.switch_to_child_view(run_id);
-    assert!(!state.auto_switched_to_child);
+    let run_id = tracked_subagent(&mut state);
+    state.switch_to_subagent_view(run_id);
+    assert!(!state.auto_switched_to_subagent);
 
     let id = Uuid::new_v4();
     update(
@@ -280,7 +283,7 @@ fn root_tool_pending_while_drilled_into_a_child_auto_switches_to_root_and_restor
         ConversationView::Root,
         "expected auto-switch to root for the root-owned approval"
     );
-    assert!(state.auto_switched_to_child);
+    assert!(state.auto_switched_to_subagent);
 
     update(
         &mut state,
@@ -288,20 +291,23 @@ fn root_tool_pending_while_drilled_into_a_child_auto_switches_to_root_and_restor
         &empty_textarea(),
     );
     assert!(
-        matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == run_id),
-        "expected to return to the previously-viewed child, got {:?}",
+        matches!(state.active_view, ConversationView::Subagent { run_id: r, .. } if r == run_id),
+        "expected to return to the previously-viewed subagent, got {:?}",
         state.active_view
     );
-    assert!(!state.auto_switched_to_child);
+    assert!(!state.auto_switched_to_subagent);
 }
 
 #[test]
-fn esc_with_empty_draft_in_child_view_navigates_back_to_root() {
+fn esc_with_empty_draft_in_subagent_view_navigates_back_to_root() {
     let mut state = AppState::new();
     state.mode = TuiMode::Streaming;
-    let run_id = tracked_child(&mut state);
-    state.switch_to_child_view(run_id);
-    assert!(matches!(state.active_view, ConversationView::Child { .. }));
+    let run_id = tracked_subagent(&mut state);
+    state.switch_to_subagent_view(run_id);
+    assert!(matches!(
+        state.active_view,
+        ConversationView::Subagent { .. }
+    ));
 
     let effects = update(
         &mut state,
@@ -322,10 +328,10 @@ fn esc_with_empty_draft_in_child_view_navigates_back_to_root() {
 }
 
 #[test]
-fn esc_with_non_empty_draft_in_child_view_clears_draft_instead_of_navigating() {
+fn esc_with_non_empty_draft_in_subagent_view_clears_draft_instead_of_navigating() {
     let mut state = AppState::new();
-    let run_id = tracked_child(&mut state);
-    state.switch_to_child_view(run_id);
+    let run_id = tracked_subagent(&mut state);
+    state.switch_to_subagent_view(run_id);
 
     let effects = update(
         &mut state,
@@ -333,7 +339,10 @@ fn esc_with_non_empty_draft_in_child_view_clears_draft_instead_of_navigating() {
         &textarea_with("some draft"),
     );
 
-    assert!(matches!(state.active_view, ConversationView::Child { .. }));
+    assert!(matches!(
+        state.active_view,
+        ConversationView::Subagent { .. }
+    ));
     assert!(matches!(effects.as_slice(), [Effect::ClearTextarea]));
 }
 
@@ -724,16 +733,16 @@ fn enter_with_text_returns_submit_prompt_effect() {
 }
 
 #[test]
-fn enter_with_text_in_child_view_is_a_no_op() {
+fn enter_with_text_in_subagent_view_is_a_no_op() {
     // Regression test: Enter must not silently steer the *root* agent
     // while the user is looking at a subagent's drill-in transcript —
     // there is no visual confirmation of which conversation the message
-    // would go to, and the child conversation itself does not accept
+    // would go to, and the subagent conversation itself does not accept
     // input.
     let mut state = AppState::new();
     state.mode = TuiMode::Streaming;
-    let run_id = tracked_child(&mut state);
-    state.switch_to_child_view(run_id);
+    let run_id = tracked_subagent(&mut state);
+    state.switch_to_subagent_view(run_id);
 
     let effects = update(
         &mut state,

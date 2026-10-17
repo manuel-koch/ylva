@@ -14,7 +14,7 @@
 
 use super::*;
 use crate::agent::{AssistantStatus, Message, UserMessageKind};
-use crate::store::ChildRunRecord;
+use crate::store::SubagentRunRecord;
 
 #[test]
 fn replay_places_the_compaction_marker_at_the_boundary_and_keeps_the_transcript() {
@@ -212,7 +212,7 @@ fn replay_projection_hides_transport_only_tool_result() {
 }
 
 #[test]
-fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_child_state() {
+fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_subagent_state() {
     let finished_call_id = Uuid::new_v4();
     let orphaned_call_id = Uuid::new_v4();
     let finished_run_id = Uuid::new_v4();
@@ -228,8 +228,8 @@ fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_child_state
         status: AssistantStatus::Complete,
         tool_calls: vec![spawn_call(finished_call_id), spawn_call(orphaned_call_id)],
     }];
-    let child_runs = vec![
-        ChildRunRecord {
+    let subagent_runs = vec![
+        SubagentRunRecord {
             run_id: finished_run_id,
             call_id: finished_call_id,
             parent_session: Uuid::new_v4(),
@@ -241,10 +241,10 @@ fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_child_state
             status: Some("success".to_string()),
             result: Some("patch is safe".to_string()),
             sources: vec!["src/lib.rs".to_string()],
-            origin: crate::child_agent_manager::FinishResultOrigin::Agent,
+            origin: crate::subagent_manager::FinishResultOrigin::Agent,
             duration: Some(Duration::from_secs(1)),
         },
-        ChildRunRecord {
+        SubagentRunRecord {
             run_id: orphaned_run_id,
             call_id: orphaned_call_id,
             parent_session: Uuid::new_v4(),
@@ -256,16 +256,16 @@ fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_child_state
             status: None,
             result: None,
             sources: vec![],
-            origin: crate::child_agent_manager::FinishResultOrigin::default(),
+            origin: crate::subagent_manager::FinishResultOrigin::default(),
             duration: None,
         },
     ];
 
-    let entries = project_messages_with_child_runs(&messages, &child_runs, None);
+    let entries = project_messages_with_subagent_runs(&messages, &subagent_runs, None);
     let finished_entry = entries
         .iter()
         .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == finished_call_id))
-        .expect("finished child bubble");
+        .expect("finished subagent bubble");
     assert!(matches!(
         finished_entry,
         ChatEntry::ToolBubble {
@@ -287,7 +287,7 @@ fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_child_state
     let orphaned_entry = entries
         .iter()
         .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == orphaned_call_id))
-        .expect("orphaned child bubble");
+        .expect("orphaned subagent bubble");
     assert!(matches!(
         orphaned_entry,
         ChatEntry::ToolBubble {
@@ -302,10 +302,10 @@ fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_child_state
 }
 
 #[test]
-fn replay_child_transcripts_load_once_on_drill_in() {
+fn replay_subagent_transcripts_load_once_on_drill_in() {
     let run_id = Uuid::new_v4();
     let call_id = Uuid::new_v4();
-    let child_runs = vec![ChildRunRecord {
+    let subagent_runs = vec![SubagentRunRecord {
         run_id,
         call_id,
         parent_session: Uuid::new_v4(),
@@ -317,7 +317,7 @@ fn replay_child_transcripts_load_once_on_drill_in() {
         status: Some("success".to_string()),
         result: Some("done".to_string()),
         sources: vec![],
-        origin: crate::child_agent_manager::FinishResultOrigin::Agent,
+        origin: crate::subagent_manager::FinishResultOrigin::Agent,
         duration: Some(Duration::from_secs(1)),
     }];
     let root_messages = vec![Message::Assistant {
@@ -330,7 +330,7 @@ fn replay_child_transcripts_load_once_on_drill_in() {
             persisted_title_arguments: vec![],
         }],
     }];
-    let child_messages = vec![
+    let subagent_messages = vec![
         Message::User {
             content: "inspect the patch".to_string(),
             kind: UserMessageKind::Explicit,
@@ -343,26 +343,26 @@ fn replay_child_transcripts_load_once_on_drill_in() {
     ];
 
     let mut state = AppState::new();
-    state.replay_messages(&root_messages, &child_runs, None);
-    assert!(state.child_needs_lazy_load(run_id));
+    state.replay_messages(&root_messages, &subagent_runs, None);
+    assert!(state.subagent_needs_lazy_load(run_id));
     assert!(state
-        .child_conversations
+        .subagent_conversations
         .get(&run_id)
-        .expect("replayed child")
+        .expect("replayed subagent")
         .messages
         .is_empty());
 
-    state.load_child_messages(run_id, &child_messages, None);
+    state.load_subagent_messages(run_id, &subagent_messages, None);
     let loaded_messages = state
-        .child_conversations
+        .subagent_conversations
         .get(&run_id)
-        .expect("replayed child")
+        .expect("replayed subagent")
         .messages
         .clone();
-    assert!(!state.child_needs_lazy_load(run_id));
+    assert!(!state.subagent_needs_lazy_load(run_id));
     assert_eq!(loaded_messages.len(), 2);
 
-    state.load_child_messages(
+    state.load_subagent_messages(
         run_id,
         &[Message::Assistant {
             content: "should not replace the cached transcript".to_string(),
@@ -373,9 +373,9 @@ fn replay_child_transcripts_load_once_on_drill_in() {
     );
     assert_eq!(
         state
-            .child_conversations
+            .subagent_conversations
             .get(&run_id)
-            .expect("replayed child")
+            .expect("replayed subagent")
             .messages,
         loaded_messages
     );
@@ -611,10 +611,10 @@ fn flush_partial_assistant_message_drops_whitespace_only_assistant_text() {
 }
 
 #[test]
-fn flush_child_partial_text_drops_whitespace_only_assistant_text() {
+fn flush_subagent_partial_text_drops_whitespace_only_assistant_text() {
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
@@ -622,14 +622,14 @@ fn flush_child_partial_text_drops_whitespace_only_assistant_text() {
         label: "Investigate flaky test".to_string(),
     });
     let conversation = state
-        .child_conversations
+        .subagent_conversations
         .get_mut(&run_id)
         .expect("conversation");
     conversation.turn_buffer.partial_assistant_text = "\n\n".to_string();
-    state.flush_child_partial_text(run_id);
+    state.flush_subagent_partial_text(run_id);
 
     let conversation = state
-        .child_conversations
+        .subagent_conversations
         .get(&run_id)
         .expect("conversation");
     assert!(
@@ -794,11 +794,11 @@ fn toggle_tool_bubble_collapsed_clamps_scroll_offset_to_bubble_start_row() {
 }
 
 #[test]
-fn toggle_tool_bubble_collapsed_toggles_bubble_in_child_conversations() {
+fn toggle_tool_bubble_collapsed_toggles_bubble_in_subagent_conversations() {
     let mut state = AppState::new();
     let id = Uuid::new_v4();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
@@ -806,7 +806,7 @@ fn toggle_tool_bubble_collapsed_toggles_bubble_in_child_conversations() {
         label: "Investigate flaky test".to_string(),
     });
     state
-        .child_conversations
+        .subagent_conversations
         .get_mut(&run_id)
         .unwrap()
         .messages
@@ -824,7 +824,8 @@ fn toggle_tool_bubble_collapsed_toggles_bubble_in_child_conversations() {
 
     state.toggle_tool_bubble_collapsed(id);
 
-    let ChatEntry::ToolBubble { collapsed, .. } = &state.child_conversations[&run_id].messages[0]
+    let ChatEntry::ToolBubble { collapsed, .. } =
+        &state.subagent_conversations[&run_id].messages[0]
     else {
         panic!("expected ToolBubble");
     };
@@ -852,45 +853,45 @@ fn header_bubble_scroll_up_and_down_saturate_at_bounds() {
     let mut state = AppState::new();
     state.header_bubble_scroll_up(3);
     assert_eq!(
-        state.child_view.header_bubble_scroll_offset, 0,
+        state.subagent_view.header_bubble_scroll_offset, 0,
         "must not underflow below zero"
     );
     state.header_bubble_scroll_down(5);
-    assert_eq!(state.child_view.header_bubble_scroll_offset, 5);
+    assert_eq!(state.subagent_view.header_bubble_scroll_offset, 5);
     state.header_bubble_scroll_up(2);
-    assert_eq!(state.child_view.header_bubble_scroll_offset, 3);
+    assert_eq!(state.subagent_view.header_bubble_scroll_offset, 3);
 }
 
 #[test]
-fn switch_to_child_view_resets_header_bubble_scroll_offset() {
+fn switch_to_subagent_view_resets_header_bubble_scroll_offset() {
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
         task: "look into flaky test".to_string(),
         label: "Investigate flaky test".to_string(),
     });
-    state.child_view.header_bubble_scroll_offset = 7;
+    state.subagent_view.header_bubble_scroll_offset = 7;
 
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
 
-    assert_eq!(state.child_view.header_bubble_scroll_offset, 0);
+    assert_eq!(state.subagent_view.header_bubble_scroll_offset, 0);
 }
 
 #[test]
-fn switch_to_child_view_re_pins_chat_scroll_to_bottom() {
+fn switch_to_subagent_view_re_pins_chat_scroll_to_bottom() {
     // `scroll_offset`/`scroll_locked` are shared between the root and
-    // child views (single fields, not per-view). If the user had
+    // subagent views (single fields, not per-view). If the user had
     // scrolled up while viewing `Root` and then drills into a running
     // subagent, that stale non-bottom position must not carry over —
-    // the child transcript should always open pinned to its latest
+    // the subagent transcript should always open pinned to its latest
     // activity (regression test for the bug where drilling in left the
     // list scrolled wherever `Root` had been left).
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
@@ -900,12 +901,12 @@ fn switch_to_child_view_re_pins_chat_scroll_to_bottom() {
     state.conversation.scroll_offset = 30;
     state.conversation.scroll_locked = false;
 
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
 
     assert_eq!(state.conversation.scroll_offset, 0);
     assert!(
         state.conversation.scroll_locked,
-        "child view must open auto-scrolled (pinned) to the bottom"
+        "subagent view must open auto-scrolled (pinned) to the bottom"
     );
 }
 
@@ -916,7 +917,7 @@ fn switch_to_root_view_restores_scroll_position_from_before_drill_in() {
     // not always at the end of the root conversation.
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
@@ -926,7 +927,7 @@ fn switch_to_root_view_restores_scroll_position_from_before_drill_in() {
     state.conversation.scroll_offset = 30;
     state.conversation.scroll_locked = false;
 
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
     state.switch_to_root_view();
 
     assert_eq!(state.conversation.scroll_offset, 30);
@@ -935,16 +936,16 @@ fn switch_to_root_view_restores_scroll_position_from_before_drill_in() {
 }
 
 #[test]
-fn switch_to_root_view_is_a_no_op_on_scroll_when_child_was_auto_switched() {
-    // `note_interactive_pause` auto-switches into the child view
-    // without going through `switch_to_child_view`, so it never
+fn switch_to_root_view_is_a_no_op_on_scroll_when_subagent_was_auto_switched() {
+    // `note_interactive_pause` auto-switches into the subagent view
+    // without going through `switch_to_subagent_view`, so it never
     // populates `saved_root_scroll`. The scroll fields it leaves behind
     // belong to whatever was on screen while viewing `Root` and must be
     // left untouched on auto-return.
     let mut state = AppState::new();
     state.conversation.scroll_offset = 12;
     state.conversation.scroll_locked = false;
-    state.active_view = ConversationView::Child {
+    state.active_view = ConversationView::Subagent {
         run_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
         task: "look into flaky test".to_string(),
@@ -958,7 +959,7 @@ fn switch_to_root_view_is_a_no_op_on_scroll_when_child_was_auto_switched() {
 }
 
 #[test]
-fn switch_to_child_view_captures_the_drilled_into_spawn_bubble_id() {
+fn switch_to_subagent_view_captures_the_drilled_into_spawn_bubble_id() {
     let mut state = AppState::new();
     let bubble_id = Uuid::new_v4();
     state.chat_entries.push(ChatEntry::ToolBubble {
@@ -973,7 +974,7 @@ fn switch_to_child_view_captures_the_drilled_into_spawn_bubble_id() {
         collapsed: false,
     });
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
@@ -981,15 +982,15 @@ fn switch_to_child_view_captures_the_drilled_into_spawn_bubble_id() {
         label: "Investigate flaky test".to_string(),
     });
 
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
 
     assert_eq!(state.saved_root_scroll_bubble, Some(bubble_id));
 }
 
 #[test]
 fn switch_to_root_view_arms_pending_scroll_to_bubble_from_the_saved_bubble_id() {
-    // Regression test: the raw offset saved by `switch_to_child_view`
-    // drifts if the root conversation grows while the child view is
+    // Regression test: the raw offset saved by `switch_to_subagent_view`
+    // drifts if the root conversation grows while the subagent view is
     // open (new messages/tool bubbles shift row indices). Resolving by
     // the drilled-into bubble's own id, once root is rendered again,
     // stays correct regardless.
@@ -1007,15 +1008,15 @@ fn switch_to_root_view_arms_pending_scroll_to_bubble_from_the_saved_bubble_id() 
         collapsed: false,
     });
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
         task: "look into flaky test".to_string(),
         label: "Investigate flaky test".to_string(),
     });
-    state.switch_to_child_view(run_id);
-    // Simulate the root conversation growing while the child view is
+    state.switch_to_subagent_view(run_id);
+    // Simulate the root conversation growing while the subagent view is
     // open — must not affect which bubble is targeted.
     state.chat_entries.push(ChatEntry::AssistantMessage {
         text: "a concurrent root reply".to_string(),
@@ -1050,7 +1051,7 @@ fn header_bubble_id_is_none_while_viewing_root() {
 }
 
 #[test]
-fn header_bubble_id_finds_the_root_spawn_subagent_bubble_while_viewing_child() {
+fn header_bubble_id_finds_the_root_spawn_subagent_bubble_while_viewing_subagent() {
     let mut state = AppState::new();
     let bubble_id = Uuid::new_v4();
     state.chat_entries.push(ChatEntry::ToolBubble {
@@ -1065,14 +1066,14 @@ fn header_bubble_id_finds_the_root_spawn_subagent_bubble_while_viewing_child() {
         collapsed: false,
     });
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
         task: "look into flaky test".to_string(),
         label: "Investigate flaky test".to_string(),
     });
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
 
     assert_eq!(state.header_bubble_id(), Some(bubble_id));
 }
@@ -1093,14 +1094,14 @@ fn toggle_header_bubble_collapsed_flips_the_root_bubble_without_touching_chat_sc
         collapsed: false,
     });
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
         task: "look into flaky test".to_string(),
         label: "Investigate flaky test".to_string(),
     });
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
     state.conversation.scroll_offset = 42;
     state.conversation.scroll_locked = true;
 
@@ -1111,11 +1112,11 @@ fn toggle_header_bubble_collapsed_flips_the_root_bubble_without_touching_chat_sc
     );
     assert_eq!(
         state.conversation.scroll_offset, 42,
-        "must not touch the child transcript's own scroll"
+        "must not touch the subagent transcript's own scroll"
     );
     assert!(
         state.conversation.scroll_locked,
-        "must not touch the child transcript's own scroll lock"
+        "must not touch the subagent transcript's own scroll lock"
     );
 }
 
@@ -1154,8 +1155,8 @@ fn pending_tool_bubble(id: Uuid, name: &str) -> ChatEntry {
     }
 }
 
-fn child_run_info(run_id: Uuid) -> ChildRunInfo {
-    ChildRunInfo {
+fn subagent_run_info(run_id: Uuid) -> SubagentRunInfo {
+    SubagentRunInfo {
         run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
@@ -1165,27 +1166,27 @@ fn child_run_info(run_id: Uuid) -> ChildRunInfo {
 }
 
 #[test]
-fn pending_approvals_are_offered_in_request_order_across_root_and_children() {
+fn pending_approvals_are_offered_in_request_order_across_root_and_subagents() {
     let mut state = AppState::new();
     let first_run_id = Uuid::new_v4();
     let second_run_id = Uuid::new_v4();
-    state.start_child_run(child_run_info(first_run_id));
-    state.start_child_run(child_run_info(second_run_id));
+    state.start_subagent_run(subagent_run_info(first_run_id));
+    state.start_subagent_run(subagent_run_info(second_run_id));
     let root_tool_id = Uuid::new_v4();
-    let first_child_tool_id = Uuid::new_v4();
-    let second_child_tool_id = Uuid::new_v4();
+    let first_subagent_tool_id = Uuid::new_v4();
+    let second_subagent_tool_id = Uuid::new_v4();
 
-    // Requested: second child, then root, then first child.
+    // Requested: second subagent, then root, then first subagent.
     for (tool_id, transcript_run_id) in [
-        (second_child_tool_id, Some(second_run_id)),
+        (second_subagent_tool_id, Some(second_run_id)),
         (root_tool_id, None),
-        (first_child_tool_id, Some(first_run_id)),
+        (first_subagent_tool_id, Some(first_run_id)),
     ] {
         match transcript_run_id {
             Some(run_id) => state
-                .child_conversations
+                .subagent_conversations
                 .get_mut(&run_id)
-                .expect("child transcript")
+                .expect("subagent transcript")
                 .messages
                 .push(pending_tool_bubble(tool_id, "bash")),
             None => state
@@ -1197,7 +1198,7 @@ fn pending_approvals_are_offered_in_request_order_across_root_and_children() {
 
     assert_eq!(
         state.pending_tool_approval().map(|(id, _)| id),
-        Some(second_child_tool_id),
+        Some(second_subagent_tool_id),
         "the earliest request is the head, regardless of transcript"
     );
 
@@ -1205,7 +1206,7 @@ fn pending_approvals_are_offered_in_request_order_across_root_and_children() {
     if let Some(ChatEntry::ToolBubble {
         state: tool_state, ..
     }) = state
-        .child_conversations
+        .subagent_conversations
         .get_mut(&second_run_id)
         .and_then(|conversation| conversation.messages.first_mut())
     {
@@ -1225,27 +1226,27 @@ fn pending_approvals_are_offered_in_request_order_across_root_and_children() {
 }
 
 #[test]
-fn two_running_children_each_keep_their_own_agent_mode() {
+fn two_running_subagents_each_keep_their_own_agent_mode() {
     let mut state = AppState::new();
     let first_run_id = Uuid::new_v4();
     let second_run_id = Uuid::new_v4();
-    state.start_child_run(child_run_info(first_run_id));
-    state.start_child_run(child_run_info(second_run_id));
+    state.start_subagent_run(subagent_run_info(first_run_id));
+    state.start_subagent_run(subagent_run_info(second_run_id));
 
     assert_eq!(
-        state.agent_mode_for_child(first_run_id),
+        state.agent_mode_for_subagent(first_run_id),
         AgentMode::Streaming
     );
     assert_eq!(
-        state.agent_mode_for_child(second_run_id),
+        state.agent_mode_for_subagent(second_run_id),
         AgentMode::Streaming
     );
 
-    state.running_children.remove(&first_run_id);
-    assert_eq!(state.agent_mode_for_child(first_run_id), AgentMode::Idle);
+    state.running_subagents.remove(&first_run_id);
+    assert_eq!(state.agent_mode_for_subagent(first_run_id), AgentMode::Idle);
     assert_eq!(
-        state.agent_mode_for_child(second_run_id),
+        state.agent_mode_for_subagent(second_run_id),
         AgentMode::Streaming,
-        "finishing one child leaves its sibling running"
+        "finishing one subagent leaves its sibling running"
     );
 }

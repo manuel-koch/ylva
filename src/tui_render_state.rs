@@ -35,7 +35,7 @@ use crate::tui_reducer_state::{
 //
 // Mirrors the four sub-structs of the same name on
 // [`crate::tui_reducer_state::AppState`], grouping the same user-facing
-// areas (help popup, drill-in child view, clarify banner, conversation
+// areas (help popup, drill-in subagent view, clarify banner, conversation
 // list). Unlike `AppState` — which keeps on-screen rects together in
 // `AppLayout`, written once per frame by the Driver — `TuiState` has no
 // separate layout type: it is a disposable, rebuilt-every-frame snapshot, so
@@ -67,10 +67,10 @@ pub struct HelpPopupState {
     pub help_drag_active: bool,
 }
 
-/// Drill-in child-view header bubble render state.
-pub struct ChildViewState {
+/// Drill-in subagent-view header bubble render state.
+pub struct SubagentViewState {
     /// Set when the drill-in view (`AppState::active_view ==
-    /// ConversationView::Child`) is showing a child conversation; carries the
+    /// ConversationView::Subagent`) is showing a subagent conversation; carries the
     /// real root `spawn_subagent` `ToolBubble`'s `(id, name, state,
     /// collapsed)` so `tui_widgets::draw` can re-render it verbatim as the header —
     /// same chrome, same collapsed/expanded state, same task/label/
@@ -80,17 +80,17 @@ pub struct ChildViewState {
     /// the root-relative "Spawn" is noise) — see
     /// `ToolBubbleArgs::display_title_override`. `None` while
     /// viewing `Root`.
-    pub child_view_bubble: Option<(uuid::Uuid, String, ToolCallState, bool)>,
-    /// Current vertical scroll offset inside the child-view header bubble
+    pub subagent_view_bubble: Option<(uuid::Uuid, String, ToolCallState, bool)>,
+    /// Current vertical scroll offset inside the subagent-view header bubble
     /// (lines from the top of its content), used only when the bubble's full
     /// content exceeds the header's clamped max height. Clamped to the valid
-    /// range by `tui_widgets::draw` each frame. Meaningless when `child_view_bubble`
+    /// range by `tui_widgets::draw` each frame. Meaningless when `subagent_view_bubble`
     /// is `None`.
     pub header_bubble_scroll_offset: usize,
     /// On-screen rect of the header bubble's content column (excluding its
     /// scrollbar column), written each frame by `tui_widgets::draw` for mouse
     /// hit-testing (routing scroll-wheel events to the header instead of the
-    /// chat area below it). Zero-sized while `child_view_bubble` is `None`.
+    /// chat area below it). Zero-sized while `subagent_view_bubble` is `None`.
     pub header_bubble_area: ratatui::layout::Rect,
     /// Plain text of every rendered header line, indexed before the vertical
     /// scroll offset. Used for extracting selected text on mouse-up.
@@ -123,7 +123,7 @@ pub struct ClarifyBannerState {
     pub clarify_banner: ratatui::layout::Rect,
 }
 
-/// Root-or-child scrollable conversation-list render state (Phase 6.10
+/// Root-or-subagent scrollable conversation-list render state (Phase 6.10
 /// drill-in model: shared by both `active_view` cases, not duplicated per
 /// view).
 pub struct ConversationListState {
@@ -189,13 +189,13 @@ pub struct TuiState {
     /// Active profile and workspace paths displayed in the startup logo and
     /// help popup.
     pub display_metadata: TuiDisplayMetadata,
-    /// Status of the root/parent agent loop. While a child transcript is
-    /// displayed, [`Self::agent_mode`] describes that visible child instead,
+    /// Status of the root/parent agent loop. While a subagent transcript is
+    /// displayed, [`Self::agent_mode`] describes that visible subagent instead,
     /// so the footer can still report parent activity separately.
     pub parent_agent_mode: AgentMode,
     pub agent_mode: AgentMode,
-    /// Active child-agent counts from the root conversation. This is empty
-    /// while a drilled-in child transcript is displayed because the footer
+    /// Active subagent counts from the root conversation. This is empty
+    /// while a drilled-in subagent transcript is displayed because the footer
     /// indicator belongs to the main conversation.
     pub active_subagent_counts: ActiveSubagentCounts,
     /// Engine label for the transcript currently being rendered.
@@ -231,7 +231,7 @@ pub struct TuiState {
     /// `StreamCancelled`. While `Some`, the TUI is in approval sub-mode.
     pub pending_approval: Option<(uuid::Uuid, String, serde_json::Value)>, // (tool_id, tool_name, arguments)
     /// `true` when `pending_approval`'s tool call belongs to a subagent
-    /// (i.e. it lives in `AppState::child_messages`) rather than the root
+    /// (i.e. it lives in `AppState::subagent_messages`) rather than the root
     /// agent — even while `active_view` is `Root` (the user manually
     /// navigated back while the subagent's tool call is still awaiting
     /// approval). Used by `tui_widgets::draw_approval_footer` to prefix the approval
@@ -266,8 +266,8 @@ pub struct TuiState {
     // ── clarify banner ───────────────────────────────────────────────────────
     pub clarify_banner_state: ClarifyBannerState,
 
-    // ── drill-in child view ─────────────────────────────────────────────────
-    pub child_view: ChildViewState,
+    // ── drill-in subagent view ─────────────────────────────────────────────────
+    pub subagent_view: SubagentViewState,
 
     // ── scroll state / chat selection / bubble hit-testing ─────────────────
     pub conversation: ConversationListState,
@@ -326,8 +326,8 @@ impl TuiState {
                 clarify_banner_drag: None,
                 clarify_banner: ratatui::layout::Rect::default(),
             },
-            child_view: ChildViewState {
-                child_view_bubble: None,
+            subagent_view: SubagentViewState {
+                subagent_view_bubble: None,
                 header_bubble_scroll_offset: 0,
                 header_bubble_area: ratatui::layout::Rect::default(),
                 header_rendered_lines: Vec::new(),

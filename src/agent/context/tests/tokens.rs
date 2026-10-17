@@ -179,7 +179,7 @@ fn context_tiers_order_identity_instructions_and_conversation() {
     context.push_user("first question".to_string());
     assert_eq!(context.tier(2), Some(MessageTier::Recent));
 
-    // Instructions injected later (a child briefing, the iteration
+    // Instructions injected later (a subagent briefing, the iteration
     // budget) stay stable `InitialContext` wherever they land.
     context.push_system("work within the sandbox".to_string());
     assert_eq!(context.tier(3), Some(MessageTier::InitialContext));

@@ -29,7 +29,7 @@ fn session_summary(identity: u128, parent: Option<u128>, day: u32) -> SessionSum
 }
 
 #[test]
-fn session_tree_groups_interleaved_children_and_marks_missing_parents() {
+fn session_tree_groups_interleaved_subagents_and_marks_missing_parents() {
     let sessions = [
         session_summary(1, None, 1),
         session_summary(2, None, 2),

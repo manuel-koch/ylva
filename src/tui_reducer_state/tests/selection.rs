@@ -26,9 +26,9 @@ fn conversation_selections_use_terminal_columns_and_strip_chrome() {
     state.conversation.chat_rendered_lines = vec!["a界b".into()];
     state.conversation.chat_rendered_line_prefix_widths = vec![2];
     state.conversation.chat_selection = Some(selection);
-    state.child_view.header_rendered_lines = vec!["a界b".into()];
-    state.child_view.header_rendered_line_prefix_widths = vec![2];
-    state.child_view.header_selection = Some(selection);
+    state.subagent_view.header_rendered_lines = vec!["a界b".into()];
+    state.subagent_view.header_rendered_line_prefix_widths = vec![2];
+    state.subagent_view.header_selection = Some(selection);
     state.help_popup.help_rendered_lines = vec!["a界b".into()];
     state.help_popup.help_selection = Some(ChatSelection {
         anchor_col: 3,

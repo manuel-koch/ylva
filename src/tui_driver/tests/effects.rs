@@ -229,24 +229,27 @@ async fn tool_pending_ctrl_c_denies_tool_immediately() {
 
 #[tokio::test]
 async fn overlapping_approvals_resume_root_and_preserve_input() {
-    for approve_child in [true, false] {
+    for approve_subagent in [true, false] {
         let (mut state, _, cmd_tx, mut cmd_rx) = setup();
         state.mode = TuiMode::Streaming;
         let mut textarea = TextArea::from(vec!["unfinished draft".to_string()]);
         let root_tool_id = uuid::Uuid::new_v4();
-        let child_tool_id = uuid::Uuid::new_v4();
-        let child_run_id = uuid::Uuid::new_v4();
-        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
-            run_id: child_run_id,
+        let subagent_tool_id = uuid::Uuid::new_v4();
+        let subagent_run_id = uuid::Uuid::new_v4();
+        state.start_subagent_run(crate::tui_reducer_state::SubagentRunInfo {
+            run_id: subagent_run_id,
             bubble_id: uuid::Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
             task: "review".to_string(),
             label: "Review".to_string(),
         });
         let mut pending_run_ids = PendingRunIds::default();
-        // Approvals are shown in request order: the child asks first, so its
+        // Approvals are shown in request order: the subagent asks first, so its
         // prompt is the head and the root's prompt waits behind it.
-        for (id, run_id) in [(child_tool_id, Some(child_run_id)), (root_tool_id, None)] {
+        for (id, run_id) in [
+            (subagent_tool_id, Some(subagent_run_id)),
+            (root_tool_id, None),
+        ] {
             let context = textarea_ctx_from(&textarea);
             process_one_update(
                 &mut state,
@@ -270,7 +273,7 @@ async fn overlapping_approvals_resume_root_and_preserve_input() {
         let context = textarea_ctx_from(&textarea);
         let effects = presenter::update(
             &mut state,
-            TuiEvent::Input(if approve_child {
+            TuiEvent::Input(if approve_subagent {
                 InputEvent::KeyInput(key_event(KeyCode::Enter))
             } else {
                 InputEvent::Escape
@@ -289,17 +292,17 @@ async fn overlapping_approvals_resume_root_and_preserve_input() {
         .await;
         assert!(matches!(
             cmd_rx.try_recv(),
-            Ok(AgentCommand::ForChild { run_id, command })
-                if run_id == child_run_id
-                    && if approve_child {
-                        matches!(*command, AgentCommand::ApproveTool { id } if id == child_tool_id)
+            Ok(AgentCommand::ForSubagent { run_id, command })
+                if run_id == subagent_run_id
+                    && if approve_subagent {
+                        matches!(*command, AgentCommand::ApproveTool { id } if id == subagent_tool_id)
                     } else {
-                        matches!(*command, AgentCommand::DenyTool { id, .. } if id == child_tool_id)
+                        matches!(*command, AgentCommand::DenyTool { id, .. } if id == subagent_tool_id)
                     }
         ));
         assert!(
             matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == root_tool_id),
-            "root approval must remain actionable after approving the child: {:?}",
+            "root approval must remain actionable after approving the subagent: {:?}",
             state.focus
         );
         assert_eq!(
@@ -335,13 +338,13 @@ async fn overlapping_approvals_resume_root_and_preserve_input() {
 }
 
 #[tokio::test]
-async fn two_child_approvals_are_presented_fifo_and_route_to_their_own_runs() {
+async fn two_subagent_approvals_are_presented_fifo_and_route_to_their_own_runs() {
     let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
     state.mode = TuiMode::Streaming;
     let first_run_id = Uuid::new_v4();
     let second_run_id = Uuid::new_v4();
     for (run_id, task) in [(first_run_id, "first task"), (second_run_id, "second task")] {
-        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+        state.start_subagent_run(crate::tui_reducer_state::SubagentRunInfo {
             run_id,
             bubble_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
@@ -383,7 +386,7 @@ async fn two_child_approvals_are_presented_fifo_and_route_to_their_own_runs() {
     ));
     assert!(matches!(
         state.active_view,
-        crate::tui_reducer_state::ConversationView::Child { run_id, .. }
+        crate::tui_reducer_state::ConversationView::Subagent { run_id, .. }
             if run_id == first_run_id
     ));
 
@@ -405,7 +408,7 @@ async fn two_child_approvals_are_presented_fifo_and_route_to_their_own_runs() {
     .await;
     assert!(matches!(
         cmd_rx.try_recv(),
-        Ok(AgentCommand::ForChild { run_id, command })
+        Ok(AgentCommand::ForSubagent { run_id, command })
             if run_id == first_run_id
                 && matches!(*command, AgentCommand::ApproveTool { id } if id == first_tool_id)
     ));
@@ -415,7 +418,7 @@ async fn two_child_approvals_are_presented_fifo_and_route_to_their_own_runs() {
     ));
     assert!(matches!(
         state.active_view,
-        crate::tui_reducer_state::ConversationView::Child { run_id, .. }
+        crate::tui_reducer_state::ConversationView::Subagent { run_id, .. }
             if run_id == second_run_id
     ));
 
@@ -437,11 +440,11 @@ async fn two_child_approvals_are_presented_fifo_and_route_to_their_own_runs() {
     assert!(
         matches!(
             &second_command,
-            AgentCommand::ForChild { run_id, command }
+            AgentCommand::ForSubagent { run_id, command }
                 if *run_id == second_run_id
                     && matches!(**command, AgentCommand::DenyTool { id, .. } if id == second_tool_id)
         ),
-        "second verdict must target the second child and tool, got: {second_command:?}"
+        "second verdict must target the second subagent and tool, got: {second_command:?}"
     );
     assert!(state.pending_approval_order.is_empty());
 }
@@ -1138,7 +1141,7 @@ async fn tui_run_outcome_follows_driver_events_with_the_headless_precedence() {
         &cmd_tx,
         &textarea_context,
         &UiUpdate::Error {
-            message: "child failed".into(),
+            message: "subagent failed".into(),
             run_id: Some(Uuid::nil()),
         },
         &mut MouseDrag::default(),
@@ -1149,7 +1152,7 @@ async fn tui_run_outcome_follows_driver_events_with_the_headless_precedence() {
     assert_eq!(
         pending_run_ids.run_outcome.exit_code(),
         crate::ExitCode::Success,
-        "a child error must not change the run outcome"
+        "a subagent error must not change the run outcome"
     );
 
     execute_effects(

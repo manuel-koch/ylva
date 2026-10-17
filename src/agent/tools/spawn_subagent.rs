@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `spawn_subagent`: delegate a task to a one-level-deep child agent.
+//! `spawn_subagent`: delegate a task to a one-level-deep subagent.
 //!
-//! Structurally absent from `Role::Child` registries — a child cannot itself
-//! spawn grandchildren in Phase 6. Only registered for `Role::Root` agents
+//! Structurally absent from `Role::Subagent` registries — a subagent cannot itself
+//! spawn further subagents in Phase 6. Only registered for `Role::Root` agents
 //! whose `AgentConfig::can_spawn` is `true` (`AgentFactory::create` decides
 //! this, not this module).
 //!
 //! Unlike most tools, [`SpawnSubagentCall::run`] is never actually invoked:
 //! `AgentLoop::run` recognises this tool by name once its call is approved
-//! and resolves it directly against the agent's `ChildAgentManager` — the
+//! and resolves it directly against the agent's `SubagentManager` — the
 //! manager lives on the outer `AgentLoop`, which a `ToolCall` object has no
 //! access to. The `run` stub mirrors `clarify`'s headless-mode error for the
 //! same reason: any codepath that reaches it is a bug in the agent loop's
@@ -40,28 +40,28 @@ use crate::sandbox::ApprovalCheck;
 
 /// The default agent-type name used when a `spawn_subagent` call omits
 /// `agent_type`.
-pub const DEFAULT_CHILD_AGENT_TYPE: &str = "default";
+pub const DEFAULT_SUBAGENT_TYPE: &str = "default";
 
 fn default_agent_type() -> String {
-    DEFAULT_CHILD_AGENT_TYPE.to_string()
+    DEFAULT_SUBAGENT_TYPE.to_string()
 }
 
 /// `spawn_subagent` arguments.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct SpawnSubagentArgs {
-    /// 3-6 word label for what the child is doing, e.g. "Refactor auth token validation".
+    /// 3-6 word label for what the subagent is doing, e.g. "Refactor auth token validation".
     /// Shown in the (possibly collapsed) tool-call bubble title and included in
     /// the later completion event so the parent can correlate results without
     /// relying on completion order.
     pub label: String,
-    /// Self-contained instruction and expected deliverable for the child — it
+    /// Self-contained instruction and expected deliverable for the subagent — it
     /// has no knowledge of this conversation beyond `briefing`.
     pub task: String,
-    /// Optional context/background injected ahead of `task` in the child's own
+    /// Optional context/background injected ahead of `task` in the subagent's own
     /// conversation, so it need not be repeated in `task`.
     #[serde(default)]
     pub briefing: Option<String>,
-    /// Agent-type configuration name the child runs as (default: `"default"`).
+    /// Agent-type configuration name the subagent runs as (default: `"default"`).
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
 }
@@ -110,12 +110,12 @@ impl SpawnSubagentTool {
     }
 
     fn base_description() -> &'static str {
-        "Delegate a self-contained task to a background child agent. The immediate tool result \
-         is admission only, not the child's answer: it has the JSON shape \
+        "Delegate a self-contained task to a background subagent. The immediate tool result \
+         is admission only, not the subagent's answer: it has the JSON shape \
          {\"event\":\"subagent_accepted\",\"status\":\"running\"|\"queued\",\"run_id\":\"...\", \
          \"outstanding_count\":N,\"all_done\":false}. Never invent a tool call merely to wait \
          (no sleep, status-only command, or polling). A terminal completion is delivered later \
-         as a hidden harness notice, not as a second tool result; it contains the child's \
+         as a hidden harness notice, not as a second tool result; it contains the subagent's \
          run_id, tool_call_id, label, status, result/error/sources, outstanding_count, and \
          all_done. Completion order is not a reliable ordering signal. Do not acknowledge an \
          intermediate completion or tell the user to wait. Continue only genuinely independent \
@@ -128,7 +128,7 @@ impl SpawnSubagentTool {
          Preserve the user's requested format, including tables. Do not assume tool results or \
          subagent responses are visible to the user; present the findings instead of merely announcing \
          completion or referring to results 'above'. Report failures or missing findings explicitly \
-         without inventing details. Never claim a child completed from the admission result alone."
+         without inventing details. Never claim a subagent completed from the admission result alone."
     }
 }
 
@@ -159,10 +159,10 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn is_default_argument(&self, key: &str, value: &Value) -> bool {
-        key == "agent_type" && value.as_str() == Some(DEFAULT_CHILD_AGENT_TYPE)
+        key == "agent_type" && value.as_str() == Some(DEFAULT_SUBAGENT_TYPE)
     }
 
-    /// The call's subtype: which configured agent type the child runs as.
+    /// The call's subtype: which configured agent type the subagent runs as.
     /// Rendered as `Subagent (local-discovery)` instead of an
     /// `agent_type=…` prop; the default type qualifies nothing because
     /// [`is_default_argument`](Self::is_default_argument) already drops it.
@@ -257,7 +257,7 @@ impl ToolCall for SpawnSubagentCall {
             Err(ToolError::failed(
                 SpawnSubagentTool::NAME,
                 "spawn_subagent must be resolved by the agent loop against its \
-                 ChildAgentManager; it cannot be executed as a standalone tool call",
+                 SubagentManager; it cannot be executed as a standalone tool call",
             ))
         }
         .boxed()
@@ -290,7 +290,7 @@ mod tests {
     fn agent_type_defaults_when_omitted() {
         let args: SpawnSubagentArgs =
             serde_json::from_value(serde_json::json!({"label": "Do it", "task": "do it"})).unwrap();
-        assert_eq!(args.agent_type, DEFAULT_CHILD_AGENT_TYPE);
+        assert_eq!(args.agent_type, DEFAULT_SUBAGENT_TYPE);
     }
 
     #[test]
@@ -306,6 +306,8 @@ mod tests {
             },
         ]);
         let description = tool.description();
+        assert!(description.contains("background subagent"));
+        assert!(!description.contains("child"));
         assert!(description.contains("Available agent types:"));
         assert!(description.contains("- default: No description provided."));
         assert!(description.contains("- research: Investigate the repository."));
@@ -359,10 +361,7 @@ mod tests {
         let tool = SpawnSubagentTool::new(false);
         assert_eq!(tool.subtype_argument(), Some("agent_type"));
         assert!(
-            tool.is_default_argument(
-                "agent_type",
-                &Value::String(DEFAULT_CHILD_AGENT_TYPE.into())
-            ),
+            tool.is_default_argument("agent_type", &Value::String(DEFAULT_SUBAGENT_TYPE.into())),
             "the default type never reaches a renderer, so it qualifies nothing"
         );
         assert!(
@@ -373,7 +372,7 @@ mod tests {
 
     #[test]
     fn label_is_the_primary_title_argument_ranked_ahead_of_agent_type() {
-        // `label` gives the LLM a way to summarise the child's purpose so
+        // `label` gives the LLM a way to summarise the subagent's purpose so
         // even a collapsed bubble hints at what it's doing. It must rank
         // before every other non-body argument so the bubble renderer picks
         // it as the bare/bold primary title text instead of `agent_type`.

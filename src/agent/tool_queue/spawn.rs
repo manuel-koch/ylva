@@ -14,19 +14,19 @@
 
 use super::*;
 /// Resolve an approved `spawn_subagent` call immediately against
-/// `child_agent_manager`: unlike ordinary tools, spawning never executes the
+/// `subagent_manager`: unlike ordinary tools, spawning never executes the
 /// call's own `ToolCall::run` (which has no access to the manager) — it
-/// starts (or enqueues) the child directly and pushes a structured admission
+/// starts (or enqueues) the subagent directly and pushes a structured admission
 /// event as the call's tool result right away. This is *not* the call
-/// finishing: `ChildAgentManager::spawn` reports that status as a
+/// finishing: `SubagentManager::spawn` reports that status as a
 /// `UiUpdate::ToolProgress` (bubble stays `Running`), and `content_sections`
 /// (the task/briefing shown to the user) are stashed in
 /// `spawn_content_sections` so the eventual real `ToolDone` — sent only
-/// once the child actually finishes, see `AgentLoop::run`'s `finish_rx`
-/// handling — can still show them alongside the child's result.
+/// once the subagent actually finishes, see `AgentLoop::run`'s `finish_rx`
+/// handling — can still show them alongside the subagent's result.
 pub(in crate::agent) async fn resolve_spawn_subagent(
     pending: PendingTool,
-    child_agent_manager: &mut Option<crate::child_agent_manager::ChildAgentManager>,
+    subagent_manager: &mut Option<crate::subagent_manager::SubagentManager>,
     context: &mut Context,
     ui_tx: &mpsc::Sender<UiUpdate>,
     spawn_content_sections: &mut HashMap<Uuid, Vec<crate::agent::tools::Section>>,
@@ -59,7 +59,7 @@ pub(in crate::agent) async fn resolve_spawn_subagent(
     let agent_type = arguments
         .get("agent_type")
         .and_then(|value| value.as_str())
-        .unwrap_or(tools::spawn_subagent::DEFAULT_CHILD_AGENT_TYPE)
+        .unwrap_or(tools::spawn_subagent::DEFAULT_SUBAGENT_TYPE)
         .to_string();
     let label = arguments
         .get("label")
@@ -67,23 +67,23 @@ pub(in crate::agent) async fn resolve_spawn_subagent(
         .unwrap_or_default()
         .to_string();
 
-    let (status_text, run_id, outstanding_count) = match child_agent_manager.as_mut() {
+    let (status_text, run_id, outstanding_count) = match subagent_manager.as_mut() {
         Some(manager) => {
             let status = manager.spawn(task, briefing, agent_type, label.clone(), call_id);
             let outstanding_count = manager.outstanding_count();
             let (status_text, run_id) = match status {
-                crate::child_agent_manager::SpawnStatus::Started(run_id) => ("running", run_id),
-                crate::child_agent_manager::SpawnStatus::Queued(run_id) => ("queued", run_id),
+                crate::subagent_manager::SpawnStatus::Started(run_id) => ("running", run_id),
+                crate::subagent_manager::SpawnStatus::Queued(run_id) => ("queued", run_id),
             };
             (status_text, run_id, outstanding_count)
         }
         None => {
             // Structurally unreachable: `spawn_subagent` is only ever
-            // registered when a `ChildAgentManager` is wired. Fail safe
+            // registered when a `SubagentManager` is wired. Fail safe
             // rather than panic.
             let error =
-                "spawn_subagent is unavailable: this agent cannot spawn children".to_string();
-            tracing::error!(tool_call_id = %call_id, "spawn_subagent resolved with no ChildAgentManager wired");
+                "spawn_subagent is unavailable: this agent cannot spawn subagents".to_string();
+            tracing::error!(tool_call_id = %call_id, "spawn_subagent resolved with no SubagentManager wired");
             context.push_tool_error(
                 call_id,
                 name.clone(),
@@ -132,7 +132,7 @@ pub(in crate::agent) async fn resolve_spawn_subagent(
             .unwrap_or_default(),
         duration: std::time::Duration::ZERO,
     });
-    // No `ToolDone` here: `ChildAgentManager::spawn` already reported the
+    // No `ToolDone` here: `SubagentManager::spawn` already reported the
     // "running"/"queued" status via `UiUpdate::ToolProgress`. The bubble
-    // stays `Running` until the child truly finishes.
+    // stays `Running` until the subagent truly finishes.
 }

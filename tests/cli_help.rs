@@ -42,6 +42,8 @@ fn help_flag_prints_usage_and_exits_zero() {
         "--auto-approve-web-fetch",
         "--auto-approve-spawn",
         "--max-concurrent-subagents",
+        "Auto-approve spawning subagents",
+        "Maximum subagents running at once",
         "init",
         "profile",
     ] {
@@ -50,6 +52,7 @@ fn help_flag_prints_usage_and_exits_zero() {
             "help must list {expected}: {stdout}"
         );
     }
+    assert!(!stdout.contains("child agent"));
     assert!(
         output.stderr.is_empty(),
         "help must not write to stderr: {:?}",

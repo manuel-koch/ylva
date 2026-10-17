@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 impl AppState {
     /// Find the most-recent `ToolBubble` with `id == target_id`, searching
-    /// every child's own transcript (`child_conversations`) and the root
+    /// every subagent's own transcript (`subagent_conversations`) and the root
     /// (`chat_entries`) — a bubble's `id` (a `Uuid`) is unique regardless of
     /// which transcript it was created in (see `target_messages_mut`), so
     /// updaters (`apply_tool_*`) can stay agnostic of which one it lives in.
@@ -38,7 +38,7 @@ impl AppState {
         target_id: Uuid,
         content_changed: bool,
     ) -> Option<&mut ChatEntry> {
-        for (run_id, conversation) in &mut self.child_conversations {
+        for (run_id, conversation) in &mut self.subagent_conversations {
             if let Some(pos) = conversation.messages.iter().rposition(
                 |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == target_id),
             ) {
@@ -61,13 +61,13 @@ impl AppState {
     }
 
     /// Target transcript for a *new* tool/clarify bubble tagged with
-    /// `run_id`: that child's own transcript when `run_id` identifies any
-    /// tracked child run (running, queued, or already finished — see
-    /// `child_conversations`), the root transcript otherwise (`run_id` is
+    /// `run_id`: that subagent's own transcript when `run_id` identifies any
+    /// tracked subagent run (running, queued, or already finished — see
+    /// `subagent_conversations`), the root transcript otherwise (`run_id` is
     /// `None`, or an unrecognised id).
     pub(crate) fn target_messages_mut(&mut self, run_id: Option<Uuid>) -> &mut Vec<ChatEntry> {
         if let Some(run_id) = run_id {
-            if let Some(conversation) = self.child_conversations.get_mut(&run_id) {
+            if let Some(conversation) = self.subagent_conversations.get_mut(&run_id) {
                 return &mut conversation.messages;
             }
         }
@@ -75,7 +75,7 @@ impl AppState {
     }
 
     /// The head of the queued tool approvals, as `(tool_id, tool_name)`, when
-    /// its bubble is still in [`ToolCallState::Pending`] in the root or a child
+    /// its bubble is still in [`ToolCallState::Pending`] in the root or a subagent
     /// transcript.
     ///
     /// This is the authoritative "an approval is outstanding" marker —
@@ -90,7 +90,7 @@ impl AppState {
     }
 
     /// Name of the tool bubble `tool_id` when it is still awaiting approval
-    /// in the root or any child transcript.
+    /// in the root or any subagent transcript.
     fn pending_approval_name(&self, tool_id: Uuid) -> Option<String> {
         fn find_in(messages: &[ChatEntry], tool_id: Uuid) -> Option<String> {
             messages.iter().find_map(|entry| match entry {
@@ -103,7 +103,7 @@ impl AppState {
             })
         }
         find_in(&self.chat_entries, tool_id).or_else(|| {
-            self.child_conversations
+            self.subagent_conversations
                 .values()
                 .find_map(|conversation| find_in(&conversation.messages, tool_id))
         })
@@ -121,11 +121,11 @@ impl AppState {
         self.pending_approval_order = still_pending;
     }
 
-    /// Mark unfinished tool bubbles in a cancelled child transcript as
+    /// Mark unfinished tool bubbles in a cancelled subagent transcript as
     /// killed, returning their ids so the presenter can release any approval
     /// focus and resume the next queued prompt.
-    pub(crate) fn kill_unfinished_child_tools(&mut self, run_id: Uuid) -> Vec<Uuid> {
-        let Some(conversation) = self.child_conversations.get_mut(&run_id) else {
+    pub(crate) fn kill_unfinished_subagent_tools(&mut self, run_id: Uuid) -> Vec<Uuid> {
+        let Some(conversation) = self.subagent_conversations.get_mut(&run_id) else {
             return Vec::new();
         };
         let mut killed_tool_ids = Vec::new();
@@ -154,8 +154,8 @@ impl AppState {
     /// row keeps that title row visible in the current viewport.
     ///
     /// Delegates the actual lookup to `find_tool_bubble_mut`, which searches
-    /// both the root (`chat_entries`) and every tracked child's own
-    /// transcript (`child_conversations`) — the click that triggers this can
+    /// both the root (`chat_entries`) and every tracked subagent's own
+    /// transcript (`subagent_conversations`) — the click that triggers this can
     /// target a bubble in any of them, depending on `active_view`.
     pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
         let expanded = if let Some(ChatEntry::ToolBubble { collapsed, .. }) =
@@ -187,8 +187,8 @@ impl AppState {
     pub fn toggle_thinking_collapsed(&mut self, target_index: usize) {
         let entries = match self.active_view {
             ConversationView::Root => &mut self.chat_entries,
-            ConversationView::Child { run_id, .. } => {
-                let Some(conversation) = self.child_conversations.get_mut(&run_id) else {
+            ConversationView::Subagent { run_id, .. } => {
+                let Some(conversation) = self.subagent_conversations.get_mut(&run_id) else {
                     return;
                 };
                 &mut conversation.messages
@@ -219,8 +219,8 @@ impl AppState {
     pub fn toggle_partial_thinking_collapsed(&mut self) {
         let turn = match self.active_view {
             ConversationView::Root => &mut self.turn_buffer,
-            ConversationView::Child { run_id, .. } => {
-                let Some(conversation) = self.child_conversations.get_mut(&run_id) else {
+            ConversationView::Subagent { run_id, .. } => {
+                let Some(conversation) = self.subagent_conversations.get_mut(&run_id) else {
                     return;
                 };
                 &mut conversation.turn_buffer

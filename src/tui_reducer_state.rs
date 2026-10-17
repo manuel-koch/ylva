@@ -46,8 +46,8 @@ mod session_picker;
 
 pub use conversation::{
     project_messages, result_section_ids, ActiveSubagentCounts, BubbleExpansionTarget, ChatEntry,
-    ChildConversation, ChildRunInfo, ChildViewState, ConversationListState, ConversationView,
-    ResultSection, ToolCallState, TurnBuffer, UserMessageState,
+    ConversationListState, ConversationView, ResultSection, SubagentConversation, SubagentRunInfo,
+    SubagentViewState, ToolCallState, TurnBuffer, UserMessageState,
 };
 pub use events::{ConfirmKey, DomainEvent, Effect, Focus, InputEvent, TuiMode};
 pub use input_history::HistoryDirection;
@@ -129,7 +129,7 @@ pub fn format_context_usage_readout(context_usage: ContextUsage) -> String {
 // ─── Per-area sub-structs ──────────────────────────────────────────────────────
 //
 // Groups related `AppState` fields by the user-facing area they belong to
-// (help popup, drill-in child view, clarify banner, conversation list),
+// (help popup, drill-in subagent view, clarify banner, conversation list),
 // mirroring the `AppLayout` precedent above. On-screen rects for these same
 // areas stay in `AppLayout` (written once per frame by the Driver) rather
 // than living here — these sub-structs are data-only. `TuiState`
@@ -224,8 +224,8 @@ pub struct AppState {
     // ── chat view-model ─────────────────────────────────────────────────────
     pub chat_entries: Vec<ChatEntry>,
     /// Root conversation's in-flight stream-text accumulator. See
-    /// `TurnBuffer`; every child conversation has its own instance
-    /// (`ChildConversation::turn_buffer`).
+    /// `TurnBuffer`; every subagent conversation has its own instance
+    /// (`SubagentConversation::turn_buffer`).
     pub turn_buffer: TurnBuffer,
     /// Steers (user messages sent while the agent is busy) staged for live
     /// rendering as `Queued` bubbles, not yet committed to `chat_entries`.
@@ -256,8 +256,8 @@ pub struct AppState {
 
     // ── context readout ─────────────────────────────────────────────────────
     /// Latest root model-view estimate reported by `UiUpdate::ContextUsage`;
-    /// rendered in the footer only while `active_view` is `Root`. Child values
-    /// are stored on their respective `ChildConversation`s.
+    /// rendered in the footer only while `active_view` is `Root`. Subagent values
+    /// are stored on their respective `SubagentConversation`s.
     pub context_usage: Option<ContextUsage>,
     /// The persisted compaction snapshot's transcript-relative boundary,
     /// read once at startup and handed to [`Self::replay_messages`] so the
@@ -281,8 +281,8 @@ pub struct AppState {
     // ── clarify banner ───────────────────────────────────────────────────────
     pub clarify_banner_state: ClarifyBannerState,
 
-    // ── child-view header bubble ────────────────────────────────────────────
-    pub child_view: ChildViewState,
+    // ── subagent-view header bubble ────────────────────────────────────────────
+    pub subagent_view: SubagentViewState,
 
     // ── input field ─────────────────────────────────────────────────────────
     /// Mirrors ratatui-textarea's internal scroll-top so scroll indicators
@@ -301,47 +301,47 @@ pub struct AppState {
     pub aborting_exit: bool,
 
     // ── drill-in conversation model (Phase 6.10) ─────────────────────────────
-    /// Which transcript (root or child) is currently rendered in the main
-    /// chat area. Independent of `running_child`: the parent stays in
-    /// `Root` view while a child streams in the background.
+    /// Which transcript (root or subagent) is currently rendered in the main
+    /// chat area. Independent of `running_subagent`: the parent stays in
+    /// `Root` view while a subagent streams in the background.
     pub active_view: ConversationView,
-    /// Every child run's own conversation transcript/partial-text
+    /// Every subagent run's own conversation transcript/partial-text
     /// accumulator, keyed by `run_id` — one entry per `spawn_subagent`
-    /// child that has ever started, added on `ChildAgentStarted` and never
+    /// subagent that has ever started, added on `SubagentStarted` and never
     /// removed (mirrors `chat_entries`, which is also session-lifetime
     /// unbounded), so any of them can still be drilled into later even
-    /// while another child is running/queued or has since finished. Fixes
+    /// while another subagent is running/queued or has since finished. Fixes
     /// the bug where a single shared transcript was silently overwritten
-    /// whenever the next queued child started, corrupting whichever
-    /// child's conversation the user was currently viewing.
-    pub child_conversations: HashMap<Uuid, ChildConversation>,
-    /// Provider/model identity for each constructed child engine, keyed by
-    /// child run id. Child conversations can remain drillable after a run
+    /// whenever the next queued subagent started, corrupting whichever
+    /// subagent's conversation the user was currently viewing.
+    pub subagent_conversations: HashMap<Uuid, SubagentConversation>,
+    /// Provider/model identity for each constructed subagent engine, keyed by
+    /// subagent run id. Subagent conversations can remain drillable after a run
     /// finishes, so these entries have the same session lifetime as their
     /// transcripts.
-    pub child_engine_displays: HashMap<Uuid, EngineDisplayInfo>,
-    /// Identifies every currently *running* child (several may run at once
-    /// — see `ChildAgentManager`), independent of whether `active_view` has
-    /// switched to one yet, and independent of which child the user is
-    /// currently viewing. Keyed by `run_id`; empty when no child is running
-    /// (earlier children may still have entries in `child_conversations`).
-    /// Populated on `ChildAgentStarted`, removed on `ChildAgentDone`.
-    pub running_children: HashMap<Uuid, ChildRunInfo>,
+    pub subagent_engine_displays: HashMap<Uuid, EngineDisplayInfo>,
+    /// Identifies every currently *running* subagent (several may run at once
+    /// — see `SubagentManager`), independent of whether `active_view` has
+    /// switched to one yet, and independent of which subagent the user is
+    /// currently viewing. Keyed by `run_id`; empty when no subagent is running
+    /// (earlier subagents may still have entries in `subagent_conversations`).
+    /// Populated on `SubagentStarted`, removed on `SubagentDone`.
+    pub running_subagents: HashMap<Uuid, SubagentRunInfo>,
     /// Tool-call ids awaiting approval, in the order their `ToolPending`
-    /// arrived (across the root and every child). The head is the prompt
+    /// arrived (across the root and every subagent). The head is the prompt
     /// shown in `Focus::ToolApproval`; the rest wait their turn. Entries
     /// whose bubble has left `Pending` are pruned lazily.
     pub pending_approval_order: Vec<Uuid>,
     /// `true` when `active_view` was switched automatically (an interactive
-    /// pause — `note_interactive_pause`), to `Child` *or* `Root`, rather than
+    /// pause — `note_interactive_pause`), to `Subagent` *or* `Root`, rather than
     /// by explicit user navigation (click/Esc). Gates whether the view
     /// auto-returns to `pre_pause_view` once that pause resolves or the
-    /// owning child finishes.
-    pub auto_switched_to_child: bool,
+    /// owning subagent finishes.
+    pub auto_switched_to_subagent: bool,
     /// Snapshot of `active_view` from immediately before an auto-switch
     /// (`note_interactive_pause`), so `resolve_possible_interactive_pause`
     /// can restore *that* view — which may be `Root` or a different,
-    /// already-finished child's view the user had manually drilled into —
+    /// already-finished subagent's view the user had manually drilled into —
     /// instead of unconditionally landing back on `Root`. Populated only by
     /// `note_interactive_pause`, consumed (taken) by
     /// `resolve_possible_interactive_pause`.
@@ -354,26 +354,26 @@ pub struct AppState {
     /// supports.
     pub last_bubble_click: Option<(uuid::Uuid, std::time::Instant)>,
     /// `(scroll_offset, scroll_locked)` of the root transcript, captured by
-    /// `switch_to_child_view` right before it re-pins the shared scroll
-    /// state to the bottom of the child's transcript. Restored by
+    /// `switch_to_subagent_view` right before it re-pins the shared scroll
+    /// state to the bottom of the subagent's transcript. Restored by
     /// `switch_to_root_view` (Esc with an empty draft) as an immediate best-effort
     /// placeholder — the precise fix is `saved_root_scroll_bubble` below,
     /// resolved once root is rendered again. `None` before the first
     /// drill-in, or once restored.
     pub saved_root_scroll: Option<(usize, bool)>,
     /// `Uuid` of the `spawn_subagent` `ToolBubble` the user drilled in from,
-    /// captured by `switch_to_child_view` (from the drilled-into run's
-    /// `ChildRunInfo::bubble_id`). Consumed by
+    /// captured by `switch_to_subagent_view` (from the drilled-into run's
+    /// `SubagentRunInfo::bubble_id`). Consumed by
     /// `switch_to_root_view`, which moves it into `pending_scroll_to_bubble`
     /// so `render::sync_from_draw` can scroll to that bubble's *current* row
-    /// — robust against the root conversation having grown while the child
+    /// — robust against the root conversation having grown while the subagent
     /// view was open, unlike a raw saved offset which would drift. `None`
     /// before the first drill-in, or once consumed.
     pub saved_root_scroll_bubble: Option<uuid::Uuid>,
     /// Armed by `switch_to_root_view` with the `Uuid` from
     /// `saved_root_scroll_bubble`; consumed by `render::sync_from_draw`
     /// immediately after the first root frame following the switch is drawn
-    /// (so `AppState::bubble_title_rows` reflects root's, not the child's,
+    /// (so `AppState::bubble_title_rows` reflects root's, not the subagent's,
     /// bubbles), which scrolls to that bubble's row and clears this field.
     /// `None` when there is nothing pending.
     pub pending_scroll_to_bubble: Option<uuid::Uuid>,
@@ -407,7 +407,7 @@ impl AppState {
 
     pub(crate) fn invalidate_transcript_layout(&mut self, run_id: Option<Uuid>) {
         let length = run_id
-            .and_then(|run_id| self.child_conversations.get(&run_id))
+            .and_then(|run_id| self.subagent_conversations.get(&run_id))
             .map_or(self.chat_entries.len(), |conversation| {
                 conversation.messages.len()
             });
@@ -424,8 +424,8 @@ impl AppState {
         self.conversation.bubble_title_rows = Vec::new();
         self.conversation.thinking_title_rows = Vec::new();
         self.conversation.chat_selection = None;
-        self.child_view.header_rendered_lines = Vec::new();
-        self.child_view.header_rendered_line_prefix_widths = Vec::new();
+        self.subagent_view.header_rendered_lines = Vec::new();
+        self.subagent_view.header_rendered_line_prefix_widths = Vec::new();
     }
 
     pub(crate) fn revise_stream(&mut self, run_id: Option<Uuid>) {
@@ -471,7 +471,7 @@ impl AppState {
 
             clarify_banner_state: ClarifyBannerState::default(),
 
-            child_view: ChildViewState::default(),
+            subagent_view: SubagentViewState::default(),
 
             input_scroll_top: 0,
 
@@ -485,11 +485,11 @@ impl AppState {
             aborting_exit: false,
 
             active_view: ConversationView::Root,
-            child_conversations: HashMap::new(),
-            child_engine_displays: HashMap::new(),
-            running_children: HashMap::new(),
+            subagent_conversations: HashMap::new(),
+            subagent_engine_displays: HashMap::new(),
+            running_subagents: HashMap::new(),
             pending_approval_order: Vec::new(),
-            auto_switched_to_child: false,
+            auto_switched_to_subagent: false,
             pre_pause_view: None,
             last_bubble_click: None,
             saved_root_scroll: None,
@@ -525,11 +525,11 @@ impl AppState {
         self.turn_buffer = TurnBuffer::default();
         self.queued_steer_texts.clear();
         self.steer_indicator = false;
-        self.child_conversations.clear();
-        self.running_children.clear();
+        self.subagent_conversations.clear();
+        self.running_subagents.clear();
         self.pending_approval_order.clear();
         self.active_view = ConversationView::Root;
-        self.child_view = ChildViewState::default();
+        self.subagent_view = SubagentViewState::default();
         self.conversation.chat_selection = None;
         self.conversation.scroll_offset = 0;
         self.conversation.scroll_locked = true;
@@ -606,11 +606,11 @@ impl AppState {
     pub fn agent_mode(&self) -> AgentMode {
         match &self.mode {
             // A spawned subagent keeps its `spawn_subagent` tool bubble in
-            // `Running` until the child actually finishes, independently of
+            // `Running` until the subagent actually finishes, independently of
             // the root loop's own `TuiMode` — the root can go `Idle` (its
-            // own turn ended) while the child is still working. Report
+            // own turn ended) while the subagent is still working. Report
             // `ToolRunning` in that case so the footer/spinner doesn't look
-            // finished while a child is still active.
+            // finished while a subagent is still active.
             TuiMode::Idle => {
                 if self.has_running_tool_bubble() {
                     AgentMode::ToolRunning

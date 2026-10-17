@@ -15,6 +15,57 @@
 use super::*;
 
 #[test]
+fn subagent_events_roundtrip_with_new_tags_and_reject_old_tags() {
+    let run_id = Uuid::new_v4();
+    let parent_session = Uuid::new_v4();
+    let call_id = Uuid::new_v4();
+    let events = [
+        (
+            StoreEvent::SubagentStart {
+                version: EVENT_VERSION,
+                created_at: now_timestamp(),
+                id: run_id,
+                parent_session,
+                call_id,
+                agent_type: "research".to_string(),
+                task: "Investigate the issue".to_string(),
+                label: "Investigate the issue".to_string(),
+            },
+            "subagent_start",
+            "child_start",
+        ),
+        (
+            StoreEvent::SubagentResult {
+                version: EVENT_VERSION,
+                completed_at: now_timestamp(),
+                id: run_id,
+                parent_session,
+                call_id,
+                status: "success".to_string(),
+                result: Some("Found the cause".to_string()),
+                sources: vec!["src/agent.rs".to_string()],
+                origin: crate::subagent_manager::FinishResultOrigin::Agent,
+            },
+            "subagent_result",
+            "child_result",
+        ),
+    ];
+    for (event, tag, old_tag) in events {
+        let mut serialized = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(serialized["type"], tag);
+        assert_eq!(
+            serde_json::from_value::<StoreEvent>(serialized.clone()).expect("event reads back"),
+            event
+        );
+        serialized["type"] = serde_json::json!(old_tag);
+        assert!(
+            serde_json::from_value::<StoreEvent>(serialized).is_err(),
+            "old delegation tags are intentionally unsupported"
+        );
+    }
+}
+
+#[test]
 fn a_compaction_event_written_before_the_field_still_reads() {
     // An event from before the marker existed: no `transcript_boundary`
     // key at all. The reader tolerates it and reports no marker position.

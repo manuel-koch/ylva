@@ -29,7 +29,7 @@ struct RunState {
     parent_cancel: Option<CancellationToken>,
     system_prompt: Option<String>,
     own_run_id: Option<Uuid>,
-    child_agent_manager: Option<crate::child_agent_manager::ChildAgentManager>,
+    subagent_manager: Option<crate::subagent_manager::SubagentManager>,
     max_tool_iterations: usize,
     batch_cap: usize,
     agent_type: Option<String>,
@@ -37,7 +37,7 @@ struct RunState {
     current_store: Arc<Mutex<Option<Store>>>,
     store_for_commands: Option<Store>,
     spawn_content_sections: HashMap<Uuid, Vec<tools::Section>>,
-    is_child: bool,
+    is_subagent: bool,
     context: Context,
     compaction: compaction::CompactionRuntime,
     startup_checks_finished: bool,
@@ -52,7 +52,7 @@ struct RunState {
     clarify_started_at: Option<std::time::Instant>,
     generation: u64,
     cancelled_run_ids: std::collections::HashSet<Uuid>,
-    pending_child_finish_reprompt: bool,
+    pending_subagent_finish_reprompt: bool,
     iteration_cap_exceeded: Option<String>,
     stream_error: Option<String>,
     session_switch_frozen: bool,
@@ -68,7 +68,7 @@ enum LoopControl {
 
 impl RunState {
     fn session_switch_quiescent(&self) -> bool {
-        !self.is_child
+        !self.is_subagent
             && self.mode == AgentMode::Idle
             && self.pending_steers.is_empty()
             && self.pending_tools.is_empty()
@@ -76,11 +76,11 @@ impl RunState {
             && self.current_tool_cancel.is_none()
             && self.cancelled_run_ids.is_empty()
             && self
-                .child_agent_manager
+                .subagent_manager
                 .as_ref()
                 .is_none_or(|manager| manager.outstanding_count() == 0)
             && !self.compaction.summary_pending()
-            && !self.pending_child_finish_reprompt
+            && !self.pending_subagent_finish_reprompt
             && !self.request_waiting_for_startup_checks
             && self.model_change_capacity_check.is_none()
     }
@@ -132,10 +132,10 @@ impl RunState {
             self.generation,
             &mut self.clarify_started_at,
             &mut self.pending_steers,
-            &mut self.child_agent_manager,
+            &mut self.subagent_manager,
             &mut self.spawn_content_sections,
             self.own_run_id,
-            &mut self.pending_child_finish_reprompt,
+            &mut self.pending_subagent_finish_reprompt,
             &mut self.iteration_cap_exceeded,
             self.session_id,
             Some(&mut self.compaction),
@@ -163,7 +163,7 @@ impl AgentLoop {
         let briefing = self.briefing.take();
         let system_prompt = self.system_prompt.clone();
         let own_run_id = self.own_run_id.take();
-        let child_agent_manager = self.child_agent_manager.take();
+        let subagent_manager = self.subagent_manager.take();
         let mut finish_rx = self.finish_rx.take();
         let mut subagent_ui_rx = self.subagent_ui_rx.take();
         let max_tool_iterations = self.max_tool_iterations;
@@ -185,16 +185,16 @@ impl AgentLoop {
         // Stashes each in-flight `spawn_subagent` call's task/briefing content
         // sections (shown while pending/running) keyed by call id, so they
         // can be carried forward into the eventual real `ToolDone` — sent
-        // once the child actually finishes or is cancelled — alongside its
+        // once the subagent actually finishes or is cancelled — alongside its
         // result. Entries are removed as soon as that terminal `ToolDone` is
         // sent; see `resolve_spawn_subagent`, the `finish_rx` arm below, and
         // the `AgentCommand::Stop` handler's cancellation cleanup.
         let spawn_content_sections: HashMap<Uuid, Vec<crate::agent::tools::Section>> =
             HashMap::new();
-        // Only a `Role::Child` loop has `parent_cancel` set; such a loop must
+        // Only a `Role::Subagent` loop has `parent_cancel` set; such a loop must
         // return as soon as it goes idle instead of waiting forever for
         // commands nobody will send (see the end of the loop body below).
-        let is_child = parent_cancel.is_some();
+        let is_subagent = parent_cancel.is_some();
         let parent_span = tracing::Span::current();
         let initial_span = store
             .as_ref()
@@ -248,8 +248,8 @@ impl AgentLoop {
             if let Some(briefing) = briefing {
                 context.push_system(briefing);
             }
-            if is_child {
-                // Give the child a chance to budget its own tool calls: it
+            if is_subagent {
+                // Give the subagent a chance to budget its own tool calls: it
                 // has no visibility into `advance_tool_queue`'s guard (it
                 // cannot tell "was cut off" from "chose to stop"), so a smart
                 // model can only avoid the cap by knowing about it up front
@@ -295,16 +295,16 @@ impl AgentLoop {
             // generation still matches this counter.
             let generation: u64 = 0;
             // Populated by `AgentCommand::Stop`/`AgentCommand::ClearContext`
-            // right after `child_agent_manager.cancel_all()`: the `run_id`s
-            // of children cancelled but not yet confirmed terminal. A
-            // cancelled child's task may still be mid-flight and send a real
+            // right after `subagent_manager.cancel_all()`: the `run_id`s
+            // of subagents cancelled but not yet confirmed terminal. A
+            // cancelled subagent's task may still be mid-flight and send a real
             // `FinishResult` after cancellation was requested; `finish_rx`'s
             // arm consults this set to drop such stale results instead of
             // pushing their content into a `Context` (possibly a brand-new
             // one, post-`ClearContext`) they no longer belong to.
             let cancelled_run_ids: std::collections::HashSet<Uuid> =
                 std::collections::HashSet::new();
-            // Set by the `finish_rx` arm when the final outstanding child's
+            // Set by the `finish_rx` arm when the final outstanding subagent's
             // result lands while the root is mid-stream (`mode != Idle`): the
             // result is already in `context` (see the `finish_rx` arm's
             // comment), but the root can't react to it until its *own*
@@ -312,19 +312,19 @@ impl AgentLoop {
             // `StreamDone` below is that turn's completion point, so it must
             // check this flag and force a re-prompt — otherwise the root goes
             // Idle believing its just-streamed text is the final answer, the
-            // driver (which tracks the same child via `pending_spawn_call_ids`)
-            // sees zero pending children and ends the conversation, and the
-            // child's result silently never reaches the model.
-            let pending_child_finish_reprompt = false;
-            // Set (only for a child loop) when `advance_tool_queue`'s
+            // driver (which tracks the same subagent via `pending_spawn_call_ids`)
+            // sees zero pending subagents and ends the conversation, and the
+            // subagent's result silently never reaches the model.
+            let pending_subagent_finish_reprompt = false;
+            // Set (only for a subagent loop) when `advance_tool_queue`'s
             // max-tool-use-iterations guard trips — see that function's doc
-            // comment. Checked below at the `is_child && mode == Idle` tail
+            // comment. Checked below at the `is_subagent && mode == Idle` tail
             // to report a clear `Err` (→ `status: "failure"`) instead of the
             // generic "unstructured" `Ok(context)` fallback.
             let iteration_cap_exceeded: Option<String> = None;
-            // A child has no caller that can recover from a provider/stream
+            // A subagent has no caller that can recover from a provider/stream
             // failure after the current request ends. Preserve that
-            // authoritative error so the child returns `Err` instead of
+            // authoritative error so the subagent returns `Err` instead of
             // being misclassified as an unstructured successful answer.
             let stream_error: Option<String> = None;
 
@@ -336,7 +336,7 @@ impl AgentLoop {
                 parent_cancel,
                 system_prompt,
                 own_run_id,
-                child_agent_manager,
+                subagent_manager,
                 max_tool_iterations,
                 batch_cap,
                 agent_type,
@@ -344,7 +344,7 @@ impl AgentLoop {
                 current_store,
                 store_for_commands,
                 spawn_content_sections,
-                is_child,
+                is_subagent,
                 context,
                 compaction,
                 startup_checks_finished,
@@ -359,7 +359,7 @@ impl AgentLoop {
                 clarify_started_at,
                 generation,
                 cancelled_run_ids,
-                pending_child_finish_reprompt,
+                pending_subagent_finish_reprompt,
                 iteration_cap_exceeded,
                 stream_error,
                 session_switch_frozen: false,
@@ -379,7 +379,7 @@ impl AgentLoop {
                                             if std::mem::take(&mut state.request_waiting_for_startup_checks) {
                                                 state.start_request();
                                             }
-                                            // Startup completion is not a completed child turn.
+                                            // Startup completion is not a completed subagent turn.
                                             continue;
                                         }
                 warning = async {
@@ -402,7 +402,7 @@ impl AgentLoop {
                 }
                 }
                 Some(finish_result) = recv_finish(&mut finish_rx) => {
-                // Apply child UI updates already queued before this finish so a child's
+                // Apply subagent UI updates already queued before this finish so a subagent's
                 // `ToolDone` is shown before its completion.
                 if let Some(subagent_rx) = subagent_ui_rx.as_mut() {
                     while let Ok(update) = subagent_rx.try_recv() {
@@ -417,11 +417,11 @@ impl AgentLoop {
                 }
                 Some(update) = recv_subagent_ui(&mut subagent_ui_rx) => { state.forward_subagent_update(update).instrument(session_span.clone()).await; }
                 _ = cancelled_or_pending(&state.parent_cancel) => {
-                                            // The parent cancelled this child (e.g. it stopped
+                                            // The parent cancelled this subagent (e.g. it stopped
                                             // or was torn down). Abort whatever is in flight and
                                             // return immediately — nobody will drive this loop
                                             // with further commands.
-                                            session_span.in_scope(|| tracing::info!("child agent cancelled by parent"));
+                                            session_span.in_scope(|| tracing::info!("subagent cancelled by parent"));
                                             if let Some(cancel_token) = state.current_cancel.take() {
                                                 cancel_token.cancel();
                                             }
@@ -463,7 +463,7 @@ impl AgentLoop {
                                                         &state.ui_tx,
                                                     )
                                                     .instrument(session_span.clone()).await;
-                                                    if waiting_continuation || (state.is_child && prefix_dropped) {
+                                                    if waiting_continuation || (state.is_subagent && prefix_dropped) {
                                                         state.resume_after_compaction();
                                                     }
                                                 } else if waiting_continuation {
@@ -492,7 +492,7 @@ impl AgentLoop {
                 }
                 }
 
-                // A `Role::Child` loop has nobody left to drive it once it
+                // A `Role::Subagent` loop has nobody left to drive it once it
                 // goes idle (no user, no more steers) — the "unstructured
                 // fallback" case (the model stopped calling tools without
                 // ever calling `agent_finish`). Returning here lets the caller
@@ -500,13 +500,13 @@ impl AgentLoop {
                 // an "unstructured" outcome.
                 //
                 // Iteration-cap and stream-error cases are different and
-                // reported as hard `Err`s instead: the child either never got
+                // reported as hard `Err`s instead: the subagent either never got
                 // a chance to conclude naturally or the provider failed, so
                 // there is no "final answer" to salvage. The
-                // `drive_child_to_completion` `Ok(Err(error))` arm reports
+                // `drive_subagent_to_completion` `Ok(Err(error))` arm reports
                 // exactly the right shape (`status: "failure"`, explicit
                 // `error`, no fabricated `result`).
-                if state.is_child && state.mode == AgentMode::Idle {
+                if state.is_subagent && state.mode == AgentMode::Idle {
                     if state.compaction.summary_pending() {
                         continue;
                     }

@@ -17,17 +17,17 @@ use super::*;
 struct ConcurrencyScenario {
     agent: AgentLoop,
     ui_rx: mpsc::Receiver<UiUpdate>,
-    finish_tx: mpsc::UnboundedSender<ylva::child_agent_manager::FinishResult>,
-    spawned_requests: Arc<Mutex<Vec<ylva::child_agent_manager::SpawnRequest>>>,
-    child_ui_senders: Arc<Mutex<Vec<mpsc::UnboundedSender<UiUpdate>>>>,
+    finish_tx: mpsc::UnboundedSender<ylva::subagent_manager::FinishResult>,
+    spawned_requests: Arc<Mutex<Vec<ylva::subagent_manager::SpawnRequest>>>,
+    subagent_ui_senders: Arc<Mutex<Vec<mpsc::UnboundedSender<UiUpdate>>>>,
     interval: Duration,
 }
 
 fn build_concurrency_scenario(
-    max_concurrent_children: Option<usize>,
-    child_count: usize,
+    max_concurrent_subagents: Option<usize>,
+    subagent_count: usize,
 ) -> ConcurrencyScenario {
-    use ylva::child_agent_manager::{ChildAgentManager, SpawnFn, SpawnRequest};
+    use ylva::subagent_manager::{SpawnFn, SpawnRequest, SubagentManager};
 
     let registry = Arc::new(default_registry(
         make_sandbox(),
@@ -38,13 +38,13 @@ fn build_concurrency_scenario(
         },
     ));
     let interval = Duration::from_millis(5);
-    let spawn_calls = (0..child_count)
+    let spawn_calls = (0..subagent_count)
         .map(|index| {
             call(
                 "spawn_subagent",
                 index,
                 serde_json::json!({
-                    "label": format!("Child {index}"),
+                    "label": format!("Subagent {index}"),
                     "task": format!("task {index}"),
                 }),
             )
@@ -70,30 +70,30 @@ fn build_concurrency_scenario(
     let (subagent_ui_tx, subagent_ui_rx) = mpsc::unbounded_channel();
     let spawned_requests = Arc::new(Mutex::new(Vec::<SpawnRequest>::new()));
     let recorded_requests = Arc::clone(&spawned_requests);
-    let child_ui_senders = Arc::new(Mutex::new(Vec::<mpsc::UnboundedSender<UiUpdate>>::new()));
-    let recorded_child_ui_senders = Arc::clone(&child_ui_senders);
+    let subagent_ui_senders = Arc::new(Mutex::new(Vec::<mpsc::UnboundedSender<UiUpdate>>::new()));
+    let recorded_subagent_ui_senders = Arc::clone(&subagent_ui_senders);
     let spawn_fn: SpawnFn = Box::new(move |request, _cancel, subagent_ui_tx| {
         recorded_requests
             .lock()
-            .expect("record child spawn")
+            .expect("record subagent spawn")
             .push(request);
-        recorded_child_ui_senders
+        recorded_subagent_ui_senders
             .lock()
-            .expect("record child UI sender")
+            .expect("record subagent UI sender")
             .push(subagent_ui_tx);
-        ylva::child_agent_manager::SpawnOutcome {
+        ylva::subagent_manager::SpawnOutcome {
             command_sender: None,
             handle: tokio::spawn(async {}),
         }
     });
-    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, max_concurrent_children);
-    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+    let manager = SubagentManager::new(subagent_ui_tx, spawn_fn, max_concurrent_subagents);
+    agent = agent.with_subagent_manager(manager, finish_rx, subagent_ui_rx);
     ConcurrencyScenario {
         agent,
         ui_rx,
         finish_tx,
         spawned_requests,
-        child_ui_senders,
+        subagent_ui_senders,
         interval,
     }
 }
@@ -113,7 +113,7 @@ async fn collect_through_working_response(
         }),
     )
     .await
-    .expect("root should complete the intermediate response while children remain active")
+    .expect("root should complete the intermediate response while subagents remain active")
 }
 
 async fn collect_final_root_response(
@@ -134,16 +134,16 @@ async fn collect_final_root_response(
     .expect("root should finish the final combined answer")
 }
 
-fn successful_child_finish(
+fn successful_subagent_finish(
     run_id: uuid::Uuid,
     call_id: uuid::Uuid,
-) -> ylva::child_agent_manager::FinishResult {
-    ylva::child_agent_manager::FinishResult {
+) -> ylva::subagent_manager::FinishResult {
+    ylva::subagent_manager::FinishResult {
         run_id,
         call_id,
-        origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
+        origin: ylva::subagent_manager::FinishResultOrigin::Agent,
         status: "success".to_string(),
-        result: Some("child result".to_string()),
+        result: Some("subagent result".to_string()),
         error: None,
         sources: vec![],
     }
@@ -170,10 +170,10 @@ fn tool_progress_run_id(update: &UiUpdate, expected_status: &str) -> Option<uuid
 }
 
 #[tokio::test(start_paused = true)]
-async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_finish() {
+async fn intermediate_subagent_completion_does_not_reprompt_until_all_subagents_finish() {
     use std::sync::Mutex;
 
-    use ylva::child_agent_manager::{ChildAgentManager, FinishResult, SpawnFn};
+    use ylva::subagent_manager::{FinishResult, SpawnFn, SubagentManager};
 
     let registry = Arc::new(default_registry(
         make_sandbox(),
@@ -191,7 +191,7 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
                     "spawn_subagent",
                     0,
                     serde_json::json!({
-                        "label": "First child",
+                        "label": "First subagent",
                         "task": "first task"
                     }),
                 ),
@@ -199,7 +199,7 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
                     "spawn_subagent",
                     1,
                     serde_json::json!({
-                        "label": "Second child",
+                        "label": "Second subagent",
                         "task": "second task"
                     }),
                 ),
@@ -226,13 +226,13 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
             .lock()
             .unwrap()
             .push((request.run_id, request.call_id, request.label));
-        ylva::child_agent_manager::SpawnOutcome {
+        ylva::subagent_manager::SpawnOutcome {
             command_sender: None,
             handle: tokio::spawn(async {}),
         }
     });
-    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(1));
-    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+    let manager = SubagentManager::new(subagent_ui_tx, spawn_fn, Some(1));
+    agent = agent.with_subagent_manager(manager, finish_rx, subagent_ui_rx);
 
     agent
         .send_command(AgentCommand::Prompt("delegate twice".to_string()))
@@ -254,12 +254,12 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
     let (running_run_id, running_call_id) = initial_updates
         .iter()
         .find_map(|update| match update {
-            UiUpdate::ChildAgentStarted {
+            UiUpdate::SubagentStarted {
                 run_id, call_id, ..
             } => Some((*run_id, *call_id)),
             _ => None,
         })
-        .expect("one child should have started");
+        .expect("one subagent should have started");
     let (second_call_id, second_run_id) = initial_updates
         .iter()
         .find_map(|update| match update {
@@ -279,7 +279,7 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
             }
             _ => None,
         })
-        .expect("one child should be queued");
+        .expect("one subagent should be queued");
     assert_ne!(running_call_id, second_call_id);
     assert_eq!(spawned_runs.lock().unwrap().len(), 1);
 
@@ -287,13 +287,13 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
         .send(FinishResult {
             run_id: running_run_id,
             call_id: running_call_id,
-            origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
+            origin: ylva::subagent_manager::FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("first result".to_string()),
             error: None,
             sources: vec![],
         })
-        .expect("first child completion should be accepted");
+        .expect("first subagent completion should be accepted");
     let first_done_updates = collect_until_advancing(&mut ui_rx, interval, |update| {
         matches!(
             update,
@@ -322,13 +322,13 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
         .send(FinishResult {
             run_id: second_run_id,
             call_id: second_call_id,
-            origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
+            origin: ylva::subagent_manager::FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("second result".to_string()),
             error: None,
             sources: vec![],
         })
-        .expect("second child completion should be accepted");
+        .expect("second subagent completion should be accepted");
     let final_updates = collect_until_advancing(&mut ui_rx, interval, |update| {
         matches!(update, UiUpdate::StreamStarted)
     })
@@ -376,18 +376,18 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
     assert!(completion_notices[1].contains("\"all_done\":true"));
     assert!(completion_notices
         .iter()
-        .any(|notice| notice.contains("\"label\":\"First child\"")));
+        .any(|notice| notice.contains("\"label\":\"First subagent\"")));
     assert!(completion_notices
         .iter()
-        .any(|notice| notice.contains("\"label\":\"Second child\"")));
+        .any(|notice| notice.contains("\"label\":\"Second subagent\"")));
 }
 
 #[tokio::test(start_paused = true)]
-async fn interleaved_child_tokens_retain_their_own_run_id() {
+async fn interleaved_subagent_tokens_retain_their_own_run_id() {
     use std::collections::HashMap;
 
     use uuid::Uuid;
-    use ylva::child_agent_manager::{ChildAgentManager, FinishResult, SpawnFn};
+    use ylva::subagent_manager::{FinishResult, SpawnFn, SubagentManager};
 
     let registry = Arc::new(default_registry(
         make_sandbox(),
@@ -404,12 +404,12 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
                 call(
                     "spawn_subagent",
                     0,
-                    serde_json::json!({"label": "First child", "task": "first task"}),
+                    serde_json::json!({"label": "First subagent", "task": "first task"}),
                 ),
                 call(
                     "spawn_subagent",
                     1,
-                    serde_json::json!({"label": "Second child", "task": "second task"}),
+                    serde_json::json!({"label": "Second subagent", "task": "second task"}),
                 ),
             ],
             vec![MockEvent::Text("working".to_string())],
@@ -440,13 +440,13 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
         let finish_gate = Arc::clone(&spawn_finish_gate);
         let finish_tx = spawn_finish_tx.clone();
         let handle = tokio::spawn(async move {
-            let _ = forward_ui_tx.send(UiUpdate::ChildAgentToken {
+            let _ = forward_ui_tx.send(UiUpdate::SubagentToken {
                 run_id,
                 text: format!("{task} first chunk"),
                 is_thinking: false,
             });
             barrier.wait().await;
-            let _ = forward_ui_tx.send(UiUpdate::ChildAgentToken {
+            let _ = forward_ui_tx.send(UiUpdate::SubagentToken {
                 run_id,
                 text: format!("{task} thinking"),
                 is_thinking: true,
@@ -454,51 +454,51 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
             let permit = finish_gate
                 .acquire()
                 .await
-                .expect("test keeps the child completion gate open");
+                .expect("test keeps the subagent completion gate open");
             permit.forget();
             let _ = finish_tx.send(FinishResult {
                 run_id,
                 call_id,
-                origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
+                origin: ylva::subagent_manager::FinishResultOrigin::Agent,
                 status: "success".to_string(),
                 result: Some(format!("completed {task}")),
                 error: None,
                 sources: vec![],
             });
         });
-        ylva::child_agent_manager::SpawnOutcome {
+        ylva::subagent_manager::SpawnOutcome {
             command_sender: None,
             handle,
         }
     });
-    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(2));
-    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+    let manager = SubagentManager::new(subagent_ui_tx, spawn_fn, Some(2));
+    agent = agent.with_subagent_manager(manager, finish_rx, subagent_ui_rx);
 
     agent
         .send_command(AgentCommand::Prompt("delegate twice".to_string()))
         .await;
     let handle = agent.run();
 
-    let mut child_token_count = 0;
+    let mut subagent_token_count = 0;
     let mut stream_done_count = 0;
     let mut observed_updates = Vec::new();
     let mut updates = tokio::time::timeout(
         Duration::from_secs(5),
         collect_until_advancing(&mut ui_rx, interval, |update| {
             observed_updates.push(format!("{update:?}"));
-            if matches!(update, UiUpdate::ChildAgentToken { .. }) {
-                child_token_count += 1;
+            if matches!(update, UiUpdate::SubagentToken { .. }) {
+                subagent_token_count += 1;
             }
             if matches!(update, UiUpdate::StreamDone) {
                 stream_done_count += 1;
             }
-            child_token_count == 4 && stream_done_count == 1
+            subagent_token_count == 4 && stream_done_count == 1
         }),
     )
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "bounded wait expired: child_token_count={child_token_count}, \
+            "bounded wait expired: subagent_token_count={subagent_token_count}, \
              stream_done_count={stream_done_count}, updates={observed_updates:?}"
         )
     });
@@ -506,19 +506,19 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
     let task_by_run_id: HashMap<_, _> = updates
         .iter()
         .filter_map(|update| match update {
-            UiUpdate::ChildAgentStarted { run_id, task, .. } => Some((*run_id, task.as_str())),
+            UiUpdate::SubagentStarted { run_id, task, .. } => Some((*run_id, task.as_str())),
             _ => None,
         })
         .collect();
     assert_eq!(
         task_by_run_id.len(),
         2,
-        "both children started concurrently"
+        "both subagents started concurrently"
     );
-    let child_tokens: Vec<(Uuid, String, bool)> = updates
+    let subagent_tokens: Vec<(Uuid, String, bool)> = updates
         .iter()
         .filter_map(|update| match update {
-            UiUpdate::ChildAgentToken {
+            UiUpdate::SubagentToken {
                 run_id,
                 text,
                 is_thinking,
@@ -526,8 +526,8 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
             _ => None,
         })
         .collect();
-    assert_eq!(child_tokens.len(), 4);
-    for (run_id, text, is_thinking) in &child_tokens {
+    assert_eq!(subagent_tokens.len(), 4);
+    for (run_id, text, is_thinking) in &subagent_tokens {
         let task = task_by_run_id
             .get(run_id)
             .expect("every token belongs to a started run");
@@ -541,7 +541,7 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
             "stream kind must match the emitted token: {text:?}"
         );
     }
-    let first_token_run_ids: Vec<Uuid> = child_tokens
+    let first_token_run_ids: Vec<Uuid> = subagent_tokens
         .iter()
         .filter(|(_, text, _)| text.ends_with("first chunk"))
         .map(|(run_id, _, _)| *run_id)
@@ -549,7 +549,7 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
     assert_eq!(first_token_run_ids.len(), 2);
     assert_ne!(
         first_token_run_ids[0], first_token_run_ids[1],
-        "both child streams must contribute before either reaches its second chunk"
+        "both subagent streams must contribute before either reaches its second chunk"
     );
     finish_gate.add_permits(2);
     let final_updates = tokio::time::timeout(
@@ -562,7 +562,7 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
         }),
     )
     .await
-    .expect("root should finish its single final continuation after both children finish");
+    .expect("root should finish its single final continuation after both subagents finish");
     updates.extend(final_updates);
     assert_eq!(
         updates
@@ -570,7 +570,7 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
             .filter(|update| matches!(update, UiUpdate::StreamStarted))
             .count(),
         3,
-        "the root is re-prompted once after the final child finishes"
+        "the root is re-prompted once after the final subagent finishes"
     );
 
     drop(agent);
@@ -578,13 +578,13 @@ async fn interleaved_child_tokens_retain_their_own_run_id() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn child_completion_is_delivered_after_the_child_tool_done_that_precedes_it() {
+async fn subagent_completion_is_delivered_after_the_subagent_tool_done_that_precedes_it() {
     let ConcurrencyScenario {
         mut agent,
         mut ui_rx,
         finish_tx,
         spawned_requests: _,
-        child_ui_senders,
+        subagent_ui_senders,
         interval,
     } = build_concurrency_scenario(Some(1), 1);
     agent
@@ -596,47 +596,47 @@ async fn child_completion_is_delivered_after_the_child_tool_done_that_precedes_i
     let (run_id, call_id) = updates
         .iter()
         .find_map(|update| match update {
-            UiUpdate::ChildAgentStarted {
+            UiUpdate::SubagentStarted {
                 run_id, call_id, ..
             } => Some((*run_id, *call_id)),
             _ => None,
         })
-        .expect("the child must start");
+        .expect("the subagent must start");
 
-    let child_tool_id = uuid::Uuid::new_v4();
-    let subagent_ui_tx = child_ui_senders.lock().expect("child UI senders")[0].clone();
+    let subagent_tool_id = uuid::Uuid::new_v4();
+    let subagent_ui_tx = subagent_ui_senders.lock().expect("subagent UI senders")[0].clone();
     subagent_ui_tx
         .send(UiUpdate::ToolDone {
-            id: child_tool_id,
+            id: subagent_tool_id,
             name: "read_file".to_string(),
-            result_section: ylva::tui_reducer_state::ResultSection::plain("child output"),
+            result_section: ylva::tui_reducer_state::ResultSection::plain("subagent output"),
             summary: vec![],
             duration: Duration::from_millis(1),
             content_sections: vec![],
             run_id: Some(run_id),
         })
-        .expect("child tool completion accepted");
+        .expect("subagent tool completion accepted");
     finish_tx
-        .send(successful_child_finish(run_id, call_id))
-        .expect("child finish accepted");
+        .send(successful_subagent_finish(run_id, call_id))
+        .expect("subagent finish accepted");
 
     let completion_updates = tokio::time::timeout(
         Duration::from_secs(5),
         collect_until_advancing(&mut ui_rx, interval, |update| {
-            matches!(update, UiUpdate::ChildAgentDone { run_id: done_run_id, .. } if *done_run_id == run_id)
+            matches!(update, UiUpdate::SubagentDone { run_id: done_run_id, .. } if *done_run_id == run_id)
         }),
     )
     .await
-    .expect("child completion is delivered");
-    let child_tool_done_index = completion_updates
-        .iter()
-        .position(|update| matches!(update, UiUpdate::ToolDone { id, .. } if *id == child_tool_id));
-    let child_done_index = completion_updates.iter().position(
-        |update| matches!(update, UiUpdate::ChildAgentDone { run_id: done_run_id, .. } if *done_run_id == run_id),
+    .expect("subagent completion is delivered");
+    let subagent_tool_done_index = completion_updates.iter().position(
+        |update| matches!(update, UiUpdate::ToolDone { id, .. } if *id == subagent_tool_id),
+    );
+    let subagent_done_index = completion_updates.iter().position(
+        |update| matches!(update, UiUpdate::SubagentDone { run_id: done_run_id, .. } if *done_run_id == run_id),
     );
     assert!(
-        matches!((child_tool_done_index, child_done_index), (Some(tool_done), Some(done)) if tool_done < done),
-        "the child's ToolDone must be delivered before its ChildAgentDone"
+        matches!((subagent_tool_done_index, subagent_done_index), (Some(tool_done), Some(done)) if tool_done < done),
+        "the subagent's ToolDone must be delivered before its SubagentDone"
     );
 
     collect_final_root_response(&mut ui_rx, interval).await;
@@ -645,13 +645,13 @@ async fn child_completion_is_delivered_after_the_child_tool_done_that_precedes_i
 }
 
 #[tokio::test(start_paused = true)]
-async fn limit_two_starts_the_third_child_after_one_finishes_and_reprompts_after_the_last() {
+async fn limit_two_starts_the_third_subagent_after_one_finishes_and_reprompts_after_the_last() {
     let ConcurrencyScenario {
         mut agent,
         mut ui_rx,
         finish_tx,
         spawned_requests,
-        child_ui_senders: _,
+        subagent_ui_senders: _,
         interval,
     } = build_concurrency_scenario(Some(2), 3);
     agent
@@ -663,7 +663,7 @@ async fn limit_two_starts_the_third_child_after_one_finishes_and_reprompts_after
     let initially_running: Vec<_> = updates
         .iter()
         .filter_map(|update| match update {
-            UiUpdate::ChildAgentStarted {
+            UiUpdate::SubagentStarted {
                 run_id, call_id, ..
             } => Some((*run_id, *call_id)),
             _ => None,
@@ -681,36 +681,39 @@ async fn limit_two_starts_the_third_child_after_one_finishes_and_reprompts_after
             }
             _ => None,
         })
-        .expect("the third child must be queued at the limit");
+        .expect("the third subagent must be queued at the limit");
     assert_eq!(spawned_requests.lock().unwrap().len(), 2);
 
     let (first_run_id, first_call_id) = initially_running[0];
     finish_tx
-        .send(successful_child_finish(first_run_id, first_call_id))
-        .expect("first child finish accepted");
-    let mut first_child_done = false;
-    let mut queued_child_started = None;
+        .send(successful_subagent_finish(first_run_id, first_call_id))
+        .expect("first subagent finish accepted");
+    let mut first_subagent_done = false;
+    let mut queued_subagent_started = None;
     let after_first_finish = tokio::time::timeout(
         Duration::from_secs(5),
         collect_until_advancing(&mut ui_rx, interval, |update| {
             if matches!(update, UiUpdate::ToolDone { id, .. } if *id == first_call_id) {
-                first_child_done = true;
+                first_subagent_done = true;
             }
-            if let UiUpdate::ChildAgentStarted {
+            if let UiUpdate::SubagentStarted {
                 run_id, call_id, ..
             } = update
             {
                 if *call_id == queued_call_id {
-                    queued_child_started = Some((*run_id, *call_id));
+                    queued_subagent_started = Some((*run_id, *call_id));
                 }
             }
-            first_child_done && queued_child_started.is_some()
+            first_subagent_done && queued_subagent_started.is_some()
         }),
     )
     .await
-    .expect("the queued third child should start as the first child finishes");
+    .expect("the queued third subagent should start as the first subagent finishes");
     updates.extend(after_first_finish);
-    assert_eq!(queued_child_started, Some((queued_run_id, queued_call_id)));
+    assert_eq!(
+        queued_subagent_started,
+        Some((queued_run_id, queued_call_id))
+    );
     let third_request = spawned_requests
         .lock()
         .unwrap()
@@ -721,8 +724,8 @@ async fn limit_two_starts_the_third_child_after_one_finishes_and_reprompts_after
 
     let (second_run_id, second_call_id) = initially_running[1];
     finish_tx
-        .send(successful_child_finish(second_run_id, second_call_id))
-        .expect("second child finish accepted");
+        .send(successful_subagent_finish(second_run_id, second_call_id))
+        .expect("second subagent finish accepted");
     let second_done = tokio::time::timeout(
         Duration::from_secs(5),
         collect_until_advancing(
@@ -732,15 +735,15 @@ async fn limit_two_starts_the_third_child_after_one_finishes_and_reprompts_after
         ),
     )
     .await
-    .expect("second child should finish without a root continuation");
+    .expect("second subagent should finish without a root continuation");
     updates.extend(second_done);
 
     finish_tx
-        .send(successful_child_finish(
+        .send(successful_subagent_finish(
             third_request.run_id,
             third_request.call_id,
         ))
-        .expect("third child finish accepted");
+        .expect("third subagent finish accepted");
     let final_updates = collect_final_root_response(&mut ui_rx, interval).await;
     updates.extend(final_updates);
     assert_eq!(
@@ -749,7 +752,7 @@ async fn limit_two_starts_the_third_child_after_one_finishes_and_reprompts_after
             .filter(|update| matches!(update, UiUpdate::StreamStarted))
             .count(),
         3,
-        "the root receives one continuation only after the last child finishes"
+        "the root receives one continuation only after the last subagent finishes"
     );
 
     drop(agent);
@@ -757,17 +760,17 @@ async fn limit_two_starts_the_third_child_after_one_finishes_and_reprompts_after
 }
 
 async fn assert_concurrency_cap_starts_all_before_finishing(
-    max_concurrent_children: Option<usize>,
-    child_count: usize,
+    max_concurrent_subagents: Option<usize>,
+    subagent_count: usize,
 ) {
     let ConcurrencyScenario {
         mut agent,
         mut ui_rx,
         finish_tx,
         spawned_requests,
-        child_ui_senders: _,
+        subagent_ui_senders: _,
         interval,
-    } = build_concurrency_scenario(max_concurrent_children, child_count);
+    } = build_concurrency_scenario(max_concurrent_subagents, subagent_count);
     agent
         .send_command(AgentCommand::Prompt(
             "delegate independent tasks".to_string(),
@@ -776,32 +779,32 @@ async fn assert_concurrency_cap_starts_all_before_finishing(
     let handle = agent.run();
 
     let mut updates = collect_through_working_response(&mut ui_rx, interval).await;
-    let started_children: Vec<_> = updates
+    let started_subagents: Vec<_> = updates
         .iter()
         .filter_map(|update| match update {
-            UiUpdate::ChildAgentStarted {
+            UiUpdate::SubagentStarted {
                 run_id, call_id, ..
             } => Some((*run_id, *call_id)),
             _ => None,
         })
         .collect();
     assert_eq!(
-        started_children.len(),
-        child_count,
-        "all children start before any finish when the cap is sufficient"
+        started_subagents.len(),
+        subagent_count,
+        "all subagents start before any finish when the cap is sufficient"
     );
-    assert_eq!(spawned_requests.lock().unwrap().len(), child_count);
+    assert_eq!(spawned_requests.lock().unwrap().len(), subagent_count);
     assert!(
         updates
             .iter()
             .all(|update| tool_progress_run_id(update, "queued").is_none()),
-        "a sufficiently high cap should leave no child queued"
+        "a sufficiently high cap should leave no subagent queued"
     );
 
-    for (run_id, call_id) in started_children {
+    for (run_id, call_id) in started_subagents {
         finish_tx
-            .send(successful_child_finish(run_id, call_id))
-            .expect("child finish accepted");
+            .send(successful_subagent_finish(run_id, call_id))
+            .expect("subagent finish accepted");
         let finished = tokio::time::timeout(
             Duration::from_secs(5),
             collect_until_advancing(
@@ -811,7 +814,7 @@ async fn assert_concurrency_cap_starts_all_before_finishing(
             ),
         )
         .await
-        .expect("each child should reach its terminal update");
+        .expect("each subagent should reach its terminal update");
         updates.extend(finished);
     }
     updates.extend(collect_final_root_response(&mut ui_rx, interval).await);
@@ -829,18 +832,18 @@ async fn assert_concurrency_cap_starts_all_before_finishing(
 }
 
 #[tokio::test(start_paused = true)]
-async fn limit_three_runs_all_three_children_concurrently_and_reprompts_once() {
+async fn limit_three_runs_all_three_subagents_concurrently_and_reprompts_once() {
     assert_concurrency_cap_starts_all_before_finishing(Some(3), 3).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn unlimited_starts_all_five_children_concurrently() {
+async fn unlimited_starts_all_five_subagents_concurrently() {
     assert_concurrency_cap_starts_all_before_finishing(None, 5).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loop() {
-    // Regression test: a child that resolves near-instantly (finishes via
+    // Regression test: a subagent that resolves near-instantly (finishes via
     // `finish_tx` essentially as soon as it's spawned) drives the root
     // through the `finish_rx` "root was idle, forcing reprompt" branch
     // instead of `advance_tool_queue`'s queue-empty branch. That branch used
@@ -851,7 +854,7 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
     // `DEFAULT_MAX_TOOL_USE_ITERATIONS`. The guard must trip here exactly like it
     // does for the plain `write`-in-a-loop case above.
     use tokio_util::sync::CancellationToken;
-    use ylva::child_agent_manager::{ChildAgentManager, FinishResult, SpawnFn};
+    use ylva::subagent_manager::{FinishResult, SpawnFn, SubagentManager};
 
     let registry = Arc::new(default_registry(
         make_sandbox(),
@@ -881,7 +884,7 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
     let (finish_tx, finish_rx) = mpsc::unbounded_channel();
     let (subagent_ui_tx, subagent_ui_rx) = mpsc::unbounded_channel();
     // Resolves immediately: reports success via `finish_tx` right away and
-    // never actually does any work, simulating a child that finishes near-
+    // never actually does any work, simulating a subagent that finishes near-
     // instantly relative to the root's own request/response cycle.
     let spawn_fn: SpawnFn = Box::new(move |request, _cancel: CancellationToken, _ui_tx| {
         let finish_tx = finish_tx.clone();
@@ -889,20 +892,20 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
             let _ = finish_tx.send(FinishResult {
                 run_id: request.run_id,
                 call_id: request.call_id,
-                origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
+                origin: ylva::subagent_manager::FinishResultOrigin::Agent,
                 status: "success".to_string(),
                 result: Some("done".to_string()),
                 error: None,
                 sources: vec![],
             });
         });
-        ylva::child_agent_manager::SpawnOutcome {
+        ylva::subagent_manager::SpawnOutcome {
             command_sender: None,
             handle,
         }
     });
-    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(1));
-    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+    let manager = SubagentManager::new(subagent_ui_tx, spawn_fn, Some(1));
+    agent = agent.with_subagent_manager(manager, finish_rx, subagent_ui_rx);
 
     agent
         .send_command(AgentCommand::Prompt("delegate forever".into()))
@@ -939,10 +942,10 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
 #[tokio::test(start_paused = true)]
 async fn stop_cancels_multiple_running_and_queued_subagents() {
     // Stop must resolve every running and queued spawn bubble to a terminal
-    // cancelled result; only the first two child tasks are constructed under
+    // cancelled result; only the first two subagent tasks are constructed under
     // the configured limit, while the third remains queued.
     use tokio_util::sync::CancellationToken;
-    use ylva::child_agent_manager::{ChildAgentManager, SpawnFn};
+    use ylva::subagent_manager::{SpawnFn, SubagentManager};
 
     let registry = Arc::new(default_registry(
         make_sandbox(),
@@ -959,17 +962,17 @@ async fn stop_cancels_multiple_running_and_queued_subagents() {
                 call(
                     "spawn_subagent",
                     0,
-                    serde_json::json!({ "label": "First child", "task": "first task" }),
+                    serde_json::json!({ "label": "First subagent", "task": "first task" }),
                 ),
                 call(
                     "spawn_subagent",
                     1,
-                    serde_json::json!({ "label": "Second child", "task": "second task" }),
+                    serde_json::json!({ "label": "Second subagent", "task": "second task" }),
                 ),
                 call(
                     "spawn_subagent",
                     2,
-                    serde_json::json!({ "label": "Third child", "task": "third task" }),
+                    serde_json::json!({ "label": "Third subagent", "task": "third task" }),
                 ),
             ],
             vec![MockEvent::Text("working".to_string())],
@@ -992,13 +995,13 @@ async fn stop_cancels_multiple_running_and_queued_subagents() {
         let handle = tokio::spawn(async move {
             cancel.cancelled().await;
         });
-        ylva::child_agent_manager::SpawnOutcome {
+        ylva::subagent_manager::SpawnOutcome {
             command_sender: None,
             handle,
         }
     });
-    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(2));
-    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+    let manager = SubagentManager::new(subagent_ui_tx, spawn_fn, Some(2));
+    agent = agent.with_subagent_manager(manager, finish_rx, subagent_ui_rx);
     drop(finish_tx);
 
     agent
@@ -1009,7 +1012,7 @@ async fn stop_cancels_multiple_running_and_queued_subagents() {
     let running_call_ids: Vec<_> = initial_updates
         .iter()
         .filter_map(|update| match update {
-            UiUpdate::ChildAgentStarted { call_id, .. } => Some(*call_id),
+            UiUpdate::SubagentStarted { call_id, .. } => Some(*call_id),
             _ => None,
         })
         .collect();
@@ -1024,7 +1027,7 @@ async fn stop_cancels_multiple_running_and_queued_subagents() {
             }
             _ => None,
         })
-        .expect("the third child should be queued");
+        .expect("the third subagent should be queued");
     let spawn_call_ids: std::collections::HashSet<_> = running_call_ids
         .iter()
         .copied()
@@ -1088,15 +1091,15 @@ async fn stop_cancels_multiple_running_and_queued_subagents() {
         .count();
     assert!(
         cancelled_notices == 3,
-        "expected one implicit cancellation completion notice per child, got: {:?}",
+        "expected one implicit cancellation completion notice per subagent, got: {:?}",
         context.messages(),
     );
 }
 
 #[tokio::test(start_paused = true)]
-async fn for_child_targeting_an_unknown_run_id_is_dropped_without_hanging_the_root() {
-    // Regression test for `AgentCommand::ForChild`'s "stale target" case: a
-    // command addressed to a `run_id` the root's `ChildAgentManager` doesn't
+async fn for_subagent_targeting_an_unknown_run_id_is_dropped_without_hanging_the_root() {
+    // Regression test for `AgentCommand::ForSubagent`'s "stale target" case: a
+    // command addressed to a `run_id` the root's `SubagentManager` doesn't
     // recognize (already finished, or never existed) must be logged and
     // dropped, not panic or silently wedge the root loop's `select!` — the
     // root must stay fully responsive to its own, unrelated commands
@@ -1115,11 +1118,11 @@ async fn for_child_targeting_an_unknown_run_id_is_dropped_without_hanging_the_ro
         Arc::clone(&registry),
     );
 
-    // No `ChildAgentManager` is wired at all, so this is the strongest form
-    // of "no live child recognizes this run_id".
+    // No `SubagentManager` is wired at all, so this is the strongest form
+    // of "no live subagent recognizes this run_id".
     let stray_run_id = uuid::Uuid::new_v4();
     agent
-        .send_command(AgentCommand::ForChild {
+        .send_command(AgentCommand::ForSubagent {
             run_id: stray_run_id,
             command: Box::new(AgentCommand::ApproveTool { id: stray_run_id }),
         })
@@ -1128,7 +1131,7 @@ async fn for_child_targeting_an_unknown_run_id_is_dropped_without_hanging_the_ro
     let handle = agent.run();
 
     // The root must still be able to run a completely ordinary prompt
-    // afterwards — if the stray `ForChild` had wedged the `select!` loop,
+    // afterwards — if the stray `ForSubagent` had wedged the `select!` loop,
     // this would hang forever instead of completing.
     agent
         .send_command(AgentCommand::Prompt("hello".into()))
@@ -1144,7 +1147,7 @@ async fn for_child_targeting_an_unknown_run_id_is_dropped_without_hanging_the_ro
             .iter()
             .any(|u| matches!(u, UiUpdate::AppendText(text) if text == "hi there")),
         "expected the root to still process an ordinary prompt after a stale \
-         ForChild, got: {updates:?}"
+         ForSubagent, got: {updates:?}"
     );
 
     drop(agent);

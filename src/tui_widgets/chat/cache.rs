@@ -28,8 +28,8 @@ use crate::conversation_render_cache::{
 };
 use crate::highlight::active_theme;
 use crate::theme::{
-    CHAT_SCROLLBAR_COLOR, CHAT_SELECTION_BG, CHILD_VIEW_SEPARATOR_COLOR, ERROR_COLOR,
-    MUTED_TEXT_COLOR, NOTICE_COLOR, THINKING_BORDER_COLOR,
+    CHAT_SCROLLBAR_COLOR, CHAT_SELECTION_BG, ERROR_COLOR, MUTED_TEXT_COLOR, NOTICE_COLOR,
+    SUBAGENT_VIEW_SEPARATOR_COLOR, THINKING_BORDER_COLOR,
 };
 use crate::tui_reducer_state::{BubbleExpansionTarget, ChatEntry, ToolCallState, UserMessageState};
 use crate::tui_render_state::TuiState;
@@ -187,8 +187,8 @@ pub(in crate::tui_widgets) fn prepare_cached_header(
     update_selection_index(
         &mut conversation.cache.header,
         layouts,
-        &mut state.child_view.header_rendered_lines,
-        &mut state.child_view.header_rendered_line_prefix_widths,
+        &mut state.subagent_view.header_rendered_lines,
+        &mut state.subagent_view.header_rendered_line_prefix_widths,
         false,
     );
 }
@@ -587,7 +587,7 @@ pub(in crate::tui_widgets) fn draw_cached_chat(
             total,
             visible,
             if source.header.is_some() {
-                CHILD_VIEW_SEPARATOR_COLOR
+                SUBAGENT_VIEW_SEPARATOR_COLOR
             } else {
                 CHAT_SCROLLBAR_COLOR
             },

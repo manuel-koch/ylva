@@ -83,10 +83,10 @@ fn write_session_tree(
     diagnostics: &mut dyn Write,
 ) -> std::io::Result<()> {
     let identities: BTreeSet<_> = sessions.iter().map(|session| session.session_id).collect();
-    let mut children = BTreeMap::<_, Vec<_>>::new();
+    let mut subagents = BTreeMap::<_, Vec<_>>::new();
     for session in sessions {
         if let Some(parent) = session.parent_session {
-            children.entry(parent).or_default().push(session);
+            subagents.entry(parent).or_default().push(session);
         }
     }
     let roots = sessions.iter().filter(|session| {
@@ -128,8 +128,13 @@ fn write_session_tree(
                 },
                 output,
             )?;
-            if let Some(descendants) = children.get(&session.session_id) {
-                pending.extend(descendants.iter().rev().map(|child| (*child, depth + 1)));
+            if let Some(descendants) = subagents.get(&session.session_id) {
+                pending.extend(
+                    descendants
+                        .iter()
+                        .rev()
+                        .map(|subagent| (*subagent, depth + 1)),
+                );
             }
         }
     }

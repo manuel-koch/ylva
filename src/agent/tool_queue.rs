@@ -133,41 +133,41 @@ pub(super) fn context_budget_skip_reason(name: &str) -> String {
 /// `ToolCall` batch arrives (the iteration counter was already set) and
 /// `true` after a tool finishes executing (each completed tool round counts).
 /// `own_run_id` is the calling loop's own `AgentLoop::own_run_id` (`None` for
-/// the root, `Some(run_id)` for a child); it is stamped onto the
+/// the root, `Some(run_id)` for a subagent); it is stamped onto the
 /// `UiUpdate::ToolPending`/`ClarifyPending` this function may emit so the
-/// root (which forwards a child's `UiUpdate`s up to its own driver) and the
+/// root (which forwards a subagent's `UiUpdate`s up to its own driver) and the
 /// driver can route the resulting `ApproveTool`/`DenyTool`/`AnswerClarify`/
 /// `AbortClarify` verdict back to the correct agent loop via
-/// `AgentCommand::ForChild`. This has no effect on how the tool queue itself
-/// is processed — children pause and wait exactly like the root; there is no
+/// `AgentCommand::ForSubagent`. This has no effect on how the tool queue itself
+/// is processed — subagents pause and wait exactly like the root; there is no
 /// auto-deny special case.
 ///
-/// `pending_child_finish_reprompt` is cleared whenever this function
+/// `pending_subagent_finish_reprompt` is cleared whenever this function
 /// re-prompts the model (the queue-empty branch): that re-prompt's `context`
-/// already carries any deferred `spawn_subagent` child result (see
+/// already carries any deferred `spawn_subagent` subagent result (see
 /// `AgentLoop::run`'s `finish_rx` arm), so the flag's job is done and a later
 /// `StreamDone` must not force a redundant extra re-prompt for it.
 ///
 /// `iteration_cap_exceeded` is set (to the guard's explanation message) when
 /// the loop's effective `max_tool_iterations` is exceeded — but only for a
-/// child loop
+/// subagent loop
 /// (`own_run_id.is_some()`); a root loop's own hit is reported to the human
 /// directly (an `Interrupted` assistant bubble) and never sets this. The
-/// caller (`AgentLoop::run`'s `is_child && mode == AgentMode::Idle` tail)
+/// caller (`AgentLoop::run`'s `is_subagent && mode == AgentMode::Idle` tail)
 /// checks it to return `Err` instead of `Ok(context)` — so
-/// `drive_child_to_completion` reports a clear `status: "failure"` instead of
-/// folding this into the generic "unstructured" fallback used when a child
+/// `drive_subagent_to_completion` reports a clear `status: "failure"` instead of
+/// folding this into the generic "unstructured" fallback used when a subagent
 /// simply goes idle without ever calling `agent_finish`. See docs/features.md
 /// → *spawn_subagent*/*agent_finish* for the distinction.
 /// Increments `*iterations` and, if that now exceeds `max_tool_iterations`
 /// (the loop's effective limit; see [`AgentLoop::with_max_tool_iterations`]),
 /// reports the guard tripping and forces `*mode = AgentMode::Idle`: for the
 /// root (`own_run_id: None`) a human reads the transcript directly, so a real
-/// `Interrupted` assistant bubble is pushed; for a child, the explanation is
+/// `Interrupted` assistant bubble is pushed; for a subagent, the explanation is
 /// instead handed back via `*iteration_cap_exceeded` (never pushed as an
 /// assistant message — `extract_last_assistant_text` in `agent_factory.rs`
-/// would otherwise mistake this guard boilerplate for the child's own final
-/// answer) for `AgentLoop::run`'s `is_child && mode == AgentMode::Idle` tail
+/// would otherwise mistake this guard boilerplate for the subagent's own final
+/// answer) for `AgentLoop::run`'s `is_subagent && mode == AgentMode::Idle` tail
 /// to turn into an `Err`, producing an honest `status: "failure"` instead of
 /// folding this into the generic "unstructured" fallback (see
 /// `advance_tool_queue`'s doc comment and docs/features.md →
@@ -177,7 +177,7 @@ pub(super) fn context_budget_skip_reason(name: &str) -> String {
 /// request this round) and `false` otherwise (still under budget, proceed as
 /// normal). Shared by `advance_tool_queue`'s queue-empty branch and
 /// `AgentLoop::run`'s `finish_rx` idle-reprompt branch — both are re-prompt
-/// call sites, and both must enforce the same budget. Without this, a child
+/// call sites, and both must enforce the same budget. Without this, a subagent
 /// finishing while the root is idle re-prompts it directly via `start_request`,
 /// bypassing `advance_tool_queue`'s iteration counter entirely; a model that
 /// just keeps calling `spawn_subagent` again on every finish notice (rather
@@ -240,10 +240,10 @@ pub(super) async fn advance_tool_queue(
     generation: u64,
     clarify_started_at: &mut Option<std::time::Instant>,
     pending_steers: &mut VecDeque<String>,
-    child_agent_manager: &mut Option<crate::child_agent_manager::ChildAgentManager>,
+    subagent_manager: &mut Option<crate::subagent_manager::SubagentManager>,
     spawn_content_sections: &mut HashMap<Uuid, Vec<crate::agent::tools::Section>>,
     own_run_id: Option<Uuid>,
-    pending_child_finish_reprompt: &mut bool,
+    pending_subagent_finish_reprompt: &mut bool,
     iteration_cap_exceeded: &mut Option<String>,
     session_id: Option<Uuid>,
     mut compaction: Option<&mut compaction::CompactionRuntime>,
@@ -301,11 +301,11 @@ pub(super) async fn advance_tool_queue(
                     )
                     .await;
                 }
-                // This re-prompt's `context` already carries any child result
+                // This re-prompt's `context` already carries any subagent result
                 // that arrived (and was deferred) while the root was mid-turn
                 // — clear the flag so a later, unrelated `StreamDone` doesn't
                 // force a redundant re-prompt for a result already handled.
-                *pending_child_finish_reprompt = false;
+                *pending_subagent_finish_reprompt = false;
                 *mode = AgentMode::Streaming;
                 *current_cancel = Some(start_request(
                     context,
@@ -389,7 +389,7 @@ pub(super) async fn advance_tool_queue(
                         let pending = pending_tools.pop_front().expect("checked front");
                         resolve_spawn_subagent(
                             pending,
-                            child_agent_manager,
+                            subagent_manager,
                             context,
                             &ui_tx,
                             spawn_content_sections,

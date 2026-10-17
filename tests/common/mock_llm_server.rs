@@ -333,7 +333,7 @@ impl MockLlmServer {
 
     /// Bind and start the server with connection frames plus optional
     /// request-body rules. A matching rule takes precedence over the
-    /// connection-index frame, which keeps concurrent root/child chat
+    /// connection-index frame, which keeps concurrent root/subagent chat
     /// requests deterministic.
     pub async fn start_with_connection_frame_rules(
         config: MockLlmConfig,

@@ -25,7 +25,7 @@ mod replay;
 mod tools;
 pub use replay::project_messages;
 #[cfg(test)]
-pub(super) use replay::project_messages_with_child_runs;
+pub(super) use replay::project_messages_with_subagent_runs;
 
 /// State of a user message entry in the TUI chat history.
 /// `ChatEntry` is ephemeral view state only — never persisted.
@@ -238,20 +238,20 @@ pub enum ChatEntry {
 }
 
 /// A single in-flight turn's accumulated stream text, shared by the root
-/// conversation (`AppState::turn_buffer`) and every child conversation
-/// (`ChildConversation::turn_buffer`) — the single place that knows how to
+/// conversation (`AppState::turn_buffer`) and every subagent conversation
+/// (`SubagentConversation::turn_buffer`) — the single place that knows how to
 /// buffer/segment a live token stream into ordered `ChatEntry::ThinkingMessage`/
-/// `ChatEntry::AssistantMessage` bubbles, so root and child transcripts can
+/// `ChatEntry::AssistantMessage` bubbles, so root and subagent transcripts can
 /// never drift apart in how they handle thinking-vs-response text.
 #[derive(Debug, Clone, Default)]
 pub struct TurnBuffer {
     /// In-flight assistant reply text, appended by `push_response_chunk`
-    /// (root: `StreamChunk`; child: `ChildAgentToken { is_thinking: false, .. }`).
+    /// (root: `StreamChunk`; subagent: `SubagentToken { is_thinking: false, .. }`).
     pub partial_assistant_text: String,
     /// In-flight extended-thinking/reasoning text, accumulated separately
     /// from `partial_assistant_text` so it never contaminates the assistant
     /// reply. Appended by `push_thinking_chunk` (root: `StreamThinkingChunk`;
-    /// child: `ChildAgentToken { is_thinking: true, .. }`). Flushed into a
+    /// subagent: `SubagentToken { is_thinking: true, .. }`). Flushed into a
     /// `ChatEntry::ThinkingMessage` ahead of the assistant bubble.
     pub partial_thinking_text: String,
     /// Set when the first fragment of a new `partial_thinking_text` segment
@@ -350,16 +350,16 @@ impl TurnBuffer {
 
 // ─── Drill-in conversation model (Phase 6.10) ────────────────────────────────
 
-/// Identifies one child run's identity/metadata, keyed by `run_id` in
-/// `AppState::child_conversations`. Populated on `DomainEvent::ChildAgentStarted`
-/// and kept for the lifetime of the session (even after the child finishes)
+/// Identifies one subagent run's identity/metadata, keyed by `run_id` in
+/// `AppState::subagent_conversations`. Populated on `DomainEvent::SubagentStarted`
+/// and kept for the lifetime of the session (even after the subagent finishes)
 /// so its transcript/header bubble can still be drilled into afterwards.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChildRunInfo {
+pub struct SubagentRunInfo {
     pub run_id: Uuid,
     /// The `id` of the real root `spawn_subagent` `ToolBubble` this run
     /// belongs to (the tool-call id) — the single source of truth
-    /// correlating a specific bubble to a specific child conversation, used
+    /// correlating a specific bubble to a specific subagent conversation, used
     /// by both `AppState::header_bubble_id` (view → bubble) and the
     /// double-click handler (bubble → view), so multiple concurrent/queued
     /// `spawn_subagent` bubbles are never confused with one another.
@@ -369,28 +369,28 @@ pub struct ChildRunInfo {
     pub label: String,
 }
 
-/// One child run's own conversation transcript plus in-flight `TurnBuffer`,
-/// keyed by `run_id` in `AppState::child_conversations`. Kept indefinitely
+/// One subagent run's own conversation transcript plus in-flight `TurnBuffer`,
+/// keyed by `run_id` in `AppState::subagent_conversations`. Kept indefinitely
 /// once created (mirrors `AppState::chat_entries`, which is also
-/// session-lifetime-unbounded) so a finished child's transcript remains
+/// session-lifetime-unbounded) so a finished subagent's transcript remains
 /// drillable for as long as its root `spawn_subagent` bubble is visible.
 #[derive(Debug, Clone)]
-pub struct ChildConversation {
-    pub info: ChildRunInfo,
+pub struct SubagentConversation {
+    pub info: SubagentRunInfo,
     /// Monotonic start of live execution; replayed runs have no live timer.
     pub started_at: Option<Instant>,
     pub messages: Vec<ChatEntry>,
     pub turn_buffer: TurnBuffer,
-    /// Latest context estimate reported by this child run. Kept with the
+    /// Latest context estimate reported by this subagent run. Kept with the
     /// conversation so the footer can show the correct window while drilled
-    /// into this child, even after it finishes.
+    /// into this subagent, even after it finishes.
     pub context_usage: Option<ContextUsage>,
     pub needs_lazy_load: bool,
 }
 
-impl ChildConversation {
-    pub(crate) fn new(info: ChildRunInfo) -> Self {
-        ChildConversation {
+impl SubagentConversation {
+    pub(crate) fn new(info: SubagentRunInfo) -> Self {
+        SubagentConversation {
             info,
             started_at: Some(Instant::now()),
             messages: Vec::new(),
@@ -400,8 +400,8 @@ impl ChildConversation {
         }
     }
 
-    pub(crate) fn new_replay(info: ChildRunInfo) -> Self {
-        ChildConversation {
+    pub(crate) fn new_replay(info: SubagentRunInfo) -> Self {
+        SubagentConversation {
             info,
             started_at: None,
             messages: Vec::new(),
@@ -417,8 +417,8 @@ impl ChildConversation {
 pub enum ConversationView {
     /// The root/parent conversation (`AppState::chat_entries`).
     Root,
-    /// The currently-tracked child's conversation (`AppState::child_conversations`).
-    Child {
+    /// The currently-tracked subagent's conversation (`AppState::subagent_conversations`).
+    Subagent {
         run_id: Uuid,
         agent_type: String,
         task: String,
@@ -431,14 +431,14 @@ pub enum BubbleExpansionTarget {
     /// `STREAMING_THINKING_ENTRY_INDEX` denotes the in-flight thinking bubble.
     Thinking(usize),
 }
-/// Drill-in child-view header bubble state.
+/// Drill-in subagent-view header bubble state.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ChildViewState {
-    /// Current vertical scroll offset inside the child-view header bubble
+pub struct SubagentViewState {
+    /// Current vertical scroll offset inside the subagent-view header bubble
     /// (lines from the top of its content), used only when the bubble's full
     /// content exceeds the header's clamped max height. Clamped to the valid
     /// range by `tui_widgets::draw` each frame; reset to 0 whenever the header bubble
-    /// it applies to changes (see `presenter::domain::domain_child_lifecycle`).
+    /// it applies to changes (see `presenter::domain::domain_subagent_lifecycle`).
     pub header_bubble_scroll_offset: usize,
     /// Plain text of every rendered header line, indexed before the vertical
     /// scroll offset. Used for extracting selected text on mouse-up.
@@ -451,7 +451,7 @@ pub struct ChildViewState {
     /// `true` while the left mouse button is held down in the header bubble.
     pub header_drag_active: bool,
 }
-/// Root-or-child scrollable conversation-list state (Phase 6.10 drill-in
+/// Root-or-subagent scrollable conversation-list state (Phase 6.10 drill-in
 /// model: shared by both `active_view` cases, not duplicated per view).
 #[derive(Debug, Clone)]
 pub struct ConversationListState {
@@ -499,12 +499,12 @@ impl Default for ConversationListState {
 
 impl AppState {
     /// Latest context usage for the conversation currently shown in the main
-    /// chat area. Root usage remains independent from all child updates.
+    /// chat area. Root usage remains independent from all subagent updates.
     pub fn active_context_usage(&self) -> Option<ContextUsage> {
         match &self.active_view {
             ConversationView::Root => self.context_usage,
-            ConversationView::Child { run_id, .. } => self
-                .child_conversations
+            ConversationView::Subagent { run_id, .. } => self
+                .subagent_conversations
                 .get(run_id)
                 .and_then(|conversation| conversation.context_usage),
         }
@@ -517,7 +517,7 @@ impl AppState {
     /// merging every thinking fragment of the turn into a single bubble.
     /// No-op when there is no pending thinking text. Delegates to
     /// `TurnBuffer::flush_thinking_message` — see there for the shared
-    /// root/child implementation.
+    /// root/subagent implementation.
     pub fn flush_partial_thinking_message(&mut self) {
         self.turn_buffer
             .flush_thinking_message(&mut self.chat_entries);
@@ -564,14 +564,14 @@ impl AppState {
         }
     }
 
-    /// Flush `run_id`'s own `TurnBuffer` (accumulated `ChildAgentToken`
+    /// Flush `run_id`'s own `TurnBuffer` (accumulated `SubagentToken`
     /// fragments, thinking and assistant text alike) into new
     /// `ChatEntry::ThinkingMessage`/`ChatEntry::AssistantMessage` entries in
     /// its own transcript. No-op when there is no pending text, or `run_id`
-    /// is not a tracked child. Delegates to `TurnBuffer::flush_assistant_message`
+    /// is not a tracked subagent. Delegates to `TurnBuffer::flush_assistant_message`
     /// — the same shared logic the root conversation uses.
-    pub fn flush_child_partial_text(&mut self, run_id: Uuid) {
-        let Some(conversation) = self.child_conversations.get_mut(&run_id) else {
+    pub fn flush_subagent_partial_text(&mut self, run_id: Uuid) {
+        let Some(conversation) = self.subagent_conversations.get_mut(&run_id) else {
             return;
         };
         conversation
@@ -580,45 +580,45 @@ impl AppState {
     }
 
     /// Flushes whichever partial-text accumulator `run_id` targets before a
-    /// new tool/clarify bubble is created — that child's own `TurnBuffer`
-    /// when `run_id` identifies any tracked child run, the root's own
-    /// `turn_buffer` otherwise. Without this, a child's in-flight reply would
-    /// stay stuck in its buffer until `ChildAgentDone`, making a tool call it
+    /// new tool/clarify bubble is created — that subagent's own `TurnBuffer`
+    /// when `run_id` identifies any tracked subagent run, the root's own
+    /// `turn_buffer` otherwise. Without this, a subagent's in-flight reply would
+    /// stay stuck in its buffer until `SubagentDone`, making a tool call it
     /// made appear to precede its own explanatory text in its transcript.
     pub(crate) fn flush_target_partial_text(&mut self, run_id: Option<Uuid>) {
         if let Some(run_id) = run_id {
-            if self.child_conversations.contains_key(&run_id) {
-                self.flush_child_partial_text(run_id);
+            if self.subagent_conversations.contains_key(&run_id) {
+                self.flush_subagent_partial_text(run_id);
                 return;
             }
         }
         self.flush_partial_assistant_message(false);
     }
 
-    /// Manual navigation into `run_id`'s child view (double-clicking a
+    /// Manual navigation into `run_id`'s subagent view (double-clicking a
     /// `spawn_subagent` bubble's title). Marks the switch as *not*
     /// auto-switched, so the view never auto-returns to `Root` on its own —
     /// the user must navigate back explicitly (Esc with an empty draft).
-    /// Works for any tracked child (running, queued, or already finished —
-    /// see `child_conversations`), not just the currently-running one, so
+    /// Works for any tracked subagent (running, queued, or already finished —
+    /// see `subagent_conversations`), not just the currently-running one, so
     /// each `spawn_subagent` bubble unambiguously drills into *its own*
-    /// conversation rather than whichever child happens to be running now.
-    /// No-op when `run_id` is not a tracked child.
-    /// Registers a new tracked child run (adding a fresh, empty entry to
-    /// `child_conversations`) and marks it as running (`running_children`).
-    /// Used by `presenter::domain::domain_child_lifecycle` on
-    /// `DomainEvent::ChildAgentStarted`, and directly by tests that need to
-    /// simulate a child run's existence without driving the full event
+    /// conversation rather than whichever subagent happens to be running now.
+    /// No-op when `run_id` is not a tracked subagent.
+    /// Registers a new tracked subagent run (adding a fresh, empty entry to
+    /// `subagent_conversations`) and marks it as running (`running_subagents`).
+    /// Used by `presenter::domain::domain_subagent_lifecycle` on
+    /// `DomainEvent::SubagentStarted`, and directly by tests that need to
+    /// simulate a subagent run's existence without driving the full event
     /// pipeline.
-    pub(crate) fn start_child_run(&mut self, info: ChildRunInfo) {
+    pub(crate) fn start_subagent_run(&mut self, info: SubagentRunInfo) {
         self.invalidate_transcript_layout(Some(info.run_id));
-        self.running_children.insert(info.run_id, info.clone());
-        self.child_conversations
-            .insert(info.run_id, ChildConversation::new(info));
+        self.running_subagents.insert(info.run_id, info.clone());
+        self.subagent_conversations
+            .insert(info.run_id, SubagentConversation::new(info));
     }
 
     pub(crate) fn subagent_started_at(&self) -> HashMap<Uuid, Instant> {
-        self.child_conversations
+        self.subagent_conversations
             .values()
             .filter_map(|conversation| {
                 conversation
@@ -634,7 +634,7 @@ impl AppState {
     }
 
     /// Push a transcript notice into the root transcript, or — when
-    /// `run_id` identifies a child — into that child's transcript, the same
+    /// `run_id` identifies a subagent — into that subagent's transcript, the same
     /// routing [`super::DomainEvent`]s use via [`AppState::target_messages_mut`].
     pub fn push_notice_to(&mut self, run_id: Option<Uuid>, text: String) {
         self.target_messages_mut(run_id)
@@ -666,10 +666,10 @@ impl AppState {
         self.history_index = None;
     }
 
-    /// Return the active child-agent counts for the root conversation.
+    /// Return the active subagent counts for the root conversation.
     ///
     /// This is derived from the root transcript rather than
-    /// `child_conversations`, which intentionally retains finished
+    /// `subagent_conversations`, which intentionally retains finished
     /// conversations for drill-in navigation.
     pub fn active_subagent_counts(&self) -> ActiveSubagentCounts {
         ActiveSubagentCounts::from_entries(&self.chat_entries)
@@ -680,14 +680,14 @@ impl AppState {
     /// (`Done`/`Error`/`Denied`/`Killed`). Used by `agent_mode` to
     /// distinguish "a tool is executing" from plain LLM streaming (thinking
     /// or assistant text) in the footer, and — for `TuiMode::Idle` — to
-    /// detect a still-running `spawn_subagent` bubble whose child hasn't
+    /// detect a still-running `spawn_subagent` bubble whose subagent hasn't
     /// finished yet even though the root loop's own turn already has.
     pub(in crate::tui_reducer_state) fn has_running_tool_bubble(&self) -> bool {
         Self::entries_have_running_tool_bubble(&self.chat_entries)
     }
 
-    /// Shared by `has_running_tool_bubble` (root) and `agent_mode_for_child`
-    /// (a drilled-into child's own transcript) — same "is a tool call still
+    /// Shared by `has_running_tool_bubble` (root) and `agent_mode_for_subagent`
+    /// (a drilled-into subagent's own transcript) — same "is a tool call still
     /// executing" check, just parameterized over which entry list to scan.
     fn entries_have_running_tool_bubble(entries: &[ChatEntry]) -> bool {
         entries.iter().any(|entry| {
@@ -698,25 +698,25 @@ impl AppState {
         })
     }
 
-    /// [`AgentMode`] for a drilled-into child conversation (`run_id`), used
+    /// [`AgentMode`] for a drilled-into subagent conversation (`run_id`), used
     /// by `render::project_for_draw` in place of `agent_mode()` whenever
-    /// `active_view` is `ConversationView::Child` — `agent_mode()` alone
+    /// `active_view` is `ConversationView::Subagent` — `agent_mode()` alone
     /// reflects only the *root* loop's `TuiMode`, which stays whatever it
     /// was when the root issued `spawn_subagent` (typically `Idle`, mapped
     /// to `ToolRunning` via `has_running_tool_bubble` because the root's own
     /// `spawn_subagent` `ToolBubble` is still `Running`) regardless of
-    /// whether the child itself is currently thinking/streaming, running one
-    /// of its own tools, or already finished. Without this, the child's own
+    /// whether the subagent itself is currently thinking/streaming, running one
+    /// of its own tools, or already finished. Without this, the subagent's own
     /// in-flight `partial_thinking_text`/`partial_assistant_text` (correctly
     /// projected in `project_for_draw`) never renders as a streaming bubble,
     /// because `tui_widgets::draw` only shows it when `agent_mode ==
     /// AgentMode::Streaming` — text popped straight from "invisible" to a
     /// fully-committed bubble once flushed (see docs/known-test-issues.md).
-    pub fn agent_mode_for_child(&self, run_id: uuid::Uuid) -> AgentMode {
-        // Any Pending bubble in this child's transcript means its loop is
+    pub fn agent_mode_for_subagent(&self, run_id: uuid::Uuid) -> AgentMode {
+        // Any Pending bubble in this subagent's transcript means its loop is
         // blocked on an approval, even when that prompt is queued behind the
         // head shown in `Focus::ToolApproval`.
-        let has_pending_approval = self.child_conversations.get(&run_id).is_some_and(|conversation| {
+        let has_pending_approval = self.subagent_conversations.get(&run_id).is_some_and(|conversation| {
             conversation.messages.iter().any(|entry| {
                 matches!(entry, ChatEntry::ToolBubble { state, .. } if matches!(**state, ToolCallState::Pending { .. }))
             })
@@ -725,14 +725,14 @@ impl AppState {
             return AgentMode::ToolPending;
         }
         let has_running_tool_bubble =
-            self.child_conversations
+            self.subagent_conversations
                 .get(&run_id)
                 .is_some_and(|conversation| {
                     Self::entries_have_running_tool_bubble(&conversation.messages)
                 });
         if has_running_tool_bubble {
             AgentMode::ToolRunning
-        } else if self.running_children.contains_key(&run_id) {
+        } else if self.running_subagents.contains_key(&run_id) {
             AgentMode::Streaming
         } else {
             AgentMode::Idle

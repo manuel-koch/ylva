@@ -157,10 +157,10 @@ pub enum DomainEvent {
         content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
         /// `None` for the root's own pending call; `Some(run_id)` when it
-        /// belongs to the currently-tracked child (see `UiUpdate::ToolPending`).
-        /// Drives which transcript (`chat_entries` vs `child_messages`) the
+        /// belongs to the currently-tracked subagent (see `UiUpdate::ToolPending`).
+        /// Drives which transcript (`chat_entries` vs `subagent_messages`) the
         /// resulting bubble is created in and whether the drill-in view
-        /// auto-switches to `ConversationView::Child`.
+        /// auto-switches to `ConversationView::Subagent`.
         run_id: Option<Uuid>,
     },
     /// The model is asking the user to clarify something.
@@ -209,8 +209,8 @@ pub enum DomainEvent {
     /// A tool call was denied by the user.
     ToolDenied { id: Uuid },
     /// An error occurred in the agent — in its own loop when `run_id` is
-    /// `None`, or in the child run identified by `run_id` (e.g. that
-    /// child's own max-tool-use-iterations guard tripped). See
+    /// `None`, or in the subagent run identified by `run_id` (e.g. that
+    /// subagent's own max-tool-use-iterations guard tripped). See
     /// `DomainEvent::ToolPending::run_id`.
     Error {
         message: String,
@@ -226,39 +226,39 @@ pub enum DomainEvent {
     SteerApplied { run_id: Option<Uuid> },
     /// A fragment of extended-thinking / reasoning-token output arrived.
     StreamThinkingChunk(String),
-    /// A child agent actually started running. See `UiUpdate::ChildAgentStarted`.
-    ChildAgentStarted {
+    /// A subagent actually started running. See `UiUpdate::SubagentStarted`.
+    SubagentStarted {
         run_id: Uuid,
         /// The `spawn_subagent` tool-call id (== the root `ToolBubble`'s
-        /// `id`) this run belongs to. See `ChildRunInfo::bubble_id`.
+        /// `id`) this run belongs to. See `SubagentRunInfo::bubble_id`.
         call_id: Uuid,
         agent_type: String,
         task: String,
         label: String,
     },
-    /// The provider-connection/model identity of a constructed child engine.
-    ChildAgentEngineConfigured {
+    /// The provider-connection/model identity of a constructed subagent engine.
+    SubagentEngineConfigured {
         run_id: Uuid,
         engine: EngineDisplayInfo,
     },
     /// A fragment of `run_id`'s own text/thinking output.
-    /// See `UiUpdate::ChildAgentToken`.
-    ChildAgentToken {
+    /// See `UiUpdate::SubagentToken`.
+    SubagentToken {
         run_id: Uuid,
         text: String,
         is_thinking: bool,
     },
-    /// The child run's estimate against its own active context window. See
-    /// `UiUpdate::ChildContextUsage` for the estimate source.
-    ChildContextUsage {
+    /// The subagent run's estimate against its own active context window. See
+    /// `UiUpdate::SubagentContextUsage` for the estimate source.
+    SubagentContextUsage {
         run_id: Uuid,
         estimated_tokens: usize,
         context_length: usize,
         source: ContextUsageSource,
     },
-    /// The child agent run identified by `run_id` has finished.
-    /// See `UiUpdate::ChildAgentDone`.
-    ChildAgentDone {
+    /// The subagent run identified by `run_id` has finished.
+    /// See `UiUpdate::SubagentDone`.
+    SubagentDone {
         run_id: Uuid,
         status: String,
         result: Option<String>,
@@ -311,11 +311,11 @@ impl DomainEvent {
             DomainEvent::SteerQueued { .. } => "SteerQueued",
             DomainEvent::SteerApplied { .. } => "SteerApplied",
             DomainEvent::StreamThinkingChunk(_) => "StreamThinkingChunk",
-            DomainEvent::ChildAgentStarted { .. } => "ChildAgentStarted",
-            DomainEvent::ChildAgentEngineConfigured { .. } => "ChildAgentEngineConfigured",
-            DomainEvent::ChildAgentToken { .. } => "ChildAgentToken",
-            DomainEvent::ChildContextUsage { .. } => "ChildContextUsage",
-            DomainEvent::ChildAgentDone { .. } => "ChildAgentDone",
+            DomainEvent::SubagentStarted { .. } => "SubagentStarted",
+            DomainEvent::SubagentEngineConfigured { .. } => "SubagentEngineConfigured",
+            DomainEvent::SubagentToken { .. } => "SubagentToken",
+            DomainEvent::SubagentContextUsage { .. } => "SubagentContextUsage",
+            DomainEvent::SubagentDone { .. } => "SubagentDone",
             DomainEvent::BubbleClickWindowExpired => "BubbleClickWindowExpired",
             DomainEvent::BubbleExpansionFeedbackShown => "BubbleExpansionFeedbackShown",
             DomainEvent::ContextUsage { .. } => "ContextUsage",
@@ -419,8 +419,8 @@ pub enum Effect {
     },
     CancelSessionSelection,
     Compact,
-    /// Read a replay-discovered child transcript before entering its view.
-    LoadChildTranscript {
+    /// Read a replay-discovered subagent transcript before entering its view.
+    LoadSubagentTranscript {
         run_id: Uuid,
     },
     /// `/models` — fetch the provider's model list for the picker,

@@ -72,7 +72,7 @@ fn factory_validates_unused_types_and_library_defaults_never_discover() {
 }
 
 #[test]
-fn root_child_and_storeless_factory_copies_keep_independent_catalogs() {
+fn root_subagent_and_storeless_factory_copies_keep_independent_catalogs() {
     crate::test_support::run_locked(async {
         let directory = tempfile::tempdir().unwrap();
         let (factory, mut profile) = make_factory();
@@ -110,11 +110,11 @@ fn root_child_and_storeless_factory_copies_keep_independent_catalogs() {
 
         let (finish_tx, _finish_rx) = mpsc::channel(1);
         let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
-        let (child, _updates) = storeless
+        let (subagent, _updates) = storeless
             .create(
                 &profile,
                 "specialist",
-                Role::Child(ChildRoleConfig {
+                Role::Subagent(SubagentRoleConfig {
                     run_id: Uuid::new_v4(),
                     call_id: Uuid::new_v4(),
                     session_id: None,
@@ -125,7 +125,7 @@ fn root_child_and_storeless_factory_copies_keep_independent_catalogs() {
                 }),
             )
             .unwrap();
-        let loader = child.registry().get("load_skill").unwrap();
+        let loader = subagent.registry().get("load_skill").unwrap();
         assert_eq!(
             loader.needs_approval(&serde_json::json!({"name":"beta"})),
             crate::ApprovalCheck::AutoApproved
@@ -134,8 +134,8 @@ fn root_child_and_storeless_factory_copies_keep_independent_catalogs() {
             loader.needs_approval(&serde_json::json!({"name":"alpha"})),
             crate::ApprovalCheck::AutoDenied { .. }
         ));
-        assert!(child.registry().get("bash").is_none());
-        assert!(child.registry().get("write").is_none());
+        assert!(subagent.registry().get("bash").is_none());
+        assert!(subagent.registry().get("write").is_none());
 
         let store = Store::create(
             &directory.path().join("chats"),

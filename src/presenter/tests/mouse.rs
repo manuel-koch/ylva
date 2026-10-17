@@ -679,7 +679,7 @@ fn slash_overlay_drag_uses_the_scrolled_content_row() {
 fn mouse_scroll_over_header_bubble_scrolls_the_header_not_the_chat_area() {
     let mut state = AppState::new();
     state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
-    state.child_view.header_bubble_scroll_offset = 2;
+    state.subagent_view.header_bubble_scroll_offset = 2;
     state.conversation.scroll_offset = 5;
     state.conversation.scroll_locked = false;
     let mouse = crossterm::event::MouseEvent {
@@ -689,7 +689,7 @@ fn mouse_scroll_over_header_bubble_scrolls_the_header_not_the_chat_area() {
         modifiers: KeyModifiers::NONE,
     };
     update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
-    assert_eq!(state.child_view.header_bubble_scroll_offset, 3);
+    assert_eq!(state.subagent_view.header_bubble_scroll_offset, 3);
     assert_eq!(
         state.conversation.scroll_offset, 5,
         "scroll over the header must not also move the chat area"
@@ -714,14 +714,14 @@ fn click_on_header_bubble_toggles_its_collapsed_state() {
         collapsed: false,
     });
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
         task: "look into flaky test".to_string(),
         label: "Investigate flaky test".to_string(),
     });
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
     state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
     let mouse_down = crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -772,23 +772,23 @@ fn drag_on_header_bubble_copies_text_without_toggling_collapse() {
         collapsed: false,
     });
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
         task: "inspect this task".to_string(),
         label: "Inspect task".to_string(),
     });
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
     render_app_state_buffer(&mut state);
     let task_line = state
-        .child_view
+        .subagent_view
         .header_rendered_lines
         .iter()
         .position(|line| line.contains("inspect this task"))
         .expect("rendered header must contain the task");
-    let task_column = state.child_view.header_rendered_line_prefix_widths[task_line];
-    let task_text_column = state.child_view.header_rendered_lines[task_line]
+    let task_column = state.subagent_view.header_rendered_line_prefix_widths[task_line];
+    let task_text_column = state.subagent_view.header_rendered_lines[task_line]
         .find("inspect")
         .expect("rendered header must contain the selected word");
     let task_row = state.layout.header_bubble.y + task_line as u16;
@@ -851,7 +851,7 @@ fn drag_on_header_bubble_copies_text_without_toggling_collapse() {
         matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
         "a non-empty header drag must not toggle collapse"
     );
-    assert!(!state.child_view.header_drag_active);
+    assert!(!state.subagent_view.header_drag_active);
 }
 
 #[test]
@@ -872,14 +872,14 @@ fn click_outside_header_bubble_does_not_toggle_it() {
         collapsed: false,
     });
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
         task: "look into flaky test".to_string(),
         label: "Investigate flaky test".to_string(),
     });
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
     state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
     let mouse_down = crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -1061,7 +1061,7 @@ fn single_click_on_spawn_bubble_title_toggles_collapsed_not_drill_in() {
     let mut state = AppState::new();
     let bubble_id = Uuid::new_v4();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
@@ -1095,11 +1095,11 @@ fn single_click_on_spawn_bubble_title_toggles_collapsed_not_drill_in() {
 }
 
 #[test]
-fn double_click_on_spawn_bubble_title_drills_into_child_view() {
+fn double_click_on_spawn_bubble_title_drills_into_subagent_view() {
     let mut state = AppState::new();
     let bubble_id = Uuid::new_v4();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
@@ -1123,7 +1123,7 @@ fn double_click_on_spawn_bubble_title_drills_into_child_view() {
 
     assert!(matches!(
         state.active_view,
-        ConversationView::Child { run_id: r, .. } if r == run_id
+        ConversationView::Subagent { run_id: r, .. } if r == run_id
     ));
     // The deferred toggle from the first click must not have committed —
     // the bubble was never collapsed, since the pair resolved as a
@@ -1135,21 +1135,21 @@ fn double_click_on_spawn_bubble_title_drills_into_child_view() {
 }
 
 #[test]
-fn double_click_on_finished_spawn_bubble_still_drills_in_via_child_conversations() {
-    // Once the child finishes, `running_child` is cleared but its entry
-    // in `child_conversations` survives — the bubble must still be
+fn double_click_on_finished_spawn_bubble_still_drills_in_via_subagent_conversations() {
+    // Once the subagent finishes, `running_subagent` is cleared but its entry
+    // in `subagent_conversations` survives — the bubble must still be
     // drillable.
     let mut state = AppState::new();
     let bubble_id = Uuid::new_v4();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id,
         agent_type: "reviewer".to_string(),
         task: "look into flaky test".to_string(),
         label: "Investigate flaky test".to_string(),
     });
-    state.running_children.clear();
+    state.running_subagents.clear();
     let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
 
     update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
@@ -1164,7 +1164,7 @@ fn double_click_on_finished_spawn_bubble_still_drills_in_via_child_conversations
 
     assert!(matches!(
         state.active_view,
-        ConversationView::Child { run_id: r, .. } if r == run_id
+        ConversationView::Subagent { run_id: r, .. } if r == run_id
     ));
 }
 

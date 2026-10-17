@@ -35,7 +35,7 @@ pub struct RunOutcome {
 impl RunOutcome {
     /// Record the outcome-relevant part of a driver event.
     ///
-    /// A root-level error (`run_id: None`) counts as a failure. Child errors and
+    /// A root-level error (`run_id: None`) counts as a failure. Subagent errors and
     /// tool results do not affect the outcome.
     pub fn record_update(&mut self, update: &UiUpdate) {
         if let UiUpdate::Error { run_id: None, .. } = update {
@@ -148,10 +148,10 @@ mod tests {
     }
 
     #[test]
-    fn child_error_update_does_not_affect_the_outcome() {
+    fn subagent_error_update_does_not_affect_the_outcome() {
         let mut outcome = RunOutcome::default();
         outcome.record_update(&UiUpdate::Error {
-            message: "child failed".into(),
+            message: "subagent failed".into(),
             run_id: Some(Uuid::nil()),
         });
         assert_eq!(outcome, RunOutcome::default());

@@ -110,16 +110,16 @@ const CLARIFY_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("ctrl-c/esc", "cancel"),
     FooterHint::key("F1", "help"),
 ];
-const CHILD_VIEW_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
+const SUBAGENT_VIEW_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("ctrl-c/esc", "clear draft"),
     FooterHint::key("F1", "help"),
 ];
-const CHILD_VIEW_BUSY_FOOTER_HINTS: &[FooterHint] = &[
+const SUBAGENT_VIEW_BUSY_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("esc", "back to conversation"),
     FooterHint::key("ctrl-c", "cancel & quit"),
     FooterHint::key("F1", "help"),
 ];
-const CHILD_VIEW_IDLE_FOOTER_HINTS: &[FooterHint] = &[
+const SUBAGENT_VIEW_IDLE_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("esc", "back to conversation"),
     FooterHint::key("ctrl-c", "quit"),
     FooterHint::key("F1", "help"),
@@ -167,23 +167,23 @@ pub(super) fn footer_keybinding_hints(
             }
         }
         SlashOverlay::Hidden => {
-            let in_child_view = state.child_view.child_view_bubble.is_some();
+            let in_subagent_view = state.subagent_view.subagent_view_bubble.is_some();
             let parent_agent_is_busy = state.parent_agent_mode != AgentMode::Idle;
             if state.clarify_banner_state.pending_clarify.is_some() {
                 CLARIFY_FOOTER_HINTS
-            } else if in_child_view && !input_is_empty {
+            } else if in_subagent_view && !input_is_empty {
                 // Viewing a subagent's drill-in transcript: `enter send` is
-                // omitted entirely — the child conversation doesn't accept
+                // omitted entirely — the subagent conversation doesn't accept
                 // input (only one agent loop is driven at a time), and Enter
                 // no longer steers the root agent from here either.
-                CHILD_VIEW_DRAFT_FOOTER_HINTS
-            } else if in_child_view {
+                SUBAGENT_VIEW_DRAFT_FOOTER_HINTS
+            } else if in_subagent_view {
                 // Esc with an empty draft navigates back to the root
                 // conversation instead of acting on the root agent's turn.
                 if parent_agent_is_busy {
-                    CHILD_VIEW_BUSY_FOOTER_HINTS
+                    SUBAGENT_VIEW_BUSY_FOOTER_HINTS
                 } else {
-                    CHILD_VIEW_IDLE_FOOTER_HINTS
+                    SUBAGENT_VIEW_IDLE_FOOTER_HINTS
                 }
             } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
                 BUSY_DRAFT_FOOTER_HINTS
@@ -483,8 +483,8 @@ pub(super) fn draw_normal_footer(
         })
     } else {
         state
-            .child_view
-            .child_view_bubble
+            .subagent_view
+            .subagent_view_bubble
             .as_ref()
             .map(|(_, _, state, _)| state)
     };
@@ -504,10 +504,10 @@ pub(super) fn draw_normal_footer(
         AgentMode::Aborting => "Aborting…",
     };
     // While drilled into a subagent's transcript, `agent_mode` follows the
-    // visible child and `parent_agent_mode` retains the root loop's status.
-    // Once the child bubble reaches a terminal state (Done/Error/Denied/
+    // visible subagent and `parent_agent_mode` retains the root loop's status.
+    // Once the subagent bubble reaches a terminal state (Done/Error/Denied/
     // Killed) but the root is still busy (e.g. producing its final reply or
-    // running another child), the plain mode word would misleadingly read
+    // running another subagent), the plain mode word would misleadingly read
     // "Idle" or "Streaming…" without saying which agent is active. Override
     // with an explicit "done, but parent busy" message in that case; once the
     // root also goes `Idle`, the plain `mode_word` above is unambiguous.
@@ -524,31 +524,31 @@ pub(super) fn draw_normal_footer(
         {
             "Subagent done, parent working…"
         }
-        // The child bubble is still `Running` (the subagent itself hasn't
+        // The subagent bubble is still `Running` (the subagent itself hasn't
         // finished) — `state.agent_mode` reports `ToolRunning` for the whole
-        // lifetime of a live child (see `AppState::agent_mode`), which reads
+        // lifetime of a live subagent (see `AppState::agent_mode`), which reads
         // correctly on the *root* footer ("a tool — the subagent — is
-        // running") but is misleading here: while looking at the child's own
-        // transcript, "Running tool…" implies the *child itself* is
+        // running") but is misleading here: while looking at the subagent's own
+        // transcript, "Running tool…" implies the *subagent itself* is
         // executing a tool call, when most of the time it's just
         // streaming/thinking. Only keep the plain "Running tool…" word when
-        // the child's own transcript (already projected into
+        // the subagent's own transcript (already projected into
         // `state.chat_entries` while viewing it) shows one of *its own* tool
         // bubbles still `Running`; otherwise say explicitly whether the
         // subagent is thinking, streaming, or (before its first token
         // arrives) just generically working — `state.partial_thinking_text`/
-        // `state.partial_assistant_text` are the *child's own* accumulators
-        // here (see `render::project_for_draw`'s child projection), not the
+        // `state.partial_assistant_text` are the *subagent's own* accumulators
+        // here (see `render::project_for_draw`'s subagent projection), not the
         // root's.
         Some(ToolCallState::Running { .. }) => {
             let entries = source.map_or(state.chat_entries.as_slice(), |source| source.entries);
-            let child_running_own_tool = entries.iter().any(|entry| {
+            let subagent_running_own_tool = entries.iter().any(|entry| {
                 matches!(
                     entry,
                     ChatEntry::ToolBubble { state, .. } if matches!(state.as_ref(), ToolCallState::Running { .. })
                 )
             });
-            if child_running_own_tool {
+            if subagent_running_own_tool {
                 "Running tool…"
             } else if thinking && !responding {
                 "Subagent thinking…"

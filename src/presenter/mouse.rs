@@ -381,13 +381,13 @@ pub(super) fn route_mouse(
                 if let Some((anchor_line, anchor_col)) =
                     state.header_bubble_content_position(column, row)
                 {
-                    state.child_view.header_selection = Some(ChatSelection {
+                    state.subagent_view.header_selection = Some(ChatSelection {
                         anchor_line,
                         anchor_col,
                         cursor_line: anchor_line,
                         cursor_col: anchor_col,
                     });
-                    state.child_view.header_drag_active = true;
+                    state.subagent_view.header_drag_active = true;
                 }
                 return vec![];
             }
@@ -481,9 +481,9 @@ pub(super) fn route_mouse(
                 }
                 return vec![];
             }
-            if state.child_view.header_drag_active {
+            if state.subagent_view.header_drag_active {
                 if let Some((line, column)) = state.header_bubble_drag_position(column, row) {
-                    if let Some(selection) = state.child_view.header_selection.as_mut() {
+                    if let Some(selection) = state.subagent_view.header_selection.as_mut() {
                         selection.cursor_line = line;
                         selection.cursor_col = column;
                     }
@@ -592,9 +592,9 @@ pub(super) fn route_mouse(
                 return vec![];
             }
 
-            if state.child_view.header_drag_active {
-                state.child_view.header_drag_active = false;
-                let selection = state.child_view.header_selection;
+            if state.subagent_view.header_drag_active {
+                state.subagent_view.header_drag_active = false;
+                let selection = state.subagent_view.header_selection;
                 if let Some(text) = state.extract_header_selection_text() {
                     if !text.is_empty() {
                         return vec![Effect::CopyToClipboard(text)];
@@ -603,7 +603,7 @@ pub(super) fn route_mouse(
                 if selection.is_some_and(|selection| !selection.is_empty()) {
                     return vec![];
                 }
-                state.child_view.header_selection = None;
+                state.subagent_view.header_selection = None;
                 state.toggle_header_bubble_collapsed();
                 return vec![];
             }
@@ -644,10 +644,10 @@ pub(super) fn route_mouse(
                         // single-click collapse/expand every bubble
                         // (including spawn bubbles) always supports.
                         // `run_id_for_bubble` still resolves a finished
-                        // child's bubble (entries in `child_conversations`
+                        // subagent's bubble (entries in `subagent_conversations`
                         // are kept indefinitely), and correctly disambiguates
                         // between multiple concurrent/queued `spawn_subagent`
-                        // bubbles rather than assuming "the" single child.
+                        // bubbles rather than assuming "the" single subagent.
                         //
                         // The first click on a spawn bubble does NOT toggle
                         // collapse immediately — it only arms
@@ -675,10 +675,10 @@ pub(super) fn route_mouse(
                             if is_double_click {
                                 state.last_bubble_click = None;
                                 if let Some(run_id) = state.run_id_for_bubble(bubble_id) {
-                                    if state.child_needs_lazy_load(run_id) {
-                                        return vec![Effect::LoadChildTranscript { run_id }];
+                                    if state.subagent_needs_lazy_load(run_id) {
+                                        return vec![Effect::LoadSubagentTranscript { run_id }];
                                     }
-                                    state.switch_to_child_view(run_id);
+                                    state.switch_to_subagent_view(run_id);
                                 } else {
                                     state.toggle_tool_bubble_collapsed(bubble_id);
                                 }

@@ -15,13 +15,13 @@
 //! Persisted event shapes and version/timestamp contracts.
 
 use crate::agent::Message;
-use crate::child_agent_manager::FinishResultOrigin;
+use crate::subagent_manager::FinishResultOrigin;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Version of the whole-file schema, written into the `meta` header. Bumped
-/// only for a semantic break that needs an upgrader.
-pub const SCHEMA_VERSION: u32 = 1;
+/// only for an incompatible semantic change.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Version stamped on every individual event line, so an old reader can take
 /// an event-type-specific path even without the header.
@@ -55,8 +55,8 @@ pub enum StoreEvent {
         timestamp: String,
         message: Message,
     },
-    /// A child-agent run is about to start.
-    ChildStart {
+    /// A subagent run is about to start.
+    SubagentStart {
         #[serde(default, alias = "v")]
         version: u32,
         created_at: String,
@@ -69,8 +69,8 @@ pub enum StoreEvent {
         #[serde(default)]
         label: String,
     },
-    /// A child-agent run finished.
-    ChildResult {
+    /// A subagent run finished.
+    SubagentResult {
         #[serde(default, alias = "v")]
         version: u32,
         completed_at: String,
@@ -171,11 +171,11 @@ pub struct SessionMeta {
     /// Empty while no eligible outcome exists or generation has not succeeded.
     #[serde(default)]
     pub title: String,
-    /// Set only for a child-agent's own session file, naming the parent's
-    /// `session_id` (mirrors the parent-side `ChildStart`/`ChildResult`
+    /// Set only for a subagent's own session file, naming the parent's
+    /// `session_id` (mirrors the parent-side `SubagentStart`/`SubagentResult`
     /// events so the link is discoverable from either file). `None` for
     /// every top-level session and for `/clear` rollovers, which start a
-    /// fresh session but are not a child run — omitted from the JSON line
+    /// fresh session but are not a subagent run — omitted from the JSON line
     /// entirely rather than serialized as `null`, so existing top-level
     /// sessions' header shape is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,15 +201,15 @@ pub struct SessionMeta {
 /// the one timestamp format written to the store, so `created_at`/
 /// `changed_at`/`completed_at`/`timestamp` values sort lexicographically.
 /// Millisecond (not second) precision so back-to-back events — e.g. a fast
-/// child's `child_start`/`child_result` pair, or several tool-call turns in
+/// subagent's `subagent_start`/`subagent_result` pair, or several tool-call turns in
 /// one second — don't collide on the same value.
 pub fn now_timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// Joined child lifecycle metadata reconstructed from a parent session.
+/// Joined subagent lifecycle metadata reconstructed from a parent session.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ChildRunRecord {
+pub struct SubagentRunRecord {
     pub run_id: Uuid,
     pub call_id: Uuid,
     pub parent_session: Uuid,

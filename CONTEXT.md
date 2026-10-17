@@ -199,7 +199,7 @@ whole response before any tool executes.
 
 **Per-agent compaction settings**:
 An agent type may override the profile's compaction engine and summary timeout.
-Each omitted override inherits independently. Root and child runs use the
+Each omitted override inherits independently. Root and subagent runs use the
 settings resolved for their own agent type.
 An explicitly selected compaction engine retains its configured model and
 settings independently of conversation model switches. When neither layer

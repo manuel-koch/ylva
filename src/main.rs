@@ -214,7 +214,7 @@ fn main() {
         Err(error) => exit_with_error(&mut log_guard, error),
     };
     // Export the resolved Ylva home so `$YLVA_HOME/…` sentinel sources expand
-    // verbatim for path-like tools (`create_call`) and for `bash` child
+    // verbatim for path-like tools (`create_call`) and for `bash` subagent
     // processes alike. `ylva_home()` already answered the same question, but
     // the default `~/.ylva` value existed only inside its return value while
     // `YLVA_HOME` stayed unset in the process environment. Idempotent when the

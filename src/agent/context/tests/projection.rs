@@ -17,16 +17,16 @@ use super::*;
 #[test]
 fn harness_notice_projection_preserves_the_canonical_transcript() {
     let mut context = Context::new();
-    context.push_async_harness_notice("full child result".to_string());
+    context.push_async_harness_notice("full subagent result".to_string());
     let canonical = context.messages().to_vec();
-    context.project_last_harness_notice("bounded child result".to_string());
+    context.project_last_harness_notice("bounded subagent result".to_string());
     assert_eq!(context.messages(), canonical);
     assert_eq!(
         context.model_messages().last(),
         Some(&Message::User {
             content: format_prompt_block(
                 PromptBlockKind::HarnessNotice,
-                "Harness notice; not from the user.\nbounded child result",
+                "Harness notice; not from the user.\nbounded subagent result",
             ),
             kind: UserMessageKind::ImplicitToolNote,
         })

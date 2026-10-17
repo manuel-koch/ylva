@@ -61,7 +61,7 @@ struct ContextEntry {
 
 /// The tier a message occupies at `index`: the leading identity prompt is
 /// the `System` tier, every other system message (tool protocol, persona,
-/// briefing, child budget) is stable `InitialContext` instructions, and
+/// briefing, subagent budget) is stable `InitialContext` instructions, and
 /// everything else is conversation `Recent`. [`MessageTier::Compacted`] is
 /// only ever assigned to the synthetic summary entry compaction projects
 /// into the model view, never to a transcript message.
@@ -241,7 +241,7 @@ pub struct Context {
     batch_admitted_calls: usize,
     batch_skipped_calls: usize,
     /// Session store this context appends its committed messages to, when
-    /// persistence is enabled. `None` for child agents and
+    /// persistence is enabled. `None` for subagents and
     /// for runs started without a store.
     store: Option<Store>,
 }
@@ -450,7 +450,7 @@ impl Context {
         });
     }
 
-    /// Push an additional system message. Used to inject a `Role::Child`
+    /// Push an additional system message. Used to inject a `Role::Subagent`
     /// agent's `briefing` ahead of its task, after the standard system
     /// prompts `Context::new` already installed.
     pub fn push_system(&mut self, text: String) {

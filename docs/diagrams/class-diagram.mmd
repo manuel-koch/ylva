@@ -34,12 +34,12 @@ classDiagram
         class Role {
             <<enum>>
             Root
-            Child(ChildRoleConfig)
+            Subagent(SubagentRoleConfig)
         }
-        class ChildAgentManager {
-            -running: Vec~RunningChild~
+        class SubagentManager {
+            -running: Vec~RunningSubagent~
             -queue: VecDeque~SpawnRequest~
-            -max_concurrent_children: Option~usize~
+            -max_concurrent_subagents: Option~usize~
             -spawn_fn: SpawnFn
         }
         class AgentLoop {
@@ -168,8 +168,8 @@ classDiagram
     AgentFactory ..> ProfileConfig : resolves agent settings
     AgentFactory o-- Engine : configured engines
     AgentFactory o-- SkillCatalog : discovery snapshot
-    AgentFactory ..> ChildAgentManager : wires spawn closure
-    ChildAgentManager ..> AgentLoop : starts subagent via closure
+    AgentFactory ..> SubagentManager : wires spawn closure
+    SubagentManager ..> AgentLoop : starts subagent via closure
     AgentLoop ..> RunState : run() starts outer-loop task
     AgentLoop o-- Engine
     AgentLoop o-- ToolRegistry
@@ -177,7 +177,7 @@ classDiagram
     RunState o-- ToolRegistry
     RunState *-- Context : sole writer
     RunState *-- CompactionRuntime
-    RunState *-- ChildAgentManager : optional root scheduler
+    RunState *-- SubagentManager : optional root scheduler
     Context o-- Store : optional persistence handle
     CompactionRuntime o-- Engine : summary engine
     EngineImpl ..|> Engine

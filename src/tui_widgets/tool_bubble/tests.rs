@@ -761,7 +761,7 @@ fn subagent_bubble_hides_run_id_from_title() {
     );
 }
 
-/// The child-view header shortens the `spawn_subagent` bubble's title to
+/// The subagent-view header shortens the `spawn_subagent` bubble's title to
 /// `"Subagent"` via `ToolBubbleArgs::display_title_override`, dropping
 /// the "Spawn" prefix that's only meaningful from the root
 /// conversation's point of view (regression test for the header always

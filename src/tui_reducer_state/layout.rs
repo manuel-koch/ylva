@@ -174,7 +174,7 @@ pub struct AppLayout {
     pub slash_overlay: SlashOverlayLayout,
     /// Rect of the clarify banner. Zero-sized when no clarify is pending.
     pub clarify_banner: ratatui::layout::Rect,
-    /// Rect of the child-view header bubble's own content column (excludes
+    /// Rect of the subagent-view header bubble's own content column (excludes
     /// its scrollbar column). Zero-sized while viewing `Root`. Used to route
     /// mouse-wheel scroll events to the header bubble rather than the chat
     /// area when the pointer is hovering over it.

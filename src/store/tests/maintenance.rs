@@ -175,15 +175,15 @@ async fn unknown_ids_prevalidate_entire_batch_and_active_targets_fail_independen
 }
 
 #[tokio::test]
-async fn deletion_retains_clone_shared_children_and_never_cascades_clones() {
+async fn deletion_retains_clone_shared_subagents_and_never_cascades_clones() {
     let (directory, chats_root, identity, path, _bytes) = super::archive::fixture().await;
     let root = Store::resume(&chats_root, directory.path(), identity).unwrap();
     let run_id = Uuid::new_v4();
-    root.record_child_start(run_id, Uuid::new_v4(), "default", "task", "label");
-    root.write_child_transcript_for_run(
+    root.record_subagent_start(run_id, Uuid::new_v4(), "default", "task", "label");
+    root.write_subagent_transcript_for_run(
         run_id,
         Some(("mock", "mock")),
-        &[user_message("child task")],
+        &[user_message("subagent task")],
     )
     .await
     .unwrap();
@@ -197,7 +197,7 @@ async fn deletion_retains_clone_shared_children_and_never_cascades_clones() {
     drop(clone);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let key = project_key(directory.path());
-    let child_path = session_path(&chats_root, &key, run_id);
+    let subagent_path = session_path(&chats_root, &key, run_id);
     let refused = Store::maintain_sessions(
         &chats_root,
         &key,
@@ -207,7 +207,7 @@ async fn deletion_retains_clone_shared_children_and_never_cascades_clones() {
     )
     .unwrap();
     assert_eq!(refused.failures.len(), 1);
-    assert!(child_path.exists());
+    assert!(subagent_path.exists());
     let report = Store::maintain_sessions(
         &chats_root,
         &key,
@@ -223,7 +223,7 @@ async fn deletion_retains_clone_shared_children_and_never_cascades_clones() {
         .any(|notice| notice.contains("retained shared")));
     assert!(!path.exists());
     assert!(clone_path.exists());
-    assert!(child_path.exists());
+    assert!(subagent_path.exists());
     let report = Store::maintain_sessions(
         &chats_root,
         &key,
@@ -233,7 +233,7 @@ async fn deletion_retains_clone_shared_children_and_never_cascades_clones() {
     )
     .unwrap();
     assert!(report.failures.is_empty());
-    assert!(!child_path.exists());
+    assert!(!subagent_path.exists());
     assert!(!clone_path.exists());
 }
 
@@ -241,12 +241,12 @@ async fn deletion_retains_clone_shared_children_and_never_cascades_clones() {
 async fn locked_root_blocks_its_whole_descendant_group() {
     let (directory, chats_root, identity, path, _bytes) = super::archive::fixture().await;
     let root = Store::resume(&chats_root, directory.path(), identity).unwrap();
-    let child = root
+    let subagent = root
         .start_new_session("mock", "mock", Some(identity), None)
         .unwrap();
-    let child_path = child.path().to_path_buf();
-    child.flush().await;
-    drop(child);
+    let subagent_path = subagent.path().to_path_buf();
+    subagent.flush().await;
+    drop(subagent);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let key = project_key(directory.path());
     let report = Store::maintain_sessions(
@@ -259,7 +259,7 @@ async fn locked_root_blocks_its_whole_descendant_group() {
     .unwrap();
     assert_eq!(report.failures.len(), 1);
     assert!(path.exists());
-    assert!(child_path.exists());
+    assert!(subagent_path.exists());
     drop(root);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let report = Store::maintain_sessions(
@@ -272,7 +272,7 @@ async fn locked_root_blocks_its_whole_descendant_group() {
     .unwrap();
     assert!(report.failures.is_empty());
     assert!(!path.exists());
-    assert!(!child_path.exists());
+    assert!(!subagent_path.exists());
 }
 
 #[tokio::test]
@@ -366,13 +366,13 @@ async fn identity_lock_survives_unlink_and_excludes_a_new_writer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_clone_and_deletion_never_leave_a_surviving_clone_without_its_child() {
+async fn concurrent_clone_and_deletion_never_leave_a_surviving_clone_without_its_subagent() {
     for _ in 0..4 {
         let (directory, chats_root, identity, _path, _bytes) = super::archive::fixture().await;
         let root = Store::resume(&chats_root, directory.path(), identity).unwrap();
-        let child_id = Uuid::new_v4();
-        root.record_child_start(child_id, Uuid::new_v4(), "default", "task", "label");
-        root.write_child_transcript_for_run(child_id, None, &[user_message("child task")])
+        let subagent_id = Uuid::new_v4();
+        root.record_subagent_start(subagent_id, Uuid::new_v4(), "default", "task", "label");
+        root.write_subagent_transcript_for_run(subagent_id, None, &[user_message("subagent task")])
             .await
             .unwrap();
         root.flush().await;
@@ -408,12 +408,12 @@ async fn concurrent_clone_and_deletion_never_leave_a_surviving_clone_without_its
         match cloned {
             Ok(clone) => {
                 assert!(
-                    session_path(&chats_root, &project_key(directory.path()), child_id).exists()
+                    session_path(&chats_root, &project_key(directory.path()), subagent_id).exists()
                 );
-                assert!(Store::read_child_runs(clone.path())
+                assert!(Store::read_subagent_runs(clone.path())
                     .unwrap()
                     .iter()
-                    .any(|run| run.run_id == child_id));
+                    .any(|run| run.run_id == subagent_id));
             }
             Err(StoreError::SessionNotFound { .. }) => {}
             Err(error) => panic!("unexpected clone failure: {error}"),

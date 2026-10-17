@@ -113,13 +113,13 @@ fn write_scratch(dir: &TempDir, name: &str, content: &str) -> String {
 struct SwitchableTestEngine {
     config: std::sync::RwLock<EngineConfig>,
     calls: AtomicUsize,
-    child_calls: AtomicUsize,
+    subagent_calls: AtomicUsize,
     spawn_agent_type: String,
     chat_records: Mutex<Vec<ChatRecord>>,
-    child_request_barrier: Option<Arc<ChildRequestBarrier>>,
+    subagent_request_barrier: Option<Arc<SubagentRequestBarrier>>,
 }
 
-struct ChildRequestBarrier {
+struct SubagentRequestBarrier {
     first_request_started: Notify,
     release_first_request: Notify,
 }
@@ -127,7 +127,7 @@ struct ChildRequestBarrier {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ChatRecord {
     model: String,
-    is_child: bool,
+    is_subagent: bool,
 }
 
 impl SwitchableTestEngine {
@@ -143,11 +143,11 @@ impl SwitchableTestEngine {
         Self::new_with_options(provider_connection, model, spawn_agent_type, None)
     }
 
-    fn new_with_child_request_barrier(
+    fn new_with_subagent_request_barrier(
         provider_connection: &str,
         model: &str,
-    ) -> (Arc<Self>, Arc<ChildRequestBarrier>) {
-        let barrier = Arc::new(ChildRequestBarrier {
+    ) -> (Arc<Self>, Arc<SubagentRequestBarrier>) {
+        let barrier = Arc::new(SubagentRequestBarrier {
             first_request_started: Notify::new(),
             release_first_request: Notify::new(),
         });
@@ -164,7 +164,7 @@ impl SwitchableTestEngine {
         provider_connection: &str,
         model: &str,
         spawn_agent_type: &str,
-        child_request_barrier: Option<Arc<ChildRequestBarrier>>,
+        subagent_request_barrier: Option<Arc<SubagentRequestBarrier>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             config: std::sync::RwLock::new(EngineConfig {
@@ -181,19 +181,20 @@ impl SwitchableTestEngine {
                 hard_compaction_threshold: 0.9,
             }),
             calls: AtomicUsize::new(0),
-            child_calls: AtomicUsize::new(0),
+            subagent_calls: AtomicUsize::new(0),
             spawn_agent_type: spawn_agent_type.to_string(),
             chat_records: Mutex::new(Vec::new()),
-            child_request_barrier,
+            subagent_request_barrier,
         })
     }
 
-    async fn wait_for_child_chats(&self, expected_count: usize) {
+    async fn wait_for_subagent_chats(&self, expected_count: usize) {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let records = self.chat_records();
-                let child_chat_count = records.iter().filter(|record| record.is_child).count();
-                if child_chat_count >= expected_count {
+                let subagent_chat_count =
+                    records.iter().filter(|record| record.is_subagent).count();
+                if subagent_chat_count >= expected_count {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -202,7 +203,7 @@ impl SwitchableTestEngine {
         .await
         .unwrap_or_else(|_| {
             panic!(
-                "expected child chat request starts; records={:?}",
+                "expected subagent chat request starts; records={:?}",
                 self.chat_records()
             )
         });
@@ -215,10 +216,10 @@ impl SwitchableTestEngine {
             .clone()
     }
 
-    fn child_chat_records(&self) -> Vec<ChatRecord> {
+    fn subagent_chat_records(&self) -> Vec<ChatRecord> {
         self.chat_records()
             .into_iter()
-            .filter(|record| record.is_child)
+            .filter(|record| record.is_subagent)
             .collect()
     }
 }
@@ -230,21 +231,25 @@ impl Engine for SwitchableTestEngine {
         tools: Vec<ToolSchema>,
         _cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
-        let is_child = tools.iter().any(|tool| tool.name == "agent_finish");
+        let is_subagent = tools.iter().any(|tool| tool.name == "agent_finish");
         let model = self.config().model;
         let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
-        let child_call_index = is_child.then(|| self.child_calls.fetch_add(1, Ordering::SeqCst));
+        let subagent_call_index =
+            is_subagent.then(|| self.subagent_calls.fetch_add(1, Ordering::SeqCst));
         self.chat_records
             .lock()
             .expect("test chat records lock")
-            .push(ChatRecord { model, is_child });
+            .push(ChatRecord { model, is_subagent });
         let spawn_agent_type = self.spawn_agent_type.clone();
-        let child_request_barrier = if child_call_index == Some(0) {
-            self.child_request_barrier.clone()
+        let subagent_request_barrier = if subagent_call_index == Some(0) {
+            self.subagent_request_barrier.clone()
         } else {
             None
         };
-        let event = if is_child && child_call_index == Some(0) && child_request_barrier.is_some() {
+        let event = if is_subagent
+            && subagent_call_index == Some(0)
+            && subagent_request_barrier.is_some()
+        {
             StreamEvent::Delta(DeltaChunk {
                 tool_call_index: 0,
                 tool_call_id: None,
@@ -256,8 +261,8 @@ impl Engine for SwitchableTestEngine {
                     .to_string(),
                 ),
             })
-        } else if is_child {
-            StreamEvent::Text("child result".to_string())
+        } else if is_subagent {
+            StreamEvent::Text("subagent result".to_string())
         } else if call_index == 0 {
             StreamEvent::Delta(DeltaChunk {
                 tool_call_index: 0,
@@ -278,7 +283,7 @@ impl Engine for SwitchableTestEngine {
         Box::pin(async move {
             let (sender, receiver) = mpsc::channel(2);
             sender.send(event).await.expect("test stream receiver open");
-            if let Some(barrier) = child_request_barrier {
+            if let Some(barrier) = subagent_request_barrier {
                 barrier.first_request_started.notify_one();
                 barrier.release_first_request.notified().await;
             }
@@ -561,7 +566,7 @@ async fn catalog_context_length_rebudgets_the_first_request_before_dispatch() {
 }
 
 #[tokio::test]
-async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
+async fn subagent_spawn_after_root_model_switch_uses_the_root_active_engine() {
     let default_engine = SwitchableTestEngine::new("default-provider", "default-model");
     let alternate_engine = SwitchableTestEngine::new("alternate-provider", "alternate-model");
     let factory = ylva::AgentFactory::new(std::collections::HashMap::from([
@@ -625,14 +630,14 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
                 UiUpdate::ToolPending { id, name, .. } if name == "spawn_subagent" => {
                     root.send_command(AgentCommand::ApproveTool { id }).await;
                 }
-                UiUpdate::ChildAgentEngineConfigured { engine, .. } => return engine,
+                UiUpdate::SubagentEngineConfigured { engine, .. } => return engine,
                 _ => {}
             }
         }
-        panic!("root UI channel closed before child engine configuration");
+        panic!("root UI channel closed before subagent engine configuration");
     })
     .await
-    .expect("child engine configuration arrives");
+    .expect("subagent engine configuration arrives");
 
     root.send_command(AgentCommand::Stop {
         reason: "end regression test".to_string(),
@@ -647,18 +652,21 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
 
     assert_eq!(
         configured_engine.provider_connection, "alternate-provider",
-        "a child resolving the default engine must follow the root's active provider"
+        "a subagent resolving the default engine must follow the root's active provider"
     );
     assert_eq!(
         configured_engine.model, "alternate-model",
-        "a child resolving the default engine must follow the root's active model"
+        "a subagent resolving the default engine must follow the root's active model"
     );
 }
 
 #[tokio::test]
-async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
-    let (default_engine, child_request_barrier) =
-        SwitchableTestEngine::new_with_child_request_barrier("default-provider", "default-model");
+async fn running_subagent_uses_a_shared_engine_switch_on_its_next_request() {
+    let (default_engine, subagent_request_barrier) =
+        SwitchableTestEngine::new_with_subagent_request_barrier(
+            "default-provider",
+            "default-model",
+        );
     let alternate_engine = SwitchableTestEngine::new("alternate-provider", "alternate-model");
     let factory = ylva::AgentFactory::new(std::collections::HashMap::from([
         (
@@ -699,18 +707,21 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
         .await;
     let (run_id, configured_engine) = tokio::time::timeout(Duration::from_secs(1), async {
         while let Some(update) = ui_rx.recv().await {
-            if let UiUpdate::ChildAgentEngineConfigured { run_id, engine } = update {
+            if let UiUpdate::SubagentEngineConfigured { run_id, engine } = update {
                 return (run_id, engine);
             }
         }
-        panic!("root UI channel closed before child engine configuration");
+        panic!("root UI channel closed before subagent engine configuration");
     })
     .await
-    .expect("child engine configuration arrives");
+    .expect("subagent engine configuration arrives");
     assert_eq!(configured_engine.model, "default-model");
 
-    default_engine.wait_for_child_chats(1).await;
-    child_request_barrier.first_request_started.notified().await;
+    default_engine.wait_for_subagent_chats(1).await;
+    subagent_request_barrier
+        .first_request_started
+        .notified()
+        .await;
     root.engine()
         .switch_model_option(&ProviderModelOption {
             context_length_override: None,
@@ -725,21 +736,21 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
             reasoning_effort: None,
         })
         .expect("root model switch succeeds");
-    root.send_command(AgentCommand::ForChild {
+    root.send_command(AgentCommand::ForSubagent {
         run_id,
         command: Box::new(AgentCommand::Prompt(
             "continue after the model switch".to_string(),
         )),
     })
     .await;
-    child_request_barrier.release_first_request.notify_one();
+    subagent_request_barrier.release_first_request.notify_one();
 
-    alternate_engine.wait_for_child_chats(1).await;
+    alternate_engine.wait_for_subagent_chats(1).await;
     assert_eq!(
-        alternate_engine.child_chat_records(),
+        alternate_engine.subagent_chat_records(),
         vec![ChatRecord {
             model: "alternate-model".to_string(),
-            is_child: true,
+            is_subagent: true,
         }]
     );
 
@@ -756,7 +767,7 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
 }
 
 #[tokio::test]
-async fn child_with_explicit_engine_override_keeps_its_named_engine() {
+async fn subagent_with_explicit_engine_override_keeps_its_named_engine() {
     let default_engine = SwitchableTestEngine::new_with_spawn_agent_type(
         "default-provider",
         "default-model",
@@ -843,16 +854,16 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
         .await;
     let configured_engine = tokio::time::timeout(Duration::from_secs(1), async {
         while let Some(update) = ui_rx.recv().await {
-            if let UiUpdate::ChildAgentEngineConfigured { engine, .. } = update {
+            if let UiUpdate::SubagentEngineConfigured { engine, .. } = update {
                 return engine;
             }
         }
-        panic!("root UI channel closed before child engine configuration");
+        panic!("root UI channel closed before subagent engine configuration");
     })
     .await
-    .expect("child engine configuration arrives");
+    .expect("subagent engine configuration arrives");
 
-    specialized_engine.wait_for_child_chats(1).await;
+    specialized_engine.wait_for_subagent_chats(1).await;
     assert_eq!(configured_engine.engine_name, "specialized");
     assert_eq!(configured_engine.provider_connection, "special-provider");
     assert_eq!(configured_engine.model, "special-model");
@@ -860,7 +871,7 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
         specialized_engine.chat_records(),
         vec![ChatRecord {
             model: "special-model".to_string(),
-            is_child: true,
+            is_subagent: true,
         }]
     );
 
@@ -1100,16 +1111,16 @@ async fn run_cli_bash_denial_prints_label_and_command_sections() {
 }
 
 #[tokio::test]
-async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
+async fn run_cli_waits_for_spawned_subagent_before_ending_conversation() {
     use tokio_util::sync::CancellationToken;
-    use ylva::child_agent_manager::SpawnFn;
-    use ylva::{ChildAgentManager, FinishResult};
+    use ylva::subagent_manager::SpawnFn;
+    use ylva::{FinishResult, SubagentManager};
 
     // Regression test: `spawn_subagent` resolves the parent's own turn
-    // (`StreamDone`) immediately, well before the child actually finishes.
+    // (`StreamDone`) immediately, well before the subagent actually finishes.
     // `run_cli_to` must not tear down the `AgentLoop` at that first
-    // `StreamDone` while a spawned child is still outstanding — otherwise
-    // the child's eventual `agent_finish` result is silently discarded.
+    // `StreamDone` while a spawned subagent is still outstanding — otherwise
+    // the subagent's eventual `agent_finish` result is silently discarded.
     let calls = Arc::new(AtomicUsize::new(0));
     let provider = Arc::new(MockProviderWithScript {
         phase_one: vec![tool_call(
@@ -1146,22 +1157,22 @@ async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
                         .send(FinishResult {
                             run_id: request.run_id,
                             call_id: request.call_id,
-                            origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
+                            origin: ylva::subagent_manager::FinishResultOrigin::Agent,
                             status: "success".to_string(),
-                            result: Some("child result payload".to_string()),
+                            result: Some("subagent result payload".to_string()),
                             error: None,
                             sources: vec![],
                         });
                 }
             }
         });
-        ylva::child_agent_manager::SpawnOutcome {
+        ylva::subagent_manager::SpawnOutcome {
             command_sender: None,
             handle,
         }
     });
-    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(1));
-    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+    let manager = SubagentManager::new(subagent_ui_tx, spawn_fn, Some(1));
+    agent = agent.with_subagent_manager(manager, finish_rx, subagent_ui_rx);
 
     run_cli_to(
         agent,
@@ -1175,18 +1186,18 @@ async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
     let output = String::from_utf8(output).expect("utf8 output");
 
     assert!(
-        output.contains("child result payload"),
-        "expected the child's result to be printed before the CLI exits, output: {output}"
+        output.contains("subagent result payload"),
+        "expected the subagent's result to be printed before the CLI exits, output: {output}"
     );
     // Regression check for the forced re-prompt: the mock provider is only
     // called again once (call #2, the reprompt right after `spawn_subagent`
-    // resolves) if the root never reacts to the child's finish. A third call
-    // proves `AgentLoop` re-prompted the root LLM after the child's result
+    // resolves) if the root never reacts to the subagent's finish. A third call
+    // proves `AgentLoop` re-prompted the root LLM after the subagent's result
     // landed in context (see the `finish_rx` arm's `mode == Idle` check).
     assert_eq!(
         calls.load(Ordering::SeqCst),
         3,
-        "expected a third provider call: the reprompt after the child's finish result, output: {output}"
+        "expected a third provider call: the reprompt after the subagent's finish result, output: {output}"
     );
 }
 
@@ -1194,7 +1205,7 @@ async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
 /// call, and plain text embedding the 1-based call index on every
 /// subsequent call (`"auto-reply-<n>"`). Used to distinguish, purely from
 /// printed output, which of several interleaved provider calls (shared by
-/// the root and its child, since [`ylva::AgentFactory`] resolves both
+/// the root and its subagent, since [`ylva::AgentFactory`] resolves both
 /// against the same named engine) produced a given piece of text.
 struct CallCountingProvider {
     calls: Arc<AtomicUsize>,
@@ -1247,16 +1258,16 @@ impl Provider for CallCountingProvider {
 }
 
 #[tokio::test]
-async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_child() {
+async fn console_app_reacts_to_subagent_finish_through_real_agent_factory_and_run_subagent() {
     // Regression/end-to-end test: unlike
-    // `run_cli_waits_for_spawned_child_before_ending_conversation` (which
-    // wires a hand-rolled `SpawnFn`/`ChildAgentManager` directly onto
+    // `run_cli_waits_for_spawned_subagent_before_ending_conversation` (which
+    // wires a hand-rolled `SpawnFn`/`SubagentManager` directly onto
     // `AgentLoop`), this test goes through the *real* production path:
     // `ylva::AgentFactory::create` (the same call `ConsoleApp::run` makes)
-    // wiring a real `Role::Child` agent run via `run_child`
-    // (`src/agent_factory.rs`), including its `forward_task`/`child_loop`
-    // drain-on-drop cleanup. It exercises the "child never called
-    // `agent_finish`" unstructured-fallback path, since the mock child's
+    // wiring a real `Role::Subagent` agent run via `run_subagent`
+    // (`src/agent_factory.rs`), including its `forward_task`/`subagent_loop`
+    // drain-on-drop cleanup. It exercises the "subagent never called
+    // `agent_finish`" unstructured-fallback path, since the mock subagent's
     // reply here is plain text with no tool call.
     let calls = Arc::new(AtomicUsize::new(0));
     let provider: Arc<dyn Provider> = Arc::new(CallCountingProvider {
@@ -1315,8 +1326,8 @@ async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_c
 
     // Exactly 4 provider calls are causally required: #1 the root's
     // `spawn_subagent` tool call; #2 the root's immediate reprompt once
-    // `spawn_subagent` resolves with `{"status":"running"}`; #3 the child's
-    // own (sole) turn, which never calls `agent_finish` so `run_child`
+    // `spawn_subagent` resolves with `{"status":"running"}`; #3 the subagent's
+    // own (sole) turn, which never calls `agent_finish` so `run_subagent`
     // sends an "unstructured" fallback `FinishResult`; #4 the root's
     // reprompt once that fallback result lands in its context via the
     // `finish_rx` arm. #4 can only be dispatched after #3 completes, so it
@@ -1325,7 +1336,7 @@ async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_c
     assert_eq!(
         calls.load(Ordering::SeqCst),
         4,
-        "expected the root to react to the child's result with a 4th provider call, output: {output}"
+        "expected the root to react to the subagent's result with a 4th provider call, output: {output}"
     );
     assert!(
         output.contains("auto-reply-4"),
@@ -1333,35 +1344,35 @@ async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_c
     );
 }
 
-/// A provider shared by a root agent and its spawned child (both resolved
+/// A provider shared by a root agent and its spawned subagent (both resolved
 /// against the same named engine by `AgentFactory`), that tells the two
 /// apart by whether `agent_finish` appears in the tool schema list handed to
-/// `chat()` — only a `Role::Child` registry has that tool (see
+/// `chat()` — only a `Role::Subagent` registry has that tool (see
 /// `AgentFactory::create`). Each side gets its own independent call counter,
-/// so the root and child scripts don't need to reason about which of them
+/// so the root and subagent scripts don't need to reason about which of them
 /// the scheduler happens to invoke first.
-struct RootAndChildProvider {
+struct RootAndSubagentProvider {
     root_calls: Arc<AtomicUsize>,
-    child_calls: Arc<AtomicUsize>,
+    subagent_calls: Arc<AtomicUsize>,
 }
 
-impl Provider for RootAndChildProvider {
+impl Provider for RootAndSubagentProvider {
     fn chat<'a>(
         &'a self,
         _messages: Vec<Message>,
         tools: Vec<ToolSchema>,
         _cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
-        let is_child = tools.iter().any(|tool| tool.name == "agent_finish");
-        let call_index = if is_child {
-            self.child_calls.fetch_add(1, Ordering::SeqCst) + 1
+        let is_subagent = tools.iter().any(|tool| tool.name == "agent_finish");
+        let call_index = if is_subagent {
+            self.subagent_calls.fetch_add(1, Ordering::SeqCst) + 1
         } else {
             self.root_calls.fetch_add(1, Ordering::SeqCst) + 1
         };
         Box::pin(async move {
             let (tx, rx) = mpsc::channel(16);
             tokio::spawn(async move {
-                let event = match (is_child, call_index) {
+                let event = match (is_subagent, call_index) {
                     (false, 1) => StreamEvent::Delta(DeltaChunk {
                         tool_call_index: 0,
                         tool_call_id: None,
@@ -1386,7 +1397,7 @@ impl Provider for RootAndChildProvider {
                         arguments_fragment: Some(
                             serde_json::json!({
                                 "status": "success",
-                                "result": "child result payload",
+                                "result": "subagent result payload",
                             })
                             .to_string(),
                         ),
@@ -1410,27 +1421,27 @@ impl Provider for RootAndChildProvider {
 }
 
 #[tokio::test]
-async fn spawned_child_bash_approval_is_routed_to_the_child_not_the_root() {
-    // Regression/end-to-end test for the original hang: a spawned child
+async fn spawned_subagent_bash_approval_is_routed_to_the_subagent_not_the_root() {
+    // Regression/end-to-end test for the original hang: a spawned subagent
     // agent's own tool call (`bash`, `UserApprovalRequired`) must resolve
-    // against *that child's* pending queue when the driver answers it, not
+    // against *that subagent's* pending queue when the driver answers it, not
     // be silently dropped or (mis)applied to the root's queue — the latter
-    // is exactly how the original bug hung forever, since the child never
+    // is exactly how the original bug hung forever, since the subagent never
     // saw an answer to its own `ToolPending` and the root had nothing
     // pending to match the stray command against.
     //
     // `cli_driver::run_cli_to` always auto-denies `UserApprovalRequired`
     // tools ("not supported in CLI mode"), but critically it must route
-    // that denial back to the *child* (via `AgentCommand::ForChild`,
-    // resolved through `ChildAgentManager::running_command_sender`) using
-    // the `run_id` stamped on the child's `UiUpdate::ToolPending`. If that
-    // routing were broken, the child would stay parked at `ToolPending`
+    // that denial back to the *subagent* (via `AgentCommand::ForSubagent`,
+    // resolved through `SubagentManager::running_command_sender`) using
+    // the `run_id` stamped on the subagent's `UiUpdate::ToolPending`. If that
+    // routing were broken, the subagent would stay parked at `ToolPending`
     // forever and the whole run would hang, reproducing the original bug.
     let root_calls = Arc::new(AtomicUsize::new(0));
-    let child_calls = Arc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(RootAndChildProvider {
+    let subagent_calls = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(RootAndSubagentProvider {
         root_calls: Arc::clone(&root_calls),
-        child_calls: Arc::clone(&child_calls),
+        subagent_calls: Arc::clone(&subagent_calls),
     });
     let engine: Arc<dyn ylva::Engine> =
         Arc::new(EngineImpl::new(provider, common::test_engine_config()));
@@ -1483,24 +1494,24 @@ async fn spawned_child_bash_approval_is_routed_to_the_child_not_the_root() {
         ),
     )
     .await
-    .expect("run must not hang: the child's bash approval must be routed to it, not dropped")
+    .expect("run must not hang: the subagent's bash approval must be routed to it, not dropped")
     .expect("headless run succeeds");
     let output = String::from_utf8(output).expect("utf8 output");
 
     assert!(
         output.contains("not supported in CLI mode"),
-        "expected the child's bash call to surface an auto-denial, output: {output}"
+        "expected the subagent's bash call to surface an auto-denial, output: {output}"
     );
     assert!(
-        output.contains("child result payload"),
-        "expected the child to still report its result after the denied bash call \
+        output.contains("subagent result payload"),
+        "expected the subagent to still report its result after the denied bash call \
          (proving it wasn't stuck waiting for an approval that never reached it), \
          output: {output}"
     );
     assert_eq!(
-        child_calls.load(Ordering::SeqCst),
+        subagent_calls.load(Ordering::SeqCst),
         2,
-        "expected exactly 2 child provider calls: the bash call, then agent_finish \
+        "expected exactly 2 subagent provider calls: the bash call, then agent_finish \
          after the denial is fed back, output: {output}"
     );
 }

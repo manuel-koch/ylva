@@ -475,7 +475,7 @@ WON'T FIX: These are no relevant documents for current review.
 
 ### D17 - User-facing terminology does not follow the glossary
 
-- [ ] Align explanatory terminology with the glossary.
+- [x] Align explanatory terminology with the glossary.
 
 **Priority: Low. Category: terminology drift.**
 
@@ -483,10 +483,38 @@ WON'T FIX: These are no relevant documents for current review.
   explicitly discourages "child agent"/"child". [features](../features.md),
   lines 783 and 825 onward, and [implementation notes](../implementation-notes.md),
   lines 668 onward, use child-agent headings and prose throughout.
-- Resolution: use "subagent" in authored explanatory prose and headings, while
+- Original resolution: use "subagent" in authored explanatory prose and headings, while
   retaining actual identifiers such as `ChildAgentManager`, event names, and
   persisted `child_start` fields. Preserve existing inbound anchors or update
   all their references together if headings change.
+- Authorized scope extension: also rename agent-domain Rust types, modules,
+  identifiers, comments, CLI help, and model/UI wording to "subagent".
+  Preserve OS-process, filesystem, syntax-tree, and module-child terminology.
+  Also rename persisted field/event names, as subsequently requested.
+  Backward-compatible handling and migration are explicitly out of scope;
+  report which existing persisted sessions need to be discarded.
+- Documentation step: update `README.md`, `CONTEXT.md`, `docs/features.md`,
+  `docs/implementation-notes.md`, `docs/configuration.md`, `docs/cli-options.md`,
+  `docs/persistence.md`, `docs/keybindings.md`, and `docs/known-test-issues.md`,
+  plus affected `docs/diagrams/*.mmd` references and the renamed source path
+  in `docs/ideas/sample-prompts.md`. Keep the original review evidence historical.
+- Verification: add persisted-event serialization and user/model-facing
+  terminology checks; run `make format lint` and `make test-coverage`.
+- Applied: renamed the scheduler module/type to `subagent_manager` /
+  `SubagentManager`, agent roles and lifecycle events to `Subagent*`, and
+  agent-domain fields, methods, test names, comments, and displayed wording
+  throughout the code. Updated current references, diagrams, and inbound anchors;
+  ordinary process, filesystem, syntax-tree, and module children are unchanged.
+  Persisted events now use `subagent_start` / `subagent_result`, with whole-file
+  schema 2 and no legacy aliases. No other persisted field needed renaming.
+  Existing sessions containing old delegation events, their clones, and associated
+  subagent transcripts must be discarded for complete replay; sessions without
+  delegation and configuration remain usable. No stored data was deleted.
+  The consequences and raw/archive handling are documented in
+  [schema tolerance](../persistence.md#schema-tolerance).
+  Verified serialization/old-tag rejection, CLI/model wording, `make format lint`,
+  and `make test-coverage` (88.83% aggregate line coverage), plus Markdown lint,
+  local links/anchors, and rendering all four changed Mermaid sources.
 
 ### D18 - Naming research infers namespace ownership from absent resources
 

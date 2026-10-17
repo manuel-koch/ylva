@@ -79,7 +79,7 @@ impl RunState {
                 let steers_injected =
                     inject_pending_steers(&mut self.pending_steers, &mut self.context);
                 if steers_injected {
-                    self.pending_child_finish_reprompt = false;
+                    self.pending_subagent_finish_reprompt = false;
                     let _ = self
                         .ui_tx
                         .send(UiUpdate::SteerApplied {
@@ -88,8 +88,8 @@ impl RunState {
                         .await;
                     self.mode = AgentMode::Streaming;
                     self.start_request();
-                } else if self.pending_child_finish_reprompt {
-                    self.pending_child_finish_reprompt = false;
+                } else if self.pending_subagent_finish_reprompt {
+                    self.pending_subagent_finish_reprompt = false;
                     // Same iteration budget as any other
                     // re-prompt — without this guard a model
                     // whose replies never contain a tool call
@@ -128,7 +128,7 @@ impl RunState {
                         &self.ui_tx,
                     )
                     .await;
-                    if self.is_child && prefix_dropped {
+                    if self.is_subagent && prefix_dropped {
                         self.resume_after_compaction();
                     }
                 }
@@ -166,7 +166,7 @@ impl RunState {
                 self.pending_steers.clear();
                 self.current_cancel = None;
                 self.mode = AgentMode::Idle;
-                if self.is_child {
+                if self.is_subagent {
                     self.stream_error = Some(error.clone());
                 }
                 tracing::error!(message = %error, "agent stream error");
@@ -253,8 +253,8 @@ impl RunState {
                     self.engine.effective_context_length(),
                     &queued_tool_names(&self.pending_tools, 0),
                 );
-                // `agent_finish` is only ever registered on a `Role::Child`
-                // registry; once it completes the child's ReAct loop
+                // `agent_finish` is only ever registered on a `Role::Subagent`
+                // registry; once it completes the subagent's ReAct loop
                 // exits unconditionally (exempt from the iteration
                 // cap) — the tool itself already reported the
                 // outcome to the parent via `finish_tx`.

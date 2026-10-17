@@ -39,7 +39,7 @@ use tokio_util::sync::CancellationToken;
 /// Execution interface over a chat-completions-style streaming backend.
 ///
 /// Keeps `AgentLoop` independent of concrete provider implementations while
-/// allowing the agent factory to construct root and child engines consistently.
+/// allowing the agent factory to construct root and subagent engines consistently.
 pub trait Engine: Send + Sync {
     /// Create an independent runtime from the engine's original configuration.
     fn configured_copy(&self) -> anyhow::Result<Arc<dyn Engine>> {

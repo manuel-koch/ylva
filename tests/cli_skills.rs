@@ -73,27 +73,27 @@ fn empty_listing_warnings_help_and_unread_stdin() {
     let home = temporary.path().join("home");
     let launch = temporary.path().join("launch");
     std::fs::create_dir_all(&launch).unwrap();
-    let mut child = command(&home, &launch)
+    let mut subagent = command(&home, &launch)
         .args(["skill", "list"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     // Keep stdin open: listing must return without waiting for EOF.
-    let stdin = child.stdin.take().unwrap();
+    let stdin = subagent.stdin.take().unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        if child.try_wait().unwrap().is_some() {
+        if subagent.try_wait().unwrap().is_some() {
             break;
         }
         if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
+            subagent.kill().unwrap();
             panic!("skill list consumed stdin");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     drop(stdin);
-    let output = child.wait_with_output().unwrap();
+    let output = subagent.wait_with_output().unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"No skills discovered.\n");
     let invalid = write_skill(&home.join(".ylva/skills"), "bad", "x");

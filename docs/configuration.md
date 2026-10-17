@@ -188,7 +188,7 @@ environment file.
     it is never silently substituted.
   - **Implicit** (no `--profile` flag; the `default` profile): not an error —
     Ylva supplies a built-in default profile with one `default` agent type
-    that may spawn children, the dark theme, and no configured engines. The
+    that may spawn subagents, the dark theme, and no configured engines. The
     backend then comes from the environment variables in
     `docs/cli-options.md`, so Ylva runs out of the box without writing a
     config file.
@@ -207,7 +207,7 @@ Example:
 default_engine = "ollama/local"
 theme = "dark"
 input_history_limit = 50
-# Maximum child agents running at once; <= 0 means unlimited.
+# Maximum subagents running at once; <= 0 means unlimited.
 # max_concurrent_subagents = 4
 
 [provider_connections.ollama-local]
@@ -249,7 +249,7 @@ engine = "ollama/local"
 | `default_model` | string (optional) | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Syntax-highlighting theme. Defaults to `dark`. See [features — rendering](./features.md#tui-architecture). |
 | `input_history_limit` | number | Maximum number of explicit messages from prior root sessions loaded into TUI input history. Defaults to `50`; `0` disables prior-session history. |
-| `max_concurrent_subagents` | integer or integer string | Profile-level cap on simultaneously running child agents across the delegation tree. Defaults to `4`; values `<= 0` mean unlimited. `--max-concurrent-subagents <N>` overrides this for one run. The cap limits child runs, not the root request. Provider request concurrency is separately limited per connection. |
+| `max_concurrent_subagents` | integer or integer string | Profile-level cap on simultaneously running subagents across the delegation tree. Defaults to `4`; values `<= 0` mean unlimited. `--max-concurrent-subagents <N>` overrides this for one run. The cap limits subagent runs, not the root request. Provider request concurrency is separately limited per connection. |
 | `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
 | `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind; its endpoint and credentials belong to this connection. |
 | `[engines.<name>]` | table | A named engine — see [Engine configuration](#engine-configuration) below. |
@@ -275,8 +275,8 @@ Referencing an engine name that no table defines (from `default_engine`,
 than a silent fallback.
 
 When the root agent changes its active provider connection or model through
-`/models`, a child spawned afterwards that resolves the same named engine uses
-that active engine. A child whose agent configuration names a different engine
+`/models`, a subagent spawned afterwards that resolves the same named engine uses
+that active engine. A subagent whose agent configuration names a different engine
 uses that named engine instead of inheriting the root's active selection.
 
 For how TUI `/session` and `/compact` use the current profile and per-agent
@@ -372,14 +372,14 @@ same whole-file replacement order:
 ```
 
 The resolved text is trimmed only at the end and becomes the global baseline
-of every newly created root and child context, exactly once. The built-in
+of every newly created root and subagent context, exactly once. The built-in
 value is `You are Ylva, a helpful agent with tool capabilities.` and
 guarantees an out-of-the-box global persona when neither disk layer exists.
 
 The baseline may then be enriched with trusted instruction files (next
 section). The agent-type persona is additive — it extends the baseline and
 never replaces it — so the initial system-prompt contract, the order in which
-every part of a freshly created root or child context is composed, is:
+every part of a freshly created root or subagent context is composed, is:
 
 1. the global SOUL (the `SOUL.md` resolution above),
 2. the safety preamble plus the trusted instruction sections, present only
@@ -487,7 +487,7 @@ changing the profile. Ylva includes a built-in prompt in
 
 Custom files only need summary guidelines. Ylva supplies the request framing
 and generation trigger automatically for conversation compaction; custom prompts
-do not need to include them. Oversized child reports use marked deterministic
+do not need to include them. Oversized subagent reports use marked deterministic
 model-only reduction, not a separate blocking summary request.
 
 Conversation compaction supplies an immutable prefix snapshot. The compact
@@ -617,13 +617,13 @@ field table, defaults, and engine-reference requirements.
 |---|---|---|
 | `engine` | string (optional) | Override the engine for this agent type. When absent, the profile's `default_engine` is used. |
 | `description` | string (optional) | Model-facing summary of the tasks this agent type is suited for. The root agent receives it in the `spawn_subagent` tool description. |
-| `allowed_tools` | list of strings (optional) | Restrict which tool names this agent may invoke. When absent, the caller's flat default tool list applies (the CLI's or TUI's standard tool set, whichever is unset). When set, a distinct agent type — including one used only for spawned children — can be restricted to a genuinely different tool set than the root or any other agent type. |
+| `allowed_tools` | list of strings (optional) | Restrict which tool names this agent may invoke. When absent, the caller's flat default tool list applies (the CLI's or TUI's standard tool set, whichever is unset). When set, a distinct agent type — including one used only for spawned subagents — can be restricted to a genuinely different tool set than the root or any other agent type. |
 | `allowed_skills` | list of strings (optional) | Restrict callable discovered skills. Omission permits all retained names; `[]` permits none; explicit values replace inherited lists. See [Agent Skills](#agent-skills). |
 | `timeout_secs` | number (optional) | Maximum wall-clock seconds before the agent is cancelled. Omitted means no timeout. |
-| `max_tool_iterations` | number (optional) | Cap on consecutive tool-use rounds one turn may spend, for this agent type's root and child loops alike. Defaults to `50` when omitted; `0` is rejected at profile load because it would trip the guard on the very first tool-use round. |
-| `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or child. |
-| `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to concurrent children (one level deep; children cannot spawn further children). The profile-level `max_concurrent_subagents` setting caps running children across the delegation tree; excess spawns wait FIFO. Use `--auto-approve-spawn` to skip the human-approval prompt. See "Child-agent delegation" in `docs/features.md`. |
-| `[agents.<type>.compaction].engine` | string (optional) | Explicit compaction engine for this agent type's context. Overrides `[compaction].engine`; if neither is set, summaries follow the agent type's active conversation engine. Applies to root and child runs of this agent type. |
+| `max_tool_iterations` | number (optional) | Cap on consecutive tool-use rounds one turn may spend, for this agent type's root and subagent loops alike. Defaults to `50` when omitted; `0` is rejected at profile load because it would trip the guard on the very first tool-use round. |
+| `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or subagent. |
+| `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to concurrent subagents (one level deep; subagents cannot spawn further subagents). The profile-level `max_concurrent_subagents` setting caps running subagents across the delegation tree; excess spawns wait FIFO. Use `--auto-approve-spawn` to skip the human-approval prompt. See "Subagent delegation" in `docs/features.md`. |
+| `[agents.<type>.compaction].engine` | string (optional) | Explicit compaction engine for this agent type's context. Overrides `[compaction].engine`; if neither is set, summaries follow the agent type's active conversation engine. Applies to root and subagent runs of this agent type. |
 | `[agents.<type>.compaction].timeout_sec` | number (optional) | Summary request timeout for this agent type, in seconds. Overrides `[compaction].timeout_sec` (default `60`); must be greater than `0`. |
 | `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tools.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
 
@@ -691,7 +691,7 @@ Every loaded profile has a `default` agent type. Without a file-authored
 `default_engine`, the normal tool set, and `can_spawn = true` for the root
 agent. An inline `[agents.default]` table overrides only the fields it supplies;
 omitted fields retain their resolved values. For example, without a replacing
-agent-type file, this customization retains child-agent delegation:
+agent-type file, this customization retains subagent delegation:
 
 ```toml
 [agents.default]
@@ -713,11 +713,11 @@ independently. If an agent needs specialized engine settings, define another
 Agents that resolve the same named engine share its Engine runtime selection. A
 provider/model or reasoning-effort change made through `/models` therefore
 applies to every conversation agent using that engine, including already-running
-children, but not to their explicitly selected compaction engines.
+subagents, but not to their explicitly selected compaction engines.
 The change does not alter an in-flight LLM request; it is observed by the
-agent's next request, which may be another request in the same child run after
+agent's next request, which may be another request in the same subagent run after
 a tool call. The selection is dynamic rather than pinned at spawn time. Use
-separate named engines when the root and a child must remain independent.
+separate named engines when the root and a subagent must remain independent.
 
 ### Web search configuration
 

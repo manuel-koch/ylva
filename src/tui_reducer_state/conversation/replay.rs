@@ -15,11 +15,11 @@
 //! Conversation / replay state and operations.
 
 use super::{
-    result_section_ids, AppState, ChatEntry, ChildConversation, ChildRunInfo, ResultSection,
+    result_section_ids, AppState, ChatEntry, ResultSection, SubagentConversation, SubagentRunInfo,
     ToolCallState, UserMessageState,
 };
 use crate::agent::{AssistantStatus, Message, UserMessageKind};
-use crate::store::ChildRunRecord;
+use crate::store::SubagentRunRecord;
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
@@ -27,15 +27,15 @@ use uuid::Uuid;
 /// Project persisted domain messages into the same terminal-free chat model
 /// used by live presenter updates.
 pub fn project_messages(messages: &[Message]) -> Vec<ChatEntry> {
-    project_messages_with_child_runs(messages, &[], None)
+    project_messages_with_subagent_runs(messages, &[], None)
 }
 
 /// Project persisted messages into chat entries, inserting the compaction
 /// marker at `compaction_boundary` — the transcript index where the verbatim
 /// tail begins. `None` keeps the plain transcript view.
-pub(in crate::tui_reducer_state) fn project_messages_with_child_runs(
+pub(in crate::tui_reducer_state) fn project_messages_with_subagent_runs(
     messages: &[Message],
-    child_runs: &[ChildRunRecord],
+    subagent_runs: &[SubagentRunRecord],
     compaction_boundary: Option<usize>,
 ) -> Vec<ChatEntry> {
     let tool_calls = messages
@@ -217,12 +217,12 @@ pub(in crate::tui_reducer_state) fn project_messages_with_child_runs(
         });
     }
 
-    for child_run in child_runs {
-        if child_run.call_id.is_nil() {
+    for subagent_run in subagent_runs {
+        if subagent_run.call_id.is_nil() {
             continue;
         }
         let (name, arguments, title_arguments) = tool_calls
-            .get(&child_run.call_id)
+            .get(&subagent_run.call_id)
             .cloned()
             .unwrap_or_else(|| {
                 (
@@ -235,7 +235,7 @@ pub(in crate::tui_reducer_state) fn project_messages_with_child_runs(
             .iter()
             .rev()
             .find_map(|entry| match entry {
-                ChatEntry::ToolBubble { id, state, .. } if *id == child_run.call_id => {
+                ChatEntry::ToolBubble { id, state, .. } if *id == subagent_run.call_id => {
                     match state.as_ref() {
                         ToolCallState::Pending {
                             content_sections, ..
@@ -258,24 +258,24 @@ pub(in crate::tui_reducer_state) fn project_messages_with_child_runs(
                 _ => None,
             })
             .unwrap_or_default();
-        let child_state = match (&child_run.status, &child_run.completed_at) {
+        let subagent_state = match (&subagent_run.status, &subagent_run.completed_at) {
             (Some(status), Some(_)) => {
-                let finish_result = crate::agent::child_agent_manager::FinishResult {
-                    run_id: child_run.run_id,
-                    call_id: child_run.call_id,
-                    origin: child_run.origin,
+                let finish_result = crate::agent::subagent_manager::FinishResult {
+                    run_id: subagent_run.run_id,
+                    call_id: subagent_run.call_id,
+                    origin: subagent_run.origin,
                     status: status.clone(),
                     result: if status == "failure" {
                         None
                     } else {
-                        child_run.result.clone()
+                        subagent_run.result.clone()
                     },
                     error: if status == "failure" {
-                        child_run.result.clone()
+                        subagent_run.result.clone()
                     } else {
                         None
                     },
-                    sources: child_run.sources.clone(),
+                    sources: subagent_run.sources.clone(),
                 };
                 preserved_content_sections.extend(finish_result.content_sections());
                 ToolCallState::Done {
@@ -283,18 +283,18 @@ pub(in crate::tui_reducer_state) fn project_messages_with_child_runs(
                     result_section: ResultSection::plain(String::new()),
                     content_sections: preserved_content_sections,
                     summary: vec![("status".to_string(), status.clone())],
-                    duration: child_run.duration.unwrap_or_default(),
+                    duration: subagent_run.duration.unwrap_or_default(),
                     title_arguments,
                 }
             }
             _ => ToolCallState::Error {
                 error: "Subagent did not finish before the session ended.".to_string(),
                 title_arguments,
-                duration: duration_since_timestamp(&child_run.created_at),
+                duration: duration_since_timestamp(&subagent_run.created_at),
                 content_sections: vec![],
             },
         };
-        replace_or_append_tool_bubble(&mut entries, child_run.call_id, &name, child_state);
+        replace_or_append_tool_bubble(&mut entries, subagent_run.call_id, &name, subagent_state);
     }
 
     entries
@@ -348,12 +348,12 @@ impl AppState {
     pub fn replay_messages(
         &mut self,
         messages: &[Message],
-        child_runs: &[ChildRunRecord],
+        subagent_runs: &[SubagentRunRecord],
         compaction_boundary: Option<usize>,
     ) {
         self.invalidate_render_cache();
         self.chat_entries =
-            project_messages_with_child_runs(messages, child_runs, compaction_boundary);
+            project_messages_with_subagent_runs(messages, subagent_runs, compaction_boundary);
         self.input_history = messages
             .iter()
             .filter_map(|message| match message {
@@ -365,19 +365,19 @@ impl AppState {
             })
             .collect();
         self.history_index = None;
-        self.child_conversations.clear();
-        for child_run in child_runs {
-            if child_run.call_id.is_nil() {
+        self.subagent_conversations.clear();
+        for subagent_run in subagent_runs {
+            if subagent_run.call_id.is_nil() {
                 continue;
             }
-            self.child_conversations.insert(
-                child_run.run_id,
-                ChildConversation::new_replay(ChildRunInfo {
-                    run_id: child_run.run_id,
-                    bubble_id: child_run.call_id,
-                    agent_type: child_run.agent_type.clone(),
-                    task: child_run.task.clone(),
-                    label: child_run.label.clone(),
+            self.subagent_conversations.insert(
+                subagent_run.run_id,
+                SubagentConversation::new_replay(SubagentRunInfo {
+                    run_id: subagent_run.run_id,
+                    bubble_id: subagent_run.call_id,
+                    agent_type: subagent_run.agent_type.clone(),
+                    task: subagent_run.task.clone(),
+                    label: subagent_run.label.clone(),
                 }),
             );
         }
@@ -385,27 +385,27 @@ impl AppState {
         self.conversation.scroll_offset = 0;
     }
 
-    /// Replace a replay-discovered child's empty transcript after its first
+    /// Replace a replay-discovered subagent's empty transcript after its first
     /// drill-in read, retaining its persisted compaction boundary.
     /// Repeated drill-ins keep the loaded transcript.
-    pub fn load_child_messages(
+    pub fn load_subagent_messages(
         &mut self,
         run_id: Uuid,
         messages: &[Message],
         compaction_boundary: Option<usize>,
     ) {
         self.invalidate_transcript_layout(Some(run_id));
-        if let Some(conversation) = self.child_conversations.get_mut(&run_id) {
+        if let Some(conversation) = self.subagent_conversations.get_mut(&run_id) {
             if conversation.needs_lazy_load {
                 conversation.messages =
-                    project_messages_with_child_runs(messages, &[], compaction_boundary);
+                    project_messages_with_subagent_runs(messages, &[], compaction_boundary);
                 conversation.needs_lazy_load = false;
             }
         }
     }
 
-    pub fn child_needs_lazy_load(&self, run_id: Uuid) -> bool {
-        self.child_conversations
+    pub fn subagent_needs_lazy_load(&self, run_id: Uuid) -> bool {
+        self.subagent_conversations
             .get(&run_id)
             .is_some_and(|conversation| conversation.needs_lazy_load)
     }

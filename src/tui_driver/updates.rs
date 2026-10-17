@@ -41,12 +41,12 @@ pub(super) fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent
             context_length: *context_length,
             source: *source,
         }),
-        UiUpdate::ChildContextUsage {
+        UiUpdate::SubagentContextUsage {
             run_id,
             estimated_tokens,
             context_length,
             source,
-        } => Some(DomainEvent::ChildContextUsage {
+        } => Some(DomainEvent::SubagentContextUsage {
             run_id: *run_id,
             estimated_tokens: *estimated_tokens,
             context_length: *context_length,
@@ -147,39 +147,39 @@ pub(super) fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent
             message: message.clone(),
             run_id: *run_id,
         }),
-        UiUpdate::ChildAgentStarted {
+        UiUpdate::SubagentStarted {
             run_id,
             call_id,
             agent_type,
             task,
             label,
-        } => Some(DomainEvent::ChildAgentStarted {
+        } => Some(DomainEvent::SubagentStarted {
             run_id: *run_id,
             call_id: *call_id,
             agent_type: agent_type.clone(),
             task: task.clone(),
             label: label.clone(),
         }),
-        UiUpdate::ChildAgentEngineConfigured { run_id, engine } => {
-            Some(DomainEvent::ChildAgentEngineConfigured {
+        UiUpdate::SubagentEngineConfigured { run_id, engine } => {
+            Some(DomainEvent::SubagentEngineConfigured {
                 run_id: *run_id,
                 engine: engine.clone(),
             })
         }
-        UiUpdate::ChildAgentToken {
+        UiUpdate::SubagentToken {
             run_id,
             text,
             is_thinking,
-        } => Some(DomainEvent::ChildAgentToken {
+        } => Some(DomainEvent::SubagentToken {
             run_id: *run_id,
             text: text.clone(),
             is_thinking: *is_thinking,
         }),
-        UiUpdate::ChildAgentDone {
+        UiUpdate::SubagentDone {
             run_id,
             status,
             result,
-        } => Some(DomainEvent::ChildAgentDone {
+        } => Some(DomainEvent::SubagentDone {
             run_id: *run_id,
             status: status.clone(),
             result: result.clone(),
@@ -193,10 +193,10 @@ pub(super) fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent
     }
 }
 
-/// Resolve a replay-discovered child transcript before the pure reducer enters
-/// the child view. Live children are already populated and pass through
+/// Resolve a replay-discovered subagent transcript before the pure reducer enters
+/// the subagent view. Live subagents are already populated and pass through
 /// unchanged.
-pub(super) fn prepare_child_replay_effects(
+pub(super) fn prepare_subagent_replay_effects(
     state: &mut AppState,
     effects: Vec<Effect>,
     store: Option<&crate::store::Store>,
@@ -206,8 +206,8 @@ pub(super) fn prepare_child_replay_effects(
     let mut prepared = Vec::with_capacity(effects.len());
     for effect in effects {
         match effect {
-            Effect::LoadChildTranscript { run_id } => {
-                if state.child_needs_lazy_load(run_id) {
+            Effect::LoadSubagentTranscript { run_id } => {
+                if state.subagent_needs_lazy_load(run_id) {
                     let (messages, compaction_boundary) = match store {
                         Some(store) => {
                             let path = crate::store::session_path(
@@ -225,22 +225,22 @@ pub(super) fn prepare_child_replay_effects(
                                         %error,
                                         path = %path.display(),
                                         %run_id,
-                                        "could not replay child transcript"
+                                        "could not replay subagent transcript"
                                     );
                                     state.push_notice_to(
                                         Some(run_id),
                                         format!("Could not load subagent transcript: {error}"),
                                     );
-                                    state.switch_to_child_view(run_id);
+                                    state.switch_to_subagent_view(run_id);
                                     continue;
                                 }
                             }
                         }
                         None => (Vec::new(), None),
                     };
-                    state.load_child_messages(run_id, &messages, compaction_boundary);
+                    state.load_subagent_messages(run_id, &messages, compaction_boundary);
                 }
-                state.switch_to_child_view(run_id);
+                state.switch_to_subagent_view(run_id);
             }
             other => prepared.push(other),
         }
@@ -389,8 +389,8 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
             clarify_banner_drag: None,
             clarify_banner: ratatui::layout::Rect::default(),
         },
-        child_view: crate::tui_render_state::ChildViewState {
-            child_view_bubble: None,
+        subagent_view: crate::tui_render_state::SubagentViewState {
+            subagent_view_bubble: None,
             header_bubble_scroll_offset: 0,
             header_bubble_area: ratatui::layout::Rect::default(),
             header_rendered_lines: Vec::new(),

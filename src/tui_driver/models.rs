@@ -285,22 +285,22 @@ fn refresh_engine_display_after_selection(
     );
     state.engine_display = conversation_display.clone();
 
-    for child_display in state.child_engine_displays.values_mut() {
-        if child_display.inherits_parent_runtime {
-            child_display.engine_name = conversation_display.engine_name.clone();
-            child_display.provider_connection = conversation_display.provider_connection.clone();
-            child_display.model = conversation_display.model.clone();
-            child_display.reasoning_effort = conversation_display.reasoning_effort.clone();
+    for subagent_display in state.subagent_engine_displays.values_mut() {
+        if subagent_display.inherits_parent_runtime {
+            subagent_display.engine_name = conversation_display.engine_name.clone();
+            subagent_display.provider_connection = conversation_display.provider_connection.clone();
+            subagent_display.model = conversation_display.model.clone();
+            subagent_display.reasoning_effort = conversation_display.reasoning_effort.clone();
         }
-        let child_engine_name = child_display.engine_name.clone();
-        let child_provider_connection = child_display.provider_connection.clone();
-        let child_model = child_display.model.clone();
+        let subagent_engine_name = subagent_display.engine_name.clone();
+        let subagent_provider_connection = subagent_display.provider_connection.clone();
+        let subagent_model = subagent_display.model.clone();
         refresh_compaction_display(
-            child_display,
+            subagent_display,
             target,
-            &child_engine_name,
-            &child_provider_connection,
-            &child_model,
+            &subagent_engine_name,
+            &subagent_provider_connection,
+            &subagent_model,
         );
     }
 }

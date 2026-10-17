@@ -24,23 +24,21 @@ use crate::agent::tools::spawn_subagent::AgentTypeInfo;
 use crate::agent::tools::{
     default_registry, AutoApproveTool, ToolRegistryConfig, DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
 };
-use crate::agent::{AgentLoop, ChildRoleConfig, Context, Message, Role, UiUpdate};
-use crate::child_agent_manager::{
-    ChildAgentManager, FinishResult, FinishResultOrigin, SpawnRequest,
-};
+use crate::agent::{AgentLoop, Context, Message, Role, SubagentRoleConfig, UiUpdate};
 use crate::config::ProfileConfig;
 use crate::llm::engine::{Engine, EngineConfig, EngineRouter};
 use crate::llm::ProviderRegistry;
 use crate::sandbox::Sandbox;
 use crate::session_title::TitleAttempt;
 use crate::store::Store;
+use crate::subagent_manager::{FinishResult, FinishResultOrigin, SpawnRequest, SubagentManager};
 
 /// Constructs [`AgentLoop`] instances from a named set of [`Engine`]s and a
 /// [`ProfileConfig`].
 ///
 /// `Role::Root` agents whose resolved `AgentConfig::can_spawn` is `true` are
-/// wired with a [`ChildAgentManager`] capable of running `Role::Child`
-/// agents via this very factory (recursively, one level deep — a child's own
+/// wired with a [`SubagentManager`] capable of running `Role::Subagent`
+/// agents via this very factory (recursively, one level deep — a subagent's own
 /// registry never contains `spawn_subagent`).
 pub struct AgentFactory {
     skills: SkillRuntime,
@@ -203,7 +201,7 @@ impl AgentFactory {
     /// this factory, and every configured tool name (profile-level and
     /// per-agent-type) against the registered tool set. This runs during
     /// startup so an unused agent type cannot hide an invalid engine or tool
-    /// name reference until a child is spawned.
+    /// name reference until a subagent is spawned.
     pub fn validate_profile_agent_engines(&self, profile: &ProfileConfig) -> anyhow::Result<()> {
         validate_profile_agent_engines(&self.engines, profile)?;
         validate_profile_agent_tool_names(profile)
@@ -230,7 +228,7 @@ impl AgentFactory {
 
     /// Enable persistence: every `Role::Root` agent built by this factory
     /// appends its committed messages to `store`'s session file, and every
-    /// child run it spawns appends `child_start`/`child_result` records plus
+    /// subagent run it spawns appends `subagent_start`/`subagent_result` records plus
     /// its own transcript alongside it.
     pub fn with_store(mut self, store: Store) -> Self {
         self.store = Some(store);
@@ -278,7 +276,7 @@ impl AgentFactory {
 
     /// Set the initial system message for root agents built by this factory.
     /// The resolved agent-type persona and system-prompt body are appended
-    /// when an agent is created. The same global text is inherited by children.
+    /// when an agent is created. The same global text is inherited by subagents.
     pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(system_prompt.into());
         self
@@ -337,15 +335,15 @@ impl AgentFactory {
     /// Returns `Err` when the resolved engine name is not registered in
     /// `self.engines`.
     ///
-    /// A child spawned by a root agent may inherit the root's active engine
+    /// A subagent spawned by a root agent may inherit the root's active engine
     /// when both agents resolve the same named engine. This keeps provider and
-    /// model switches made through `/models` effective for children spawned
-    /// afterwards, while a child with a different engine override uses its own
+    /// model switches made through `/models` effective for subagents spawned
+    /// afterwards, while a subagent with a different engine override uses its own
     /// configured engine.
     ///
     /// A `Role::Root` agent whose `agent_type` resolves `can_spawn: true` is
-    /// additionally wired with a [`ChildAgentManager`]; a `Role::Child` agent
-    /// is wired via [`AgentLoop::with_child_role`] and has `agent_finish` (not
+    /// additionally wired with a [`SubagentManager`]; a `Role::Subagent` agent
+    /// is wired via [`AgentLoop::with_subagent_role`] and has `agent_finish` (not
     /// `spawn_subagent`) registered in its tool registry.
     pub fn create(
         &self,
@@ -369,7 +367,7 @@ impl AgentFactory {
     }
 
     /// Shared construction logic for both the top-level `create` call and the
-    /// `spawn_fn` closure a `ChildAgentManager` uses to start children — kept
+    /// `spawn_fn` closure a `SubagentManager` uses to start subagents — kept
     /// as a free function (rather than requiring `Arc<Self>`) so the closure
     /// can capture cheap, owned clones of everything it needs instead of the
     /// whole factory.
@@ -400,13 +398,13 @@ impl AgentFactory {
             Arc::new(EngineRouter::new(engines.clone(), engine_name)?)
         };
 
-        let child_role_config = match role {
+        let subagent_role_config = match role {
             Role::Root => None,
-            Role::Child(config) => Some(config),
+            Role::Subagent(config) => Some(config),
         };
-        let is_child = child_role_config.is_some();
+        let is_subagent = subagent_role_config.is_some();
 
-        let can_spawn = child_role_config.is_none()
+        let can_spawn = subagent_role_config.is_none()
             && profile
                 .agents
                 .get(agent_type)
@@ -418,17 +416,18 @@ impl AgentFactory {
             Vec::new()
         };
 
-        let agent_finish_config = child_role_config
-            .as_ref()
-            .map(|config| AgentFinishToolConfig {
-                finish_tx: config.finish_tx.clone(),
-                run_id: config.run_id,
-                call_id: config.call_id,
-            });
+        let agent_finish_config =
+            subagent_role_config
+                .as_ref()
+                .map(|config| AgentFinishToolConfig {
+                    finish_tx: config.finish_tx.clone(),
+                    run_id: config.run_id,
+                    call_id: config.call_id,
+                });
 
         // Per-`agent_type` `allowed_tools` (`profile.toml`'s `[agents.*]`
         // entries) takes precedence over the flat, factory-wide default when
-        // configured, so a child spawned with a distinct `agent_type` can be
+        // configured, so a subagent spawned with a distinct `agent_type` can be
         // restricted to a genuinely different tool set than its parent (or
         // the root). Falls back to the flat list unchanged when unconfigured,
         // preserving today's behavior for every existing profile.
@@ -497,10 +496,10 @@ impl AgentFactory {
             agent_loop = agent_loop.with_system_prompt(system_prompt);
         }
 
-        if let Some(child_role_config) = child_role_config {
-            agent_loop = agent_loop.with_child_role(child_role_config);
+        if let Some(subagent_role_config) = subagent_role_config {
+            agent_loop = agent_loop.with_subagent_role(subagent_role_config);
         } else if can_spawn {
-            let mut manager = Self::build_child_agent_manager(
+            let mut manager = Self::build_subagent_manager(
                 skills.clone(),
                 engines.clone(),
                 allowed_tools.to_vec(),
@@ -514,7 +513,7 @@ impl AgentFactory {
             if let Some(store) = store.clone() {
                 manager.manager = manager.manager.with_store(store);
             }
-            agent_loop = agent_loop.with_child_agent_manager(
+            agent_loop = agent_loop.with_subagent_manager(
                 manager.manager,
                 manager.finish_rx,
                 manager.subagent_ui_rx,
@@ -551,7 +550,7 @@ impl AgentFactory {
                 )
                 .with_compaction_timeout_secs(profile.compaction_timeout_secs_for(agent_type))
                 .with_compaction_summary_prompt(summary_prompt);
-            if !is_child {
+            if !is_subagent {
                 let mut agent_types: Vec<_> = profile
                     .agents
                     .keys()
@@ -594,10 +593,10 @@ impl AgentFactory {
             }
         }
 
-        // Only the root agent streams into the session file; a child's
+        // Only the root agent streams into the session file; a subagent's
         // transcript is written once, at completion, into its own
         // sub-session file.
-        if !is_child {
+        if !is_subagent {
             if let Some(store) = store {
                 agent_loop = agent_loop.with_store(store);
             }
@@ -606,18 +605,18 @@ impl AgentFactory {
         Ok((agent_loop, ui_rx))
     }
 
-    /// Build a [`ChildAgentManager`] whose `spawn_fn` recursively calls
-    /// [`Self::build`] with `Role::Child` for each spawn request, runs the
-    /// resulting child `AgentLoop` to completion, and reports the outcome
-    /// through `finish_tx` — unless the child's own `agent_finish` tool already
-    /// did so (checked from the child's final `Context`), or the child was
-    /// cancelled by the parent (checked via the per-child `CancellationToken`).
+    /// Build a [`SubagentManager`] whose `spawn_fn` recursively calls
+    /// [`Self::build`] with `Role::Subagent` for each spawn request, runs the
+    /// resulting subagent `AgentLoop` to completion, and reports the outcome
+    /// through `finish_tx` — unless the subagent's own `agent_finish` tool already
+    /// did so (checked from the subagent's final `Context`), or the subagent was
+    /// cancelled by the parent (checked via the per-subagent `CancellationToken`).
     ///
-    /// The root engine and its resolved name are captured so a child using the
-    /// same named engine shares the root's active router; children resolving a
+    /// The root engine and its resolved name are captured so a subagent using the
+    /// same named engine shares the root's active router; subagents resolving a
     /// different name still use their configured engine selection.
     #[expect(clippy::too_many_arguments)]
-    fn build_child_agent_manager(
+    fn build_subagent_manager(
         skills: SkillRuntime,
         engines: HashMap<String, Arc<dyn Engine>>,
         allowed_tools: Vec<String>,
@@ -627,12 +626,12 @@ impl AgentFactory {
         parent_engine: Arc<dyn Engine>,
         parent_engine_name: String,
         system_prompt: Option<String>,
-    ) -> BuiltChildAgentManager {
+    ) -> BuiltSubagentManager {
         let (finish_tx, finish_rx) = mpsc::unbounded_channel::<FinishResult>();
         let (subagent_ui_tx, subagent_ui_rx) = mpsc::unbounded_channel::<UiUpdate>();
-        let max_concurrent_children = profile.max_concurrent_subagents_limit();
+        let max_concurrent_subagents = profile.max_concurrent_subagents_limit();
 
-        let spawn_fn: crate::child_agent_manager::SpawnFn = Box::new(
+        let spawn_fn: crate::subagent_manager::SpawnFn = Box::new(
             move |request: SpawnRequest,
                   cancel: CancellationToken,
                   forward_ui_tx: mpsc::UnboundedSender<UiUpdate>| {
@@ -647,7 +646,7 @@ impl AgentFactory {
                 let parent_engine_name = parent_engine_name.clone();
                 let system_prompt = system_prompt.clone();
                 let utility_engine = engines.get(profile.utility_engine_name()).cloned();
-                let child_engine_name =
+                let subagent_engine_name =
                     resolve_engine_name(&profile, &request.agent_type).to_string();
                 let run_id = request.run_id;
                 let call_id = request.call_id;
@@ -658,27 +657,27 @@ impl AgentFactory {
                     parent_session_id = session_id.map(|identity| identity.to_string()).as_deref(),
                 );
                 let inherited_engine =
-                    (child_engine_name == parent_engine_name).then_some(parent_engine);
+                    (subagent_engine_name == parent_engine_name).then_some(parent_engine);
 
-                // The child's `agent_finish` tool reports into this private
-                // channel; `drive_child_to_completion` forwards it to the shared
-                // `finish_tx` only after the child's UI has fully drained.
-                let (child_finish_tx, child_finish_rx) = mpsc::channel::<FinishResult>(1);
-                let child_role_config = ChildRoleConfig {
+                // The subagent's `agent_finish` tool reports into this private
+                // channel; `drive_subagent_to_completion` forwards it to the shared
+                // `finish_tx` only after the subagent's UI has fully drained.
+                let (subagent_finish_tx, subagent_finish_rx) = mpsc::channel::<FinishResult>(1);
+                let subagent_role_config = SubagentRoleConfig {
                     run_id,
                     call_id,
                     session_id,
                     briefing: request.briefing.clone(),
                     parent_cancel: cancel.clone(),
                     subagent_ui_tx: forward_ui_tx.clone(),
-                    finish_tx: child_finish_tx,
+                    finish_tx: subagent_finish_tx,
                 };
 
-                // Constructing the child `AgentLoop` is synchronous
+                // Constructing the subagent `AgentLoop` is synchronous
                 // (`AgentFactory::build` performs no I/O), so it runs here,
                 // directly in the `spawn_fn` closure, before `tokio::spawn` —
-                // this is what lets the manager retain the child's own
-                // `command_sender` for `ChildAgentManager::running_command_sender`
+                // this is what lets the manager retain the subagent's own
+                // `command_sender` for `SubagentManager::running_command_sender`
                 // (see `SpawnOutcome`). Only the "drive to completion" body
                 // below (unchanged apart from being split out) moves into the
                 // spawned task.
@@ -689,15 +688,15 @@ impl AgentFactory {
                     &auto_approve,
                     &profile,
                     &request.agent_type,
-                    Role::Child(child_role_config),
+                    Role::Subagent(subagent_role_config),
                     None,
                     system_prompt,
                     inherited_engine,
                 );
-                let (child_loop, child_ui_rx) = match built {
+                let (subagent_loop, subagent_ui_rx) = match built {
                     Ok(built) => built,
                     Err(error) => {
-                        tracing::error!(%run_id, %error, "failed to construct child agent");
+                        tracing::error!(%run_id, %error, "failed to construct subagent");
                         // The failure report goes to the unbounded shared finish
                         // channel, so it is never dropped and needs no await.
                         let _ = finish_tx.send(FinishResult {
@@ -709,38 +708,38 @@ impl AgentFactory {
                             error: Some(error.to_string()),
                             sources: vec![],
                         });
-                        return crate::child_agent_manager::SpawnOutcome {
+                        return crate::subagent_manager::SpawnOutcome {
                             command_sender: None,
                             handle: tokio::spawn(async {}),
                         };
                     }
                 };
 
-                let child_engine = child_loop.engine();
-                let child_engine_config = Some(child_engine.config());
-                let child_engine_display = child_loop.engine_display_info();
-                let _ = forward_ui_tx.send(UiUpdate::ChildAgentEngineConfigured {
+                let subagent_engine = subagent_loop.engine();
+                let subagent_engine_config = Some(subagent_engine.config());
+                let subagent_engine_display = subagent_loop.engine_display_info();
+                let _ = forward_ui_tx.send(UiUpdate::SubagentEngineConfigured {
                     run_id,
-                    engine: child_engine_display,
+                    engine: subagent_engine_display,
                 });
 
-                let command_sender = child_loop.command_sender();
+                let command_sender = subagent_loop.command_sender();
                 let task = request.task.clone();
                 let handle = tokio::spawn(
                     async move {
-                        drive_child_to_completion(
-                            child_loop,
-                            child_ui_rx,
-                            child_finish_rx,
+                        drive_subagent_to_completion(
+                            subagent_loop,
+                            subagent_ui_rx,
+                            subagent_finish_rx,
                             task,
                             run_id,
                             call_id,
                             cancel,
                             finish_tx,
                             forward_ui_tx,
-                            ChildTranscriptTarget {
+                            SubagentTranscriptTarget {
                                 parent_store,
-                                engine_config: child_engine_config,
+                                engine_config: subagent_engine_config,
                                 utility_engine,
                             },
                         )
@@ -749,15 +748,15 @@ impl AgentFactory {
                     .instrument(subagent_span),
                 );
 
-                crate::child_agent_manager::SpawnOutcome {
+                crate::subagent_manager::SpawnOutcome {
                     command_sender: Some(command_sender),
                     handle,
                 }
             },
         );
 
-        BuiltChildAgentManager {
-            manager: ChildAgentManager::new(subagent_ui_tx, spawn_fn, max_concurrent_children),
+        BuiltSubagentManager {
+            manager: SubagentManager::new(subagent_ui_tx, spawn_fn, max_concurrent_subagents),
             finish_rx,
             subagent_ui_rx,
         }
@@ -788,37 +787,37 @@ fn compose_agent_system_prompt(
     (!prompt_sections.is_empty()).then(|| prompt_sections.join("\n\n"))
 }
 
-/// Return value of [`AgentFactory::build_child_agent_manager`]: the manager
-/// plus the receiving ends of the channels its children send on, which the
+/// Return value of [`AgentFactory::build_subagent_manager`]: the manager
+/// plus the receiving ends of the channels its subagents send on, which the
 /// caller stores on the parent `AgentLoop`.
-struct BuiltChildAgentManager {
-    manager: ChildAgentManager,
+struct BuiltSubagentManager {
+    manager: SubagentManager,
     finish_rx: mpsc::UnboundedReceiver<FinishResult>,
     subagent_ui_rx: mpsc::UnboundedReceiver<UiUpdate>,
 }
 
-/// Drives an already-constructed child `AgentLoop` to completion and reports
-/// its outcome via `finish_tx`, unless the child was cancelled (its own
+/// Drives an already-constructed subagent `AgentLoop` to completion and reports
+/// its outcome via `finish_tx`, unless the subagent was cancelled (its own
 /// `cancel` token fired) or it already reported via its own `agent_finish`
 /// tool call (detected from its final `Context`). Split out of the former
-/// `run_child` so the synchronous construction step (`AgentFactory::build`)
+/// `run_subagent` so the synchronous construction step (`AgentFactory::build`)
 /// can run in the `spawn_fn` closure itself, ahead of `tokio::spawn`, letting
-/// the caller retain the child's `command_sender` (see
-/// `build_child_agent_manager`).
-/// Where a finished child's own transcript is persisted: the **parent**
-/// session's store (`None` when persistence is disabled) plus the child's own
+/// the caller retain the subagent's `command_sender` (see
+/// `build_subagent_manager`).
+/// Where a finished subagent's own transcript is persisted: the **parent**
+/// session's store (`None` when persistence is disabled) plus the subagent's own
 /// resolved engine config, stamped into the sub-session's `meta` header.
-struct ChildTranscriptTarget {
+struct SubagentTranscriptTarget {
     parent_store: Option<Store>,
-    /// The child's own resolved provider-connection/model (which can differ from the
-    /// parent's), recorded in the child session's `meta` header and its
+    /// The subagent's own resolved provider-connection/model (which can differ from the
+    /// parent's), recorded in the subagent session's `meta` header and its
     /// initial `ModelChanged` event. `None` when the engine name failed to
     /// resolve — should not happen given `from_profile`'s upfront
     /// validation, but persisting nothing is safer than persisting a
     /// misleading empty pair.
     engine_config: Option<EngineConfig>,
-    /// The independently resolved utility engine used to title this child
-    /// transcript without routing through the child's active engine.
+    /// The independently resolved utility engine used to title this subagent
+    /// transcript without routing through the subagent's active engine.
     utility_engine: Option<Arc<dyn Engine>>,
 }
 
@@ -953,12 +952,12 @@ fn unique_engine_name(
     format!("{requested_name}-provider-{index}")
 }
 
-/// Persist a finished child's transcript once, into its own sub-session file
+/// Persist a finished subagent's transcript once, into its own sub-session file
 /// under the parent's `project_key`. A failure to
-/// write is logged and swallowed: losing a child transcript must never fail
+/// write is logged and swallowed: losing a subagent transcript must never fail
 /// the run that produced it.
-async fn write_child_transcript(
-    target: &ChildTranscriptTarget,
+async fn write_subagent_transcript(
+    target: &SubagentTranscriptTarget,
     run_id: uuid::Uuid,
     context: &Context,
 ) {
@@ -970,24 +969,24 @@ async fn write_child_transcript(
         .as_ref()
         .map(|config| (config.provider_connection.as_str(), config.model.as_str()));
     match parent_store
-        .write_child_transcript_for_run_store(
+        .write_subagent_transcript_for_run_store(
             run_id,
             provider_connection_and_model,
             context.messages(),
         )
         .await
     {
-        Ok(child_store) => {
-            let child_session_id = child_store.session_id();
-            tracing::debug!(%run_id, parent_session_id = %parent_store.session_id(), %child_session_id, "persisted child agent transcript");
+        Ok(subagent_store) => {
+            let subagent_session_id = subagent_store.session_id();
+            tracing::debug!(%run_id, parent_session_id = %parent_store.session_id(), %subagent_session_id, "persisted subagent transcript");
             if let Some(utility_engine) = &target.utility_engine {
                 let _ = TitleAttempt::default()
-                    .trigger_with_engine(child_store, utility_engine.clone());
+                    .trigger_with_engine(subagent_store, utility_engine.clone());
             }
         }
 
         Err(error) => {
-            tracing::warn!(%run_id, parent_session_id = %parent_store.session_id(), %error, "failed to persist child agent transcript");
+            tracing::warn!(%run_id, parent_session_id = %parent_store.session_id(), %error, "failed to persist subagent transcript");
         }
     }
 }
@@ -1003,7 +1002,7 @@ fn resolve_engine_name<'profile>(
 }
 
 /// Return the deterministic catalog shown to a root model when it can spawn
-/// children. The built-in `default` type remains available even for profiles
+/// subagents. The built-in `default` type remains available even for profiles
 /// constructed in memory without an explicit `[agents.default]` table.
 fn configured_agent_types(profile: &ProfileConfig) -> Vec<AgentTypeInfo> {
     let mut agent_types: Vec<_> = profile
@@ -1027,17 +1026,17 @@ fn configured_agent_types(profile: &ProfileConfig) -> Vec<AgentTypeInfo> {
     agent_types
 }
 
-/// Tags a child's streamed text and thinking with the child's own `run_id`
+/// Tags a subagent's streamed text and thinking with the subagent's own `run_id`
 /// before the update enters the shared subagent channel. The root then
-/// attributes each fragment directly, so several children can stream at once.
-fn attribute_child_update(run_id: uuid::Uuid, update: UiUpdate) -> UiUpdate {
+/// attributes each fragment directly, so several subagents can stream at once.
+fn attribute_subagent_update(run_id: uuid::Uuid, update: UiUpdate) -> UiUpdate {
     match update {
-        UiUpdate::AppendText(text) => UiUpdate::ChildAgentToken {
+        UiUpdate::AppendText(text) => UiUpdate::SubagentToken {
             run_id,
             text,
             is_thinking: false,
         },
-        UiUpdate::AppendThinking(text) => UiUpdate::ChildAgentToken {
+        UiUpdate::AppendThinking(text) => UiUpdate::SubagentToken {
             run_id,
             text,
             is_thinking: true,
@@ -1047,71 +1046,71 @@ fn attribute_child_update(run_id: uuid::Uuid, update: UiUpdate) -> UiUpdate {
 }
 
 #[expect(clippy::too_many_arguments)]
-async fn drive_child_to_completion(
-    mut child_loop: AgentLoop,
-    mut child_ui_rx: mpsc::Receiver<UiUpdate>,
-    mut child_finish_rx: mpsc::Receiver<FinishResult>,
+async fn drive_subagent_to_completion(
+    mut subagent_loop: AgentLoop,
+    mut subagent_ui_rx: mpsc::Receiver<UiUpdate>,
+    mut subagent_finish_rx: mpsc::Receiver<FinishResult>,
     task: String,
     run_id: uuid::Uuid,
     call_id: uuid::Uuid,
     cancel: CancellationToken,
     finish_tx: mpsc::UnboundedSender<FinishResult>,
     forward_ui_tx: mpsc::UnboundedSender<UiUpdate>,
-    transcript_target: ChildTranscriptTarget,
+    transcript_target: SubagentTranscriptTarget,
 ) {
     let forward_task = tokio::spawn(
         async move {
-            while let Some(update) = child_ui_rx.recv().await {
-                let _ = forward_ui_tx.send(attribute_child_update(run_id, update));
+            while let Some(update) = subagent_ui_rx.recv().await {
+                let _ = forward_ui_tx.send(attribute_subagent_update(run_id, update));
             }
         }
         .in_current_span(),
     );
 
-    tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: starting child AgentLoop");
-    let handle = child_loop.run();
-    child_loop
+    tracing::debug!(%run_id, tool_call_id = %call_id, "run_subagent: starting subagent AgentLoop");
+    let handle = subagent_loop.run();
+    subagent_loop
         .send_command(crate::agent::AgentCommand::Prompt(task))
         .await;
 
     let result = handle.await;
-    tracing::debug!(%run_id, tool_call_id = %call_id, ok = result.is_ok(), "run_child: child AgentLoop::run() returned");
-    // `handle.await` resolving only guarantees the child's `run()` future
+    tracing::debug!(%run_id, tool_call_id = %call_id, ok = result.is_ok(), "run_subagent: subagent AgentLoop::run() returned");
+    // `handle.await` resolving only guarantees the subagent's `run()` future
     // completed — i.e. its own `ui_tx.send(...)` calls were enqueued, not
     // that `forward_task` has already popped and forwarded all of them. In
-    // particular the child's terminal `agent_finish` `ToolDone` can still be
-    // sitting unforwarded in `child_ui_rx` at this point. Aborting
+    // particular the subagent's terminal `agent_finish` `ToolDone` can still be
+    // sitting unforwarded in `subagent_ui_rx` at this point. Aborting
     // `forward_task` here would race that drain and could drop the update,
     // leaving the forwarded bubble stuck in `Running` in the parent's UI.
-    // Instead, drop `child_loop` (its last `ui_tx` clone) so `child_ui_rx`
+    // Instead, drop `subagent_loop` (its last `ui_tx` clone) so `subagent_ui_rx`
     // closes once drained, and await `forward_task` so it only exits after
     // forwarding everything buffered.
-    drop(child_loop);
+    drop(subagent_loop);
     let _ = forward_task.await;
-    tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: forward_task drained and closed");
+    tracing::debug!(%run_id, tool_call_id = %call_id, "run_subagent: forward_task drained and closed");
 
     if cancel.is_cancelled() {
-        tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: parent already cancelled this run, not reporting");
+        tracing::debug!(%run_id, tool_call_id = %call_id, "run_subagent: parent already cancelled this run, not reporting");
         // The parent already handled this cancellation synchronously
-        // (`ChildAgentManager::cancel_all`); nothing left to report.
+        // (`SubagentManager::cancel_all`); nothing left to report.
         return;
     }
 
     match result {
         Ok(Ok(context)) => {
-            write_child_transcript(&transcript_target, run_id, &context).await;
-            if child_context_called_finish(&context) {
+            write_subagent_transcript(&transcript_target, run_id, &context).await;
+            if subagent_context_called_finish(&context) {
                 // The `agent_finish` tool buffered its result in
-                // `child_finish_rx`; release it only now that its ToolDone has been
+                // `subagent_finish_rx`; release it only now that its ToolDone has been
                 // forwarded, so the parent never applies the finish first.
-                if let Ok(agent_finish_result) = child_finish_rx.try_recv() {
+                if let Ok(agent_finish_result) = subagent_finish_rx.try_recv() {
                     let _ = finish_tx.send(agent_finish_result);
                 }
-                tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: agent_finish reported result, not sending fallback");
+                tracing::debug!(%run_id, tool_call_id = %call_id, "run_subagent: agent_finish reported result, not sending fallback");
                 return;
             }
             let text = extract_last_assistant_text(&context);
-            tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: child never called agent_finish, sending unstructured fallback");
+            tracing::debug!(%run_id, tool_call_id = %call_id, "run_subagent: subagent never called agent_finish, sending unstructured fallback");
             let _ = finish_tx.send(FinishResult {
                 run_id,
                 call_id,
@@ -1140,17 +1139,17 @@ async fn drive_child_to_completion(
                 origin: FinishResultOrigin::Runtime,
                 status: "failure".to_string(),
                 result: None,
-                error: Some(format!("child agent task panicked: {join_error}")),
+                error: Some(format!("subagent task panicked: {join_error}")),
                 sources: vec![],
             });
         }
     }
 }
 
-/// Whether the child's final context contains a completed `agent_finish` tool
+/// Whether the subagent's final context contains a completed `agent_finish` tool
 /// call — if so, its own `AgentFinishTool::run` already sent a `FinishResult` and
 /// the caller must not send a second, "unstructured" one.
-fn child_context_called_finish(context: &Context) -> bool {
+fn subagent_context_called_finish(context: &Context) -> bool {
     context.messages().iter().any(|message| {
         matches!(
             message,
@@ -1163,7 +1162,7 @@ fn child_context_called_finish(context: &Context) -> bool {
 
 /// The last `Message::Assistant` text in `context`, or an empty string when
 /// none exists. Used to build the "unstructured fallback" `FinishResult`
-/// when a child never called `agent_finish`.
+/// when a subagent never called `agent_finish`.
 fn extract_last_assistant_text(context: &Context) -> String {
     context
         .messages()

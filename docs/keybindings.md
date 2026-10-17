@@ -10,7 +10,7 @@ The footer layout is dynamic and adapts to the terminal width.
 
 While a bounded continuation waits for an existing context summary, normal
 interrupt controls and `/clear` remain responsive. `Compacting…` is scoped to
-the displayed root/child conversation; successful summaries keep it active until
+the displayed root/subagent conversation; successful summaries keep it active until
 safe application, while failure, timeout, stop, and clear remove it.
 
 While the main conversation is shown, the footer also reports separate
@@ -64,8 +64,8 @@ conversation. The original draft returns after all approvals are resolved.
 | Left-click on conversation scrollbar | Root or subagent conversation | Jump to the clicked position; top/bottom arrows jump to start/end; reaching the end re-enables auto-scroll |
 | Left-click | Input focused | Move the cursor to the visible clicked character (input scrolling, word-wrapping, tabs, and Unicode display widths honored) |
 | Left-drag | Input focused | Select text; click (no drag) just places the cursor |
-| Left-click | Child-view header bubble | Toggle the header bubble expand/collapse state |
-| Left-drag | Chat or child-view header bubble | Select visible text; release copies a non-empty selection to the clipboard |
+| Left-click | Subagent-view header bubble | Toggle the header bubble expand/collapse state |
+| Left-drag | Chat or subagent-view header bubble | Select visible text; release copies a non-empty selection to the clipboard |
 | Left-click on tool bubble title / border | Any | Toggle tool bubble expand (`▼`) / collapse (`▶`); expansion shows `Expanding…` before body layout |
 | Double-click on a `spawn_subagent` tool bubble's title | Any | Drill in to the subagent's conversation view (manual navigation; does not auto-return; still works after the subagent has finished) |
 | `esc` (input empty) | Subagent drill-in view | Go back to the root conversation (does not cancel/interrupt the root agent's turn); restores the scroll position from before drilling in |

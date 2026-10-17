@@ -222,7 +222,7 @@ fn clear_context_records_the_root_agent_type_in_the_replacement_session() {
         );
         assert_eq!(
             meta.parent_session, None,
-            "a /clear rollover is not a child run"
+            "a /clear rollover is not a subagent run"
         );
 
         drop(agent_loop);
@@ -239,7 +239,7 @@ fn agent_command_dispatch_logs_every_command_variant() {
         let (mut agent_loop, _ui_rx) = AgentLoop::new(test_engine(), registry);
         let handle = agent_loop.run();
         let tool_call_id = Uuid::nil();
-        let child_run_id = Uuid::nil();
+        let subagent_run_id = Uuid::nil();
 
         agent_loop
             .send_command(AgentCommand::Prompt(String::new()))
@@ -270,8 +270,8 @@ fn agent_command_dispatch_logs_every_command_variant() {
             })
             .await;
         agent_loop
-            .send_command(AgentCommand::ForChild {
-                run_id: child_run_id,
+            .send_command(AgentCommand::ForSubagent {
+                run_id: subagent_run_id,
                 command: Box::new(AgentCommand::AbortClarify),
             })
             .await;
@@ -292,7 +292,7 @@ fn agent_command_dispatch_logs_every_command_variant() {
         "stop",
         "clear_context",
         "record_model_changed",
-        "for_child",
+        "for_subagent",
     ] {
         assert!(
             log.contains(&format!("command=\"{command_name}\"")),

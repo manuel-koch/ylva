@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::conversation::project_messages_with_child_runs;
+use super::conversation::project_messages_with_subagent_runs;
 use super::*;
 
 mod conversation;
@@ -50,7 +50,7 @@ fn collapse_and_clear_cancel_pending_expansion_feedback() {
 fn navigation_clears_expansion_feedback_from_the_previous_view() {
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();
-    state.start_child_run(ChildRunInfo {
+    state.start_subagent_run(SubagentRunInfo {
         run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
@@ -58,7 +58,7 @@ fn navigation_clears_expansion_feedback_from_the_previous_view() {
         label: "Review".to_string(),
     });
     state.pending_bubble_expansion = Some(BubbleExpansionTarget::Thinking(0));
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
     assert_eq!(state.pending_bubble_expansion, None);
     state.pending_bubble_expansion = Some(BubbleExpansionTarget::Thinking(0));
     state.switch_to_root_view();
@@ -216,11 +216,11 @@ fn agent_mode_reports_tool_running_when_a_tool_bubble_is_running() {
 }
 
 #[test]
-fn agent_mode_reports_tool_running_when_idle_but_a_spawned_child_is_still_running() {
+fn agent_mode_reports_tool_running_when_idle_but_a_spawned_subagent_is_still_running() {
     // Regression: the root loop's own turn can settle to `TuiMode::Idle`
     // (e.g. after `spawn_subagent` acked with "running") while the
-    // spawned child is still working — its `spawn_subagent` tool bubble
-    // stays `Running` until the child actually finishes. The footer must
+    // spawned subagent is still working — its `spawn_subagent` tool bubble
+    // stays `Running` until the subagent actually finishes. The footer must
     // not report `Idle` in that case; that made a genuinely-running
     // subagent look finished/stuck (see docs/known-test-issues.md).
     let mut state = AppState::new();

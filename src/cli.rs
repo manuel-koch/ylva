@@ -154,11 +154,11 @@ pub struct Cli {
     #[arg(long)]
     pub auto_approve_web_fetch: bool,
 
-    /// Auto-approve spawning child agents
+    /// Auto-approve spawning subagents
     #[arg(long)]
     pub auto_approve_spawn: bool,
 
-    /// Maximum child agents running at once; values <= 0 mean unlimited
+    /// Maximum subagents running at once; values <= 0 mean unlimited
     #[arg(long, value_name = "N", allow_negative_numbers = true)]
     pub max_concurrent_subagents: Option<i64>,
 
@@ -267,7 +267,7 @@ pub enum ProfileCommand {
 pub enum SessionCommand {
     /// List sessions, least recently used roots first
     List {
-        /// Include child transcripts grouped beneath their parents
+        /// Include subagent transcripts grouped beneath their parents
         #[arg(long)]
         include_subagents: bool,
     },

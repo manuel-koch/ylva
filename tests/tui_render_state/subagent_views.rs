@@ -15,14 +15,14 @@
 use super::*;
 
 #[test]
-fn exact_and_suggested_child_compact_refuse_and_session_remains_available() {
+fn exact_and_suggested_subagent_compact_refuse_and_session_remains_available() {
     use ylva::tui_reducer_state::{Effect, InputEvent};
     for typed in ["/compact \n", "/comp", "/session \n", "/ses"] {
         let mut state = ylva::AppState::new();
         let run_id = uuid::Uuid::new_v4();
         present_render_event(
             &mut state,
-            ylva::DomainEvent::ChildAgentStarted {
+            ylva::DomainEvent::SubagentStarted {
                 run_id,
                 call_id: uuid::Uuid::new_v4(),
                 agent_type: "reviewer".into(),
@@ -30,7 +30,7 @@ fn exact_and_suggested_child_compact_refuse_and_session_remains_available() {
                 label: "Replay-only subagent".into(),
             },
         );
-        state.switch_to_child_view(run_id);
+        state.switch_to_subagent_view(run_id);
         state.refresh_slash_overlay(typed);
         let textarea = ylva::TextareaContext {
             text: typed.into(),
@@ -55,20 +55,20 @@ fn exact_and_suggested_child_compact_refuse_and_session_remains_available() {
         }
         assert!(matches!(
             state.active_view,
-            ylva::tui_reducer_state::ConversationView::Child { .. }
+            ylva::tui_reducer_state::ConversationView::Subagent { .. }
         ));
     }
 }
 
 /// While viewing an *active* subagent's own transcript, the footer must not
-/// parrot the root's "Running tool…" word unless the child's own transcript
+/// parrot the root's "Running tool…" word unless the subagent's own transcript
 /// shows one of its own tool bubbles running — otherwise it misleadingly
-/// implies the child itself is executing a tool when it's merely
+/// implies the subagent itself is executing a tool when it's merely
 /// streaming/thinking (regression test for the bug where the root's
-/// `ToolRunning` mode — reported for the whole lifetime of a live child —
-/// bled into the child view's footer verbatim).
+/// `ToolRunning` mode — reported for the whole lifetime of a live subagent —
+/// bled into the subagent view's footer verbatim).
 #[test]
-fn footer_says_subagent_working_while_child_is_only_streaming() {
+fn footer_says_subagent_working_while_subagent_is_only_streaming() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -80,8 +80,8 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
 
     let mut state = ylva::TuiState {
         agent_mode: AgentMode::ToolRunning,
-        child_view: ylva::tui_render_state::ChildViewState {
-            child_view_bubble: Some((
+        subagent_view: ylva::tui_render_state::SubagentViewState {
+            subagent_view_bubble: Some((
                 uuid::Uuid::new_v4(),
                 "spawn_subagent".to_string(),
                 ToolCallState::Running {
@@ -92,10 +92,10 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
                 },
                 false,
             )),
-            ..ylva::TuiState::new().child_view
+            ..ylva::TuiState::new().subagent_view
         },
         chat_entries: vec![ChatEntry::AssistantMessage {
-            text: "child is replying".to_string(),
+            text: "subagent is replying".to_string(),
             interrupted: false,
         }],
         ..ylva::TuiState::new()
@@ -126,10 +126,10 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
     );
     assert!(
         !rendered.contains("Running tool"),
-        "the misleading inherited root mode word must not leak into the child view: {rendered:?}"
+        "the misleading inherited root mode word must not leak into the subagent view: {rendered:?}"
     );
 
-    // Once the child's own transcript shows one of *its own* tool bubbles
+    // Once the subagent's own transcript shows one of *its own* tool bubbles
     // running, "Running tool…" becomes accurate again and must be restored.
     state.chat_entries.push(ChatEntry::ToolBubble {
         id: uuid::Uuid::new_v4(),
@@ -153,7 +153,7 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
                 &ylva::ToolRegistry::new(),
             );
         })
-        .expect("draw with child running its own tool");
+        .expect("draw with subagent running its own tool");
     let buf = terminal.backend().buffer().clone();
     let rendered: String = (0..20u16)
         .flat_map(|y| (0..60u16).map(move |x| (x, y)))
@@ -161,7 +161,7 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
         .collect();
     assert!(
         rendered.contains("Running tool"),
-        "once the child's own transcript shows a running tool bubble, the plain word is accurate again: {rendered:?}"
+        "once the subagent's own transcript shows a running tool bubble, the plain word is accurate again: {rendered:?}"
     );
 }
 
@@ -209,7 +209,7 @@ fn footer_shows_running_and_queued_subagent_counts() {
 }
 
 #[test]
-fn concurrent_children_keep_separate_streams_and_running_modes() {
+fn concurrent_subagents_keep_separate_streams_and_running_modes() {
     use ylva::{AppState, DomainEvent};
 
     let mut state = AppState::new();
@@ -245,7 +245,7 @@ fn concurrent_children_keep_separate_streams_and_running_modes() {
         );
         present_render_event(
             &mut state,
-            DomainEvent::ChildAgentStarted {
+            DomainEvent::SubagentStarted {
                 run_id,
                 call_id: bubble_id,
                 agent_type: "reviewer".to_string(),
@@ -255,7 +255,7 @@ fn concurrent_children_keep_separate_streams_and_running_modes() {
         );
         present_render_event(
             &mut state,
-            DomainEvent::ChildAgentToken {
+            DomainEvent::SubagentToken {
                 run_id,
                 text: output.to_string(),
                 is_thinking: false,
@@ -263,12 +263,12 @@ fn concurrent_children_keep_separate_streams_and_running_modes() {
         );
     }
 
-    assert_eq!(state.running_children.len(), 2);
+    assert_eq!(state.running_subagents.len(), 2);
     for (run_id, own_output, sibling_output) in [
         (first_run_id, "FIRST-ONLY-STREAM", "SECOND-ONLY-STREAM"),
         (second_run_id, "SECOND-ONLY-STREAM", "FIRST-ONLY-STREAM"),
     ] {
-        state.switch_to_child_view(run_id);
+        state.switch_to_subagent_view(run_id);
         let rendered = rendered_text(&render_offline(&mut state, 80, 24));
         assert!(rendered.contains(own_output), "{rendered:?}");
         assert!(!rendered.contains(sibling_output), "{rendered:?}");
@@ -277,28 +277,28 @@ fn concurrent_children_keep_separate_streams_and_running_modes() {
 
     present_render_event(
         &mut state,
-        DomainEvent::ChildAgentDone {
+        DomainEvent::SubagentDone {
             run_id: first_run_id,
             status: "success".to_string(),
             result: Some("first complete".to_string()),
         },
     );
-    assert!(!state.running_children.contains_key(&first_run_id));
-    assert!(state.running_children.contains_key(&second_run_id));
-    state.switch_to_child_view(second_run_id);
+    assert!(!state.running_subagents.contains_key(&first_run_id));
+    assert!(state.running_subagents.contains_key(&second_run_id));
+    state.switch_to_subagent_view(second_run_id);
     let rendered = rendered_text(&render_offline(&mut state, 80, 24));
     assert!(rendered.contains("SECOND-ONLY-STREAM"), "{rendered:?}");
     assert!(rendered.contains("Subagent streaming"), "{rendered:?}");
 }
 
-/// While viewing a child that is streaming extended-thinking/reasoning text
+/// While viewing a subagent that is streaming extended-thinking/reasoning text
 /// (no visible reply yet), the footer must say "Subagent thinking…" rather
 /// than the generic "Subagent working…" — mirrors the root's own
-/// "Thinking…"/"Streaming…" distinction, now that the child's own
+/// "Thinking…"/"Streaming…" distinction, now that the subagent's own
 /// `partial_thinking_text` is projected separately from its
 /// `partial_assistant_text` (see `render::project_for_draw`).
 #[test]
-fn footer_says_subagent_thinking_while_child_streams_thinking_text() {
+fn footer_says_subagent_thinking_while_subagent_streams_thinking_text() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -310,8 +310,8 @@ fn footer_says_subagent_thinking_while_child_streams_thinking_text() {
 
     let mut state = ylva::TuiState {
         agent_mode: AgentMode::ToolRunning,
-        child_view: ylva::tui_render_state::ChildViewState {
-            child_view_bubble: Some((
+        subagent_view: ylva::tui_render_state::SubagentViewState {
+            subagent_view_bubble: Some((
                 uuid::Uuid::new_v4(),
                 "spawn_subagent".to_string(),
                 ToolCallState::Running {
@@ -322,7 +322,7 @@ fn footer_says_subagent_thinking_while_child_streams_thinking_text() {
                 },
                 false,
             )),
-            ..ylva::TuiState::new().child_view
+            ..ylva::TuiState::new().subagent_view
         },
         partial_thinking_text: "pondering the flaky test...".to_string(),
         ..ylva::TuiState::new()
@@ -353,11 +353,11 @@ fn footer_says_subagent_thinking_while_child_streams_thinking_text() {
     );
 }
 
-/// While viewing a child that is streaming its visible reply text, the
+/// While viewing a subagent that is streaming its visible reply text, the
 /// footer must say "Subagent streaming…" rather than the generic "Subagent
 /// working…" — mirrors the root's own wording for the same case.
 #[test]
-fn footer_says_subagent_streaming_while_child_streams_response_text() {
+fn footer_says_subagent_streaming_while_subagent_streams_response_text() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -369,8 +369,8 @@ fn footer_says_subagent_streaming_while_child_streams_response_text() {
 
     let mut state = ylva::TuiState {
         agent_mode: AgentMode::ToolRunning,
-        child_view: ylva::tui_render_state::ChildViewState {
-            child_view_bubble: Some((
+        subagent_view: ylva::tui_render_state::SubagentViewState {
+            subagent_view_bubble: Some((
                 uuid::Uuid::new_v4(),
                 "spawn_subagent".to_string(),
                 ToolCallState::Running {
@@ -381,7 +381,7 @@ fn footer_says_subagent_streaming_while_child_streams_response_text() {
                 },
                 false,
             )),
-            ..ylva::TuiState::new().child_view
+            ..ylva::TuiState::new().subagent_view
         },
         partial_assistant_text: "here is what I found so far".to_string(),
         ..ylva::TuiState::new()
@@ -413,12 +413,12 @@ fn footer_says_subagent_streaming_while_child_streams_response_text() {
 }
 
 #[test]
-fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
+fn spawn_subagent_running_duration_is_visible_in_parent_and_subagent_views() {
     use ratatui_textarea::TextArea;
     use ylva::tui_reducer_state::ResultSection;
     use ylva::{AppState, DomainEvent, TuiEvent};
 
-    for (child_view, cached) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (subagent_view, cached) in [(false, false), (true, false), (false, true), (true, true)] {
         for collapsed in [false, true] {
             let bubble_id = uuid::Uuid::new_v4();
             let run_id = uuid::Uuid::new_v4();
@@ -462,8 +462,8 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
                         );
                     })
                     .expect("draw");
-                let lines = if child_view {
-                    &state.child_view.header_rendered_lines
+                let lines = if subagent_view {
+                    &state.subagent_view.header_rendered_lines
                 } else {
                     &state.conversation.chat_rendered_lines
                 };
@@ -473,13 +473,13 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
                     .expect("subagent title")
                     .clone()
             };
-            if !child_view {
+            if !subagent_view {
                 let title = draw_title(&mut state);
                 assert!(!title.ends_with('s'), "admission is not execution: {title}");
             }
             apply_event(
                 &mut state,
-                DomainEvent::ChildAgentStarted {
+                DomainEvent::SubagentStarted {
                     run_id,
                     call_id: bubble_id,
                     agent_type: "default".to_string(),
@@ -487,18 +487,18 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
                     label: "Inspect".to_string(),
                 },
             );
-            if child_view {
-                state.switch_to_child_view(run_id);
+            if subagent_view {
+                state.switch_to_subagent_view(run_id);
             }
             for elapsed_seconds in [12, 22] {
                 state
-                    .child_conversations
+                    .subagent_conversations
                     .get_mut(&run_id)
-                    .expect("child")
+                    .expect("subagent")
                     .started_at = Some(
                     std::time::Instant::now() - Duration::from_millis(elapsed_seconds * 1000 + 100),
                 );
-                let started_at = state.child_conversations[&run_id].started_at;
+                let started_at = state.subagent_conversations[&run_id].started_at;
                 apply_event(
                     &mut state,
                     DomainEvent::ToolProgress {
@@ -506,19 +506,19 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
                         title_arguments: vec![("status".to_string(), serde_json::json!("running"))],
                     },
                 );
-                assert_eq!(state.child_conversations[&run_id].started_at, started_at);
+                assert_eq!(state.subagent_conversations[&run_id].started_at, started_at);
                 let title = draw_title(&mut state);
                 let duration_label = title.split_whitespace().last().expect("duration");
                 assert_eq!(
                     duration_label,
                     format!("{elapsed_seconds}s"),
                     "running duration uses whole seconds in the {} view",
-                    if child_view { "child" } else { "parent" },
+                    if subagent_view { "subagent" } else { "parent" },
                 );
                 state
-                    .child_conversations
+                    .subagent_conversations
                     .get_mut(&run_id)
-                    .expect("child")
+                    .expect("subagent")
                     .started_at = Some(
                     std::time::Instant::now() - Duration::from_millis(elapsed_seconds * 1000 + 600),
                 );
@@ -563,7 +563,7 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
 
 /// The drill-in header shortens the root-relative "Spawn Subagent" title.
 #[test]
-fn child_view_header_shortens_spawn_subagent_title() {
+fn subagent_view_header_shortens_spawn_subagent_title() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -574,8 +574,8 @@ fn child_view_header_shortens_spawn_subagent_title() {
     let mut terminal = Terminal::new(backend).expect("terminal");
 
     let mut state = ylva::TuiState {
-        child_view: ylva::tui_render_state::ChildViewState {
-            child_view_bubble: Some((
+        subagent_view: ylva::tui_render_state::SubagentViewState {
+            subagent_view_bubble: Some((
                 uuid::Uuid::new_v4(),
                 "spawn_subagent".to_string(),
                 ToolCallState::Running {
@@ -586,7 +586,7 @@ fn child_view_header_shortens_spawn_subagent_title() {
                 },
                 false,
             )),
-            ..ylva::TuiState::new().child_view
+            ..ylva::TuiState::new().subagent_view
         },
         ..ylva::TuiState::new()
     };
@@ -621,7 +621,7 @@ fn child_view_header_shortens_spawn_subagent_title() {
 }
 
 /// While viewing a finished subagent's transcript, if the root loop is still
-/// busy (e.g. producing its final reply from the child's result), the
+/// busy (e.g. producing its final reply from the subagent's result), the
 /// footer must say so explicitly instead of the plain "Streaming…"/"Running
 /// tool…" word, which would misleadingly read as if the *subagent* — not
 /// the parent — were still working (regression test for the ambiguous
@@ -640,14 +640,14 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
     let mut state = ylva::TuiState {
         parent_agent_mode: AgentMode::Streaming,
         agent_mode: AgentMode::Streaming,
-        child_view: ylva::tui_render_state::ChildViewState {
-            child_view_bubble: Some((
+        subagent_view: ylva::tui_render_state::SubagentViewState {
+            subagent_view_bubble: Some((
                 uuid::Uuid::new_v4(),
                 "spawn_subagent".to_string(),
                 ToolCallState::Killed,
                 false,
             )),
-            ..ylva::TuiState::new().child_view
+            ..ylva::TuiState::new().subagent_view
         },
         ..ylva::TuiState::new()
     };

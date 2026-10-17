@@ -157,7 +157,7 @@ pub(in crate::agent) async fn send_context_usage_estimate(
         "context usage estimate reported"
     );
     let update = match run_id {
-        Some(run_id) => UiUpdate::ChildContextUsage {
+        Some(run_id) => UiUpdate::SubagentContextUsage {
             run_id,
             estimated_tokens,
             context_length,
@@ -186,18 +186,18 @@ pub(in crate::agent) async fn report_compaction_failure(
 }
 
 /// Awaits the next `FinishResult` when `rx` is `Some`, else never resolves.
-/// Lets `AgentLoop::run`'s `select!` treat "no `ChildAgentManager` wired" the
+/// Lets `AgentLoop::run`'s `select!` treat "no `SubagentManager` wired" the
 /// same as "channel open but empty" without an `Option`-shaped branch.
 pub(super) async fn recv_finish(
-    rx: &mut Option<mpsc::UnboundedReceiver<crate::child_agent_manager::FinishResult>>,
-) -> Option<crate::child_agent_manager::FinishResult> {
+    rx: &mut Option<mpsc::UnboundedReceiver<crate::subagent_manager::FinishResult>>,
+) -> Option<crate::subagent_manager::FinishResult> {
     match rx {
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
     }
 }
 
-/// Awaits the next forwarded child `UiUpdate` when `rx` is `Some`, else
+/// Awaits the next forwarded subagent `UiUpdate` when `rx` is `Some`, else
 /// never resolves. See [`recv_finish`].
 pub(super) async fn recv_subagent_ui(
     rx: &mut Option<mpsc::UnboundedReceiver<UiUpdate>>,

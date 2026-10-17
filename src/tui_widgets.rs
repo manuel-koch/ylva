@@ -15,7 +15,7 @@
 //! ratatui layout and widgets for the Ylva TUI.
 //!
 //! Test-backend fixtures verify buffers and rendering geometry. This facade and
-//! all widget children participate in the aggregate coverage gate.
+//! all widget subagents participate in the aggregate coverage gate.
 
 mod bubbles;
 mod chat;
@@ -35,8 +35,8 @@ use crate::agent::tools::ToolRegistry;
 use crate::conversation_render_cache::ConversationRenderCache;
 use crate::markdown::render_markdown;
 use crate::theme::{
-    CHAT_SELECTION_BG, CHILD_VIEW_SEPARATOR_COLOR, INPUT_BORDER_COLOR, MUTED_TEXT_COLOR,
-    SEPARATOR_LINE_COLOR, USER_MESSAGE_BG_COLOR,
+    CHAT_SELECTION_BG, INPUT_BORDER_COLOR, MUTED_TEXT_COLOR, SEPARATOR_LINE_COLOR,
+    SUBAGENT_VIEW_SEPARATOR_COLOR, USER_MESSAGE_BG_COLOR,
 };
 use crate::tui_reducer_state::BubbleExpansionTarget;
 use crate::tui_reducer_state::ChatEntry;
@@ -70,14 +70,14 @@ impl<'a> ConversationSource<'a> {
     pub fn from_app(state: &'a crate::tui_reducer_state::AppState) -> Self {
         let run_id = match state.active_view {
             crate::tui_reducer_state::ConversationView::Root => None,
-            crate::tui_reducer_state::ConversationView::Child { run_id, .. } => Some(run_id),
+            crate::tui_reducer_state::ConversationView::Subagent { run_id, .. } => Some(run_id),
         };
-        let child = run_id.and_then(|run_id| state.child_conversations.get(&run_id));
+        let subagent = run_id.and_then(|run_id| state.subagent_conversations.get(&run_id));
         Self {
             expansion_feedback: None,
             run_id,
-            entries: child.map_or(state.chat_entries.as_slice(), |child| child.messages.as_slice()),
-            turn: child.map_or(&state.turn_buffer, |child| &child.turn_buffer),
+            entries: subagent.map_or(state.chat_entries.as_slice(), |subagent| subagent.messages.as_slice()),
+            turn: subagent.map_or(&state.turn_buffer, |subagent| &subagent.turn_buffer),
             queued: if run_id.is_none() { &state.queued_steer_texts } else { &[] },
             header: state.header_bubble_id().and_then(|bubble_id| {
                 state.chat_entries.iter().enumerate().find(
@@ -157,7 +157,7 @@ fn draw_internal(
     mut conversation: Option<&mut BorrowedConversation<'_>>,
 ) -> Option<ButtonAreas> {
     let full_area = frame.area();
-    // Drill-in conversation model (Phase 6.10): while viewing a child
+    // Drill-in conversation model (Phase 6.10): while viewing a subagent
     // conversation, reserve a header above the chat area that re-renders the
     // real `spawn_subagent` tool bubble from the root conversation (same
     // chrome, same collapsed/expanded state, same task/label/agent_type
@@ -171,7 +171,7 @@ fn draw_internal(
     let mut header_lines: Vec<Line<'static>> = Vec::new();
     if conversation.is_none() {
         if let Some((bubble_id, name, bubble_state, collapsed)) =
-            &state.child_view.child_view_bubble
+            &state.subagent_view.subagent_view_bubble
         {
             let header_row_width = full_area.width.saturating_sub(1) as usize;
             let mut discarded_title_rows = Vec::new();
@@ -342,7 +342,7 @@ fn draw_internal(
             .direction(Direction::Horizontal)
             .constraints([Constraint::Fill(1), Constraint::Length(1)])
             .areas(header_area);
-        state.child_view.header_bubble_area = header_content_area;
+        state.subagent_view.header_bubble_area = header_content_area;
 
         let total_lines = header_total;
         let visible = header_content_area.height as usize;
@@ -351,8 +351,11 @@ fn draw_internal(
         // height can shrink between frames (e.g. collapsing it, or a shorter
         // subagent result replacing a longer in-progress one), which would
         // otherwise leave the offset pointing past the end of the content.
-        let row_offset = state.child_view.header_bubble_scroll_offset.min(max_offset);
-        state.child_view.header_bubble_scroll_offset = row_offset;
+        let row_offset = state
+            .subagent_view
+            .header_bubble_scroll_offset
+            .min(max_offset);
+        state.subagent_view.header_bubble_scroll_offset = row_offset;
 
         if let Some(conversation) = conversation.as_mut() {
             header_lines = conversation.cache.header.visible_rows(row_offset, visible);
@@ -360,8 +363,8 @@ fn draw_internal(
         } else {
             let (rendered_lines, prefix_widths) =
                 rendered_line_selection_data(&header_lines, header_content_area.width);
-            state.child_view.header_rendered_lines = rendered_lines;
-            state.child_view.header_rendered_line_prefix_widths = prefix_widths;
+            state.subagent_view.header_rendered_lines = rendered_lines;
+            state.subagent_view.header_rendered_line_prefix_widths = prefix_widths;
             header_lines = header_lines
                 .into_iter()
                 .skip(row_offset)
@@ -369,7 +372,7 @@ fn draw_internal(
                 .collect();
         }
 
-        if let Some(selection) = state.child_view.header_selection {
+        if let Some(selection) = state.subagent_view.header_selection {
             if !selection.is_empty() {
                 let (start_line, start_col, end_line, end_col) = selection.normalized();
                 for (index, line) in header_lines.iter_mut().enumerate() {
@@ -399,8 +402,8 @@ fn draw_internal(
 
         // Show the scroll indicators/scrollbar only when the bubble's full
         // content overflows the clamped header height. Tinted
-        // `CHILD_VIEW_SEPARATOR_COLOR` — this scrollbar only ever renders
-        // while the header bubble (i.e. the child view) is showing.
+        // `SUBAGENT_VIEW_SEPARATOR_COLOR` — this scrollbar only ever renders
+        // while the header bubble (i.e. the subagent view) is showing.
         if total_lines > visible {
             render_chat_scrollbar(
                 frame,
@@ -409,30 +412,33 @@ fn draw_internal(
                 max_offset,
                 total_lines,
                 visible,
-                CHILD_VIEW_SEPARATOR_COLOR,
+                SUBAGENT_VIEW_SEPARATOR_COLOR,
             );
         }
 
         // Separator between the header bubble and the chat area below it —
         // mirrors the separator between the chat area and the input/footer
         // panel, so the header never reads as part of the scrollable
-        // conversation-list. Tinted `CHILD_VIEW_SEPARATOR_COLOR` (always the
+        // conversation-list. Tinted `SUBAGENT_VIEW_SEPARATOR_COLOR` (always the
         // case here — this branch only runs while a header bubble, i.e. the
-        // child view, is showing) rather than the neutral root-view color.
+        // subagent view, is showing) rather than the neutral root-view color.
         let header_separator_line = "─".repeat(header_separator_area.width as usize);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 header_separator_line,
                 Style::default()
-                    .fg(CHILD_VIEW_SEPARATOR_COLOR)
+                    .fg(SUBAGENT_VIEW_SEPARATOR_COLOR)
                     .add_modifier(Modifier::DIM),
             ))),
             header_separator_area,
         );
     } else {
-        state.child_view.header_bubble_area = Rect::default();
-        state.child_view.header_rendered_lines.clear();
-        state.child_view.header_rendered_line_prefix_widths.clear();
+        state.subagent_view.header_bubble_area = Rect::default();
+        state.subagent_view.header_rendered_lines.clear();
+        state
+            .subagent_view
+            .header_rendered_line_prefix_widths
+            .clear();
     }
 
     if let Some(conversation) = conversation.as_mut() {
@@ -446,9 +452,9 @@ fn draw_internal(
     // subagent's drill-in transcript, so the cue survives scrolling even once
     // the (non-scrolling) header bubble is out of view — the neutral color is
     // reserved for the root conversation.
-    let in_child_view = state.child_view.child_view_bubble.is_some();
-    let separator_color = if in_child_view {
-        CHILD_VIEW_SEPARATOR_COLOR
+    let in_subagent_view = state.subagent_view.subagent_view_bubble.is_some();
+    let separator_color = if in_subagent_view {
+        SUBAGENT_VIEW_SEPARATOR_COLOR
     } else {
         SEPARATOR_LINE_COLOR
     };

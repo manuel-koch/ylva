@@ -160,7 +160,8 @@ fn keyboard_main(
         // non-empty draft still just clears via the normal Escape path
         // below, same as in the root view.
         InputEvent::Escape
-            if textarea.is_empty && matches!(state.active_view, ConversationView::Child { .. }) =>
+            if textarea.is_empty
+                && matches!(state.active_view, ConversationView::Subagent { .. }) =>
         {
             state.switch_to_root_view();
             vec![]
@@ -417,7 +418,7 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
 /// these commands commits a user bubble: a command is an instruction to the
 /// TUI, not a turn in the conversation.
 fn slash_command_effects(state: &mut AppState, invocation: SlashCommandInvocation) -> Vec<Effect> {
-    if matches!(state.active_view, ConversationView::Child { .. })
+    if matches!(state.active_view, ConversationView::Subagent { .. })
         && invocation.command == SlashCommand::Compact
     {
         state.push_notice("Manual compaction is available only in the root conversation.".into());
@@ -613,15 +614,15 @@ fn handle_key_main(
                     return slash_command_effects(state, invocation);
                 }
             }
-            // Viewing a subagent's drill-in transcript: the child
+            // Viewing a subagent's drill-in transcript: the subagent
             // conversation doesn't accept input (only one agent loop is
             // driven at a time), and silently steering the *root* agent
-            // while a different (child) transcript is on screen would be
+            // while a different (subagent) transcript is on screen would be
             // misleading — the user would have no visual confirmation of
             // which conversation their message actually went to. So Enter
             // is a no-op here until per-subagent steering exists (see
             // `docs/known-test-issues.md`).
-            if matches!(state.active_view, ConversationView::Child { .. }) {
+            if matches!(state.active_view, ConversationView::Subagent { .. }) {
                 return vec![];
             }
             let raw_text = &textarea.text;

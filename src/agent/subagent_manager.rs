@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Child-agent delegation: `ChildAgentManager` owns the lifecycle of the
-//! running child agents plus an unbounded FIFO of queued spawn requests. A
-//! parent `AgentLoop` holds at most one `ChildAgentManager` (present only for
+//! Subagent delegation: `SubagentManager` owns the lifecycle of the
+//! running subagents plus an unbounded FIFO of queued spawn requests. A
+//! parent `AgentLoop` holds at most one `SubagentManager` (present only for
 //! `Role::Root` agents whose `AgentConfig::can_spawn` is `true`). Up to the
-//! configured `max_concurrent_children` cap runs at the same time across the
+//! configured `max_concurrent_subagents` cap runs at the same time across the
 //! whole agent tree; spawns beyond the cap are enqueued and started in FIFO
-//! order as running children finish. `None` means unlimited.
+//! order as running subagents finish. `None` means unlimited.
 //!
-//! `ChildAgentManager` itself knows nothing about engines, registries, or
-//! `AgentFactory` — actually constructing and running a child `AgentLoop` is
+//! `SubagentManager` itself knows nothing about engines, registries, or
+//! `AgentFactory` — actually constructing and running a subagent `AgentLoop` is
 //! delegated to a `SpawnFn` closure supplied by the caller (`AgentFactory`),
 //! keeping this module a plain scheduling/queueing primitive that is cheap to
 //! unit test in isolation.
@@ -38,52 +38,52 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{AgentCommand, UiUpdate};
 use crate::store::Store;
 
-/// A request to run a child agent, either starting immediately or queued
-/// behind an already-running child.
+/// A request to run a subagent, either starting immediately or queued
+/// behind an already-running subagent.
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
-    /// Identifies this child run; distinct from `call_id`.
+    /// Identifies this subagent run; distinct from `call_id`.
     pub run_id: Uuid,
     /// The `spawn_subagent` tool-call id this run is tied to. The eventual
     /// `FinishResult` is injected into the parent conversation as a hidden
     /// harness notice referencing this id — not a second `role:"tool"` message,
     /// since exactly one is allowed per `tool_call_id`.
     pub call_id: Uuid,
-    /// The task description sent to the child as its initial user turn.
+    /// The task description sent to the subagent as its initial user turn.
     pub task: String,
     /// Optional briefing/context injected as an additional system message in
-    /// the child's context, ahead of the task.
+    /// the subagent's context, ahead of the task.
     pub briefing: Option<String>,
-    /// Name of the agent-type configuration the child should run as.
+    /// Name of the agent-type configuration the subagent should run as.
     pub agent_type: String,
-    /// Short (3-6 word) label summarising what the child agent is doing,
+    /// Short (3-6 word) label summarising what the subagent is doing,
     /// shown as the second line of the drill-in conversation header.
     pub label: String,
 }
 
-/// Identifies whether a child outcome came from the child itself or was
+/// Identifies whether a subagent outcome came from the subagent itself or was
 /// produced by Ylva's harness. The latter is serialized as `runtime` for
 /// compatibility; it does not refer to an Engine runtime.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishResultOrigin {
-    /// The child deliberately called `agent_finish`.
+    /// The subagent deliberately called `agent_finish`.
     Agent,
-    /// The harness produced the outcome because the child could not complete
+    /// The harness produced the outcome because the subagent could not complete
     /// normally (for example, an unknown engine or a panic).
     #[default]
     Runtime,
 }
 
-/// Outcome of a completed, cancelled, or unstructured-fallback child run.
+/// Outcome of a completed, cancelled, or unstructured-fallback subagent run.
 #[derive(Debug, Clone)]
 pub struct FinishResult {
     pub run_id: Uuid,
     pub call_id: Uuid,
     /// Determines whether user-authored Markdown is appropriate for an
-    /// error: only a child-reported outcome is model-authored content.
+    /// error: only a subagent-reported outcome is model-authored content.
     pub origin: FinishResultOrigin,
-    /// `"success"`, `"failure"`, or `"unstructured"` (child never called
+    /// `"success"`, `"failure"`, or `"unstructured"` (subagent never called
     /// `agent_finish`; last assistant text was captured as a fallback).
     pub status: String,
     pub result: Option<String>,
@@ -93,7 +93,7 @@ pub struct FinishResult {
 
 impl FinishResult {
     /// Render as the JSON object injected as the `spawn_subagent` tool result
-    /// text once the child finishes.
+    /// text once the subagent finishes.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "status": self.status,
@@ -124,8 +124,8 @@ impl FinishResult {
     /// Renders this outcome as tool-bubble content sections for the TUI:
     /// `"failure"` shows `error` under an `"Error"` label; `"success"` and
     /// `"unstructured"` both show `result` under a `"Result"` label (the
-    /// unstructured fallback captures the child's last assistant text into
-    /// the same field — see `AgentFactory::run_child`); a non-empty
+    /// unstructured fallback captures the subagent's last assistant text into
+    /// the same field — see `AgentFactory::run_subagent`); a non-empty
     /// `sources` list is always appended as its own `"Sources"` section.
     /// Agent-reported results, errors, and sources are marked
     /// `file_extension: "md"` so
@@ -178,8 +178,8 @@ impl FinishResult {
     }
 }
 
-/// Result of [`ChildAgentManager::spawn`]: whether the request started
-/// immediately or was enqueued behind an active child.
+/// Result of [`SubagentManager::spawn`]: whether the request started
+/// immediately or was enqueued behind an active subagent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnStatus {
     Started(Uuid),
@@ -194,12 +194,12 @@ impl SpawnStatus {
     }
 }
 
-/// Constructs and runs a child `AgentLoop` for `request`, reporting its
+/// Constructs and runs a subagent `AgentLoop` for `request`, reporting its
 /// eventual outcome via the `FinishResult` sender captured by the closure
 /// (not passed here — see `AgentFactory`) and forwarding live tokens through
 /// the given `UiUpdate` sender. Returns a [`SpawnOutcome`] carrying the
-/// child's own `AgentCommand` sender (so the parent can route
-/// `AgentCommand::ForChild` verdicts to it — see `running_command_sender`)
+/// subagent's own `AgentCommand` sender (so the parent can route
+/// `AgentCommand::ForSubagent` verdicts to it — see `running_command_sender`)
 /// alongside the `JoinHandle` the manager uses only to know the task exists;
 /// completion is observed through `FinishResult`, never by awaiting this
 /// handle.
@@ -209,36 +209,36 @@ pub type SpawnFn = Box<
         + Sync,
 >;
 
-/// Return value of a [`SpawnFn`] call: the newly started (or failed) child's
+/// Return value of a [`SpawnFn`] call: the newly started (or failed) subagent's
 /// command sender, plus the `JoinHandle` driving it to completion.
-/// `command_sender` is `None` only when the child failed to construct (e.g.
+/// `command_sender` is `None` only when the subagent failed to construct (e.g.
 /// an unknown engine name) — that failure is reported via `finish_tx`
-/// (`FinishResult`) directly by the `SpawnFn`, so there is no live child to
+/// (`FinishResult`) directly by the `SpawnFn`, so there is no live subagent to
 /// route commands to.
 pub struct SpawnOutcome {
     pub command_sender: Option<mpsc::Sender<AgentCommand>>,
     pub handle: JoinHandle<()>,
 }
 
-struct RunningChild {
+struct RunningSubagent {
     run_id: Uuid,
     call_id: Uuid,
     label: String,
     cancel: CancellationToken,
-    /// When this child actually started (i.e. when `start` ran, not when the
+    /// When this subagent actually started (i.e. when `start` ran, not when the
     /// original `spawn` call was made — queued requests don't start the
     /// clock until they're dequeued). Used to compute the elapsed duration
-    /// shown on the final `ToolDone` once the child finishes.
+    /// shown on the final `ToolDone` once the subagent finishes.
     started_at: std::time::Instant,
-    /// The child's own `AgentCommand` sender, used by `running_command_sender`
-    /// to route `AgentCommand::ForChild` verdicts to it. `None` when the
-    /// child failed to construct (see `SpawnOutcome::command_sender`).
+    /// The subagent's own `AgentCommand` sender, used by `running_command_sender`
+    /// to route `AgentCommand::ForSubagent` verdicts to it. `None` when the
+    /// subagent failed to construct (see `SpawnOutcome::command_sender`).
     command_sender: Option<mpsc::Sender<AgentCommand>>,
     handle: JoinHandle<()>,
 }
 
-/// Identifies one child run/spawn-call pair that `cancel_all` tore down —
-/// either the actively running child or one still waiting in the queue.
+/// Identifies one subagent run/spawn-call pair that `cancel_all` tore down —
+/// either the actively running subagent or one still waiting in the queue.
 /// Callers use `call_id` to resolve the corresponding tool-bubble/context
 /// entry to a terminal state and `label` to correlate its lifecycle event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,25 +248,25 @@ pub struct CancelledSpawn {
     pub label: String,
 }
 
-/// Schedules and tracks concurrently running child agents, with an unbounded
+/// Schedules and tracks concurrently running subagents, with an unbounded
 /// FIFO queue for spawn requests beyond the concurrency cap.
-pub struct ChildAgentManager {
-    /// Children currently running, in start order (deterministic iteration
-    /// for `cancel_all`). Never longer than `max_concurrent_children`.
-    running: Vec<RunningChild>,
+pub struct SubagentManager {
+    /// Subagents currently running, in start order (deterministic iteration
+    /// for `cancel_all`). Never longer than `max_concurrent_subagents`.
+    running: Vec<RunningSubagent>,
     queue: VecDeque<SpawnRequest>,
-    /// Cap on children in the running state at once; `None` is unlimited.
-    max_concurrent_children: Option<usize>,
+    /// Cap on subagents in the running state at once; `None` is unlimited.
+    max_concurrent_subagents: Option<usize>,
     subagent_ui_tx: mpsc::UnboundedSender<UiUpdate>,
     spawn_fn: SpawnFn,
     /// The **parent** session's store, when persistence is enabled: every
-    /// child run appends a `child_start`/`child_result` pair to it.
+    /// subagent run appends a `subagent_start`/`subagent_result` pair to it.
     store: Option<Store>,
 }
 
 /// Builds the `UiUpdate::ToolProgress` title-argument pairs shown on the
-/// `spawn_subagent` bubble while its child is in flight: `status` (`"running"`
-/// or `"queued"`) plus the child's `run_id`.
+/// `spawn_subagent` bubble while its subagent is in flight: `status` (`"running"`
+/// or `"queued"`) plus the subagent's `run_id`.
 fn spawn_progress_title_arguments(status: &str, run_id: Uuid) -> Vec<(String, serde_json::Value)> {
     vec![
         ("status".to_string(), serde_json::json!(status)),
@@ -274,31 +274,31 @@ fn spawn_progress_title_arguments(status: &str, run_id: Uuid) -> Vec<(String, se
     ]
 }
 
-impl ChildAgentManager {
-    /// `max_concurrent_children` caps how many children may run at once
+impl SubagentManager {
+    /// `max_concurrent_subagents` caps how many subagents may run at once
     /// (`None` is unlimited). Lifecycle updates go to `subagent_ui_tx`.
     pub fn new(
         subagent_ui_tx: mpsc::UnboundedSender<UiUpdate>,
         spawn_fn: SpawnFn,
-        max_concurrent_children: Option<usize>,
+        max_concurrent_subagents: Option<usize>,
     ) -> Self {
-        ChildAgentManager {
+        SubagentManager {
             running: Vec::new(),
             queue: VecDeque::new(),
-            max_concurrent_children: max_concurrent_children.filter(|limit| *limit > 0),
+            max_concurrent_subagents: max_concurrent_subagents.filter(|limit| *limit > 0),
             subagent_ui_tx,
             spawn_fn,
             store: None,
         }
     }
 
-    /// The configured cap on concurrently running children; `None` is unlimited.
-    pub fn max_concurrent_children(&self) -> Option<usize> {
-        self.max_concurrent_children
+    /// The configured cap on concurrently running subagents; `None` is unlimited.
+    pub fn max_concurrent_subagents(&self) -> Option<usize> {
+        self.max_concurrent_subagents
     }
 
-    /// Enables persistence: `child_start`/`child_result` records for every
-    /// child run are appended to the parent session identified by `store`.
+    /// Enables persistence: `subagent_start`/`subagent_result` records for every
+    /// subagent run are appended to the parent session identified by `store`.
     pub fn with_store(mut self, store: Store) -> Self {
         self.store = Some(store);
         self
@@ -309,20 +309,20 @@ impl ChildAgentManager {
     }
 
     /// The parent session's store, when persistence is enabled. Used by the
-    /// parent `AgentLoop` to persist a finished child's own transcript.
+    /// parent `AgentLoop` to persist a finished subagent's own transcript.
     pub fn store(&self) -> Option<Store> {
         self.store.clone()
     }
 
-    /// Append the `child_result` record for a finished child run to the
+    /// Append the `subagent_result` record for a finished subagent run to the
     /// parent session. Called by the parent `AgentLoop` when a
-    /// [`FinishResult`] arrives, before `on_child_finished` clears the
+    /// [`FinishResult`] arrives, before `on_subagent_finished` clears the
     /// running slot.
-    pub fn record_child_result(&self, finish_result: &FinishResult) {
+    pub fn record_subagent_result(&self, finish_result: &FinishResult) {
         let Some(store) = &self.store else {
             return;
         };
-        store.record_child_result(
+        store.record_subagent_result(
             finish_result.run_id,
             finish_result.call_id,
             &finish_result.status,
@@ -335,23 +335,23 @@ impl ChildAgentManager {
         );
     }
 
-    /// Whether at least one child is running.
+    /// Whether at least one subagent is running.
     pub fn is_running(&self) -> bool {
         !self.running.is_empty()
     }
 
-    /// Whether another child may start right now without exceeding the cap.
+    /// Whether another subagent may start right now without exceeding the cap.
     pub fn has_free_slot(&self) -> bool {
-        self.max_concurrent_children
+        self.max_concurrent_subagents
             .is_none_or(|limit| self.running.len() < limit)
     }
 
-    /// Elapsed time since the running child identified by `run_id` actually
+    /// Elapsed time since the running subagent identified by `run_id` actually
     /// started (i.e. since `start`, not since the original `spawn` call —
     /// time spent queued behind the cap doesn't count). Returns `None` if
-    /// `run_id` isn't a running child (e.g. it's stale, or it is still
+    /// `run_id` isn't a running subagent (e.g. it's stale, or it is still
     /// queued). Used to report a real duration on the final `ToolDone` once
-    /// the child finishes, rather than a hardcoded zero.
+    /// the subagent finishes, rather than a hardcoded zero.
     pub fn running_duration(&self, run_id: Uuid) -> Option<std::time::Duration> {
         self.running
             .iter()
@@ -364,26 +364,29 @@ impl ChildAgentManager {
         self.queue.len()
     }
 
-    /// Number of child runs that have not reached a terminal outcome: the
-    /// running children plus the queued requests.
+    /// Number of subagent runs that have not reached a terminal outcome: the
+    /// running subagents plus the queued requests.
     pub fn outstanding_count(&self) -> usize {
         self.running.len() + self.queue.len()
     }
 
-    /// Number of child runs that would remain after the specified run reaches
+    /// Number of subagent runs that would remain after the specified run reaches
     /// a terminal outcome. Unknown or already-terminal run ids leave the
     /// current count unchanged.
     pub fn outstanding_count_after_completion(&self, run_id: Uuid) -> usize {
-        let tracked = self.running.iter().any(|child| child.run_id == run_id)
+        let tracked = self
+            .running
+            .iter()
+            .any(|subagent| subagent.run_id == run_id)
             || self.queue.iter().any(|request| request.run_id == run_id);
         self.outstanding_count()
             .saturating_sub(usize::from(tracked))
     }
 
-    /// The running child's own `AgentCommand` sender, if `run_id` matches a
-    /// running child. Used by the root `AgentLoop` to route an
-    /// `AgentCommand::ForChild { run_id, .. }` verdict to the correct child
-    /// loop. Returns `None` when `run_id` is stale (the child already
+    /// The running subagent's own `AgentCommand` sender, if `run_id` matches a
+    /// running subagent. Used by the root `AgentLoop` to route an
+    /// `AgentCommand::ForSubagent { run_id, .. }` verdict to the correct subagent
+    /// loop. Returns `None` when `run_id` is stale (the subagent already
     /// finished, was cancelled, or never started — e.g. still queued, or
     /// failed to construct).
     pub fn running_command_sender(&self, run_id: Uuid) -> Option<mpsc::Sender<AgentCommand>> {
@@ -393,12 +396,16 @@ impl ChildAgentManager {
             .and_then(|running| running.command_sender.clone())
     }
 
-    /// Return the display label associated with a child run that has not
+    /// Return the display label associated with a subagent run that has not
     /// reached a terminal outcome. The lookup covers both running and queued
     /// runs so completion notices can correlate results without depending on
     /// execution order.
     pub fn label_for(&self, run_id: Uuid) -> Option<&str> {
-        if let Some(running) = self.running.iter().find(|child| child.run_id == run_id) {
+        if let Some(running) = self
+            .running
+            .iter()
+            .find(|subagent| subagent.run_id == run_id)
+        {
             return Some(running.label.as_str());
         }
         self.queue
@@ -407,11 +414,11 @@ impl ChildAgentManager {
             .map(|request| request.label.as_str())
     }
 
-    /// Start `task`/`briefing`/`agent_type` as a new child run tied to
+    /// Start `task`/`briefing`/`agent_type` as a new subagent run tied to
     /// `call_id` when a slot under the concurrency cap is free, or enqueue it
     /// (FIFO) otherwise. Reports the resulting `"running"`/`"queued"` status
     /// as a `UiUpdate::ToolProgress` — the call is accepted, not yet done; the
-    /// eventual `ToolDone` is sent later, only once the child truly finishes
+    /// eventual `ToolDone` is sent later, only once the subagent truly finishes
     /// (see `AgentLoop::run`'s `finish_rx` handling).
     pub fn spawn(
         &mut self,
@@ -457,7 +464,7 @@ impl ChildAgentManager {
             tracing::debug!(
                 %run_id,
                 update_kind = kind,
-                "skipped child lifecycle update: subagent UI channel is closed"
+                "skipped subagent lifecycle update: subagent UI channel is closed"
             );
         }
     }
@@ -468,8 +475,8 @@ impl ChildAgentManager {
         let label = request.label.clone();
         self.send_lifecycle_update(
             run_id,
-            "child_agent_started",
-            UiUpdate::ChildAgentStarted {
+            "subagent_started",
+            UiUpdate::SubagentStarted {
                 run_id,
                 call_id,
                 agent_type: request.agent_type.clone(),
@@ -486,7 +493,7 @@ impl ChildAgentManager {
             },
         );
         if let Some(store) = &self.store {
-            store.record_child_start(
+            store.record_subagent_start(
                 run_id,
                 call_id,
                 &request.agent_type,
@@ -496,7 +503,7 @@ impl ChildAgentManager {
         }
         let cancel = CancellationToken::new();
         let outcome = (self.spawn_fn)(request, cancel.clone(), self.subagent_ui_tx.clone());
-        self.running.push(RunningChild {
+        self.running.push(RunningSubagent {
             run_id,
             call_id,
             label,
@@ -523,10 +530,14 @@ impl ChildAgentManager {
     /// arrives. Removes that run only (ignoring stale or unknown ids), then
     /// starts queued requests in FIFO order while slots are free.
     ///
-    /// Returns the number of child runs still awaiting a terminal outcome
+    /// Returns the number of subagent runs still awaiting a terminal outcome
     /// after this result has been applied.
-    pub fn on_child_finished(&mut self, run_id: Uuid) -> usize {
-        let Some(position) = self.running.iter().position(|child| child.run_id == run_id) else {
+    pub fn on_subagent_finished(&mut self, run_id: Uuid) -> usize {
+        let Some(position) = self
+            .running
+            .iter()
+            .position(|subagent| subagent.run_id == run_id)
+        else {
             return self.outstanding_count();
         };
         self.running.remove(position);
@@ -534,13 +545,13 @@ impl ChildAgentManager {
         self.outstanding_count()
     }
 
-    /// Cancel every running child and drain the queue. Called when the parent
+    /// Cancel every running subagent and drain the queue. Called when the parent
     /// agent stops or its context is cleared. Returns every cancelled
-    /// run/call-id/label tuple: the running children in start order, then the
+    /// run/call-id/label tuple: the running subagents in start order, then the
     /// drained queue entries in FIFO order. The caller resolves each one's
     /// tool bubble/context entry to a terminal state.
     ///
-    /// Awaits every cancelled child's task before returning, so no child is
+    /// Awaits every cancelled subagent's task before returning, so no subagent is
     /// still running (or still emitting updates) once the caller proceeds.
     pub async fn cancel_all(&mut self) -> Vec<CancelledSpawn> {
         let mut cancelled = Vec::new();
@@ -560,7 +571,7 @@ impl ChildAgentManager {
             label: request.label,
         }));
         for handle in handles {
-            // A panicked child surfaces through its own finish path; here we
+            // A panicked subagent surfaces through its own finish path; here we
             // only need the task to have stopped.
             let _ = handle.await;
         }
@@ -580,7 +591,7 @@ mod tests {
     /// Builds a `spawn_fn` stub that records every request it is asked to
     /// start (in call order) and immediately returns a completed, no-op
     /// task. The returned `CancellationToken`s are also recorded so tests can
-    /// assert a specific child's token was fired by `cancel_all`.
+    /// assert a specific subagent's token was fired by `cancel_all`.
     fn recording_spawn_fn() -> (SpawnFn, RecordedSpawnCalls) {
         let calls: RecordedSpawnCalls = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&calls);
@@ -594,22 +605,22 @@ mod tests {
         (spawn_fn, calls)
     }
 
-    fn test_manager() -> (ChildAgentManager, RecordedSpawnCalls) {
+    fn test_manager() -> (SubagentManager, RecordedSpawnCalls) {
         test_manager_with_limit(Some(1))
     }
 
     fn test_manager_with_limit(
-        max_concurrent_children: Option<usize>,
-    ) -> (ChildAgentManager, RecordedSpawnCalls) {
+        max_concurrent_subagents: Option<usize>,
+    ) -> (SubagentManager, RecordedSpawnCalls) {
         let (spawn_fn, calls) = recording_spawn_fn();
         let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
         (
-            ChildAgentManager::new(subagent_ui_tx, spawn_fn, max_concurrent_children),
+            SubagentManager::new(subagent_ui_tx, spawn_fn, max_concurrent_subagents),
             calls,
         )
     }
 
-    fn spawn_task(manager: &mut ChildAgentManager, task: &str) -> SpawnStatus {
+    fn spawn_task(manager: &mut SubagentManager, task: &str) -> SpawnStatus {
         manager.spawn(
             task.to_string(),
             None,
@@ -635,7 +646,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn child_start_and_child_result_are_appended_to_the_parent_session() {
+    async fn subagent_start_and_subagent_result_are_appended_to_the_parent_session() {
         let temp = tempfile::tempdir().expect("tempdir");
         let chats_root = temp.path().join("chats");
         let parent_session_id = Uuid::new_v4();
@@ -662,7 +673,7 @@ mod tests {
         let SpawnStatus::Started(run_id) = status else {
             panic!("expected the spawn to start immediately")
         };
-        manager.record_child_result(&FinishResult {
+        manager.record_subagent_result(&FinishResult {
             run_id,
             call_id,
             origin: FinishResultOrigin::Agent,
@@ -682,7 +693,7 @@ mod tests {
         let start = events
             .iter()
             .find_map(|event| match event {
-                crate::store::StoreEvent::ChildStart {
+                crate::store::StoreEvent::SubagentStart {
                     id,
                     parent_session,
                     agent_type,
@@ -691,7 +702,7 @@ mod tests {
                 } => Some((*id, *parent_session, agent_type.clone(), task.clone())),
                 _ => None,
             })
-            .expect("a child_start record was written");
+            .expect("a subagent_start record was written");
         assert_eq!(start.0, run_id);
         assert_eq!(start.1, parent_session_id, "linked to the parent session");
         assert_eq!(start.2, "explorer");
@@ -700,7 +711,7 @@ mod tests {
         let result = events
             .iter()
             .find_map(|event| match event {
-                crate::store::StoreEvent::ChildResult {
+                crate::store::StoreEvent::SubagentResult {
                     id,
                     parent_session,
                     status,
@@ -716,7 +727,7 @@ mod tests {
                 )),
                 _ => None,
             })
-            .expect("a child_result record was written");
+            .expect("a subagent_result record was written");
         assert_eq!(result.0, run_id);
         assert_eq!(result.1, parent_session_id);
         assert_eq!(result.2, "success");
@@ -727,7 +738,7 @@ mod tests {
     #[tokio::test]
     async fn a_manager_without_a_store_records_nothing_and_still_spawns() {
         let (mut manager, calls) = test_manager();
-        manager.record_child_result(&FinishResult {
+        manager.record_subagent_result(&FinishResult {
             run_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
             origin: FinishResultOrigin::Agent,
@@ -747,7 +758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_returns_queued_when_a_child_is_already_running() {
+    async fn spawn_returns_queued_when_a_subagent_is_already_running() {
         let (mut manager, calls) = test_manager();
         let first = manager.spawn(
             "first".to_string(),
@@ -808,7 +819,7 @@ mod tests {
         );
         assert_eq!(manager.queue_len(), 2);
 
-        manager.on_child_finished(first_run_id);
+        manager.on_subagent_finished(first_run_id);
         assert_eq!(manager.queue_len(), 1, "second request now running");
         assert!(manager.is_running());
 
@@ -819,7 +830,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_child_finished_ignores_stale_run_id() {
+    async fn on_subagent_finished_ignores_stale_run_id() {
         let (mut manager, _calls) = test_manager();
         manager.spawn(
             "first".to_string(),
@@ -829,10 +840,10 @@ mod tests {
             Uuid::new_v4(),
         );
         assert!(manager.is_running());
-        manager.on_child_finished(Uuid::new_v4()); // unrelated / stale id
+        manager.on_subagent_finished(Uuid::new_v4()); // unrelated / stale id
         assert!(
             manager.is_running(),
-            "a mismatched run_id must not clear the running child"
+            "a mismatched run_id must not clear the running subagent"
         );
     }
 
@@ -851,7 +862,7 @@ mod tests {
 
         let duration = manager
             .running_duration(run_id)
-            .expect("running child's duration should be available");
+            .expect("running subagent's duration should be available");
         assert!(duration >= std::time::Duration::ZERO);
     }
 
@@ -870,7 +881,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn running_duration_is_none_when_no_child_is_running() {
+    async fn running_duration_is_none_when_no_subagent_is_running() {
         let (manager, _calls) = test_manager();
         assert_eq!(manager.running_duration(Uuid::new_v4()), None);
     }
@@ -879,7 +890,7 @@ mod tests {
     async fn spawn_emits_tool_progress_with_spawned_status_when_started_immediately() {
         let (spawn_fn, _calls) = recording_spawn_fn();
         let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::unbounded_channel();
-        let mut manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(1));
+        let mut manager = SubagentManager::new(subagent_ui_tx, spawn_fn, Some(1));
         let call_id = Uuid::new_v4();
 
         let status = manager.spawn(
@@ -895,7 +906,7 @@ mod tests {
 
         assert!(matches!(
             subagent_ui_rx.recv().await,
-            Some(UiUpdate::ChildAgentStarted { run_id: started_run_id, agent_type, task, .. })
+            Some(UiUpdate::SubagentStarted { run_id: started_run_id, agent_type, task, .. })
                 if started_run_id == run_id && agent_type == "default" && task == "task"
         ));
         match subagent_ui_rx.recv().await {
@@ -917,10 +928,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_emits_tool_progress_with_queued_status_when_a_child_is_already_running() {
+    async fn spawn_emits_tool_progress_with_queued_status_when_a_subagent_is_already_running() {
         let (spawn_fn, _calls) = recording_spawn_fn();
         let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::unbounded_channel();
-        let mut manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(1));
+        let mut manager = SubagentManager::new(subagent_ui_tx, spawn_fn, Some(1));
         let first_call_id = Uuid::new_v4();
         let second_call_id = Uuid::new_v4();
 
@@ -942,11 +953,11 @@ mod tests {
             panic!("expected the second spawn to be queued")
         };
 
-        // First update is the immediately-started first child's lifecycle
+        // First update is the immediately-started first subagent's lifecycle
         // marker, followed by its "running" progress.
         assert!(matches!(
             subagent_ui_rx.recv().await,
-            Some(UiUpdate::ChildAgentStarted { .. })
+            Some(UiUpdate::SubagentStarted { .. })
         ));
         assert!(matches!(
             subagent_ui_rx.recv().await,
@@ -975,13 +986,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_child_finished_emits_tool_progress_for_the_newly_started_queued_request() {
-        // Regression test: starting a queued request from `on_child_finished`
+    async fn on_subagent_finished_emits_tool_progress_for_the_newly_started_queued_request() {
+        // Regression test: starting a queued request from `on_subagent_finished`
         // must report its own "running" progress update — previously this
         // path emitted no event at all, leaving the queued bubble stuck.
         let (spawn_fn, _calls) = recording_spawn_fn();
         let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::unbounded_channel();
-        let mut manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(1));
+        let mut manager = SubagentManager::new(subagent_ui_tx, spawn_fn, Some(1));
         let first_call_id = Uuid::new_v4();
         let second_call_id = Uuid::new_v4();
 
@@ -1003,17 +1014,17 @@ mod tests {
         );
 
         // Drain the three updates already emitted by the spawns above: the
-        // first child's `ChildAgentStarted` + "running" `ToolProgress`, and
-        // the second (queued) child's "queued" `ToolProgress`.
+        // first subagent's `SubagentStarted` + "running" `ToolProgress`, and
+        // the second (queued) subagent's "queued" `ToolProgress`.
         subagent_ui_rx.recv().await;
         subagent_ui_rx.recv().await;
         subagent_ui_rx.recv().await;
 
-        manager.on_child_finished(first_run_id);
+        manager.on_subagent_finished(first_run_id);
 
         assert!(matches!(
             subagent_ui_rx.recv().await,
-            Some(UiUpdate::ChildAgentStarted { .. })
+            Some(UiUpdate::SubagentStarted { .. })
         ));
         match subagent_ui_rx.recv().await {
             Some(UiUpdate::ToolProgress { id, title_arguments }) => {
@@ -1031,7 +1042,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_all_fires_child_token_and_empties_queue() {
+    async fn cancel_all_fires_subagent_token_and_empties_queue() {
         let (mut manager, calls) = test_manager();
         let first_call_id = Uuid::new_v4();
         let second_call_id = Uuid::new_v4();
@@ -1055,7 +1066,7 @@ mod tests {
         assert_eq!(
             cancelled.iter().map(|c| c.call_id).collect::<Vec<_>>(),
             vec![first_call_id, second_call_id],
-            "the running child must be reported first, then queued entries in FIFO order"
+            "the running subagent must be reported first, then queued entries in FIFO order"
         );
         assert_eq!(manager.queue_len(), 0);
         assert!(!manager.is_running());
@@ -1063,7 +1074,7 @@ mod tests {
         let recorded = calls.lock().unwrap();
         assert!(
             recorded[0].1.is_cancelled(),
-            "the running child's token must be cancelled"
+            "the running subagent's token must be cancelled"
         );
     }
 
@@ -1076,15 +1087,15 @@ mod tests {
     #[tokio::test]
     async fn limit_stores_finite_and_unlimited_values() {
         let (manager, _calls) = test_manager_with_limit(Some(3));
-        assert_eq!(manager.max_concurrent_children(), Some(3));
+        assert_eq!(manager.max_concurrent_subagents(), Some(3));
         let (unlimited, _calls) = test_manager_with_limit(None);
-        assert_eq!(unlimited.max_concurrent_children(), None);
+        assert_eq!(unlimited.max_concurrent_subagents(), None);
         let (zero, _calls) = test_manager_with_limit(Some(0));
-        assert_eq!(zero.max_concurrent_children(), None);
+        assert_eq!(zero.max_concurrent_subagents(), None);
     }
 
     #[tokio::test]
-    async fn limit_three_starts_three_children_and_queues_the_rest() {
+    async fn limit_three_starts_three_subagents_and_queues_the_rest() {
         let (mut manager, calls) = test_manager_with_limit(Some(3));
         let statuses: Vec<SpawnStatus> = (0..5)
             .map(|index| spawn_task(&mut manager, &format!("task {index}")))
@@ -1099,14 +1110,14 @@ mod tests {
             .filter(|status| matches!(status, SpawnStatus::Queued(_)))
             .count();
         assert_eq!((started, queued), (3, 2));
-        assert_eq!(calls.lock().unwrap().len(), 3, "only three children start");
+        assert_eq!(calls.lock().unwrap().len(), 3, "only three subagents start");
         assert_eq!(manager.queue_len(), 2);
         assert_eq!(manager.outstanding_count(), 5);
     }
 
     #[tokio::test]
-    async fn finishing_one_of_three_running_children_starts_exactly_one_queued_child_in_fifo_order()
-    {
+    async fn finishing_one_of_three_running_subagents_starts_exactly_one_queued_subagent_in_fifo_order(
+    ) {
         let (mut manager, calls) = test_manager_with_limit(Some(3));
         let first = spawn_task(&mut manager, "first");
         spawn_task(&mut manager, "second");
@@ -1117,12 +1128,12 @@ mod tests {
             panic!("expected the first spawn to start immediately")
         };
 
-        assert_eq!(manager.on_child_finished(first_run_id), 4);
+        assert_eq!(manager.on_subagent_finished(first_run_id), 4);
         let recorded = calls.lock().unwrap();
-        assert_eq!(recorded.len(), 4, "exactly one queued child started");
+        assert_eq!(recorded.len(), 4, "exactly one queued subagent started");
         assert_eq!(
             recorded[3].0.task, "fourth",
-            "queued children start in FIFO order"
+            "queued subagents start in FIFO order"
         );
         assert_eq!(manager.queue_len(), 1);
         assert_eq!(manager.outstanding_count(), 4);
@@ -1147,8 +1158,8 @@ mod tests {
         spawn_task(&mut manager, "second");
         spawn_task(&mut manager, "third");
 
-        assert_eq!(manager.on_child_finished(Uuid::new_v4()), 3);
-        assert_eq!(calls.lock().unwrap().len(), 2, "no queued child started");
+        assert_eq!(manager.on_subagent_finished(Uuid::new_v4()), 3);
+        assert_eq!(calls.lock().unwrap().len(), 2, "no queued subagent started");
         assert_eq!(manager.queue_len(), 1);
     }
 
@@ -1163,19 +1174,19 @@ mod tests {
         assert_eq!(manager.outstanding_count(), 2);
         spawn_task(&mut manager, "third");
         assert_eq!(manager.outstanding_count(), 3);
-        manager.on_child_finished(first);
+        manager.on_subagent_finished(first);
         assert_eq!(manager.outstanding_count(), 2);
     }
 
     #[tokio::test]
-    async fn cancel_all_with_two_running_and_one_queued_cancels_each_child() {
+    async fn cancel_all_with_two_running_and_one_queued_cancels_each_subagent() {
         let (mut manager, calls) = test_manager_with_limit(Some(2));
         spawn_task(&mut manager, "first");
         spawn_task(&mut manager, "second");
         spawn_task(&mut manager, "third");
 
         let cancelled = manager.cancel_all().await;
-        assert_eq!(cancelled.len(), 3, "one cancelled completion per child");
+        assert_eq!(cancelled.len(), 3, "one cancelled completion per subagent");
         assert_eq!(manager.outstanding_count(), 0);
         let recorded = calls.lock().unwrap();
         assert!(recorded[0].1.is_cancelled());
@@ -1197,7 +1208,7 @@ mod tests {
     async fn lifecycle_updates_are_never_dropped_under_volume() {
         let (spawn_fn, calls) = recording_spawn_fn();
         let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::unbounded_channel();
-        let mut manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn, None);
+        let mut manager = SubagentManager::new(subagent_ui_tx, spawn_fn, None);
 
         // Well past the former bounded capacity, with nothing draining yet.
         const SPAWN_COUNT: usize = 1500;
@@ -1208,7 +1219,7 @@ mod tests {
         assert_eq!(
             calls.lock().unwrap().len(),
             SPAWN_COUNT,
-            "every spawn must still start a child"
+            "every spawn must still start a subagent"
         );
         let mut received_update_count = 0;
         while subagent_ui_rx.try_recv().is_ok() {
@@ -1343,7 +1354,7 @@ mod tests {
             origin: FinishResultOrigin::Agent,
             status: "failure".to_string(),
             result: None,
-            error: Some("**The child could not complete the task.**".to_string()),
+            error: Some("**The subagent could not complete the task.**".to_string()),
             sources: vec![],
         };
         let sections = result.content_sections();

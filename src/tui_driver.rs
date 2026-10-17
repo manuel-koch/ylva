@@ -62,7 +62,7 @@ use sessions::{picker_mut, selection_error, SessionResult, SessionTasks};
 use terminal::{
     initialize_terminal, install_stop_signal_relay, set_terminal_title, TerminalTitleGuard,
 };
-use updates::{app_state_to_tui_state, prepare_child_replay_effects, process_one_update};
+use updates::{app_state_to_tui_state, prepare_subagent_replay_effects, process_one_update};
 
 pub use terminal::{ArboardClipboard, ClipboardSink, NoopClipboard};
 
@@ -269,18 +269,18 @@ where
                 Vec::new()
             }
         };
-        let child_runs = match crate::store::Store::read_child_runs(store.path()) {
-            Ok(child_runs) => child_runs,
+        let subagent_runs = match crate::store::Store::read_subagent_runs(store.path()) {
+            Ok(subagent_runs) => subagent_runs,
             Err(error) => {
                 tracing::warn!(
                     %error,
                     path = %store.path().display(),
-                    "could not replay child-run lifecycle records"
+                    "could not replay subagent-run lifecycle records"
                 );
                 Vec::new()
             }
         };
-        state.replay_messages(&messages, &child_runs, state.replay_compaction_boundary);
+        state.replay_messages(&messages, &subagent_runs, state.replay_compaction_boundary);
         match store.read_past_explicit_user_messages(input_history_limit) {
             Ok(prior_messages) => state.prepend_input_history(prior_messages),
             Err(error) => {
@@ -398,7 +398,7 @@ where
                                 state.display_metadata = display_metadata;
                                 state.enable_render_cache();
                                 state.replay_compaction_boundary = prepared.transcript.compaction_transcript_boundary;
-                                state.replay_messages(&prepared.transcript.messages, &prepared.child_runs, state.replay_compaction_boundary);
+                                state.replay_messages(&prepared.transcript.messages, &prepared.subagent_runs, state.replay_compaction_boundary);
                                 state.prepend_input_history(std::mem::take(&mut prepared.input_history));
                                 state.engine_display = agent.engine_display_info();
                                 state.available_tool_names = agent.registry().names();
@@ -498,7 +498,7 @@ where
                     let effects =
                         presenter::update(&mut state, TuiEvent::Mouse(mouse), &textarea_ctx);
                     let effects =
-                        prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
+                        prepare_subagent_replay_effects(&mut state, effects, replay_store.as_ref());
                     if execute_effects(
                         &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                         &mut pending_run_ids,
@@ -536,7 +536,7 @@ where
                 // and only key input can produce them.
                 let (slash_effects, effects) = split_slash_effects(effects);
                 let effects =
-                    prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
+                    prepare_subagent_replay_effects(&mut state, effects, replay_store.as_ref());
                 if execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -672,7 +672,7 @@ where
                     &textarea_ctx,
                 );
                 let effects =
-                    prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
+                    prepare_subagent_replay_effects(&mut state, effects, replay_store.as_ref());
                 execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -688,7 +688,7 @@ where
                     &textarea_ctx,
                 );
                 let effects =
-                    prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
+                    prepare_subagent_replay_effects(&mut state, effects, replay_store.as_ref());
                 execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -788,7 +788,7 @@ fn confirm_hint(state: &AppState) -> Option<String> {
 ///
 /// Gates on `agent_mode()`, not raw `TuiMode`, so the spinner keeps advancing
 /// whenever *anything* is animating a spinner glyph — including a
-/// `spawn_subagent` tool bubble (and its child-view header re-render) that's
+/// `spawn_subagent` tool bubble (and its subagent-view header re-render) that's
 /// still `Running` while the root's own `TuiMode` has already gone `Idle`
 /// waiting on it, regardless of whether the subagent itself is currently
 /// paused for its own tool approval (that only affects the subagent's

@@ -333,7 +333,7 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
 }
 
 #[test]
-fn per_agent_compaction_engine_and_timeout_are_applied_to_child_loops() {
+fn per_agent_compaction_engine_and_timeout_are_applied_to_subagent_loops() {
     let mut profile = two_engine_profile();
     profile.engines.insert(
         "summary".to_string(),
@@ -353,7 +353,7 @@ fn per_agent_compaction_engine_and_timeout_are_applied_to_child_loops() {
         timeout_sec: Some(240),
     });
     let factory = AgentFactory::from_profile(&profile).expect("profile engines validate");
-    let child_role = Role::Child(ChildRoleConfig {
+    let subagent_role = Role::Subagent(SubagentRoleConfig {
         run_id: Uuid::new_v4(),
         call_id: Uuid::new_v4(),
         session_id: None,
@@ -363,19 +363,19 @@ fn per_agent_compaction_engine_and_timeout_are_applied_to_child_loops() {
         finish_tx: mpsc::channel(4).0,
     });
 
-    let (child, _ui_rx) = factory
-        .create(&profile, "quick", child_role)
-        .expect("child agent builds with its compaction overrides");
+    let (subagent, _ui_rx) = factory
+        .create(&profile, "quick", subagent_role)
+        .expect("subagent builds with its compaction overrides");
 
-    assert_eq!(child.engine().config().model, "fast-model");
+    assert_eq!(subagent.engine().config().model, "fast-model");
     assert_eq!(
-        child
+        subagent
             .compaction_engine_config()
-            .expect("child compactor")
+            .expect("subagent compactor")
             .model,
         "summary-model"
     );
-    assert_eq!(child.compaction_timeout(), Duration::from_secs(240));
+    assert_eq!(subagent.compaction_timeout(), Duration::from_secs(240));
 }
 
 #[test]
@@ -568,7 +568,7 @@ fn unknown_agent_compaction_engine_is_rejected_at_factory_creation() {
 }
 
 #[test]
-fn profile_compaction_settings_apply_to_child_without_agent_override() {
+fn profile_compaction_settings_apply_to_subagent_without_agent_override() {
     let mut profile = two_engine_profile();
     profile.compaction.engine = Some("fast".to_string());
     profile.compaction.timeout_sec = 180;
@@ -588,7 +588,7 @@ fn profile_compaction_settings_apply_to_child_without_agent_override() {
             )) as Arc<dyn Engine>,
         ),
     ]));
-    let child_role = Role::Child(ChildRoleConfig {
+    let subagent_role = Role::Subagent(SubagentRoleConfig {
         run_id: Uuid::new_v4(),
         call_id: Uuid::new_v4(),
         session_id: None,
@@ -598,14 +598,14 @@ fn profile_compaction_settings_apply_to_child_without_agent_override() {
         finish_tx: mpsc::channel(4).0,
     });
 
-    let (child, _ui_rx) = factory
-        .create(&profile, "quick", child_role)
-        .expect("child inherits profile compaction configuration");
+    let (subagent, _ui_rx) = factory
+        .create(&profile, "quick", subagent_role)
+        .expect("subagent inherits profile compaction configuration");
     assert_eq!(
-        child.compaction_engine_config().unwrap().model,
+        subagent.compaction_engine_config().unwrap().model,
         "test-model"
     );
-    assert_eq!(child.compaction_timeout(), Duration::from_secs(180));
+    assert_eq!(subagent.compaction_timeout(), Duration::from_secs(180));
 }
 
 #[test]
@@ -797,11 +797,11 @@ fn validate_profile_agent_engines_rejects_unknown_agent_type_scoped_tool_name() 
 }
 
 #[test]
-fn create_returns_ok_for_child_role_with_known_engine() {
+fn create_returns_ok_for_subagent_role_with_known_engine() {
     let (factory, profile) = make_factory();
     let (finish_tx, _finish_rx) = mpsc::channel(1);
     let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
-    let child_role_config = ChildRoleConfig {
+    let subagent_role_config = SubagentRoleConfig {
         run_id: uuid::Uuid::new_v4(),
         call_id: uuid::Uuid::new_v4(),
         session_id: None,
@@ -810,10 +810,10 @@ fn create_returns_ok_for_child_role_with_known_engine() {
         subagent_ui_tx,
         finish_tx,
     };
-    let result = factory.create(&profile, "default", Role::Child(child_role_config));
+    let result = factory.create(&profile, "default", Role::Subagent(subagent_role_config));
     assert!(
         result.is_ok(),
-        "expected Ok for Role::Child with known engine"
+        "expected Ok for Role::Subagent with known engine"
     );
     let (_agent_loop, ui_rx) = result.unwrap();
     assert!(!ui_rx.is_closed(), "UiUpdate receiver should be open");

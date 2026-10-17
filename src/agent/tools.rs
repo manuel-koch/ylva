@@ -762,7 +762,7 @@ pub struct ToolRegistryConfig {
     /// Agent types and model-facing descriptions advertised by
     /// `spawn_subagent`, when that tool is registered.
     pub spawn_agent_types: Vec<spawn_subagent::AgentTypeInfo>,
-    /// Present only for `Role::Child` agents: registers `agent_finish`, wired to
+    /// Present only for `Role::Subagent` agents: registers `agent_finish`, wired to
     /// send its result through this config's channel/ids.
     pub agent_finish: Option<agent_finish::AgentFinishToolConfig>,
     /// Per-tool sandbox rule lists parsed from the profile's `[tools.<name>]`
@@ -939,8 +939,8 @@ pub fn default_registry(
         registry.register(Arc::new(clarify::ClarifyTool));
     }
     // Neither `spawn_subagent` nor `agent_finish` is gated by `allowed_tools`: the
-    // former is structural (present only when the agent can spawn children),
-    // the latter is injected only into `Role::Child` registries.
+    // former is structural (present only when the agent can spawn subagents),
+    // the latter is injected only into `Role::Subagent` registries.
     if config.include_spawn_subagent {
         registry.register(Arc::new(
             spawn_subagent::SpawnSubagentTool::new(

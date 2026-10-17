@@ -50,12 +50,12 @@ fn textarea_ctx_from(textarea: &TextArea<'_>) -> TextareaContext {
 #[tokio::test]
 async fn clarify_commands_keep_their_destination_after_the_reducer_leaves_pending_mode() {
     let (mut state, _, cmd_tx, mut cmd_rx) = setup();
-    let child_run_id = Uuid::new_v4();
+    let subagent_run_id = Uuid::new_v4();
     let mut pending_run_ids = PendingRunIds::default();
     let mut mouse_drag = MouseDrag::default();
     let mut clipboard = NoopClipboard;
 
-    for run_id in [Some(child_run_id), None] {
+    for run_id in [Some(subagent_run_id), None] {
         for abort in [false, true] {
             let mut textarea = TextArea::from(["unfinished draft"]);
             configure_textarea(&mut textarea);
@@ -121,7 +121,7 @@ async fn clarify_commands_keep_their_destination_after_the_reducer_leaves_pendin
                 AgentCommand::AnswerClarify("chosen option".to_string())
             };
             let expected_command = match run_id {
-                Some(run_id) => AgentCommand::ForChild {
+                Some(run_id) => AgentCommand::ForSubagent {
                     run_id,
                     command: Box::new(expected_command),
                 },
@@ -144,7 +144,7 @@ async fn clarify_commands_keep_their_destination_after_the_reducer_leaves_pendin
             assert_eq!(
                 cmd_rx.try_recv(),
                 Ok(AgentCommand::AbortClarify),
-                "resolving a clarify must consume its child destination"
+                "resolving a clarify must consume its subagent destination"
             );
             assert!(cmd_rx.try_recv().is_err());
         }
@@ -537,11 +537,11 @@ fn submit(state: &mut AppState, textarea: &mut TextArea<'static>, text: &str) ->
 }
 
 #[test]
-fn spinner_ticks_while_root_is_idle_but_a_spawned_child_is_still_running() {
+fn spinner_ticks_while_root_is_idle_but_a_spawned_subagent_is_still_running() {
     // Regression: the root loop's own `TuiMode` can settle to `Idle` while
     // a spawned subagent's `spawn_subagent` tool bubble stays `Running` —
     // the spinner must keep advancing (driving both the footer and the
-    // child-view header bubble's spinner glyph) rather than freezing.
+    // subagent-view header bubble's spinner glyph) rather than freezing.
     let mut state = AppState::new();
     state.mode = TuiMode::Idle;
     state
@@ -578,8 +578,8 @@ fn spinner_does_not_tick_during_double_press_abort() {
 }
 
 #[test]
-fn spinner_keeps_ticking_while_the_spawned_child_itself_is_paused_for_approval() {
-    // The child's own inner tool-approval pause sets `Focus::ToolApproval`
+fn spinner_keeps_ticking_while_the_spawned_subagent_itself_is_paused_for_approval() {
+    // The subagent's own inner tool-approval pause sets `Focus::ToolApproval`
     // but does not touch the root `spawn_subagent` bubble's `Running`
     // state or the root's `TuiMode` — the spinner must not stall just
     // because *something* is paused.

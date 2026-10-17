@@ -212,7 +212,7 @@ fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
             parent_cancel: None,
             system_prompt: None,
             own_run_id: None,
-            child_agent_manager: None,
+            subagent_manager: None,
             max_tool_iterations: DEFAULT_MAX_TOOL_USE_ITERATIONS,
             batch_cap: MAX_EXECUTED_TOOL_CALLS_PER_BATCH,
             agent_type: None,
@@ -220,7 +220,7 @@ fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
             current_store: Arc::new(Mutex::new(None)),
             store_for_commands: None,
             spawn_content_sections: HashMap::new(),
-            is_child: true,
+            is_subagent: true,
             context: Context::new(),
             compaction,
             startup_checks_finished: false,
@@ -235,7 +235,7 @@ fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
             clarify_started_at: None,
             generation: 1,
             cancelled_run_ids: std::collections::HashSet::new(),
-            pending_child_finish_reprompt: false,
+            pending_subagent_finish_reprompt: false,
             iteration_cap_exceeded: None,
             stream_error: None,
             session_switch_frozen: false,
@@ -246,7 +246,7 @@ fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
 }
 
 #[test]
-fn ignored_inputs_poll_again_instead_of_completing_an_idle_child() {
+fn ignored_inputs_poll_again_instead_of_completing_an_idle_subagent() {
     crate::test_support::run_locked(async {
         let (mut state, mut updates) = run_state();
         let transcript = state.context.messages().to_vec();
@@ -271,12 +271,12 @@ fn ignored_inputs_poll_again_instead_of_completing_an_idle_child() {
         state.cancelled_run_ids.insert(run_id);
         assert_eq!(
             state
-                .handle_subagent_finish(crate::child_agent_manager::FinishResult {
+                .handle_subagent_finish(crate::subagent_manager::FinishResult {
                     run_id,
                     call_id: Uuid::new_v4(),
-                    origin: crate::child_agent_manager::FinishResultOrigin::Runtime,
+                    origin: crate::subagent_manager::FinishResultOrigin::Runtime,
                     status: "success".to_string(),
-                    result: Some("stale child result".to_string()),
+                    result: Some("stale subagent result".to_string()),
                     error: None,
                     sources: vec![],
                 })
@@ -334,7 +334,7 @@ fn terminal_and_normal_handlers_preserve_distinct_completion_outcomes() {
 fn session_replacement_barrier_is_idempotent_blocks_mutations_and_requires_shutdown_freeze() {
     crate::test_support::run_locked(async {
         let (mut state, mut updates) = run_state();
-        state.is_child = false;
+        state.is_subagent = false;
         state.startup_checks_finished = true;
         assert_eq!(
             state.handle_command(Some(AgentCommand::Shutdown)).await,
@@ -390,12 +390,12 @@ fn session_replacement_barrier_is_idempotent_blocks_mutations_and_requires_shutd
         );
         assert_eq!(
             state
-                .handle_subagent_finish(crate::child_agent_manager::FinishResult {
+                .handle_subagent_finish(crate::subagent_manager::FinishResult {
                     run_id: Uuid::new_v4(),
                     call_id: Uuid::new_v4(),
-                    origin: crate::child_agent_manager::FinishResultOrigin::Runtime,
+                    origin: crate::subagent_manager::FinishResultOrigin::Runtime,
                     status: "success".to_string(),
-                    result: Some("late child".to_string()),
+                    result: Some("late subagent".to_string()),
                     error: None,
                     sources: vec![],
                 })
@@ -445,7 +445,7 @@ fn session_replacement_barrier_is_idempotent_blocks_mutations_and_requires_shutd
 fn session_replacement_barrier_checks_authoritative_pending_runtime_work() {
     crate::test_support::run_locked(async {
         let (mut state, _updates) = run_state();
-        state.is_child = false;
+        state.is_subagent = false;
         assert!(state.session_switch_quiescent());
         for mode in [
             AgentMode::Pending,
@@ -479,9 +479,9 @@ fn session_replacement_barrier_checks_authoritative_pending_runtime_work() {
         state.cancelled_run_ids.insert(Uuid::new_v4());
         assert!(!state.session_switch_quiescent());
         state.cancelled_run_ids.clear();
-        state.pending_child_finish_reprompt = true;
+        state.pending_subagent_finish_reprompt = true;
         assert!(!state.session_switch_quiescent());
-        state.pending_child_finish_reprompt = false;
+        state.pending_subagent_finish_reprompt = false;
         state.request_waiting_for_startup_checks = true;
         assert!(!state.session_switch_quiescent());
         state.request_waiting_for_startup_checks = false;
@@ -489,13 +489,13 @@ fn session_replacement_barrier_checks_authoritative_pending_runtime_work() {
         assert!(!state.session_switch_quiescent());
         state.model_change_capacity_check = None;
         assert!(state.session_switch_quiescent());
-        state.is_child = true;
+        state.is_subagent = true;
         assert!(!state.session_switch_quiescent());
     });
 }
 
 #[test]
-fn manual_command_noop_unavailable_and_child_notices_do_not_commit_messages() {
+fn manual_command_noop_unavailable_and_subagent_notices_do_not_commit_messages() {
     crate::test_support::run_locked(async {
         let (mut state, mut updates) = run_state();
         let transcript = state.context.messages().to_vec();
@@ -504,7 +504,7 @@ fn manual_command_noop_unavailable_and_child_notices_do_not_commit_messages() {
             updates.recv().await,
             Some(UiUpdate::Notice { text, .. }) if text.contains("only in the root")
         ));
-        state.is_child = false;
+        state.is_subagent = false;
         state.handle_command(Some(AgentCommand::Compact)).await;
         assert!(matches!(
             updates.recv().await,
@@ -527,10 +527,10 @@ fn manual_command_noop_unavailable_and_child_notices_do_not_commit_messages() {
 }
 
 #[test]
-fn session_replacement_barrier_counts_tool_child_and_summary_queues() {
+fn session_replacement_barrier_counts_tool_subagent_and_summary_queues() {
     crate::test_support::run_locked(async {
         let (mut state, _updates) = run_state();
-        state.is_child = false;
+        state.is_subagent = false;
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(tools::clarify::ClarifyTool));
         state.pending_tools.push_back(PendingTool {
@@ -544,10 +544,10 @@ fn session_replacement_barrier_counts_tool_child_and_summary_queues() {
         });
         assert!(!state.session_switch_quiescent());
         state.pending_tools.clear();
-        let (child_updates, _child_receiver) = mpsc::unbounded_channel();
-        let mut manager = crate::child_agent_manager::ChildAgentManager::new(
-            child_updates,
-            Box::new(|_, _, _| crate::child_agent_manager::SpawnOutcome {
+        let (subagent_updates, _subagent_receiver) = mpsc::unbounded_channel();
+        let mut manager = crate::subagent_manager::SubagentManager::new(
+            subagent_updates,
+            Box::new(|_, _, _| crate::subagent_manager::SpawnOutcome {
                 command_sender: None,
                 handle: tokio::spawn(async {}),
             }),
@@ -568,14 +568,9 @@ fn session_replacement_barrier_counts_tool_child_and_summary_queues() {
             Uuid::new_v4(),
         );
         assert_eq!(manager.outstanding_count(), 2);
-        state.child_agent_manager = Some(manager);
+        state.subagent_manager = Some(manager);
         assert!(!state.session_switch_quiescent());
-        state
-            .child_agent_manager
-            .as_mut()
-            .unwrap()
-            .cancel_all()
-            .await;
+        state.subagent_manager.as_mut().unwrap().cancel_all().await;
         assert!(state.session_switch_quiescent());
 
         let summary_engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
@@ -608,7 +603,7 @@ fn session_replacement_barrier_counts_tool_child_and_summary_queues() {
         state.compaction.reset().await;
         assert!(state.session_switch_quiescent());
         state.session_switch_frozen = true;
-        state.pending_child_finish_reprompt = true;
+        state.pending_subagent_finish_reprompt = true;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         state
             .handle_command(Some(AgentCommand::PrepareSessionSwitch {
@@ -625,15 +620,15 @@ fn session_replacement_barrier_counts_tool_child_and_summary_queues() {
 }
 
 #[test]
-fn stop_returns_only_after_every_cancelled_child_task_has_finished() {
+fn stop_returns_only_after_every_cancelled_subagent_task_has_finished() {
     crate::test_support::run_locked(async {
         let (mut state, _updates) = run_state();
-        state.is_child = false;
+        state.is_subagent = false;
 
         let finished_flags: Arc<Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>> =
             Arc::new(Mutex::new(Vec::new()));
         let recorded_flags = Arc::clone(&finished_flags);
-        let spawn_fn: crate::child_agent_manager::SpawnFn =
+        let spawn_fn: crate::subagent_manager::SpawnFn =
             Box::new(move |_request, cancellation_token, _subagent_ui_tx| {
                 let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 recorded_flags.lock().unwrap().push(Arc::clone(&finished));
@@ -642,14 +637,14 @@ fn stop_returns_only_after_every_cancelled_child_task_has_finished() {
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                     finished.store(true, std::sync::atomic::Ordering::SeqCst);
                 });
-                crate::child_agent_manager::SpawnOutcome {
+                crate::subagent_manager::SpawnOutcome {
                     command_sender: None,
                     handle,
                 }
             });
         let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
         let mut manager =
-            crate::child_agent_manager::ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(2));
+            crate::subagent_manager::SubagentManager::new(subagent_ui_tx, spawn_fn, Some(2));
         for index in 0..2 {
             manager.spawn(
                 format!("task {index}"),
@@ -659,7 +654,7 @@ fn stop_returns_only_after_every_cancelled_child_task_has_finished() {
                 Uuid::new_v4(),
             );
         }
-        state.child_agent_manager = Some(manager);
+        state.subagent_manager = Some(manager);
 
         state
             .handle_command(Some(AgentCommand::Stop {
@@ -672,31 +667,31 @@ fn stop_returns_only_after_every_cancelled_child_task_has_finished() {
         for finished in flags.iter() {
             assert!(
                 finished.load(std::sync::atomic::Ordering::SeqCst),
-                "a cancelled child task was still running when Stop returned"
+                "a cancelled subagent task was still running when Stop returned"
             );
         }
     });
 }
 
 #[test]
-fn stop_cancels_two_running_children_and_one_queued_child() {
+fn stop_cancels_two_running_subagents_and_one_queued_subagent() {
     crate::test_support::run_locked(async {
         let (mut state, mut updates) = run_state();
-        state.is_child = false;
+        state.is_subagent = false;
 
         let cancelled_tokens = Arc::new(Mutex::new(Vec::new()));
         let recorded_tokens = Arc::clone(&cancelled_tokens);
-        let spawn_fn: crate::child_agent_manager::SpawnFn =
+        let spawn_fn: crate::subagent_manager::SpawnFn =
             Box::new(move |_request, cancellation_token, _subagent_ui_tx| {
                 recorded_tokens.lock().unwrap().push(cancellation_token);
-                crate::child_agent_manager::SpawnOutcome {
+                crate::subagent_manager::SpawnOutcome {
                     command_sender: None,
                     handle: tokio::spawn(async {}),
                 }
             });
         let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
         let mut manager =
-            crate::child_agent_manager::ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(2));
+            crate::subagent_manager::SubagentManager::new(subagent_ui_tx, spawn_fn, Some(2));
         let call_ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
         let run_ids: Vec<Uuid> = call_ids
             .iter()
@@ -715,7 +710,7 @@ fn stop_cancels_two_running_children_and_one_queued_child() {
             .collect();
         assert_eq!(manager.outstanding_count(), 3);
         assert_eq!(manager.queue_len(), 1);
-        state.child_agent_manager = Some(manager);
+        state.subagent_manager = Some(manager);
 
         state
             .handle_command(Some(AgentCommand::Stop {
@@ -724,7 +719,7 @@ fn stop_cancels_two_running_children_and_one_queued_child() {
             .await;
 
         let mut cancelled_tool_done_ids = Vec::new();
-        let mut cancelled_child_done_run_ids = Vec::new();
+        let mut cancelled_subagent_done_run_ids = Vec::new();
         while let Ok(update) = updates.try_recv() {
             match update {
                 UiUpdate::ToolDone { id, summary, .. } => {
@@ -735,8 +730,8 @@ fn stop_cancels_two_running_children_and_one_queued_child() {
                         cancelled_tool_done_ids.push(id);
                     }
                 }
-                UiUpdate::ChildAgentDone { run_id, status, .. } if status == "cancelled" => {
-                    cancelled_child_done_run_ids.push(run_id);
+                UiUpdate::SubagentDone { run_id, status, .. } if status == "cancelled" => {
+                    cancelled_subagent_done_run_ids.push(run_id);
                 }
                 _ => {}
             }
@@ -745,15 +740,15 @@ fn stop_cancels_two_running_children_and_one_queued_child() {
         for call_id in call_ids {
             assert!(cancelled_tool_done_ids.contains(&call_id));
         }
-        let manager = state.child_agent_manager.as_ref().unwrap();
+        let manager = state.subagent_manager.as_ref().unwrap();
         assert_eq!(manager.outstanding_count(), 0);
         assert_eq!(manager.queue_len(), 0);
         for run_id in run_ids {
             assert!(state.cancelled_run_ids.contains(&run_id));
         }
-        assert_eq!(cancelled_child_done_run_ids.len(), 3);
+        assert_eq!(cancelled_subagent_done_run_ids.len(), 3);
         for run_id in state.cancelled_run_ids.iter() {
-            assert!(cancelled_child_done_run_ids.contains(run_id));
+            assert!(cancelled_subagent_done_run_ids.contains(run_id));
         }
         assert!(cancelled_tokens
             .lock()
@@ -764,24 +759,24 @@ fn stop_cancels_two_running_children_and_one_queued_child() {
 }
 
 #[test]
-fn clear_context_cancels_every_running_and_queued_child() {
+fn clear_context_cancels_every_running_and_queued_subagent() {
     crate::test_support::run_locked(async {
         let (mut state, _updates) = run_state();
-        state.is_child = false;
+        state.is_subagent = false;
 
         let cancelled_tokens = Arc::new(Mutex::new(Vec::new()));
         let recorded_tokens = Arc::clone(&cancelled_tokens);
-        let spawn_fn: crate::child_agent_manager::SpawnFn =
+        let spawn_fn: crate::subagent_manager::SpawnFn =
             Box::new(move |_request, cancellation_token, _subagent_ui_tx| {
                 recorded_tokens.lock().unwrap().push(cancellation_token);
-                crate::child_agent_manager::SpawnOutcome {
+                crate::subagent_manager::SpawnOutcome {
                     command_sender: None,
                     handle: tokio::spawn(async {}),
                 }
             });
         let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
         let mut manager =
-            crate::child_agent_manager::ChildAgentManager::new(subagent_ui_tx, spawn_fn, Some(2));
+            crate::subagent_manager::SubagentManager::new(subagent_ui_tx, spawn_fn, Some(2));
         let run_ids: Vec<Uuid> = (0..3)
             .map(|index| {
                 manager
@@ -795,12 +790,12 @@ fn clear_context_cancels_every_running_and_queued_child() {
                     .run_id()
             })
             .collect();
-        state.child_agent_manager = Some(manager);
+        state.subagent_manager = Some(manager);
         state.context.push_user("pre-clear content".to_string());
 
         state.handle_command(Some(AgentCommand::ClearContext)).await;
 
-        let manager = state.child_agent_manager.as_ref().unwrap();
+        let manager = state.subagent_manager.as_ref().unwrap();
         assert_eq!(manager.outstanding_count(), 0);
         assert_eq!(manager.queue_len(), 0);
         assert!(!state.context.messages().iter().any(|message| {
@@ -821,7 +816,7 @@ fn clear_context_cancels_every_running_and_queued_child() {
 fn busy_manual_command_snapshots_immediately_excludes_queued_steers_and_stop_cancels_it() {
     crate::test_support::run_locked(async {
         let (mut state, mut updates) = run_state();
-        state.is_child = false;
+        state.is_subagent = false;
         let (compaction, _outcomes) = compaction::CompactionRuntime::new(
             Some(state.engine.clone()),
             "prompt".to_string(),
@@ -874,7 +869,7 @@ fn busy_manual_command_snapshots_immediately_excludes_queued_steers_and_stop_can
 fn busy_manual_summary_waits_for_a_completed_turn_and_releases_the_stream_barrier() {
     crate::test_support::run_locked(async {
         let (mut state, _updates) = run_state();
-        state.is_child = false;
+        state.is_subagent = false;
         let summary_engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
             Arc::new(crate::llm::MockProvider::new(
                 vec!["short summary".to_string()],

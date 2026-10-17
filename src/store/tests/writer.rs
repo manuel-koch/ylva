@@ -81,11 +81,11 @@ async fn subagent_titles_use_completed_outcomes_and_rebuild_them_on_resume() {
     ] {
         let mut messages = completed_subagent_messages(arguments);
         messages.insert(1, assistant_message("Intermediate commentary."));
-        let child = parent
-            .write_child_transcript_store(Some(("mock", "mock")), &messages)
+        let subagent = parent
+            .write_subagent_transcript_store(Some(("mock", "mock")), &messages)
             .await
             .unwrap();
-        let prompt = child
+        let prompt = subagent
             .title_prompt()
             .expect("completed outcomes make a subagent title ready");
         assert!(prompt.contains("<user_message>\nInspect the module.\n</user_message>"));
@@ -93,9 +93,9 @@ async fn subagent_titles_use_completed_outcomes_and_rebuild_them_on_resume() {
         assert!(!prompt.contains("Reported outcome"));
         assert!(!prompt.contains("Intermediate commentary"));
         assert!(!prompt.contains("Ignored"));
-        assert_eq!(Store::read_messages(child.path()).unwrap(), messages);
-        let identity = child.session_id();
-        drop(child);
+        assert_eq!(Store::read_messages(subagent.path()).unwrap(), messages);
+        let identity = subagent.session_id();
+        drop(subagent);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let resumed =
             Store::resume(&directory.path().join("chats"), directory.path(), identity).unwrap();
@@ -154,12 +154,12 @@ async fn incomplete_or_invalid_finish_calls_do_not_make_subagent_titles_ready() 
         completed_subagent_messages(serde_json::json!({"status": "success", "result": "  "})),
         completed_subagent_messages(serde_json::json!({"status": "failure", "error": ""})),
     ] {
-        let child = parent
-            .write_child_transcript_store(None, &messages)
+        let subagent = parent
+            .write_subagent_transcript_store(None, &messages)
             .await
             .unwrap();
-        assert!(child.title_prompt().is_none());
-        assert!(child.title().is_empty());
+        assert!(subagent.title_prompt().is_none());
+        assert!(subagent.title().is_empty());
     }
     for message in completed_subagent_messages(serde_json::json!({"result": "A result."})) {
         parent.record_message(&message);
@@ -473,7 +473,7 @@ async fn record_model_changed_persists_every_switch_independent_of_meta() {
 }
 
 #[tokio::test]
-async fn child_records_link_to_the_parent_session() {
+async fn subagent_records_link_to_the_parent_session() {
     let temp = tempfile::tempdir().expect("tempdir");
     let chats_root = temp.path().join("chats");
     let parent_id = Uuid::new_v4();
@@ -489,14 +489,14 @@ async fn child_records_link_to_the_parent_session() {
     let run_id = Uuid::new_v4();
 
     store.record_message(&user_message("delegate this"));
-    store.record_child_start(
+    store.record_subagent_start(
         run_id,
         Uuid::new_v4(),
         "research",
         "investigate the bug",
         "Investigate",
     );
-    store.record_child_result(
+    store.record_subagent_result(
         run_id,
         Uuid::new_v4(),
         "success",
@@ -509,9 +509,9 @@ async fn child_records_link_to_the_parent_session() {
     let events = read_events(store.path());
     let start = events
         .iter()
-        .find(|event| matches!(event, StoreEvent::ChildStart { .. }))
-        .expect("a child_start record");
-    let StoreEvent::ChildStart {
+        .find(|event| matches!(event, StoreEvent::SubagentStart { .. }))
+        .expect("a subagent_start record");
+    let StoreEvent::SubagentStart {
         id,
         parent_session,
         agent_type,
@@ -528,9 +528,9 @@ async fn child_records_link_to_the_parent_session() {
 
     let result = events
         .iter()
-        .find(|event| matches!(event, StoreEvent::ChildResult { .. }))
-        .expect("a child_result record");
-    let StoreEvent::ChildResult {
+        .find(|event| matches!(event, StoreEvent::SubagentResult { .. }))
+        .expect("a subagent_result record");
+    let StoreEvent::SubagentResult {
         id,
         parent_session,
         status,

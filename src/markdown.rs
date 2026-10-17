@@ -1091,7 +1091,7 @@ mod tests {
         // fair share of the available width instead of being crowded down to
         // near its bare minimum by one very wide column.
         let md = "| Area | Files |\n|------|-------|\n\
-            | Core tool layer | src/agent/tools.rs , src/agent.rs , src/agent_factory.rs , src/agent/child_agent_manager.rs |\n\
+            | Core tool layer | src/agent/tools.rs , src/agent.rs , src/agent_factory.rs , src/agent/subagent_manager.rs |\n\
             | Built-in tools | bash.rs , read.rs , write.rs , edit.rs , glob.rs , search.rs , clarify.rs , spawn_subagent.rs , agent_finish.rs |\n\
             | Security / LLM / config | src/sandbox.rs , src/llm.rs , src/config.rs , src/config/profile.rs , src/config/agent.rs |";
         let lines = render_markdown(md, 103);

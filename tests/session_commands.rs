@@ -127,15 +127,15 @@ async fn resumed_old_sessions_sort_by_last_use_and_are_not_selected_by_before() 
 }
 
 #[tokio::test]
-async fn listing_groups_archived_and_nested_children_with_their_parents() {
+async fn listing_groups_archived_and_nested_subagents_with_their_parents() {
     let directory = tempfile::tempdir().unwrap();
     let chats_root = directory.path().join("chats");
     for (identity, parent, day, title) in [
         (1, None, 1, "root one"),
         (2, None, 2, "root two"),
-        (3, Some(1), 4, "child\none"),
+        (3, Some(1), 4, "subagent\none"),
         (4, Some(3), 5, "nested"),
-        (5, Some(2), 3, "child two"),
+        (5, Some(2), 3, "subagent two"),
         (6, Some(1), 4, "sibling"),
         (7, Some(99), 6, "orphan"),
     ] {
@@ -172,9 +172,9 @@ async fn listing_groups_archived_and_nested_children_with_their_parents() {
         )
         .unwrap();
     }
-    let child_identity = uuid::Uuid::from_u128(3);
+    let subagent_identity = uuid::Uuid::from_u128(3);
     let output = command(directory.path())
-        .args(["session", "compress", &child_identity.to_string()])
+        .args(["session", "compress", &subagent_identity.to_string()])
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", output);
@@ -198,11 +198,11 @@ async fn listing_groups_archived_and_nested_children_with_their_parents() {
     assert!(output.status.success(), "{:?}", output);
     let expected: String = [
         (1, 1, "", "root one"),
-        (3, 4, "+ ", "child one"),
+        (3, 4, "+ ", "subagent one"),
         (4, 5, "  + ", "nested"),
         (6, 4, "+ ", "sibling"),
         (2, 2, "", "root two"),
-        (5, 3, "+ ", "child two"),
+        (5, 3, "+ ", "subagent two"),
     ]
     .iter()
     .map(|(identity, day, marker, title)| {
@@ -221,9 +221,13 @@ async fn listing_groups_archived_and_nested_children_with_their_parents() {
         )
     );
     assert!(output.stderr.is_empty());
-    let child_path = session_path(&chats_root, &project_key(directory.path()), child_identity);
-    assert!(!child_path.exists());
-    assert!(child_path.with_extension("jsonl.gz").exists());
+    let subagent_path = session_path(
+        &chats_root,
+        &project_key(directory.path()),
+        subagent_identity,
+    );
+    assert!(!subagent_path.exists());
+    assert!(subagent_path.with_extension("jsonl.gz").exists());
 }
 
 fn command(directory: &std::path::Path) -> Command {
@@ -266,7 +270,7 @@ async fn listing_is_sorted_filtered_safe_and_diagnoses_bad_headers() {
         None,
     )
     .unwrap();
-    let child = store
+    let subagent = store
         .start_new_session("mock", "mock", Some(store.session_id()), None)
         .unwrap();
     store.set_title("Title".to_string()).await.unwrap();
@@ -284,7 +288,7 @@ async fn listing_is_sorted_filtered_safe_and_diagnoses_bad_headers() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert_eq!(text.lines().count(), 1);
     assert!(text.contains(&format!("{} Title", store.session_id())));
-    assert!(!text.contains(&child.session_id().to_string()));
+    assert!(!text.contains(&subagent.session_id().to_string()));
     assert!(String::from_utf8(output.stderr)
         .unwrap()
         .contains("no readable meta header"));
@@ -513,32 +517,32 @@ async fn deletion_and_previews_report_sessions_including_archived_descendants() 
         None,
     )
     .unwrap();
-    let child = root
+    let subagent = root
         .start_new_session("mock", "mock", Some(root.session_id()), None)
         .unwrap();
     let root_identity = root.session_id();
-    let child_identity = child.session_id();
+    let subagent_identity = subagent.session_id();
     let root_path = root.path().to_path_buf();
-    let child_path = child.path().to_path_buf();
+    let subagent_path = subagent.path().to_path_buf();
     root.flush().await;
-    child.flush().await;
+    subagent.flush().await;
     drop(root);
-    drop(child);
+    drop(subagent);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let output = command(directory.path())
-        .args(["session", "compress", &child_identity.to_string()])
+        .args(["session", "compress", &subagent_identity.to_string()])
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", output);
-    let archive_path = child_path.with_extension("jsonl.gz");
-    let metadata_path = child_path.with_extension("meta.json");
+    let archive_path = subagent_path.with_extension("jsonl.gz");
+    let metadata_path = subagent_path.with_extension("meta.json");
     let output = command(directory.path())
         .args(["session", "delete", &root_identity.to_string(), "--dry-run"])
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", output);
     let paths = [root_path, archive_path, metadata_path];
-    let mut identities = [root_identity, child_identity];
+    let mut identities = [root_identity, subagent_identity];
     identities.sort();
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),

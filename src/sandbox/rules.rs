@@ -132,7 +132,7 @@ pub enum NamedSandboxRule {
     /// (backgrounding).
     Backgrounded,
     /// Matches a `bash` command with one or more leading
-    /// `variable_assignment` children (e.g. `FOO=bar git status`).
+    /// `variable_assignment` subagents (e.g. `FOO=bar git status`).
     VariableAssignmentPrefix,
     /// Matches a `bash` command with an unquoted `*`, `?`, or `[...]` in any
     /// argv token.

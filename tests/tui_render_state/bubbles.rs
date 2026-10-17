@@ -119,14 +119,14 @@ fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
     use ylva::DomainEvent;
 
     for cached in [false, true] {
-        for child_view in [false, true] {
+        for subagent_view in [false, true] {
             for collapsed in [false, true] {
                 let mut state = ylva::AppState::new();
                 if cached {
                     state.enable_render_cache();
                 }
                 let run_id = uuid::Uuid::new_v4();
-                if child_view {
+                if subagent_view {
                     let bubble_id = uuid::Uuid::new_v4();
                     present_render_event(
                         &mut state,
@@ -141,7 +141,7 @@ fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
                     );
                     present_render_event(
                         &mut state,
-                        DomainEvent::ChildAgentStarted {
+                        DomainEvent::SubagentStarted {
                             run_id,
                             call_id: bubble_id,
                             agent_type: "default".into(),
@@ -151,13 +151,13 @@ fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
                     );
                     present_render_event(
                         &mut state,
-                        DomainEvent::ChildAgentToken {
+                        DomainEvent::SubagentToken {
                             run_id,
                             text: "reasoning".into(),
                             is_thinking: true,
                         },
                     );
-                    state.switch_to_child_view(run_id);
+                    state.switch_to_subagent_view(run_id);
                 } else {
                     present_render_event(&mut state, DomainEvent::StreamStarted);
                     present_render_event(
@@ -166,11 +166,11 @@ fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
                     );
                 }
                 for elapsed_millis in [9_100, 9_600, 10_100] {
-                    let turn_buffer = if child_view {
+                    let turn_buffer = if subagent_view {
                         &mut state
-                            .child_conversations
+                            .subagent_conversations
                             .get_mut(&run_id)
-                            .expect("child")
+                            .expect("subagent")
                             .turn_buffer
                     } else {
                         &mut state.turn_buffer
@@ -195,10 +195,13 @@ fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
                     collapsed,
                     duration: Duration::from_millis(1234),
                 };
-                if child_view {
-                    let child = state.child_conversations.get_mut(&run_id).expect("child");
-                    child.turn_buffer = Default::default();
-                    child.messages.push(completed);
+                if subagent_view {
+                    let subagent = state
+                        .subagent_conversations
+                        .get_mut(&run_id)
+                        .expect("subagent");
+                    subagent.turn_buffer = Default::default();
+                    subagent.messages.push(completed);
                 } else {
                     state.turn_buffer = Default::default();
                     state.chat_entries.push(completed);
@@ -995,9 +998,9 @@ fn footer_renders_bold_keys_with_normal_action_text_and_separators() {
 
 /// While viewing the *root* transcript, a still-running `spawn_subagent`
 /// tool bubble makes `agent_mode()` report `ToolRunning` for the whole
-/// lifetime of the live child (see `AppState::agent_mode`) — even while the
+/// lifetime of the live subagent (see `AppState::agent_mode`) — even while the
 /// root loop itself is mid-stream on its own next iteration (e.g. deciding
-/// what to do once the child finishes). Before this fix, the in-flight
+/// what to do once the subagent finishes). Before this fix, the in-flight
 /// thinking/response bubble was gated on `agent_mode == AgentMode::Streaming`
 /// and stayed completely invisible in that window, only appearing once
 /// flushed into a fully-committed bubble — i.e. it "popped in" with no

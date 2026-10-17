@@ -93,7 +93,7 @@ pub(super) fn append_tool_chrome(
         && combined_title_arguments
             .iter()
             .any(|(key, value)| key == "status" && value == "queued");
-    // Keep the child status and run identifier in state for rendering and
+    // Keep the subagent status and run identifier in state for rendering and
     // routing, but do not expose these internal values in the title.
     let title_arguments: Vec<(String, serde_json::Value)> = combined_title_arguments
         .into_iter()
@@ -373,7 +373,7 @@ pub(super) fn append_tool_chrome(
     let spinner_or_margin: Span = if is_queued_subagent {
         // Queued (not yet actually running): a static glyph, not the
         // animated spinner, since nothing is actively executing yet — the
-        // child is only waiting for the currently running one to finish.
+        // subagent is only waiting for the currently running one to finish.
         Span::styled("≡ ", Style::default().fg(TOOL_BUBBLE_BORDER_COLOR))
     } else if matches!(state, ToolCallState::Running { .. }) {
         let spinner_char = SPINNER_FRAMES[spinner_frame as usize % SPINNER_FRAMES.len()];

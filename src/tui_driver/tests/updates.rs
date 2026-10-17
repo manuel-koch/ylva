@@ -16,18 +16,18 @@ use super::super::updates::ui_update_to_domain_event;
 use super::*;
 
 #[tokio::test]
-async fn replayed_child_restores_its_compaction_marker_on_first_drill_in() {
-    assert_child_compaction_replay(false).await;
+async fn replayed_subagent_restores_its_compaction_marker_on_first_drill_in() {
+    assert_subagent_compaction_replay(false).await;
 }
 
 #[tokio::test]
-async fn archived_child_restores_its_compaction_marker_and_reports_corrupt_replay() {
-    assert_child_compaction_replay(true).await;
+async fn archived_subagent_restores_its_compaction_marker_and_reports_corrupt_replay() {
+    assert_subagent_compaction_replay(true).await;
 }
 
-async fn assert_child_compaction_replay(archived: bool) {
+async fn assert_subagent_compaction_replay(archived: bool) {
     use crate::agent::{AssistantStatus, Message, UserMessageKind};
-    use crate::tui_reducer_state::{ChildConversation, ChildRunInfo};
+    use crate::tui_reducer_state::{SubagentConversation, SubagentRunInfo};
 
     let temp = tempfile::tempdir().expect("tempdir");
     let store = crate::store::Store::create(
@@ -55,15 +55,15 @@ async fn assert_child_compaction_replay(archived: bool) {
             tool_calls: vec![],
         },
     ];
-    let child_store = store
-        .write_child_transcript_for_run_store(run_id, None, &messages)
+    let subagent_store = store
+        .write_subagent_transcript_for_run_store(run_id, None, &messages)
         .await
-        .expect("child transcript written");
-    child_store.record_compaction(2, 1, "old summary");
-    child_store.record_compaction(3, 1, "latest summary");
-    child_store.flush().await;
-    let child_path = child_store.path().to_path_buf();
-    drop(child_store);
+        .expect("subagent transcript written");
+    subagent_store.record_compaction(2, 1, "old summary");
+    subagent_store.record_compaction(3, 1, "latest summary");
+    subagent_store.flush().await;
+    let subagent_path = subagent_store.path().to_path_buf();
+    drop(subagent_store);
     tokio::time::sleep(Duration::from_millis(50)).await;
     if archived {
         let report = crate::Store::maintain_sessions(
@@ -75,7 +75,7 @@ async fn assert_child_compaction_replay(archived: bool) {
         )
         .unwrap();
         assert!(report.failures.is_empty());
-        assert!(!child_path.exists());
+        assert!(!subagent_path.exists());
     }
 
     let mut state = AppState::new();
@@ -84,9 +84,9 @@ async fn assert_child_compaction_replay(archived: bool) {
         state: UserMessageState::Sent,
     });
     let root_entries = state.chat_entries.clone();
-    state.child_conversations.insert(
+    state.subagent_conversations.insert(
         run_id,
-        ChildConversation::new_replay(ChildRunInfo {
+        SubagentConversation::new_replay(SubagentRunInfo {
             run_id,
             bubble_id: Uuid::new_v4(),
             agent_type: "research".to_string(),
@@ -94,16 +94,16 @@ async fn assert_child_compaction_replay(archived: bool) {
             label: "Inspect".to_string(),
         }),
     );
-    assert!(state.child_conversations[&run_id].messages.is_empty());
+    assert!(state.subagent_conversations[&run_id].messages.is_empty());
 
-    assert!(prepare_child_replay_effects(
+    assert!(prepare_subagent_replay_effects(
         &mut state,
-        vec![Effect::LoadChildTranscript { run_id }],
+        vec![Effect::LoadSubagentTranscript { run_id }],
         Some(&store),
     )
     .is_empty());
     assert_eq!(
-        state.child_conversations[&run_id].messages,
+        state.subagent_conversations[&run_id].messages,
         vec![
             ChatEntry::UserMessage {
                 text: "inspect the patch".to_string(),
@@ -120,28 +120,33 @@ async fn assert_child_compaction_replay(archived: bool) {
         "the latest persisted cut uses transcript indices, not rendered entry indices"
     );
     assert_eq!(state.chat_entries, root_entries);
-    assert!(!state.child_needs_lazy_load(run_id));
-    let loaded_entries = state.child_conversations[&run_id].messages.clone();
-    prepare_child_replay_effects(
+    assert!(!state.subagent_needs_lazy_load(run_id));
+    let loaded_entries = state.subagent_conversations[&run_id].messages.clone();
+    prepare_subagent_replay_effects(
         &mut state,
-        vec![Effect::LoadChildTranscript { run_id }],
+        vec![Effect::LoadSubagentTranscript { run_id }],
         Some(&store),
     );
-    assert_eq!(state.child_conversations[&run_id].messages, loaded_entries);
+    assert_eq!(
+        state.subagent_conversations[&run_id].messages,
+        loaded_entries
+    );
     if archived {
-        let info = state.child_conversations[&run_id].info.clone();
+        let info = state.subagent_conversations[&run_id].info.clone();
         state
-            .child_conversations
-            .insert(run_id, ChildConversation::new_replay(info));
-        std::fs::write(child_path.with_extension("jsonl.gz"), b"corrupt").unwrap();
-        prepare_child_replay_effects(
+            .subagent_conversations
+            .insert(run_id, SubagentConversation::new_replay(info));
+        std::fs::write(subagent_path.with_extension("jsonl.gz"), b"corrupt").unwrap();
+        prepare_subagent_replay_effects(
             &mut state,
-            vec![Effect::LoadChildTranscript { run_id }],
+            vec![Effect::LoadSubagentTranscript { run_id }],
             Some(&store),
         );
-        assert!(state.child_needs_lazy_load(run_id));
-        assert!(format!("{:?}", state.child_conversations[&run_id].messages)
-            .contains("Could not load subagent transcript"));
+        assert!(state.subagent_needs_lazy_load(run_id));
+        assert!(
+            format!("{:?}", state.subagent_conversations[&run_id].messages)
+                .contains("Could not load subagent transcript")
+        );
     }
 }
 
@@ -221,12 +226,12 @@ async fn compaction_applied_update_inserts_the_transcript_marker() {
 }
 
 #[tokio::test]
-async fn child_compaction_marker_does_not_enter_the_root_transcript() {
+async fn subagent_compaction_marker_does_not_enter_the_root_transcript() {
     let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
     let run_ids = [Uuid::new_v4(), Uuid::new_v4()];
     for run_id in run_ids {
-        let mut conversation = crate::tui_reducer_state::ChildConversation::new(
-            crate::tui_reducer_state::ChildRunInfo {
+        let mut conversation = crate::tui_reducer_state::SubagentConversation::new(
+            crate::tui_reducer_state::SubagentRunInfo {
                 run_id,
                 bubble_id: Uuid::new_v4(),
                 agent_type: "default".to_string(),
@@ -238,13 +243,13 @@ async fn child_compaction_marker_does_not_enter_the_root_transcript() {
             text: "retained reply".to_string(),
             interrupted: false,
         });
-        state.child_conversations.insert(run_id, conversation);
+        state.subagent_conversations.insert(run_id, conversation);
     }
     let root_entries = state.chat_entries.clone();
     let textarea_context = textarea_ctx_from(&textarea);
     for active_view in [
         ConversationView::Root,
-        ConversationView::Child {
+        ConversationView::Subagent {
             run_id: run_ids[0],
             agent_type: "default".to_string(),
             task: "Inspect material".to_string(),
@@ -274,11 +279,11 @@ async fn child_compaction_marker_does_not_enter_the_root_transcript() {
 
     assert_eq!(
         state.chat_entries, root_entries,
-        "a forwarded child compaction must not add a root marker"
+        "a forwarded subagent compaction must not add a root marker"
     );
     for run_id in run_ids {
         assert_eq!(
-            state.child_conversations[&run_id].messages,
+            state.subagent_conversations[&run_id].messages,
             vec![
                 ChatEntry::CompactionMarker {
                     summarized_messages: 15,
@@ -288,7 +293,7 @@ async fn child_compaction_marker_does_not_enter_the_root_transcript() {
                     interrupted: false,
                 },
             ],
-            "duplicate suppression is scoped to each child"
+            "duplicate suppression is scoped to each subagent"
         );
     }
 
@@ -312,12 +317,12 @@ async fn child_compaction_marker_does_not_enter_the_root_transcript() {
         vec![ChatEntry::CompactionMarker {
             summarized_messages: 15,
         }],
-        "root compaction still routes to root while viewing a child"
+        "root compaction still routes to root while viewing a subagent"
     );
 }
 
 #[tokio::test]
-async fn unknown_child_compaction_marker_does_not_enter_the_root_transcript() {
+async fn unknown_subagent_compaction_marker_does_not_enter_the_root_transcript() {
     let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
     let textarea_context = textarea_ctx_from(&textarea);
     process_one_update(
@@ -336,7 +341,7 @@ async fn unknown_child_compaction_marker_does_not_enter_the_root_transcript() {
     )
     .await;
     assert!(state.chat_entries.is_empty());
-    assert!(state.child_conversations.is_empty());
+    assert!(state.subagent_conversations.is_empty());
 }
 
 #[tokio::test]
@@ -406,10 +411,10 @@ async fn context_usage_update_stores_the_footer_readout() {
 }
 
 #[test]
-fn child_context_usage_update_projects_for_active_child_without_replacing_root() {
+fn subagent_context_usage_update_projects_for_active_subagent_without_replacing_root() {
     let (mut state, _textarea, _cmd_tx, _cmd_rx) = setup();
     let run_id = uuid::Uuid::new_v4();
-    state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+    state.start_subagent_run(crate::tui_reducer_state::SubagentRunInfo {
         run_id,
         bubble_id: uuid::Uuid::new_v4(),
         agent_type: "reviewer".to_string(),
@@ -421,15 +426,15 @@ fn child_context_usage_update_projects_for_active_child_without_replacing_root()
         context_length: 128_000,
         source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
     });
-    state.switch_to_child_view(run_id);
+    state.switch_to_subagent_view(run_id);
 
-    let event = ui_update_to_domain_event(&UiUpdate::ChildContextUsage {
+    let event = ui_update_to_domain_event(&UiUpdate::SubagentContextUsage {
         run_id,
         estimated_tokens: 4_000,
         context_length: 32_000,
         source: crate::tui_reducer_state::ContextUsageSource::ModelView,
     })
-    .expect("child usage update maps to a domain event");
+    .expect("subagent usage update maps to a domain event");
     presenter::update(
         &mut state,
         TuiEvent::Domain(event),
@@ -443,7 +448,7 @@ fn child_context_usage_update_projects_for_active_child_without_replacing_root()
             context_length: 128_000,
             source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
         }),
-        "child usage must not replace the root readout"
+        "subagent usage must not replace the root readout"
     );
     assert_eq!(
         state.active_context_usage(),
@@ -452,7 +457,7 @@ fn child_context_usage_update_projects_for_active_child_without_replacing_root()
             context_length: 32_000,
             source: crate::tui_reducer_state::ContextUsageSource::ModelView,
         }),
-        "the active child view selects its own readout"
+        "the active subagent view selects its own readout"
     );
     assert_eq!(
         crate::tui_reducer_state::format_context_usage(4_000, 32_000),

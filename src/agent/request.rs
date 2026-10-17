@@ -159,7 +159,7 @@ pub(super) fn start_request(
     });
     let request_dump_failure_handler = crate::http::RequestDumpFailureHandler::default();
     let inner_cancel = cancel.clone();
-    // `run_id` is `None` for the root loop and `Some(...)` for a child loop
+    // `run_id` is `None` for the root loop and `Some(...)` for a subagent loop
     // (see `AgentLoop::own_run_id`); attaching it to this span lets every
     // nested log emitted while this request is in flight — including the
     // provider-level "chat request started"/"stream ended with [DONE]"

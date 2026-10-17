@@ -26,7 +26,7 @@ use ratatui_textarea::TextArea;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Driver-local tracking of which child agent (if any) raised each pending
+/// Driver-local tracking of which subagent (if any) raised each pending
 /// tool/clarify approval. The Presenter/`AppState`/`Effect` surface stays
 /// agent-agnostic (an `Effect::ApproveTool { id }` carries no `run_id`); this
 /// struct is threaded separately through the Driver alongside `AppState` so
@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 ///
 /// - `tool_run_ids` maps a pending tool call's `id` (as carried on
 ///   `UiUpdate::ToolPending`/`Effect::ApproveTool`/`Effect::DenyTool`) to the
-///   child's `run_id` that raised it. Populated in `process_one_update` when
+///   subagent's `run_id` that raised it. Populated in `process_one_update` when
 ///   a `ToolPending` update carries `Some(run_id)`; consumed (removed) in
 ///   `execute_effects` when the corresponding `ApproveTool`/`DenyTool` effect
 ///   fires. A missing key means "root's own pending tool" — same meaning as
@@ -78,12 +78,12 @@ impl PendingRunIds {
     }
 }
 
-/// Wraps `command` in `AgentCommand::ForChild { run_id, .. }` when `run_id`
+/// Wraps `command` in `AgentCommand::ForSubagent { run_id, .. }` when `run_id`
 /// is `Some`; otherwise returns `command` unchanged, exactly as sent today
 /// for the root's own pending items.
 fn route_command(run_id: Option<uuid::Uuid>, command: AgentCommand) -> AgentCommand {
     match run_id {
-        Some(run_id) => AgentCommand::ForChild {
+        Some(run_id) => AgentCommand::ForSubagent {
             run_id,
             command: Box::new(command),
         },
@@ -195,7 +195,7 @@ pub(super) async fn execute_effects(
             | Effect::CancelSessionSelection
             | Effect::Compact
             | Effect::ShowTools
-            | Effect::LoadChildTranscript { .. }
+            | Effect::LoadSubagentTranscript { .. }
             | Effect::ListModels { .. }
             | Effect::SwitchModel(_) => {}
         }

@@ -311,14 +311,14 @@ fn test_sandbox() -> std::sync::Arc<std::sync::RwLock<Sandbox>> {
 }
 
 #[test]
-fn child_finish_notice_is_appended_as_implicit_user_message_not_a_second_tool_result() {
+fn subagent_finish_notice_is_appended_as_implicit_user_message_not_a_second_tool_result() {
     // Regression test: `spawn_subagent`'s two-stage protocol (an
     // immediate "running"/"queued" `ToolResult`, later finalized once
-    // the child actually finishes) must never leave two `role:"tool"`
+    // the subagent actually finishes) must never leave two `role:"tool"`
     // messages tied to the same `tool_call_id` in the wire history —
     // that violates the one-call/one-response tool-calling protocol and
     // visibly confuses models. The fix is to never touch the original
-    // `ToolResult` again; the child's real outcome is appended as a
+    // `ToolResult` again; the subagent's real outcome is appended as a
     // brand-new implicit `user` message instead (see
     // `push_async_harness_notice` — not `role:"system"`, which some
     // providers/models reject mid-conversation), even with an assistant
@@ -338,7 +338,7 @@ fn child_finish_notice_is_appended_as_implicit_user_message_not_a_second_tool_re
         duration: std::time::Duration::ZERO,
     });
     context.push_assistant(
-        "I have spawned the child, standing by.".into(),
+        "I have spawned the subagent, standing by.".into(),
         AssistantStatus::Complete,
     );
     context.push_async_harness_notice(format!(
@@ -390,7 +390,7 @@ fn child_finish_notice_is_appended_as_implicit_user_message_not_a_second_tool_re
             Some(Message::User { content, kind: UserMessageKind::ImplicitToolNote })
                 if content.contains(HARNESS_NOTICE_MARKER) && content.contains("has finished")
         ),
-        "the child's real outcome must be appended as a trailing implicit user message \
+        "the subagent's real outcome must be appended as a trailing implicit user message \
              carrying the harness-notice marker, got: {:?}",
         context.messages()
     );
@@ -553,18 +553,18 @@ pub(in crate::agent) fn orphaned_tool_call_ids(messages: &[Message]) -> Vec<Uuid
 }
 
 #[test]
-fn root_reprompts_after_child_finish_arrives_mid_stream() {
+fn root_reprompts_after_subagent_finish_arrives_mid_stream() {
     crate::test_support::run_locked(async {
-        // Regression test: a `spawn_subagent` child's `FinishResult` landing
+        // Regression test: a `spawn_subagent` subagent's `FinishResult` landing
         // while the root is mid-`Streaming` (not `Idle`) must force a
         // re-prompt once the root's current tool-free stream completes,
-        // instead of silently going `Idle` and stranding the child's result
+        // instead of silently going `Idle` and stranding the subagent's result
         // in `context` unseen by the model. Without the
-        // `pending_child_finish_reprompt` flag this reproduces the bug where
+        // `pending_subagent_finish_reprompt` flag this reproduces the bug where
         // the root's last streamed text claims it's "waiting for subagents"
         // and the conversation ends right there.
         use crate::agent::tools::{default_registry, ToolRegistryConfig};
-        use crate::child_agent_manager::{ChildAgentManager, FinishResult};
+        use crate::subagent_manager::{FinishResult, SubagentManager};
 
         // Two text tokens with a real gap between them so there is a window
         // to inject the `FinishResult` while `mode == Streaming`, i.e. before
@@ -596,10 +596,10 @@ fn root_reprompts_after_child_finish_arrives_mid_stream() {
         ));
 
         let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
-        let manager = ChildAgentManager::new(
+        let manager = SubagentManager::new(
             subagent_ui_tx,
             Box::new(
-                |_request, _cancel, _ui_tx| crate::child_agent_manager::SpawnOutcome {
+                |_request, _cancel, _ui_tx| crate::subagent_manager::SpawnOutcome {
                     command_sender: None,
                     handle: tokio::spawn(async {}),
                 },
@@ -611,7 +611,7 @@ fn root_reprompts_after_child_finish_arrives_mid_stream() {
         let _ = parent_subagent_ui_tx; // kept alive only to avoid closing the channel early
 
         let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
-        agent_loop = agent_loop.with_child_agent_manager(manager, finish_rx, parent_subagent_ui_rx);
+        agent_loop = agent_loop.with_subagent_manager(manager, finish_rx, parent_subagent_ui_rx);
 
         let handle = agent_loop.run();
         agent_loop
@@ -624,9 +624,9 @@ fn root_reprompts_after_child_finish_arrives_mid_stream() {
             .send(FinishResult {
                 run_id: Uuid::new_v4(),
                 call_id: Uuid::new_v4(),
-                origin: crate::child_agent_manager::FinishResultOrigin::Agent,
+                origin: crate::subagent_manager::FinishResultOrigin::Agent,
                 status: "success".to_string(),
-                result: Some("child done".to_string()),
+                result: Some("subagent done".to_string()),
                 error: None,
                 sources: vec![],
             })
@@ -654,14 +654,14 @@ fn root_reprompts_after_child_finish_arrives_mid_stream() {
             .count();
         assert!(
             assistant_turns >= 2,
-            "root must be re-prompted after the child's result arrives mid-stream \
+            "root must be re-prompted after the subagent's result arrives mid-stream \
              instead of going idle after a single turn; got {assistant_turns} assistant turn(s)"
         );
         assert!(
             context.messages().iter().any(
                 |message| matches!(message, Message::User { content, kind: UserMessageKind::ImplicitToolNote } if content.contains("Subagent completion event") && content.contains("\"event\":\"subagent_completed\""))
             ),
-            "the child's finish result must be recorded in context as an implicit user message"
+            "the subagent's finish result must be recorded in context as an implicit user message"
         );
         let completion_notice = context
             .model_messages()

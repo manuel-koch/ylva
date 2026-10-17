@@ -20,8 +20,8 @@ use super::tool_bubbles::{
     update_tool_bubble_to_running, ToolDonePayload,
 };
 use crate::tui_reducer_state::{
-    AppState, ChatEntry, ChildRunInfo, ConfirmKey, ContextUsage, ConversationView, DomainEvent,
-    Effect, Focus, TuiMode, UserMessageState,
+    AppState, ChatEntry, ConfirmKey, ContextUsage, ConversationView, DomainEvent, Effect, Focus,
+    SubagentRunInfo, TuiMode, UserMessageState,
 };
 use std::time::Instant;
 
@@ -29,8 +29,9 @@ use std::time::Instant;
 
 pub(super) fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
     match &event {
-        DomainEvent::ChildAgentToken { run_id, .. }
-        | DomainEvent::ChildAgentDone { run_id, .. } => state.revise_stream(Some(*run_id)),
+        DomainEvent::SubagentToken { run_id, .. } | DomainEvent::SubagentDone { run_id, .. } => {
+            state.revise_stream(Some(*run_id))
+        }
         DomainEvent::StreamStarted
         | DomainEvent::StreamChunk(_)
         | DomainEvent::StreamThinkingChunk(_)
@@ -47,10 +48,10 @@ pub(super) fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effe
     let event_kind = event.kind();
     let correlation_id = event.correlation_id();
     let mode_before = state.mode.kind();
-    // Child-lifecycle events never depend on / alter the parent's own
+    // Subagent-lifecycle events never depend on / alter the parent's own
     // `TuiMode` (that's driven exclusively by the root's own stream/tool
     // state) — handle them uniformly ahead of the per-mode dispatch below.
-    let effects = domain_child_lifecycle(state, event);
+    let effects = domain_subagent_lifecycle(state, event);
     // Deliberately logs only the event's variant tag, its correlation `id`
     // (when it has one), and the mode transition — never chunk text, tool
     // arguments, or tool output — just enough to follow the state-transition
@@ -66,10 +67,10 @@ pub(super) fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effe
     effects
 }
 
-/// Handles child lifecycle/configuration events ahead of the mode-specific
+/// Handles subagent lifecycle/configuration events ahead of the mode-specific
 /// dispatch; every other event falls through unchanged to the per-`TuiMode`
 /// handlers.
-fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
+fn domain_subagent_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
     match event {
         DomainEvent::CompactionActivity {
             run_id,
@@ -83,38 +84,38 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             }
             vec![]
         }
-        DomainEvent::ChildAgentStarted {
+        DomainEvent::SubagentStarted {
             run_id,
             call_id,
             agent_type,
             task,
             label,
         } => {
-            state.start_child_run(ChildRunInfo {
+            state.start_subagent_run(SubagentRunInfo {
                 run_id,
                 bubble_id: call_id,
                 agent_type,
                 task,
                 label,
             });
-            state.child_view.header_bubble_scroll_offset = 0;
-            // No synthetic "task" message is seeded here: the child-view
+            state.subagent_view.header_bubble_scroll_offset = 0;
+            // No synthetic "task" message is seeded here: the subagent-view
             // header re-renders the real root `spawn_subagent` bubble (see
-            // `render::project_for_draw`'s `child_view_bubble`), which
+            // `render::project_for_draw`'s `subagent_view_bubble`), which
             // already shows the task/label/agent_type — duplicating it as
             // the transcript's first turn would just repeat the same text.
             vec![]
         }
-        DomainEvent::ChildAgentEngineConfigured { run_id, engine } => {
-            state.child_engine_displays.insert(run_id, engine);
+        DomainEvent::SubagentEngineConfigured { run_id, engine } => {
+            state.subagent_engine_displays.insert(run_id, engine);
             vec![]
         }
-        DomainEvent::ChildAgentToken {
+        DomainEvent::SubagentToken {
             run_id,
             text,
             is_thinking,
         } => {
-            if let Some(conversation) = state.child_conversations.get_mut(&run_id) {
+            if let Some(conversation) = state.subagent_conversations.get_mut(&run_id) {
                 if is_thinking {
                     conversation
                         .turn_buffer
@@ -127,13 +128,13 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             }
             vec![]
         }
-        DomainEvent::ChildContextUsage {
+        DomainEvent::SubagentContextUsage {
             run_id,
             estimated_tokens,
             context_length,
             source,
         } => {
-            if let Some(conversation) = state.child_conversations.get_mut(&run_id) {
+            if let Some(conversation) = state.subagent_conversations.get_mut(&run_id) {
                 conversation.context_usage = Some(ContextUsage {
                     estimated_tokens,
                     context_length,
@@ -142,11 +143,11 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             }
             vec![]
         }
-        DomainEvent::ChildAgentDone { run_id, status, .. } => {
+        DomainEvent::SubagentDone { run_id, status, .. } => {
             state.compaction_requests.remove(&Some(run_id));
-            state.flush_child_partial_text(run_id);
+            state.flush_subagent_partial_text(run_id);
             if status == "cancelled" {
-                for tool_id in state.kill_unfinished_child_tools(run_id) {
+                for tool_id in state.kill_unfinished_subagent_tools(run_id) {
                     if matches!(state.focus, Focus::ToolApproval { tool_id: focused_id, .. } if focused_id == tool_id)
                     {
                         state.focus = Focus::MainInput;
@@ -155,18 +156,18 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
                 }
             }
             // Only auto-return if the user is currently viewing *this*
-            // finished child's transcript — a different child may still be
+            // finished subagent's transcript — a different subagent may still be
             // running/queued, or the user may be looking at an unrelated
-            // (earlier-finished) child's transcript, in which case this
+            // (earlier-finished) subagent's transcript, in which case this
             // event must not disturb `active_view`.
-            let is_viewing_this_child = matches!(
+            let is_viewing_this_subagent = matches!(
                 state.active_view,
-                ConversationView::Child { run_id: viewed_run_id, .. } if viewed_run_id == run_id
+                ConversationView::Subagent { run_id: viewed_run_id, .. } if viewed_run_id == run_id
             );
-            if is_viewing_this_child && state.auto_switched_to_child {
+            if is_viewing_this_subagent && state.auto_switched_to_subagent {
                 state.switch_to_root_view();
             }
-            state.running_children.remove(&run_id);
+            state.running_subagents.remove(&run_id);
             vec![]
         }
         DomainEvent::BubbleClickWindowExpired => {
@@ -190,8 +191,8 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
         } => {
             let entries = match run_id {
                 Some(run_id) => {
-                    let Some(conversation) = state.child_conversations.get_mut(&run_id) else {
-                        tracing::warn!(%run_id, "compaction marker has no owning child conversation");
+                    let Some(conversation) = state.subagent_conversations.get_mut(&run_id) else {
+                        tracing::warn!(%run_id, "compaction marker has no owning subagent conversation");
                         return vec![];
                     };
                     &mut conversation.messages
@@ -226,7 +227,7 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             context_length,
             source,
         } => {
-            // Mode-independent like the child-lifecycle events: a settled
+            // Mode-independent like the subagent-lifecycle events: a settled
             // turn reports the readout while the loop is idle, and a summary
             // outcome can do so without touching the mode.
             state.context_usage = Some(ContextUsage {
@@ -292,10 +293,10 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             vec![]
         }
         DomainEvent::SteerQueued { run_id } => {
-            // No driver routes `Prompt` to a child today (see
+            // No driver routes `Prompt` to a subagent today (see
             // `UiUpdate::SteerQueued::run_id`), so `run_id: Some(_)` is
             // unreachable in practice; guard anyway rather than silently
-            // flipping the root's own indicator for a child steer.
+            // flipping the root's own indicator for a subagent steer.
             if run_id.is_none() {
                 state.steer_indicator = true;
             }
@@ -435,10 +436,10 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             run_id,
         } => push_clarify_pending_bubble(state, id, question, context, choices, run_id),
         DomainEvent::SteerQueued { run_id } => {
-            // No driver routes `Prompt` to a child today (see
+            // No driver routes `Prompt` to a subagent today (see
             // `UiUpdate::SteerQueued::run_id`), so `run_id: Some(_)` is
             // unreachable in practice; guard anyway rather than silently
-            // flipping the root's own indicator for a child steer.
+            // flipping the root's own indicator for a subagent steer.
             if run_id.is_none() {
                 state.steer_indicator = true;
             }
@@ -661,10 +662,10 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             vec![]
         }
         DomainEvent::SteerQueued { run_id } => {
-            // No driver routes `Prompt` to a child today (see
+            // No driver routes `Prompt` to a subagent today (see
             // `UiUpdate::SteerQueued::run_id`), so `run_id: Some(_)` is
             // unreachable in practice; guard anyway rather than silently
-            // flipping the root's own indicator for a child steer.
+            // flipping the root's own indicator for a subagent steer.
             if run_id.is_none() {
                 state.steer_indicator = true;
             }

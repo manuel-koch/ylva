@@ -80,14 +80,14 @@ fn render_app_state_buffer(state: &mut AppState) -> Buffer {
 }
 
 fn assert_tool_bubble_roundtrip(case: ToolBubbleRoundtripCase) {
-    assert_tool_bubble_roundtrip_with_child_runs(case, &[]);
+    assert_tool_bubble_roundtrip_with_subagent_runs(case, &[]);
 }
 
-fn assert_tool_bubble_roundtrip_with_child_runs(
+fn assert_tool_bubble_roundtrip_with_subagent_runs(
     case: ToolBubbleRoundtripCase,
-    child_runs: &[ylva::store::ChildRunRecord],
+    subagent_runs: &[ylva::store::SubagentRunRecord],
 ) {
-    let persisted_content_sections = if child_runs.is_empty() {
+    let persisted_content_sections = if subagent_runs.is_empty() {
         case.content_sections.clone()
     } else {
         case.initial_content_sections.clone()
@@ -154,7 +154,7 @@ fn assert_tool_bubble_roundtrip_with_child_runs(
         })
         .collect::<Vec<_>>();
     let mut replayed_state = AppState::new();
-    replayed_state.replay_messages(&replayed_messages, child_runs, None);
+    replayed_state.replay_messages(&replayed_messages, subagent_runs, None);
     let replayed_entries = replayed_state.chat_entries.clone();
 
     // Keep the surrounding frame identical so this compares the actual
@@ -624,7 +624,7 @@ fn live_multiline_clarify_fixture_matches_after_resume() {
 
 #[test]
 fn live_agent_finish_tool_bubble_matches_serialized_and_replayed_bubble() {
-    let result = "The child completed the requested inspection.".to_string();
+    let result = "The subagent completed the requested inspection.".to_string();
     assert_tool_bubble_roundtrip(ToolBubbleRoundtripCase {
         tool_id: Uuid::new_v4(),
         tool_name: "agent_finish".to_string(),
@@ -659,7 +659,7 @@ fn live_agent_finish_tool_bubble_matches_serialized_and_replayed_bubble() {
 fn live_spawn_subagent_tool_bubble_matches_serialized_and_replayed_bubble() {
     let task = "Inspect the parser and report any unsafe assumptions.";
     let briefing = "Focus on input validation and error propagation.";
-    let child_result = "The parser validates all external input.";
+    let subagent_result = "The parser validates all external input.";
     let sources = vec!["src/parser.rs".to_string()];
     let run_id = Uuid::new_v4();
     let call_id = Uuid::new_v4();
@@ -677,7 +677,7 @@ fn live_spawn_subagent_tool_bubble_matches_serialized_and_replayed_bubble() {
     });
     let result_section = Section::Content(ContentSection {
         label: Some("Result".to_string()),
-        content: child_result.to_string(),
+        content: subagent_result.to_string(),
         file_extension: Some("md".to_string()),
         line_number_offset: None,
     });
@@ -694,7 +694,7 @@ fn live_spawn_subagent_tool_bubble_matches_serialized_and_replayed_bubble() {
         sources_section,
     ];
 
-    assert_tool_bubble_roundtrip_with_child_runs(
+    assert_tool_bubble_roundtrip_with_subagent_runs(
         ToolBubbleRoundtripCase {
             tool_id: call_id,
             tool_name: "spawn_subagent".to_string(),
@@ -720,7 +720,7 @@ fn live_spawn_subagent_tool_bubble_matches_serialized_and_replayed_bubble() {
             content_sections: final_content_sections,
             duration: Duration::from_millis(91),
         },
-        &[ylva::store::ChildRunRecord {
+        &[ylva::store::SubagentRunRecord {
             run_id,
             call_id,
             parent_session: Uuid::new_v4(),
@@ -730,9 +730,9 @@ fn live_spawn_subagent_tool_bubble_matches_serialized_and_replayed_bubble() {
             created_at: "2026-09-11T07:00:00.000Z".to_string(),
             completed_at: Some("2026-09-11T07:00:00.091Z".to_string()),
             status: Some("success".to_string()),
-            result: Some(child_result.to_string()),
+            result: Some(subagent_result.to_string()),
             sources,
-            origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
+            origin: ylva::subagent_manager::FinishResultOrigin::Agent,
             duration: Some(Duration::from_millis(91)),
         }],
     );

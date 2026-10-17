@@ -55,7 +55,7 @@ flowchart LR
     Mouse --> Effects
     Domain --> Effects
     Effects --> Execute
-    Execute -->|"AgentCommand; wrap child replies in ForChild"| Agent
+    Execute -->|"AgentCommand; wrap subagent replies in ForSubagent"| Agent
     Execute --> Textarea
     Execute --> IO
     Execute -->|"local bubble / approval bookkeeping"| State

@@ -179,12 +179,12 @@ impl SessionWriter {
     fn write_line(&mut self, event: &StoreEvent) {
         let _coordination = if matches!(
             event,
-            StoreEvent::ChildStart { .. } | StoreEvent::ChildResult { .. }
+            StoreEvent::SubagentStart { .. } | StoreEvent::SubagentResult { .. }
         ) {
             match lock_project(self.path.parent().expect("session directory")) {
                 Ok(lock) => Some(lock),
                 Err(error) => {
-                    tracing::error!(%error, "failed to coordinate child reference publication");
+                    tracing::error!(%error, "failed to coordinate subagent reference publication");
                     return;
                 }
             }

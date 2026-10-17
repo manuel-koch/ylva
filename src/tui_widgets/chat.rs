@@ -32,7 +32,7 @@ use ratatui::Frame;
 use crate::agent::tools::ToolRegistry;
 use crate::build_info::BUILD_INFO;
 use crate::theme::{
-    BUILD_INFO_COLOR, CHAT_SCROLLBAR_COLOR, CHILD_VIEW_SEPARATOR_COLOR, LOGO_COLOR,
+    BUILD_INFO_COLOR, CHAT_SCROLLBAR_COLOR, LOGO_COLOR, SUBAGENT_VIEW_SEPARATOR_COLOR,
 };
 use crate::tui_reducer_state::{ChatEntry, ToolCallState, UserMessageState};
 use crate::tui_render_state::TuiState;
@@ -74,9 +74,9 @@ pub(super) fn draw_chat(
     // scrollbar is tinted the same pinkish/magenta as the chat/input
     // dividers and the `spawn_subagent` bubble's own border, instead of the
     // root conversation's neutral scrollbar color.
-    let in_child_view = state.child_view.child_view_bubble.is_some();
-    let scrollbar_color = if in_child_view {
-        CHILD_VIEW_SEPARATOR_COLOR
+    let in_subagent_view = state.subagent_view.subagent_view_bubble.is_some();
+    let scrollbar_color = if in_subagent_view {
+        SUBAGENT_VIEW_SEPARATOR_COLOR
     } else {
         CHAT_SCROLLBAR_COLOR
     };
@@ -102,7 +102,7 @@ pub(super) fn draw_chat(
     // startup; never in the subagent drill-in view — an in-progress subagent
     // with no tokens yet is not "a fresh session", it's mid-flight work, so
     // the empty-state wordmark would be misleading there.
-    if state.chat_entries.is_empty() && state.child_view.child_view_bubble.is_none() {
+    if state.chat_entries.is_empty() && state.subagent_view.subagent_view_bubble.is_none() {
         append_logo(&mut lines, &state.display_metadata.profile_name);
     } else {
         lines.push(Line::default());
@@ -178,7 +178,7 @@ pub(super) fn draw_chat(
     }
 
     // Gated on the presence of pending text, not on `agent_mode == Streaming`:
-    // a running tool bubble (e.g. a still-in-flight `spawn_subagent` child)
+    // a running tool bubble (e.g. a still-in-flight `spawn_subagent` subagent)
     // makes `agent_mode()` report `ToolRunning` even while the same root
     // loop is mid-stream on its *next* iteration (see `AppState::agent_mode`
     // and `AppState::has_running_tool_bubble`). Gating strictly on

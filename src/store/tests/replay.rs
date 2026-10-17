@@ -180,7 +180,7 @@ async fn list_sessions_returns_newest_first_and_skips_headerless_files() {
 }
 
 #[tokio::test]
-async fn past_explicit_user_messages_are_deduplicated_and_skip_current_and_children() {
+async fn past_explicit_user_messages_are_deduplicated_and_skip_current_and_subagents() {
     let temp = tempfile::tempdir().expect("tempdir");
     let chats_root = temp.path().join("chats");
 
@@ -216,11 +216,15 @@ async fn past_explicit_user_messages_are_deduplicated_and_skip_current_and_child
     newer.record_message(&user_message("newer tail"));
     newer.flush().await;
 
-    let child = older
-        .write_child_transcript_for_run_store(Uuid::new_v4(), None, &[user_message("child task")])
+    let subagent = older
+        .write_subagent_transcript_for_run_store(
+            Uuid::new_v4(),
+            None,
+            &[user_message("subagent task")],
+        )
         .await
-        .expect("child session");
-    child.flush().await;
+        .expect("subagent session");
+    subagent.flush().await;
 
     let current = Store::create(
         &chats_root,
@@ -267,7 +271,7 @@ async fn list_sessions_of_unknown_project_key_is_empty() {
 }
 
 #[tokio::test]
-async fn read_child_runs_pairs_finished_and_orphaned_runs() {
+async fn read_subagent_runs_pairs_finished_and_orphaned_runs() {
     let temp = tempfile::tempdir().expect("tempdir");
     let chats_root = temp.path().join("chats");
     let store = Store::create(
@@ -284,14 +288,14 @@ async fn read_child_runs_pairs_finished_and_orphaned_runs() {
     let orphaned_run_id = Uuid::new_v4();
     let orphaned_call_id = Uuid::new_v4();
 
-    store.record_child_start(
+    store.record_subagent_start(
         finished_run_id,
         finished_call_id,
         "research",
         "find the regression",
         "Find regression",
     );
-    store.record_child_result(
+    store.record_subagent_result(
         finished_run_id,
         finished_call_id,
         "success",
@@ -299,7 +303,7 @@ async fn read_child_runs_pairs_finished_and_orphaned_runs() {
         vec!["src/agent.rs".to_string()],
         FinishResultOrigin::Agent,
     );
-    store.record_child_start(
+    store.record_subagent_start(
         orphaned_run_id,
         orphaned_call_id,
         "review",
@@ -308,7 +312,7 @@ async fn read_child_runs_pairs_finished_and_orphaned_runs() {
     );
     store.flush().await;
 
-    let runs = Store::read_child_runs(store.path()).expect("child records readable");
+    let runs = Store::read_subagent_runs(store.path()).expect("subagent records readable");
     assert_eq!(runs.len(), 2);
 
     let finished = runs

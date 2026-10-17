@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Automatic context compaction for root and child conversations, plus root-only
+//! Automatic context compaction for root and subagent conversations, plus root-only
 //! manual summaries that retain the latest explicit task.
 //! See `docs/implementation-notes.md` for scheduling and recovery mechanics.
 //!

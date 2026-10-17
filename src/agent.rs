@@ -26,13 +26,13 @@ use crate::llm::engine::Engine;
 use crate::llm::{ToolEnvelope, ToolSchema};
 use crate::store::Store;
 
-pub mod child_agent_manager;
 pub mod compaction;
 mod context;
 mod message;
 mod protocol;
 mod request;
 mod runtime;
+pub mod subagent_manager;
 mod tool_execution;
 mod tool_queue;
 use request::start_request;
@@ -65,14 +65,14 @@ use tools::{ToolCall, ToolRegistry};
 
 /// Default number of LLM requests the tool-use loop starts within a single
 /// user turn before the guard stops re-prompting. Each loop tracks its own
-/// `iterations` counter independently, so a child tripping this guard neither
+/// `iterations` counter independently, so a subagent tripping this guard neither
 /// counts against nor is masked by the root's own counter. See
 /// `UiUpdate::Error::run_id` for how the resulting error is attributed back
-/// to whichever loop (root or child) actually exceeded it.
+/// to whichever loop (root or subagent) actually exceeded it.
 ///
 /// This is the *default* only: an agent type's `max_tool_iterations`
 /// (`ProfileConfig::max_tool_iterations_for`) overrides it per loop, root and
-/// child alike, through `AgentLoop::with_max_tool_iterations`.
+/// subagent alike, through `AgentLoop::with_max_tool_iterations`.
 pub const DEFAULT_MAX_TOOL_USE_ITERATIONS: usize = 50;
 
 /// Maximum distinct tool calls accumulated while parsing one assistant response.
@@ -162,38 +162,38 @@ pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 5;
 /// approval policy, the driver decides.
 ///
 /// Indicates whether an `AgentLoop` is acting as the root (top-level) agent
-/// or as a child agent spawned by a root agent.
+/// or as a subagent spawned by a root agent.
 pub enum Role {
     /// The top-level agent for a session.
     Root,
-    /// A child agent spawned by a root agent, with the wiring back to its
+    /// A subagent spawned by a root agent, with the wiring back to its
     /// parent: an optional briefing, the parent-side cancellation token that
-    /// cascades a parent stop into this child, the channel for forwarding
+    /// cascades a parent stop into this subagent, the channel for forwarding
     /// live tokens up to the parent, and the channel the `agent_finish` tool (the
-    /// only tool a child is guaranteed to have) uses to report its outcome.
-    Child(ChildRoleConfig),
+    /// only tool a subagent is guaranteed to have) uses to report its outcome.
+    Subagent(SubagentRoleConfig),
 }
 
-/// Fields carried by [`Role::Child`]; consumed by `AgentFactory::create` to
-/// wire the child's `AgentLoop` and its `agent_finish` tool.
-pub struct ChildRoleConfig {
-    /// Identifies this child run to the parent's `ChildAgentManager`.
+/// Fields carried by [`Role::Subagent`]; consumed by `AgentFactory::create` to
+/// wire the subagent's `AgentLoop` and its `agent_finish` tool.
+pub struct SubagentRoleConfig {
+    /// Identifies this subagent run to the parent's `SubagentManager`.
     pub run_id: Uuid,
     /// The parent's `spawn_subagent` tool-call id this run is tied to.
     pub call_id: Uuid,
-    /// Persisted parent conversation associated with this child's requests.
+    /// Persisted parent conversation associated with this subagent's requests.
     pub session_id: Option<Uuid>,
     /// Optional context/background injected as an additional system message
-    /// ahead of the child's task.
+    /// ahead of the subagent's task.
     pub briefing: Option<String>,
-    /// Cancelled by the parent's `ChildAgentManager::cancel_all` (e.g. on
-    /// `AgentCommand::Stop`); cascades into this child's own cancellation.
+    /// Cancelled by the parent's `SubagentManager::cancel_all` (e.g. on
+    /// `AgentCommand::Stop`); cascades into this subagent's own cancellation.
     pub parent_cancel: CancellationToken,
-    /// Forwards this child's `UiUpdate`s up to the parent, for live-token and
-    /// context-usage display in the child drill-in view.
+    /// Forwards this subagent's `UiUpdate`s up to the parent, for live-token and
+    /// context-usage display in the subagent drill-in view.
     pub subagent_ui_tx: mpsc::UnboundedSender<UiUpdate>,
-    /// Sent to by this child's `agent_finish` tool when called.
-    pub finish_tx: mpsc::Sender<crate::child_agent_manager::FinishResult>,
+    /// Sent to by this subagent's `agent_finish` tool when called.
+    pub finish_tx: mpsc::Sender<crate::subagent_manager::FinishResult>,
 }
 
 /// The outer loop task is the sole writer of `Context` (`single-writer`
@@ -213,26 +213,26 @@ pub struct AgentLoop {
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<(u64, AgentEvent)>,
     agent_rx: Option<mpsc::Receiver<(u64, AgentEvent)>>,
-    /// Set via [`AgentLoop::with_child_role`] for a `Role::Child` agent;
+    /// Set via [`AgentLoop::with_subagent_role`] for a `Role::Subagent` agent;
     /// firing it cascades a parent stop into this loop.
     parent_cancel: Option<CancellationToken>,
-    /// Set via [`AgentLoop::with_child_role`]; injected as an extra system
-    /// message ahead of the child's task.
+    /// Set via [`AgentLoop::with_subagent_role`]; injected as an extra system
+    /// message ahead of the subagent's task.
     briefing: Option<String>,
-    /// Root-only initial system message loaded from `SOUL.md`. Child loops
+    /// Root-only initial system message loaded from `SOUL.md`. Subagent loops
     /// leave this unset and retain [`Context::new`]'s compatibility prompt.
     system_prompt: Option<String>,
-    /// Set via [`AgentLoop::with_child_role`] from `config.run_id` for a
-    /// `Role::Child` agent; `None` for `Role::Root`. Stamped onto every
+    /// Set via [`AgentLoop::with_subagent_role`] from `config.run_id` for a
+    /// `Role::Subagent` agent; `None` for `Role::Root`. Stamped onto every
     /// `UiUpdate::ToolPending`/`ClarifyPending` this loop emits so the root
-    /// (which forwards a child's `UiUpdate`s up to its own driver) and the
+    /// (which forwards a subagent's `UiUpdate`s up to its own driver) and the
     /// driver can tell which agent a pending approval belongs to and route
-    /// the verdict back via `AgentCommand::ForChild`.
+    /// the verdict back via `AgentCommand::ForSubagent`.
     own_run_id: Option<Uuid>,
-    /// Set via [`AgentLoop::with_child_agent_manager`] for a `Role::Root`
+    /// Set via [`AgentLoop::with_subagent_manager`] for a `Role::Root`
     /// agent whose `AgentConfig::can_spawn` is `true`.
-    child_agent_manager: Option<crate::child_agent_manager::ChildAgentManager>,
-    finish_rx: Option<mpsc::UnboundedReceiver<crate::child_agent_manager::FinishResult>>,
+    subagent_manager: Option<crate::subagent_manager::SubagentManager>,
+    finish_rx: Option<mpsc::UnboundedReceiver<crate::subagent_manager::FinishResult>>,
     subagent_ui_rx: Option<mpsc::UnboundedReceiver<UiUpdate>>,
     /// Set via [`AgentLoop::with_max_tool_iterations`]: the effective
     /// tool-use iteration limit for this loop, applied by the shared
@@ -260,7 +260,7 @@ pub struct AgentLoop {
     /// Set via [`AgentLoop::with_store`] when persistence is enabled: the
     /// session file this loop's committed messages are appended to.
     store: Option<Store>,
-    /// Session identity attached to model requests, including child requests
+    /// Session identity attached to model requests, including subagent requests
     /// that are attributed to their persisted parent conversation.
     session_id: Option<Uuid>,
     /// Shared with the running loop so drivers observe the successor store
@@ -295,7 +295,7 @@ impl AgentLoop {
             briefing: None,
             system_prompt: None,
             own_run_id: None,
-            child_agent_manager: None,
+            subagent_manager: None,
             finish_rx: None,
             subagent_ui_rx: None,
             max_tool_iterations: DEFAULT_MAX_TOOL_USE_ITERATIONS,
@@ -323,21 +323,21 @@ impl AgentLoop {
 
     /// Mark this loop as sharing its conversation Engine runtime with its
     /// parent agent. Display projections use this to reflect later parent
-    /// engine switches in a drilled-in child conversation.
+    /// engine switches in a drilled-in subagent conversation.
     pub fn with_inherited_parent_runtime(mut self, inherited: bool) -> Self {
         self.inherits_parent_runtime = inherited;
         self
     }
 
-    /// Wires this loop as a `Role::Child` agent: `config.parent_cancel`
+    /// Wires this loop as a `Role::Subagent` agent: `config.parent_cancel`
     /// cascades a parent stop into this loop, and `config.briefing` (if any)
-    /// is injected as an extra system message ahead of the child's task.
+    /// is injected as an extra system message ahead of the subagent's task.
     /// `config.run_id` is retained as `own_run_id`, stamped onto this loop's
     /// `ToolPending`/`ClarifyPending` updates (see `own_run_id`).
     /// `call_id`/`subagent_ui_tx`/`finish_tx` are consumed by the
-    /// caller to build the child's `agent_finish` tool and are not otherwise held
+    /// caller to build the subagent's `agent_finish` tool and are not otherwise held
     /// on the loop itself.
-    pub fn with_child_role(mut self, config: ChildRoleConfig) -> Self {
+    pub fn with_subagent_role(mut self, config: SubagentRoleConfig) -> Self {
         self.parent_cancel = Some(config.parent_cancel);
         self.briefing = config.briefing;
         self.own_run_id = Some(config.run_id);
@@ -425,16 +425,16 @@ impl AgentLoop {
         &self.registry
     }
 
-    /// Wires this loop as a `Role::Root` agent that can spawn children.
+    /// Wires this loop as a `Role::Root` agent that can spawn subagents.
     /// `finish_rx`/`subagent_ui_rx` are the receiving ends of the channels
-    /// whose sending ends `manager` hands to each child it spawns.
-    pub fn with_child_agent_manager(
+    /// whose sending ends `manager` hands to each subagent it spawns.
+    pub fn with_subagent_manager(
         mut self,
-        manager: crate::child_agent_manager::ChildAgentManager,
-        finish_rx: mpsc::UnboundedReceiver<crate::child_agent_manager::FinishResult>,
+        manager: crate::subagent_manager::SubagentManager,
+        finish_rx: mpsc::UnboundedReceiver<crate::subagent_manager::FinishResult>,
         subagent_ui_rx: mpsc::UnboundedReceiver<UiUpdate>,
     ) -> Self {
-        self.child_agent_manager = Some(manager);
+        self.subagent_manager = Some(manager);
         self.finish_rx = Some(finish_rx);
         self.subagent_ui_rx = Some(subagent_ui_rx);
         self

@@ -50,14 +50,14 @@ fn capitalize_first(s: &str) -> String {
     crate::agent::tools::title_case_tool_name(s)
 }
 
-/// Wraps `command` in `AgentCommand::ForChild { run_id, .. }` when `run_id`
+/// Wraps `command` in `AgentCommand::ForSubagent { run_id, .. }` when `run_id`
 /// is `Some` — i.e. when the pending tool/clarify call that produced
-/// `command` was forwarded up from a child agent (`UiUpdate::ToolPending`/
+/// `command` was forwarded up from a subagent (`UiUpdate::ToolPending`/
 /// `ClarifyPending::run_id`) rather than raised by the root itself.
 /// Otherwise returns `command` unchanged, exactly as sent today.
 fn route_command(run_id: Option<uuid::Uuid>, command: AgentCommand) -> AgentCommand {
     match run_id {
-        Some(run_id) => AgentCommand::ForChild {
+        Some(run_id) => AgentCommand::ForSubagent {
             run_id,
             command: Box::new(command),
         },
@@ -658,14 +658,14 @@ async fn run_cli_to_with_title(
     // conversation turn ends, unlike the TUI. A `spawn_subagent` call
     // resolves immediately with a structured admission event (see
     // `resolve_spawn_subagent`), so the parent can go idle (`StreamDone`)
-    // while its child is still running — the child's real outcome only
+    // while its subagent is still running — the subagent's real outcome only
     // arrives later, tied to the same call id, as either a `ToolDone` (the
     // normal `finish_rx` path and the `AgentCommand::Stop` cancellation
     // path both resolve this way) or, in the structurally-unreachable
-    // fail-safe case where no `ChildAgentManager` is wired, a `ToolError`.
+    // fail-safe case where no `SubagentManager` is wired, a `ToolError`.
     // Ending the loop on the first `StreamDone` would drop the agent
     // (closing `cmd_tx`) before that terminal event ever fires, silently
-    // discarding the child's result. Once the final outstanding child
+    // discarding the subagent's result. Once the final outstanding subagent
     // finishes while the parent is idle, `AgentLoop` re-prompts it once (see
     // the `finish_rx` arm in `AgentLoop::run`) so it can aggregate the
     // results — guaranteeing a further `StreamStarted`/`StreamDone` round
@@ -911,7 +911,7 @@ async fn run_cli_to_with_title(
                     tracing::debug!(
                         tool_call_id = %id,
                         pending = pending_spawn_call_ids.len(),
-                        "cli_driver: tracking spawned child, deferring conversation end"
+                        "cli_driver: tracking spawned subagent, deferring conversation end"
                     );
                 }
             }
@@ -949,7 +949,7 @@ async fn run_cli_to_with_title(
                     tracing::debug!(
                         tool_call_id = %id,
                         pending = pending_spawn_call_ids.len(),
-                        "cli_driver: spawned child reported ToolDone"
+                        "cli_driver: spawned subagent reported ToolDone"
                     );
                 }
             }
@@ -967,7 +967,7 @@ async fn run_cli_to_with_title(
                     tracing::debug!(
                         tool_call_id = %id,
                         pending = pending_spawn_call_ids.len(),
-                        "cli_driver: spawned child reported ToolError"
+                        "cli_driver: spawned subagent reported ToolError"
                     );
                 }
             }
@@ -1000,7 +1000,7 @@ async fn run_cli_to_with_title(
                     tracing::debug!(
                         tool_call_id = %id,
                         pending = pending_spawn_call_ids.len(),
-                        "cli_driver: spawned child reported ToolKilled"
+                        "cli_driver: spawned subagent reported ToolKilled"
                     );
                 }
                 // A stopped root tool leaves the agent idle without a stream
@@ -1011,7 +1011,7 @@ async fn run_cli_to_with_title(
             }
             Some(UiUpdate::SteerQueued { .. }) | Some(UiUpdate::SteerApplied { .. }) => {}
             // Headless output has no footer for the model-view readout.
-            Some(UiUpdate::ContextUsage { .. } | UiUpdate::ChildContextUsage { .. }) => {}
+            Some(UiUpdate::ContextUsage { .. } | UiUpdate::SubagentContextUsage { .. }) => {}
             // Headless output renders messages inline as they stream, so a
             // transcript marker has nothing to be inserted into.
             Some(UiUpdate::CompactionApplied { .. }) => {}
@@ -1019,13 +1019,13 @@ async fn run_cli_to_with_title(
             // No-op in headless mode: there's no live bubble to patch a
             // status update onto (see `UiUpdate::ToolProgress`'s doc comment
             // for its TUI-only purpose). The eventual `ToolDone` still
-            // prints the real outcome once the child actually finishes.
+            // prints the real outcome once the subagent actually finishes.
             Some(UiUpdate::ToolProgress { .. }) => {}
             Some(UiUpdate::Notice { text, run_id }) => {
                 // A notice (for example a dropped profile reasoning effort)
                 // is a real configuration fact, not a transcript-only
                 // bubble: print it ahead of the response, tagged when it
-                // came from a child loop. It never ends the turn, so unlike
+                // came from a subagent loop. It never ends the turn, so unlike
                 // a root `Error` it leaves `response_finished` alone.
                 flush_stream_section(
                     out,
@@ -1047,7 +1047,7 @@ async fn run_cli_to_with_title(
                     Some(run_id) => {
                         write_cli_styled_line(
                             out,
-                            &format!("[child {run_id}] notice: {text}"),
+                            &format!("[subagent {run_id}] notice: {text}"),
                             NOTICE_COLOR,
                             false,
                             output_options,
@@ -1077,7 +1077,7 @@ async fn run_cli_to_with_title(
                 } else {
                     tracing::debug!(
                         pending = pending_spawn_call_ids.len(),
-                        "cli_driver: StreamDone but children still outstanding, waiting for them"
+                        "cli_driver: StreamDone but subagents still outstanding, waiting for them"
                     );
                 }
             }
@@ -1103,7 +1103,7 @@ async fn run_cli_to_with_title(
                 } else {
                     tracing::debug!(
                         pending = pending_spawn_call_ids.len(),
-                        "cli_driver: StreamCancelled but children still outstanding, waiting for them"
+                        "cli_driver: StreamCancelled but subagents still outstanding, waiting for them"
                     );
                 }
             }
@@ -1133,17 +1133,17 @@ async fn run_cli_to_with_title(
                         writeln!(out, "{message}")?;
                         response_finished = true;
                     }
-                    // A child's own stream-level error (e.g. its max-tool-use-
+                    // A subagent's own stream-level error (e.g. its max-tool-use-
                     // iterations guard tripped) is not the root conversation
                     // ending — the root learns the spawn finished via the
                     // spawn tool's own `ToolDone`/`ToolError` (see above), not
-                    // this generic error. Headless mode has no separate child
+                    // this generic error. Headless mode has no separate subagent
                     // transcript to render into, so just surface it tagged,
                     // without ending the response.
                     Some(run_id) => {
                         write_cli_styled_line(
                             out,
-                            &format!("[child {run_id}] error: {message}"),
+                            &format!("[subagent {run_id}] error: {message}"),
                             ERROR_COLOR,
                             false,
                             output_options,
@@ -1151,17 +1151,17 @@ async fn run_cli_to_with_title(
                     }
                 }
             }
-            // Headless mode has no separate child transcript to render into
-            // (see drill-in conversation model, Phase 6.10, TUI-only): child
+            // Headless mode has no separate subagent transcript to render into
+            // (see drill-in conversation model, Phase 6.10, TUI-only): subagent
             // tool events already arrive tagged with `run_id` and are
-            // rendered inline by the arms above, so only the child's own
+            // rendered inline by the arms above, so only the subagent's own
             // free-form text/thinking tokens and lifecycle markers are
             // silently ignored here.
             Some(
-                UiUpdate::ChildAgentStarted { .. }
-                | UiUpdate::ChildAgentEngineConfigured { .. }
-                | UiUpdate::ChildAgentToken { .. }
-                | UiUpdate::ChildAgentDone { .. },
+                UiUpdate::SubagentStarted { .. }
+                | UiUpdate::SubagentEngineConfigured { .. }
+                | UiUpdate::SubagentToken { .. }
+                | UiUpdate::SubagentDone { .. },
             ) => {}
             None => {
                 flush_stream_section(

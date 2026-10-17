@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Read-only queries and reconstruction of session and child-run state.
+//! Read-only queries and reconstruction of session and subagent-run state.
 
 use super::archive;
-use super::{project_directory, ChildRunRecord, SessionMeta, Store, StoreError, StoreEvent};
+use super::{project_directory, SessionMeta, Store, StoreError, StoreEvent, SubagentRunRecord};
 use crate::agent::{Message, UserMessageKind};
-use crate::child_agent_manager::FinishResultOrigin;
 use crate::home_relative_path::display_path;
+use crate::subagent_manager::FinishResultOrigin;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -32,7 +32,7 @@ pub struct SessionSummary {
     pub title: String,
     pub provider_connection: String,
     pub model: String,
-    /// Set only for a child-agent's own session file. See
+    /// Set only for a subagent's own session file. See
     /// [`SessionMeta::parent_session`].
     pub parent_session: Option<Uuid>,
     /// Path of the resolved raw `.jsonl` or archived `.jsonl.gz` transcript.
@@ -44,7 +44,7 @@ pub struct SessionSummary {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionState {
     /// Every event in append order — the record the TUI replays and the
-    /// clone path copies, including messages, selection changes, child-run
+    /// clone path copies, including messages, selection changes, subagent-run
     /// lifecycle records and compaction snapshots.
     pub events: Vec<StoreEvent>,
     /// Every committed message, in order — the durable transcript.
@@ -153,7 +153,7 @@ impl Store {
     }
 
     /// Every persisted event of a session, in append order — the full
-    /// logical record (meta header, messages, child-run lifecycle records,
+    /// logical record (meta header, messages, subagent-run lifecycle records,
     /// model/agent selection changes). A pure read: unparseable lines are
     /// skipped in memory, never repaired on disk, matching
     /// [`Store::read_messages`]. This is the read path for callers that need
@@ -269,7 +269,7 @@ impl Store {
     /// project, oldest session first.
     ///
     /// The current session is excluded because its messages are replayed
-    /// separately by the TUI, and child-agent transcripts are excluded so
+    /// separately by the TUI, and subagent transcripts are excluded so
     /// generated subagent tasks do not appear as root-agent draft history.
     /// Only the newest `limit` messages are selected, then returned oldest
     /// first for input-history navigation.
@@ -331,15 +331,15 @@ impl Store {
         Ok(newest_user_messages)
     }
 
-    /// Read child-run lifecycle records from a parent session without
+    /// Read subagent-run lifecycle records from a parent session without
     /// modifying the file. Legacy records missing correlation metadata remain
     /// readable through serde defaults, but cannot be joined to a tool bubble.
-    pub fn read_child_runs(path: &Path) -> Result<Vec<ChildRunRecord>, StoreError> {
+    pub fn read_subagent_runs(path: &Path) -> Result<Vec<SubagentRunRecord>, StoreError> {
         let mut runs = Vec::new();
         let mut starts = std::collections::HashMap::<Uuid, usize>::new();
         for event in Self::read_events(path)? {
             match event {
-                StoreEvent::ChildStart {
+                StoreEvent::SubagentStart {
                     created_at,
                     id,
                     parent_session,
@@ -350,7 +350,7 @@ impl Store {
                     ..
                 } => {
                     starts.insert(id, runs.len());
-                    runs.push(ChildRunRecord {
+                    runs.push(SubagentRunRecord {
                         run_id: id,
                         call_id,
                         parent_session,
@@ -366,7 +366,7 @@ impl Store {
                         duration: None,
                     });
                 }
-                StoreEvent::ChildResult {
+                StoreEvent::SubagentResult {
                     completed_at,
                     id,
                     call_id,

@@ -15,7 +15,7 @@ Durable clone outcomes survive cancellation and are explicitly reported.
 Preparation freezes mutations through the outer loop's authoritative
 `PrepareSessionSwitch` barrier and rechecks quiescence before publication.
 Publication joins the old loop, replaces channels/engine/tools and replay,
-retargets the exit guard, and drops obsolete stores. Child drill-in consults
+retargets the exit guard, and drops obsolete stores. Subagent drill-in consults
 the current store, including after `/clear`, rather than a startup capture.
 
 `agent_factory::select_root_agent_type` is shared by startup and picker
@@ -32,9 +32,9 @@ manual candidates are estimated before mutating/persisting the live view and
 must strictly reduce it. Summary outcomes retain generation/request identity
 and apply at the existing safe boundaries. Request IDs remain internal to
 runtime/activity updates and structured diagnostics; user-facing manual
-compaction notices omit them. Presenter child-view handling
-rejects manual compaction before ordinary child Enter suppression, never
-forwarding it to a child or hidden root.
+compaction notices omit them. Presenter subagent-view handling
+rejects manual compaction before ordinary subagent Enter suppression, never
+forwarding it to a subagent or hidden root.
 
 `profile_command.rs` dispatches `ylva profile` before profile/provider
 initialization, like `session_command.rs`. It resolves the scope (home or
@@ -75,7 +75,7 @@ only after terminal restoration.
 
 `Store` owns an immutable session span; runtime handlers snapshot the current
 store's span for each async scope. Spawned work instruments its own future, so
-rollover never mutates an existing span. The child manager and factory share the
+rollover never mutates an existing span. The subagent manager and factory share the
 current-store handle for new delegations, while each admitted run retains its
 parent store. Title tasks explicitly parent to their target store and writer
 tasks parent to their own session. Text and JSON tests verify rollover and
@@ -140,7 +140,7 @@ type's compact engine, and those summary guidelines reach every background
 summary request; loops built outside the factory keep the built-in prompt. The
 `build_summary_request` appends code-owned framing to the resolved guidelines
 in one system message, followed by the source messages and a final user trigger.
-Conversation compaction uses this builder; child report reduction is deterministic
+Conversation compaction uses this builder; subagent report reduction is deterministic
 and does not start a separate blocking LLM request.
 The framing derives its trigger description from the same constant as the final
 user message and calls out message boundaries so source text is not mistaken for new
@@ -389,7 +389,7 @@ coordinator. Its command, agent-event and subagent handlers live in
 `runtime/commands.rs`, `runtime/events.rs` and `runtime/subagents.rs`;
 `runtime/compaction_updates.rs` translates safe-boundary outcomes into UI
 updates. Handler outcomes distinguish polling again, evaluating the
-root/child completion tail and finishing immediately, preserving the original
+root/subagent completion tail and finishing immediately, preserving the original
 outer-loop `continue` and termination decisions. Receivers stay in the
 coordinator; generation, cancellation and queued work stay in its owned state.
 No new task, channel, lock or Context copy is introduced by this split.
@@ -441,7 +441,7 @@ gets a correlation ID; the optional
 `YLVA_TOKEN_USAGE_DUMP_PATH` writer appends a metadata-only record to one JSONL
 file, leaving estimate and reported usage distinct. Request timestamps are
 captured before send; the agent loop passes its persisted session ID through the
-engine/provider boundary, and child requests carry their parent's session ID.
+engine/provider boundary, and subagent requests carry their parent's session ID.
 Records without a session association use `null`. The writer never serializes
 the request messages, credentials, or body. This is an accuracy-observation dump,
 not session data or billed usage. See
@@ -469,7 +469,7 @@ resolving any agent-type override, not from the compact engine's own model setti
 defaults to 60 seconds and is validated as positive. Scheduling after every tool
 outcome uses only completed eligible prefixes and never applies snapshots inside
 an open batch. The source includes the previous summary/recovery handoff.
-`start_request` is the shared preflight for every root/child continuation: it
+`start_request` is the shared preflight for every root/subagent continuation: it
 applies ready state, defers oversized requests for an existing summary's remaining
 absolute deadline, then measures staged recovery. The outer select loop remains
 responsive to commands. Generation and request identity are checked before
@@ -478,7 +478,7 @@ Preflight notices are generation-checked and acknowledged by the outer loop
 before provider dispatch, preventing stale notices and preserving notice order.
 
 The summary task emits a scoped `UiUpdate::CompactionActivity` start update with
-a unique request ID. The presenter retains in-flight IDs per root/child
+a unique request ID. The presenter retains in-flight IDs per root/subagent
 conversation and projects only the visible conversation's activity into the
 footer's `· Compacting` suffix. This does not change `AgentMode`, input
 routing, or idle behavior. A failure or timeout clears activity as soon as
@@ -518,7 +518,7 @@ lock with switch checks so they neither duplicate the root warning nor race its 
 `generate_summary` separately estimates the actual immutable summary request
 after summarizer metadata hydration and within the summary timeout,
 including message framing and the shared fixed request-overhead allowance, and
-emits a root/child-scoped `UiUpdate::Notice` if it exceeds the summarizer window.
+emits a root/subagent-scoped `UiUpdate::Notice` if it exceeds the summarizer window.
 Neither check clips source messages or changes summary/fallback policy.
 If catalog hydration changes the conversation window during preflight,
 `ContextWindowChanged` re-enters the outer loop's budget gate before dispatch.
@@ -528,7 +528,7 @@ summarizer identities plus `follows_conversation`/`shares_conversation` flags.
 The `/models` detail area asks `Engine::preview_model_selection` for the actual
 router target and computes the highlighted choice's summarizer effect without
 mutating Engine runtime state. After activation, the driver refreshes root and stored
-child display snapshots; inherited child views project the parent's live
+subagent display snapshots; inherited subagent views project the parent's live
 Engine runtime identity. These fields are view-only and do not extend session
 provider/model records.
 
@@ -563,7 +563,7 @@ Result/error commits preserve canonical source output, then add model-only
 overrides. Tool-local byte/line/network limits remain source limits; the harness
 does not call execution-time output hooks to destructively enforce context pressure.
 Binary payload/descriptors are kept whole or omitted together in the projection.
-Child event projection keeps valid structured lifecycle JSON and reduces only
+Subagent event projection keeps valid structured lifecycle JSON and reduces only
 result/error text; immutable metadata can still force subsequent group recovery.
 
 `Context::summary_boundary_for_target` counts removable tokens from
@@ -574,7 +574,7 @@ repeated summary requests whose snapshots cannot advance the model view.
 
 `[agents.<type>.compaction]` overrides the profile engine and timeout
 independently. `AgentFactory::build` resolves these settings for both roots and
-children. A child that goes idle waits for its in-flight summary; after a
+subagents. A subagent that goes idle waits for its in-flight summary; after a
 summary or synchronous drop changes its model view, the loop resumes the task
 instead of returning an incomplete result.
 
@@ -587,7 +587,7 @@ details remain DEBUG. These are advisory local estimates without message content
 not provider-reported input usage.
 
 Each serialized-request estimate logs `estimated_input_tokens`,
-`context_length`, and `usage_ratio` with the root/child `run_id`. Each enabled
+`context_length`, and `usage_ratio` with the root/subagent `run_id`. Each enabled
 compaction sweep logs its model-view estimate, active window, `target_tokens`,
 the configured thresholds, whether a summary is in flight, and the selected
 `CompactionAction` — including `None`. These separate DEBUG events show the
@@ -603,7 +603,7 @@ inserted either at replay (`AppState::replay_messages`) or live
 (`DomainEvent::CompactionApplied`, deduplicated by boundary).
 Subagent replay reads messages and the latest transcript-relative compaction
 boundary together through `Store::read_session_state` on first drill-in.
-`AppState::load_child_messages` uses the same boundary-aware projection as root
+`AppState::load_subagent_messages` uses the same boundary-aware projection as root
 replay and caches the projected entries; snapshots without that boundary
 continue to load without a marker.
 `StoreEvent::ModelProjection` stores bounded overrides/handoff/anchor with
@@ -617,7 +617,7 @@ synchronous prefix drops as `UiUpdate::Notice`; the TUI displays each notice in
 the transcript. Completion notices include conditional guidance for frequent
 compaction and its potential detail loss; synchronous-drop notices distinguish
 removed model context from the preserved transcript. A compaction update replaces the stale serialized-request
-estimate with a model-view estimate scoped to the root or child run. The
+estimate with a model-view estimate scoped to the root or subagent run. The
 OpenAI-compatible provider binds a request-scoped failure callback to that
 request's response dump, allowing caller-side compaction timeouts to append
 their reason even after the streaming future has been dropped.
@@ -632,10 +632,10 @@ raw selected-content counts after the byte cap; the later `read result size`
 event reports returned-content counts after tool-local caps. Source
 line count is unavailable for binary reads and partial byte ranges.
 
-Child completion events are checked against the parent's current model view at
+Subagent completion events are checked against the parent's current model view at
 delivery time, after applying any ready parent compaction when idle. An oversized
-child report gets a marked deterministic model-only reduction, not a blocking
-LLM summary. Canonical parent/child records and drill-in bubbles keep the complete
+subagent report gets a marked deterministic model-only reduction, not a blocking
+LLM summary. Canonical parent/subagent records and drill-in bubbles keep the complete
 report. The projected event sets `result_reduced=true` and
 `result_summarized=false`; canonical flags remain false. Normal parent prefix
 summarization remains independent of this report projection.
@@ -647,7 +647,7 @@ shared title snapshot. Private `store/event.rs` owns persisted event types,
 versions and timestamps; `store/session_file.rs` owns lock/open/header
 operations and append-open corruption repair; `store/writer.rs` owns the
 single writer task, locked-file lifetime, flush barriers and atomic title
-rewrite; `store/replay.rs` owns read-only queries and session/child-run
+rewrite; `store/replay.rs` owns read-only queries and session/subagent-run
 reconstruction. Explicit facade re-exports preserve existing paths.
 Replay never owns or updates title-generation state. The writer retains its
 lock after replacing the metadata inode and drains queued events when the
@@ -657,7 +657,7 @@ For finished subagents, the title snapshot correlates `agent_finish` call
 arguments with matching `ToolResult` IDs and names. Its terminal result/error
 uses `AgentFinishArgs::resolved_status`, shared with execution, and takes
 precedence over intermediate assistant text. Root title eligibility remains
-text-reply based. Child persistence and resume both reconstruct this snapshot;
+text-reply based. Subagent persistence and resume both reconstruct this snapshot;
 utility generation still uses `TitleAttempt`, with no transcript mutation or
 task-label substitution.
 
@@ -668,29 +668,29 @@ boundaries and verify complete-byte recovery. Command subprocess tests isolate
 the launch directory, state home and provider environment.
 
 `Store::clone_session` (`src/store.rs`) reads the source under a nonblocking
-exclusive lock held only for the read, rejects a child transcript or a
+exclusive lock held only for the read, rejects a subagent transcript or a
 missing header before creating anything, then writes a fresh header
 (`cloned_from`, `parent_session = None`, copied title/provider/model/agent
 type) followed by every event except the source header, rebasing
-`child_start`/`child_result` records onto the new id. The source file is
-never repaired, rewritten, or appended to; child transcript files stay where
+`subagent_start`/`subagent_result` records onto the new id. The source file is
+never repaired, rewritten, or appended to; subagent transcript files stay where
 they are and are reused as read-only history. `Cli::clone` requires
 `--conversation-id` (clap `requires`), and `open_store` in `src/main.rs`
 routes the run to the clone instead of a resume.
 
-## Child-agent delegation internals
+## Subagent delegation internals
 
 `spawn_subagent` returns the tool's single admission result. The terminal
 outcome arrives later as a hidden harness notice because the tool protocol
 allows only one result per `tool_call_id`. The root receives one continuation
 after all spawned work finishes. `AgentCommand::Stop` cancels running and
 queued work without resuming the root; `/clear` cancels both states as well.
-`ChildAgentManager` tracks every running child by `run_id`, plus a FIFO queue
+`SubagentManager` tracks every running subagent by `run_id`, plus a FIFO queue
 for spawns beyond `max_concurrent_subagents`. The profile default is `4`, and
 `0` or a negative value means unlimited. `None` is the scheduler's unlimited
 representation. The profile-level cap applies across the current one-level
-delegation tree; child-role tool registries do not expose `spawn_subagent`.
-When a child finishes, the scheduler removes only that run and starts queued
+delegation tree; subagent-role tool registries do not expose `spawn_subagent`.
+When a subagent finishes, the scheduler removes only that run and starts queued
 requests in FIFO order until the cap is full.
 The tool description and intermediate completion notices tell the root to
 end its response when no independent work remains, rather than keep thinking
@@ -703,33 +703,33 @@ this guidance in both canonical and reduced model projections; omitted report
 details must not be invented. These are model instructions, not output validation.
 
 Pending tool-approval and clarify updates carry a `run_id`. Drivers wrap the
-response in `AgentCommand::ForChild`, and the root loop forwards it to the
+response in `AgentCommand::ForSubagent`, and the root loop forwards it to the
 matching subagent. `AgentLoop` logs and drops a stale or unknown `run_id`.
-Streamed text and thinking are tagged with their child's `run_id` in the
+Streamed text and thinking are tagged with their subagent's `run_id` in the
 factory's forward task before entering the shared subagent UI channel, so
-concurrent streams cannot be attributed to whichever child started most
+concurrent streams cannot be attributed to whichever subagent started most
 recently. That channel is unbounded, so no update is dropped and the send never
 blocks the root loop that drains it; scheduler lifecycle updates use synchronous
-sends. Each child reports its finish on a private capacity-1 channel, which the
-driver forwards to the shared finish channel only after the child's UI forwarder
-has drained. A child's last UI update therefore always precedes its finish. The
+sends. Each subagent reports its finish on a private capacity-1 channel, which the
+driver forwards to the shared finish channel only after the subagent's UI forwarder
+has drained. A subagent's last UI update therefore always precedes its finish. The
 root loop also drains queued subagent UI updates before handling a finish. Stop
-and clear-context await every cancelled child task before proceeding.
+and clear-context await every cancelled subagent task before proceeding.
 
 The TUI keeps pending approval ids in request order and displays only the head
 of that FIFO queue. Replies remain keyed by tool id and are wrapped in the
-owning child's `run_id`; a child awaiting a later prompt stays blocked without
-pausing its running siblings. `AppState::running_children` tracks every live
-child by `run_id`, separately from the retained `child_conversations` map.
+owning subagent's `run_id`; a subagent awaiting a later prompt stays blocked without
+pausing its running siblings. `AppState::running_subagents` tracks every live
+subagent by `run_id`, separately from the retained `subagent_conversations` map.
 
 ### Drill-in TUI conversation view internals
 
-`ChildAgentStarted` associates a subagent's `run_id` with the exact
+`SubagentStarted` associates a subagent's `run_id` with the exact
 `spawn_subagent` bubble id. Drill-in resolves that id rather than choosing the
 most recently started subagent.
 
-Live `ChildConversation::started_at` uses a monotonic clock initialized by
-`ChildAgentStarted`; replayed conversations have no live timer. Render projections
+Live `SubagentConversation::started_at` uses a monotonic clock initialized by
+`SubagentStarted`; replayed conversations have no live timer. Render projections
 key these start times by the originating bubble id, so the root bubble and drill-in
 header share one elapsed timer. Queued and terminal bubbles never render it.
 Each tool-bubble render samples elapsed whole seconds once for both its live
@@ -740,29 +740,29 @@ Live Thinking timers also use truncated whole seconds in cached and legacy
 rendering, with the cached title and animation key sharing one sample.
 Completed `Thought for` titles retain millisecond precision.
 
-`AppState` keeps `active_view`, `running_children`, and `child_conversations`
+`AppState` keeps `active_view`, `running_subagents`, and `subagent_conversations`
 (keyed by `run_id`) separate. Finished conversations remain available while
 other subagents run, and the view model retains independent mode and transcript
-state for every run. `ChildAgentManager` forwards token updates but consumes
+state for every run. `SubagentManager` forwards token updates but consumes
 subagent stream lifecycle events so they cannot change the root TUI mode.
 
 `CompactionApplied` carries `run_id` from the agent sweep through the driver
 to the presenter. The presenter inserts and deduplicates the live marker in
-the owning root `chat_entries` or subagent `ChildConversation::messages`,
+the owning root `chat_entries` or subagent `SubagentConversation::messages`,
 independent of `active_view`. An unknown subagent ID is logged and discarded,
 never treated as root compaction.
 
 For a pending tool or clarify update tagged with `run_id`, `AppState::
 note_interactive_pause` always switches `active_view` to wherever that bubble
 actually lives — the root transcript when `run_id` is `None`/unrecognised, or
-that specific child's transcript otherwise — regardless of which conversation
+that specific subagent's transcript otherwise — regardless of which conversation
 (root or a different, possibly already-finished, subagent) is currently on
 screen. It saves the current view into `pre_pause_view` before switching and
 `resolve_possible_interactive_pause` restores it once the pause resolves. It
 skips the switch if the owning view is already open, so a manual drill-in does
 not trigger an automatic return.
 Outstanding approvals are queued in `pending_approval_order` across root and
-child transcripts. Committing a verdict locally transitions its bubble out of
+subagent transcripts. Committing a verdict locally transitions its bubble out of
 `Pending` and resumes the next request with its owning view.
 Overlapping pauses preserve the first `pending_input_snapshot`; restoration
 waits until no approval owns the input.
@@ -815,7 +815,7 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   and cross-cutting coordination, with explicit compatibility re-exports.
   Its private `conversation.rs` child owns entries, tool states and shared
   turn buffers; `conversation/replay.rs`, `conversation/navigation.rs` and
-  `conversation/tools.rs` separate transcript projection, root/child navigation
+  `conversation/tools.rs` separate transcript projection, root/subagent navigation
   and bubble mutations. `selection.rs` owns terminal-column selection,
   `model_picker.rs` owns slash/model choices, filtering and the
   `PickerRowLayout` that splits each narrow-terminal model into identity and
@@ -838,7 +838,7 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   entry/header layout and visible-row painting. `bubbles.rs` owns shared message
   chrome and prose; `tool_bubble.rs` coordinates tool chrome and body rendering
   through `tool_bubble/title.rs` and `tool_bubble/body.rs`. Cached, legacy and
-  child-header paths share this implementation. `footer.rs` owns status,
+  subagent-header paths share this implementation. `footer.rs` owns status,
   key hints and approval controls; `overlays.rs` owns slash/model panels,
   clarify banners and toasts; `help.rs` owns the help popup.
   Pure terminal-column selection (`chat/selection.rs`), hunk parsing
@@ -859,7 +859,7 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   `models.rs` owns cancellable catalog tasks, restart after approval pauses,
   typed selection and runtime display refresh; `input.rs` owns textarea,
   draft/overlay snapshots, mouse selection and history operations;
-  `updates.rs` owns live UI-to-domain mapping, lazy child replay and the
+  `updates.rs` owns live UI-to-domain mapping, lazy subagent replay and the
   compatibility snapshot; and `terminal.rs` owns clipboard implementations,
   terminal/title guards and stop-signal relay. Clipboard types retain their
   public facade paths. Pending destinations stay driver-local and are
@@ -886,17 +886,17 @@ events scroll the textarea, and the next frame synchronizes the offset.
 The footer readout follows the request path end to end: the OpenAI-compatible
 provider calls the estimate callback before response headers arrive; the agent
 loop maps it to `UiUpdate::ContextUsage` or
-`UiUpdate::ChildContextUsage { run_id, .. }`. `AgentLoop::run` also emits a
+`UiUpdate::SubagentContextUsage { run_id, .. }`. `AgentLoop::run` also emits a
 `ModelView` baseline estimate once at startup (before any prompt), so fresh and
 resumed sessions populate the footer without waiting for a request. Handling
 `AgentCommand::RecordModelChanged` re-emits the same `ModelView` estimate, so a
 model switch that changes the context window refreshes the percentage. The driver maps these to
-root/child domain events; the presenter stores root usage on
-`AppState::context_usage` and child usage on the matching `ChildConversation`.
+root/subagent domain events; the presenter stores root usage on
+`AppState::context_usage` and subagent usage on the matching `SubagentConversation`.
 `AppState::active_context_usage` selects the readout for the currently rendered
-root or child transcript, and
+root or subagent transcript, and
 `render`/`tui_widgets` format it as `64.2K (45%)` on the right end of the
-key-hints row (or the engine label/usage row below 80 columns). Finished child
+key-hints row (or the engine label/usage row below 80 columns). Finished subagent
 estimates stay with their transcripts for later
 drill-in. Headless runs drop both usage update variants.
 

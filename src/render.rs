@@ -84,10 +84,12 @@ fn render_internal(
         std::mem::take(&mut state.conversation.chat_rendered_lines);
     render_state.conversation.chat_rendered_line_prefix_widths =
         std::mem::take(&mut state.conversation.chat_rendered_line_prefix_widths);
-    render_state.child_view.header_rendered_lines =
-        std::mem::take(&mut state.child_view.header_rendered_lines);
-    render_state.child_view.header_rendered_line_prefix_widths =
-        std::mem::take(&mut state.child_view.header_rendered_line_prefix_widths);
+    render_state.subagent_view.header_rendered_lines =
+        std::mem::take(&mut state.subagent_view.header_rendered_lines);
+    render_state
+        .subagent_view
+        .header_rendered_line_prefix_widths =
+        std::mem::take(&mut state.subagent_view.header_rendered_line_prefix_widths);
     let mut cache = std::mem::take(&mut state.render_cache);
     let mut source = tui_widgets::ConversationSource::from_app(state);
     if expansion_feedback {
@@ -129,12 +131,12 @@ fn draw_expansion_indicator(frame: &mut Frame, state: &TuiState, target: BubbleE
     let (area, title_row) = match target {
         BubbleExpansionTarget::Tool(id)
             if state
-                .child_view
-                .child_view_bubble
+                .subagent_view
+                .subagent_view_bubble
                 .as_ref()
                 .is_some_and(|bubble| bubble.0 == id) =>
         {
-            (state.child_view.header_bubble_area, Some(0))
+            (state.subagent_view.header_bubble_area, Some(0))
         }
         _ => {
             let absolute_row = match target {
@@ -195,7 +197,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         None
     };
     // A pending approval belongs to a subagent, not the root agent, when
-    // its `tool_id` lives in any tracked child's own transcript rather than
+    // its `tool_id` lives in any tracked subagent's own transcript rather than
     // `chat_entries` — this can be true even while `active_view == Root`
     // (the user manually navigated back to the root conversation via Esc
     // (empty draft) while a subagent's own tool call is still awaiting
@@ -203,20 +205,20 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
     // explicitly (see `tui_widgets::draw_approval_footer`), since the
     // pending tool call is otherwise invisible from the root transcript.
     let pending_approval_is_subagent = matches!(state.focus, Focus::ToolApproval { tool_id, .. }
-    if state.child_conversations.values().any(|conversation| conversation.messages.iter().any(
+    if state.subagent_conversations.values().any(|conversation| conversation.messages.iter().any(
         |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id)
     )));
-    // Drill-in conversation model (Phase 6.10): while viewing a child, the
-    // main chat area and in-flight stream text project from that child's own
+    // Drill-in conversation model (Phase 6.10): while viewing a subagent, the
+    // main chat area and in-flight stream text project from that subagent's own
     // transcript/accumulator instead of the root's — the root's own
-    // stream/tool activity (and any other child's) keeps running in the
+    // stream/tool activity (and any other subagent's) keeps running in the
     // background but must not bleed into the transcript the user is
     // currently looking at.
-    let showing_child_run_id = match &state.active_view {
-        ConversationView::Child { run_id, .. } => Some(*run_id),
+    let showing_subagent_run_id = match &state.active_view {
+        ConversationView::Subagent { run_id, .. } => Some(*run_id),
         ConversationView::Root => None,
     };
-    let active_subagent_counts = if showing_child_run_id.is_some() {
+    let active_subagent_counts = if showing_subagent_run_id.is_some() {
         ActiveSubagentCounts::default()
     } else {
         state.active_subagent_counts()
@@ -228,7 +230,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         thinking_started_at,
         partial_thinking_collapsed,
     ) = if let Some(conversation) =
-        showing_child_run_id.and_then(|run_id| state.child_conversations.get(&run_id))
+        showing_subagent_run_id.and_then(|run_id| state.subagent_conversations.get(&run_id))
     {
         (
             if include_content {
@@ -270,14 +272,14 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
             state.turn_buffer.partial_thinking_collapsed,
         )
     };
-    // Drill-in conversation model (Phase 6.10): the child-view header
+    // Drill-in conversation model (Phase 6.10): the subagent-view header
     // re-renders the *real* `spawn_subagent` `ToolBubble` from the root
     // conversation — same chrome, same collapsed state, same task/label/
     // agent_type content — rather than a separately-maintained header
     // string. `AppState::header_bubble_id` is the single source of truth for
     // which bubble that is (also used by `presenter::route_mouse` to route
     // header clicks to the same bubble's collapse toggle).
-    let child_view_bubble = state.header_bubble_id().and_then(|bubble_id| {
+    let subagent_view_bubble = state.header_bubble_id().and_then(|bubble_id| {
         state.chat_entries.iter().find_map(|entry| match entry {
             ChatEntry::ToolBubble {
                 id,
@@ -297,31 +299,32 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
             _ => None,
         })
     });
-    // Keep the root/parent status separately: the drilled-into child's own
+    // Keep the root/parent status separately: the drilled-into subagent's own
     // streaming/tool-running/idle status, not the root's — see
-    // `AppState::agent_mode_for_child` for why `agent_mode()` alone is wrong
-    // here (it would gate the child's in-flight thinking/response bubble on
-    // the root's `TuiMode` instead of the child's).
+    // `AppState::agent_mode_for_subagent` for why `agent_mode()` alone is wrong
+    // here (it would gate the subagent's in-flight thinking/response bubble on
+    // the root's `TuiMode` instead of the subagent's).
     let parent_agent_mode = state.agent_mode();
     let agent_mode = match &state.active_view {
-        ConversationView::Child { run_id, .. } => state.agent_mode_for_child(*run_id),
+        ConversationView::Subagent { run_id, .. } => state.agent_mode_for_subagent(*run_id),
         ConversationView::Root => parent_agent_mode,
     };
-    let engine_display = showing_child_run_id
-        .and_then(|run_id| state.child_engine_displays.get(&run_id))
-        .map(|child_display| {
-            let mut child_display = child_display.clone();
-            if child_display.inherits_parent_runtime {
-                child_display.engine_name = state.engine_display.engine_name.clone();
-                child_display.provider_connection =
+    let engine_display = showing_subagent_run_id
+        .and_then(|run_id| state.subagent_engine_displays.get(&run_id))
+        .map(|subagent_display| {
+            let mut subagent_display = subagent_display.clone();
+            if subagent_display.inherits_parent_runtime {
+                subagent_display.engine_name = state.engine_display.engine_name.clone();
+                subagent_display.provider_connection =
                     state.engine_display.provider_connection.clone();
-                child_display.model = state.engine_display.model.clone();
-                child_display.reasoning_effort = state.engine_display.reasoning_effort.clone();
-                if let Some(compaction) = &mut child_display.compaction_engine {
+                subagent_display.model = state.engine_display.model.clone();
+                subagent_display.reasoning_effort = state.engine_display.reasoning_effort.clone();
+                if let Some(compaction) = &mut subagent_display.compaction_engine {
                     if compaction.follows_conversation {
-                        compaction.engine_name = child_display.engine_name.clone();
-                        compaction.provider_connection = child_display.provider_connection.clone();
-                        compaction.model = child_display.model.clone();
+                        compaction.engine_name = subagent_display.engine_name.clone();
+                        compaction.provider_connection =
+                            subagent_display.provider_connection.clone();
+                        compaction.model = subagent_display.model.clone();
                         if let Some(parent_compaction) = state
                             .engine_display
                             .compaction_engine
@@ -334,11 +337,11 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
                     } else {
                         compaction.shares_conversation = compaction.shares_conversation
                             && !compaction.engine_name.is_empty()
-                            && compaction.engine_name == child_display.engine_name;
+                            && compaction.engine_name == subagent_display.engine_name;
                     }
                 }
             }
-            child_display
+            subagent_display
         })
         .unwrap_or_else(|| state.engine_display.clone());
     TuiState {
@@ -347,7 +350,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         agent_mode,
         compacting: state
             .compaction_requests
-            .contains_key(&showing_child_run_id),
+            .contains_key(&showing_subagent_run_id),
         active_subagent_counts,
         engine_display,
         chat_entries,
@@ -356,12 +359,12 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         partial_thinking_text,
         thinking_started_at,
         partial_thinking_collapsed,
-        queued_steer_texts: if include_content && showing_child_run_id.is_none() {
+        queued_steer_texts: if include_content && showing_subagent_run_id.is_none() {
             state.queued_steer_texts.clone()
         } else {
             Vec::new()
         },
-        steer_indicator: state.steer_indicator && showing_child_run_id.is_none(),
+        steer_indicator: state.steer_indicator && showing_subagent_run_id.is_none(),
         pending_approval,
         pending_approval_is_subagent,
         input_history: if include_content {
@@ -425,22 +428,25 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
             },
             clarify_banner: ratatui::layout::Rect::default(),
         },
-        child_view: crate::tui_render_state::ChildViewState {
-            child_view_bubble,
-            header_bubble_scroll_offset: state.child_view.header_bubble_scroll_offset,
+        subagent_view: crate::tui_render_state::SubagentViewState {
+            subagent_view_bubble,
+            header_bubble_scroll_offset: state.subagent_view.header_bubble_scroll_offset,
             header_bubble_area: ratatui::layout::Rect::default(),
             header_rendered_lines: if include_content {
-                state.child_view.header_rendered_lines.clone()
+                state.subagent_view.header_rendered_lines.clone()
             } else {
                 Vec::new()
             },
             header_rendered_line_prefix_widths: if include_content {
-                state.child_view.header_rendered_line_prefix_widths.clone()
+                state
+                    .subagent_view
+                    .header_rendered_line_prefix_widths
+                    .clone()
             } else {
                 Vec::new()
             },
-            header_selection: state.child_view.header_selection,
-            header_drag_active: state.child_view.header_drag_active,
+            header_selection: state.subagent_view.header_selection,
+            header_drag_active: state.subagent_view.header_drag_active,
         },
         conversation: crate::tui_render_state::ConversationListState {
             scroll_offset: state.conversation.scroll_offset,
@@ -473,13 +479,14 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.layout.chat_area.rect = rendered.conversation.chat_area;
     state.layout.chat_scrollbar = rendered.conversation.chat_scrollbar;
     state.layout.clarify_banner = rendered.clarify_banner_state.clarify_banner;
-    state.layout.header_bubble = rendered.child_view.header_bubble_area;
-    state.child_view.header_bubble_scroll_offset = rendered.child_view.header_bubble_scroll_offset;
-    state.child_view.header_rendered_lines = rendered.child_view.header_rendered_lines;
-    state.child_view.header_rendered_line_prefix_widths =
-        rendered.child_view.header_rendered_line_prefix_widths;
-    state.child_view.header_selection = rendered.child_view.header_selection;
-    state.child_view.header_drag_active = rendered.child_view.header_drag_active;
+    state.layout.header_bubble = rendered.subagent_view.header_bubble_area;
+    state.subagent_view.header_bubble_scroll_offset =
+        rendered.subagent_view.header_bubble_scroll_offset;
+    state.subagent_view.header_rendered_lines = rendered.subagent_view.header_rendered_lines;
+    state.subagent_view.header_rendered_line_prefix_widths =
+        rendered.subagent_view.header_rendered_line_prefix_widths;
+    state.subagent_view.header_selection = rendered.subagent_view.header_selection;
+    state.subagent_view.header_drag_active = rendered.subagent_view.header_drag_active;
     state.layout.help_popup.rect = rendered.help_popup.help_popup_rect;
     state.layout.help_popup.content_area = rendered.help_popup.help_content_area;
     state.layout.slash_overlay = rendered.slash_overlay_layout;
@@ -499,10 +506,10 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     // navigation (armed by `AppState::switch_to_root_view`) now that
     // `bubble_title_rows` reflects this frame's *root* transcript (the very
     // frame after the switch, since `active_view` already flipped to `Root`
-    // before this draw call ran) rather than the child's. Resolving by the
+    // before this draw call ran) rather than the subagent's. Resolving by the
     // bubble's current row — instead of trusting the raw offset saved at
     // drill-in time — stays correct even if the root conversation grew while
-    // the child view was open. Left unresolved (and silently dropped) if the
+    // the subagent view was open. Left unresolved (and silently dropped) if the
     // bubble is no longer present, leaving whatever `saved_root_scroll`
     // placeholder was already restored.
     if let Some(target_id) = state.pending_scroll_to_bubble.take() {
@@ -538,7 +545,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::tui_reducer_state::{ChatEntry, ChildRunInfo, ToolCallState};
+    use crate::tui_reducer_state::{ChatEntry, SubagentRunInfo, ToolCallState};
 
     #[test]
     fn expansion_feedback_reuses_collapsed_layouts_before_building_large_bodies() {
@@ -548,10 +555,10 @@ mod tests {
 
         for surface in [
             "root-tool",
-            "child-tool",
+            "subagent-tool",
             "header",
             "thinking",
-            "child-thinking",
+            "subagent-thinking",
             "streaming",
         ] {
             let mut state = AppState::new();
@@ -584,7 +591,7 @@ mod tests {
                     collapsed: true,
                 }
             };
-            if surface.starts_with("child-") || surface == "header" {
+            if surface.starts_with("subagent-") || surface == "header" {
                 let run_id = Uuid::new_v4();
                 let mut entry = Some(entry);
                 let header_bubble_id = if surface == "header" {
@@ -597,7 +604,7 @@ mod tests {
                 } else {
                     push_spawn_bubble(&mut state, header_bubble_id, "reviewer", "Review");
                 }
-                state.start_child_run(ChildRunInfo {
+                state.start_subagent_run(SubagentRunInfo {
                     run_id,
                     bubble_id: header_bubble_id,
                     agent_type: "reviewer".to_string(),
@@ -606,13 +613,13 @@ mod tests {
                 });
                 if surface != "header" {
                     state
-                        .child_conversations
+                        .subagent_conversations
                         .get_mut(&run_id)
                         .unwrap()
                         .messages
                         .push(entry.take().unwrap());
                 }
-                state.switch_to_child_view(run_id);
+                state.switch_to_subagent_view(run_id);
             } else if surface == "streaming" {
                 state.turn_buffer.partial_thinking_text = content;
                 state.turn_buffer.partial_thinking_collapsed = true;
@@ -628,7 +635,7 @@ mod tests {
             let body_builds = state.render_cache.body_layout_builds;
             match surface {
                 "header" => state.toggle_header_bubble_collapsed(),
-                "thinking" | "child-thinking" => state.toggle_thinking_collapsed(0),
+                "thinking" | "subagent-thinking" => state.toggle_thinking_collapsed(0),
                 "streaming" => state.toggle_partial_thinking_collapsed(),
                 _ => state.toggle_tool_bubble_collapsed(bubble_id),
             }
@@ -715,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn scrollbar_clicks_move_the_rendered_child_conversation() {
+    fn scrollbar_clicks_move_the_rendered_subagent_conversation() {
         assert_scrollbar_click_positions(true, false);
     }
 
@@ -724,7 +731,7 @@ mod tests {
         assert_scrollbar_click_positions(false, true);
     }
 
-    fn assert_scrollbar_click_positions(child_view: bool, owned_projection: bool) {
+    fn assert_scrollbar_click_positions(subagent_view: bool, owned_projection: bool) {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::{backend::TestBackend, Terminal};
 
@@ -733,11 +740,11 @@ mod tests {
             text: (0..200).map(|index| format!("Line {index}\n\n")).collect(),
             interrupted: false,
         };
-        if child_view {
+        if subagent_view {
             let run_id = Uuid::new_v4();
             let bubble_id = Uuid::new_v4();
             push_spawn_bubble(&mut state, bubble_id, "reviewer", "Review");
-            state.start_child_run(ChildRunInfo {
+            state.start_subagent_run(SubagentRunInfo {
                 run_id,
                 bubble_id,
                 agent_type: "reviewer".to_string(),
@@ -745,12 +752,12 @@ mod tests {
                 label: "Review".to_string(),
             });
             state
-                .child_conversations
+                .subagent_conversations
                 .get_mut(&run_id)
                 .unwrap()
                 .messages
                 .push(message);
-            state.switch_to_child_view(run_id);
+            state.switch_to_subagent_view(run_id);
         } else {
             state.chat_entries.push(message);
         }
@@ -825,9 +832,9 @@ mod tests {
             assert_eq!(state.conversation.scroll_offset, expected);
         }
         state.chat_entries.clear();
-        if child_view {
+        if subagent_view {
             state
-                .child_conversations
+                .subagent_conversations
                 .values_mut()
                 .for_each(|conversation| conversation.messages.clear());
         }
@@ -840,7 +847,7 @@ mod tests {
 
     /// Pushes a `spawn_subagent` `ToolBubble` into `state.chat_entries` (the
     /// root transcript) whose title arguments mirror `run_id`'s
-    /// `ChildRunInfo`, so `project_for_draw` can find it as the child-view
+    /// `SubagentRunInfo`, so `project_for_draw` can find it as the subagent-view
     /// header source.
     fn push_spawn_bubble(state: &mut AppState, bubble_id: Uuid, agent_type: &str, task: &str) {
         state.chat_entries.push(ChatEntry::ToolBubble {
@@ -867,7 +874,7 @@ mod tests {
             interrupted: false,
         });
         let run_id = Uuid::new_v4();
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
@@ -875,12 +882,12 @@ mod tests {
             label: "Investigate flaky test".to_string(),
         });
         state
-            .child_conversations
+            .subagent_conversations
             .get_mut(&run_id)
             .unwrap()
             .messages
             .push(ChatEntry::AssistantMessage {
-                text: "child reply".to_string(),
+                text: "subagent reply".to_string(),
                 interrupted: false,
             });
 
@@ -890,11 +897,11 @@ mod tests {
         assert!(
             matches!(&projected.chat_entries[0], ChatEntry::AssistantMessage { text, .. } if text == "root reply")
         );
-        assert!(projected.child_view.child_view_bubble.is_none());
+        assert!(projected.subagent_view.subagent_view_bubble.is_none());
     }
 
     #[test]
-    fn project_for_draw_counts_active_root_subagents_but_not_finished_or_child_view_runs() {
+    fn project_for_draw_counts_active_root_subagents_but_not_finished_or_subagent_view_runs() {
         let mut state = AppState::new();
         let running_bubble_id = Uuid::new_v4();
         let queued_bubble_id = Uuid::new_v4();
@@ -938,20 +945,20 @@ mod tests {
         );
 
         let run_id = Uuid::new_v4();
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id: running_bubble_id,
             agent_type: "reviewer".to_string(),
             task: "inspect the change".to_string(),
             label: "Inspect change".to_string(),
         });
-        state.switch_to_child_view(run_id);
+        state.switch_to_subagent_view(run_id);
 
-        let child_projection = project_for_draw(&state);
+        let subagent_projection = project_for_draw(&state);
         assert_eq!(
-            child_projection.active_subagent_counts,
+            subagent_projection.active_subagent_counts,
             ActiveSubagentCounts::default(),
-            "the main-conversation count must not be shown in a child transcript"
+            "the main-conversation count must not be shown in a subagent transcript"
         );
     }
 
@@ -977,36 +984,36 @@ mod tests {
         let run_id = Uuid::new_v4();
         let bubble_id = Uuid::new_v4();
         push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.child_engine_displays.insert(
+        state.subagent_engine_displays.insert(
             run_id,
             crate::llm::engine::EngineDisplayInfo {
                 engine_name: "ollama/local2".to_string(),
                 provider_connection: "ollama".to_string(),
-                model: "child-model".to_string(),
+                model: "subagent-model".to_string(),
                 reasoning_effort: None,
                 compaction_engine: None,
                 inherits_parent_runtime: false,
             },
         );
-        state.switch_to_child_view(run_id);
+        state.switch_to_subagent_view(run_id);
 
-        let child_projection = project_for_draw(&state);
+        let subagent_projection = project_for_draw(&state);
         assert_eq!(
-            child_projection.engine_display.provider_connection,
+            subagent_projection.engine_display.provider_connection,
             "ollama"
         );
-        assert_eq!(child_projection.engine_display.model, "child-model");
+        assert_eq!(subagent_projection.engine_display.model, "subagent-model");
     }
 
     #[test]
-    fn inherited_child_projection_tracks_parent_engine_and_implicit_summarizer() {
+    fn inherited_subagent_projection_tracks_parent_engine_and_implicit_summarizer() {
         let run_id = Uuid::new_v4();
         let bubble_id = Uuid::new_v4();
         let mut state = AppState::new();
@@ -1026,14 +1033,14 @@ mod tests {
             inherits_parent_runtime: false,
         };
         push_spawn_bubble(&mut state, bubble_id, "reviewer", "inspect the change");
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id,
             agent_type: "reviewer".to_string(),
             task: "inspect the change".to_string(),
             label: "Inspect change".to_string(),
         });
-        state.child_engine_displays.insert(
+        state.subagent_engine_displays.insert(
             run_id,
             crate::llm::engine::EngineDisplayInfo {
                 engine_name: "engine-a".to_string(),
@@ -1051,15 +1058,15 @@ mod tests {
                 inherits_parent_runtime: true,
             },
         );
-        state.switch_to_child_view(run_id);
+        state.switch_to_subagent_view(run_id);
 
-        let child_projection = project_for_draw(&state);
-        assert_eq!(child_projection.engine_display.engine_name, "engine-b");
-        assert_eq!(child_projection.engine_display.model, "model-b");
-        let summarizer = child_projection
+        let subagent_projection = project_for_draw(&state);
+        assert_eq!(subagent_projection.engine_display.engine_name, "engine-b");
+        assert_eq!(subagent_projection.engine_display.model, "model-b");
+        let summarizer = subagent_projection
             .engine_display
             .compaction_engine
-            .expect("implicit child summarizer");
+            .expect("implicit subagent summarizer");
         assert_eq!(summarizer.engine_name, "engine-b");
         assert_eq!(summarizer.model, "model-b");
         assert_eq!(summarizer.context_length, 65_536);
@@ -1068,12 +1075,12 @@ mod tests {
     }
 
     #[test]
-    fn project_for_draw_sources_child_transcript_and_header_bubble_when_viewing_child() {
+    fn project_for_draw_sources_subagent_transcript_and_header_bubble_when_viewing_subagent() {
         let mut state = AppState::new();
         let run_id = Uuid::new_v4();
         let bubble_id = Uuid::new_v4();
         push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id,
             agent_type: "reviewer".to_string(),
@@ -1081,26 +1088,26 @@ mod tests {
             label: "Investigate flaky test".to_string(),
         });
         state
-            .child_conversations
+            .subagent_conversations
             .get_mut(&run_id)
             .unwrap()
             .messages
             .push(ChatEntry::AssistantMessage {
-                text: "child reply".to_string(),
+                text: "subagent reply".to_string(),
                 interrupted: false,
             });
-        state.switch_to_child_view(run_id);
+        state.switch_to_subagent_view(run_id);
 
         let projected = project_for_draw(&state);
 
         assert_eq!(projected.chat_entries.len(), 1);
         assert!(
-            matches!(&projected.chat_entries[0], ChatEntry::AssistantMessage { text, .. } if text == "child reply")
+            matches!(&projected.chat_entries[0], ChatEntry::AssistantMessage { text, .. } if text == "subagent reply")
         );
         let (header_bubble_id, header_name, _state, collapsed) = projected
-            .child_view
-            .child_view_bubble
-            .expect("header bubble must be set while viewing the child");
+            .subagent_view
+            .subagent_view_bubble
+            .expect("header bubble must be set while viewing the subagent");
         assert_eq!(header_bubble_id, bubble_id);
         assert_eq!(
             header_name,
@@ -1116,7 +1123,7 @@ mod tests {
     fn drilled_in_view_tints_chat_dividers_with_the_subagent_bubble_color() {
         // The header-to-chat and chat-to-input divider lines are tinted the
         // same pinkish/magenta as the `spawn_subagent` bubble's own border
-        // while drilled into a child, unlike the root conversation's neutral
+        // while drilled into a subagent, unlike the root conversation's neutral
         // dividers — a persistent cue that survives scrolling (an indentation
         // approach was tried first but discarded as visually odd alongside
         // the bubble chrome; see docs/features.md's drill-in section).
@@ -1169,33 +1176,33 @@ mod tests {
             "root view has a single, neutral chat/input divider"
         );
 
-        let mut child_state = AppState::new();
+        let mut subagent_state = AppState::new();
         let run_id = Uuid::new_v4();
         let bubble_id = Uuid::new_v4();
         push_spawn_bubble(
-            &mut child_state,
+            &mut subagent_state,
             bubble_id,
             "reviewer",
             "look into flaky test",
         );
-        child_state.start_child_run(ChildRunInfo {
+        subagent_state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        child_state.switch_to_child_view(run_id);
+        subagent_state.switch_to_subagent_view(run_id);
 
-        let child_colors = divider_colors(&child_state);
+        let subagent_colors = divider_colors(&subagent_state);
         assert_eq!(
-            child_colors.len(),
+            subagent_colors.len(),
             2,
-            "child view has both a header-to-chat and a chat-to-input divider: {child_colors:?}"
+            "subagent view has both a header-to-chat and a chat-to-input divider: {subagent_colors:?}"
         );
         assert!(
-            child_colors.iter().all(|color| *color == Color::Magenta),
-            "both dividers must be tinted like the subagent bubble border while drilled in: {child_colors:?}"
+            subagent_colors.iter().all(|color| *color == Color::Magenta),
+            "both dividers must be tinted like the subagent bubble border while drilled in: {subagent_colors:?}"
         );
     }
 
@@ -1203,7 +1210,7 @@ mod tests {
     fn drilled_in_view_tints_the_chat_scrollbar_with_the_subagent_bubble_color() {
         // The conversation scrollbar (track/thumb/arrows) picks up the same
         // pinkish/magenta tint as the chat dividers while drilled into a
-        // child, instead of the root conversation's neutral scrollbar color.
+        // subagent, instead of the root conversation's neutral scrollbar color.
         use ratatui::backend::TestBackend;
         use ratatui::style::Color;
         use ratatui::Terminal;
@@ -1260,39 +1267,42 @@ mod tests {
             "root scrollbar must stay the neutral color: {root_colors:?}"
         );
 
-        let mut child_state = AppState::new();
+        let mut subagent_state = AppState::new();
         let run_id = Uuid::new_v4();
         let bubble_id = Uuid::new_v4();
         push_spawn_bubble(
-            &mut child_state,
+            &mut subagent_state,
             bubble_id,
             "reviewer",
             "look into flaky test",
         );
-        child_state.start_child_run(ChildRunInfo {
+        subagent_state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        let conversation = child_state.child_conversations.get_mut(&run_id).unwrap();
+        let conversation = subagent_state
+            .subagent_conversations
+            .get_mut(&run_id)
+            .unwrap();
         for index in 0..30 {
             conversation.messages.push(ChatEntry::AssistantMessage {
-                text: format!("child reply {index}"),
+                text: format!("subagent reply {index}"),
                 interrupted: false,
             });
         }
-        child_state.switch_to_child_view(run_id);
+        subagent_state.switch_to_subagent_view(run_id);
 
-        let child_colors = scrollbar_colors(&child_state);
+        let subagent_colors = scrollbar_colors(&subagent_state);
         assert!(
-            !child_colors.is_empty(),
-            "child scrollbar must render once content overflows the viewport"
+            !subagent_colors.is_empty(),
+            "subagent scrollbar must render once content overflows the viewport"
         );
         assert!(
-            child_colors.iter().all(|color| *color == Color::Magenta),
-            "child scrollbar must be tinted like the subagent bubble border while drilled in: {child_colors:?}"
+            subagent_colors.iter().all(|color| *color == Color::Magenta),
+            "subagent scrollbar must be tinted like the subagent bubble border while drilled in: {subagent_colors:?}"
         );
     }
 
@@ -1301,7 +1311,7 @@ mod tests {
         let mut state = AppState::new();
         let tool_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
@@ -1309,7 +1319,7 @@ mod tests {
             label: "Investigate flaky test".to_string(),
         });
         state
-            .child_conversations
+            .subagent_conversations
             .get_mut(&run_id)
             .unwrap()
             .messages
@@ -1358,13 +1368,13 @@ mod tests {
     }
 
     #[test]
-    fn project_for_draw_reports_streaming_agent_mode_while_viewing_an_actively_running_child() {
+    fn project_for_draw_reports_streaming_agent_mode_while_viewing_an_actively_running_subagent() {
         // Regression test: while a `spawn_subagent` bubble is `Running` in
         // the root transcript, the root's own `agent_mode()` maps to
         // `ToolRunning` (its `TuiMode` is `Idle`/`Streaming` but a root
         // `ToolBubble` is `Running`). Before this fix, `project_for_draw`
         // used that *root* `agent_mode()` unconditionally, so a drilled-into
-        // child's own in-flight thinking/response text never rendered as a
+        // subagent's own in-flight thinking/response text never rendered as a
         // streaming bubble (`tui_widgets::draw` only shows it when
         // `agent_mode == AgentMode::Streaming`) — it only appeared once
         // flushed into a committed `ChatEntry`, i.e. no visible
@@ -1374,16 +1384,16 @@ mod tests {
         let run_id = Uuid::new_v4();
         let bubble_id = Uuid::new_v4();
         push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.switch_to_child_view(run_id);
+        state.switch_to_subagent_view(run_id);
         state
-            .child_conversations
+            .subagent_conversations
             .get_mut(&run_id)
             .unwrap()
             .turn_buffer
@@ -1401,22 +1411,22 @@ mod tests {
     }
 
     #[test]
-    fn project_for_draw_reports_idle_agent_mode_while_viewing_a_finished_child() {
+    fn project_for_draw_reports_idle_agent_mode_while_viewing_a_finished_subagent() {
         let mut state = AppState::new();
         let run_id = Uuid::new_v4();
         let bubble_id = Uuid::new_v4();
         push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.switch_to_child_view(run_id);
-        // The child finished: `running_child` is cleared (mirrors
-        // `ChildAgentDone` handling), but the transcript/view stays around.
-        state.running_children.clear();
+        state.switch_to_subagent_view(run_id);
+        // The subagent finished: `running_subagent` is cleared (mirrors
+        // `SubagentDone` handling), but the transcript/view stays around.
+        state.running_subagents.clear();
 
         let projected = project_for_draw(&state);
 
@@ -1424,7 +1434,7 @@ mod tests {
     }
 
     #[test]
-    fn footer_reports_parent_activity_when_viewing_finished_child_with_running_sibling() {
+    fn footer_reports_parent_activity_when_viewing_finished_subagent_with_running_sibling() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         use ratatui_textarea::TextArea;
@@ -1445,7 +1455,7 @@ mod tests {
             }),
             collapsed: false,
         });
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id: finished_run_id,
             bubble_id: finished_bubble_id,
             agent_type: "reviewer".to_string(),
@@ -1456,16 +1466,16 @@ mod tests {
         let running_run_id = Uuid::new_v4();
         let running_bubble_id = Uuid::new_v4();
         push_spawn_bubble(&mut state, running_bubble_id, "reviewer", "running task");
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id: running_run_id,
             bubble_id: running_bubble_id,
             agent_type: "reviewer".to_string(),
             task: "running task".to_string(),
             label: "Running task".to_string(),
         });
-        // The first child finished (`ChildAgentDone`); only the sibling is still running.
-        state.running_children.remove(&finished_run_id);
-        state.switch_to_child_view(finished_run_id);
+        // The first subagent finished (`SubagentDone`); only the sibling is still running.
+        state.running_subagents.remove(&finished_run_id);
+        state.switch_to_subagent_view(finished_run_id);
 
         assert_eq!(state.agent_mode(), crate::agent::AgentMode::ToolRunning);
         let mut projected = project_for_draw(&state);
@@ -1502,7 +1512,7 @@ mod tests {
     fn sync_from_draw_resolves_pending_scroll_to_bubble_to_its_current_row() {
         // Regression test: Esc (empty draft) must land on the drilled-in-from bubble's
         // *current* row, not a raw offset saved before the root
-        // conversation grew while the child view was open.
+        // conversation grew while the subagent view was open.
         let mut state = AppState::new();
         let bubble_id = Uuid::new_v4();
         state.pending_scroll_to_bubble = Some(bubble_id);
@@ -1645,14 +1655,14 @@ mod tests {
         let bubble_id = Uuid::new_v4();
         push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
         let run_id = Uuid::new_v4();
-        state.start_child_run(ChildRunInfo {
+        state.start_subagent_run(SubagentRunInfo {
             run_id,
             bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.switch_to_child_view(run_id);
+        state.switch_to_subagent_view(run_id);
         let mut registry = crate::agent::tools::default_registry(
             std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new())),
             crate::agent::tools::ToolRegistryConfig::default(),

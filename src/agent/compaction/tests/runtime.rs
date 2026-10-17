@@ -15,11 +15,11 @@
 use super::*;
 
 #[tokio::test]
-async fn oversized_summary_requests_emit_root_and_child_notices_without_changing_source() {
-    for is_child in [false, true] {
+async fn oversized_summary_requests_emit_root_and_subagent_notices_without_changing_source() {
+    for is_subagent in [false, true] {
         let (mut runtime, mut outcomes, mut updates, run_id, _, context) =
             new_recording_runtime("A summary.");
-        let run_id = if is_child { run_id } else { None };
+        let run_id = if is_subagent { run_id } else { None };
         let (sender, receiver) = mpsc::channel(4);
         runtime.set_activity_sender(sender, run_id);
         updates.close();

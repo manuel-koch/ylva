@@ -21,7 +21,7 @@ use uuid::Uuid;
 /// Shared handling for `DomainEvent::ToolPending`, used identically by
 /// `domain_idle`, `domain_pending`, and `domain_streaming`: creates the
 /// `Pending` bubble in whichever transcript `run_id` targets (root or a
-/// child) and queues it in `pending_approval_order`. When no other approval
+/// subagent) and queues it in `pending_approval_order`. When no other approval
 /// is on screen it arms `Focus::ToolApproval` and auto-switches the drill-in
 /// view to wherever this pending call lives (see
 /// `AppState::note_interactive_pause`). Otherwise it waits its turn behind
@@ -176,8 +176,8 @@ pub(super) fn update_tool_bubble_to_running(
         state.focus = Focus::MainInput;
     }
     // A tool moving from Pending to Running means its approval step (if any)
-    // is over — if this was the child's interactive pause we auto-switched
-    // for, auto-return to Root now that the child is unblocked again.
+    // is over — if this was the subagent's interactive pause we auto-switched
+    // for, auto-return to Root now that the subagent is unblocked again.
     state.resolve_possible_interactive_pause(id);
 }
 

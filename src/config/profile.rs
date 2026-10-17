@@ -74,8 +74,8 @@ pub struct ProfileConfig {
         deserialize_with = "deserialize_usize_or_string"
     )]
     pub input_history_limit: usize,
-    /// Cap on child agents running at the same time across the whole agent
-    /// tree (root plus all nested children). An effective value of `None`
+    /// Cap on subagents running at the same time across the whole agent
+    /// tree (root plus all nested subagents). An effective value of `None`
     /// means unlimited; a configured value `<= 0` resolves to `None`. Queued
     /// spawns beyond the cap wait in FIFO order. Read through
     /// [`ProfileConfig::max_concurrent_subagents_limit`].
@@ -478,7 +478,7 @@ fn default_agent_config() -> AgentConfig {
 
 impl Default for ProfileConfig {
     /// The in-code default profile: one `default` agent type that may spawn
-    /// children, no configured engines (the caller supplies its
+    /// subagents, no configured engines (the caller supplies its
     /// environment-derived engine), and the dark theme.
     fn default() -> Self {
         ProfileConfig {
@@ -721,13 +721,13 @@ impl ProfileConfig {
         }
     }
 
-    /// Effective cap on concurrently running child agents across the whole
+    /// Effective cap on concurrently running subagents across the whole
     /// agent tree; `None` means unlimited.
     pub fn max_concurrent_subagents_limit(&self) -> Option<usize> {
         self.max_concurrent_subagents.filter(|limit| *limit > 0)
     }
 
-    /// Apply the signed CLI override for the profile-level child concurrency
+    /// Apply the signed CLI override for the profile-level subagent concurrency
     /// cap. Non-positive values mean unlimited, matching profile deserialization.
     pub fn apply_max_concurrent_subagents_override(&mut self, value: i64) {
         self.max_concurrent_subagents = concurrency_limit_from_setting(value);

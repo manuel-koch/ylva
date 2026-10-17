@@ -17,14 +17,14 @@
 //! in-process, and then assert what landed under `~/.ylva/chats` through the
 //! public [`ylva::Store`] API.
 //!
-//! Isolation comes from one `tempfile::TempDir` used as both the child
+//! Isolation comes from one `tempfile::TempDir` used as both the subagent
 //! process's `YLVA_HOME` (so `<tempdir>/chats` resolves inside it, since
 //! `YLVA_HOME` names the Ylva home directly — no further `.ylva`
 //! nesting is applied when it is set) and its working directory (so the
 //! derived `project_key` is deterministic). The dedicated override is set
-//! **only** on the spawned child (`Command::env`), never on the test
+//! **only** on the spawned subagent (`Command::env`), never on the test
 //! runner's own process, and deliberately in place of the real `HOME`:
-//! overriding `HOME` would also mislead every executable the child might
+//! overriding `HOME` would also mislead every executable the subagent might
 //! invoke through a tool call (shell rc files, git and ssh config lookups,
 //! credential helpers, …), whereas `YLVA_HOME` redirects Ylva's own state and
 //! nothing else.
@@ -85,7 +85,7 @@ impl PersistenceRun {
 /// twice against the same persisted state (the `--conversation-id` resume
 /// test).
 ///
-/// The child's environment is an **allowlist**, not a blocklist: `env_clear`
+/// The subagent's environment is an **allowlist**, not a blocklist: `env_clear`
 /// drops everything the developer's shell or CI happens to export, and only
 /// `PATH`, `YLVA_HOME`, and the caller's `provider_env` are put back. A
 /// blocklist of today's provider variables would silently stop isolating this
@@ -795,7 +795,7 @@ async fn resumed_headless_request_replays_the_prior_transcript_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn compiled_binary_persists_and_resumes_child_run_transcripts() {
+async fn compiled_binary_persists_and_resumes_subagent_run_transcripts() {
     let server = MockLlmServer::start_with_connection_frame_rules(
         MockLlmConfig {
             frames: vec![content_frame("fallback answer")],
@@ -806,7 +806,7 @@ async fn compiled_binary_persists_and_resumes_child_run_transcripts() {
             vec![common::mock_llm_server::tool_call_frame(
                 0,
                 "spawn_subagent",
-                r#"{"label":"Inspect repository","task":"Inspect the repository and report a child result."}"#,
+                r#"{"label":"Inspect repository","task":"Inspect the repository and report a subagent result."}"#,
             )],
             vec![content_frame("parent answer")],
             vec![content_frame("resumed parent answer")],
@@ -816,7 +816,7 @@ async fn compiled_binary_persists_and_resumes_child_run_transcripts() {
             vec![common::mock_llm_server::tool_call_frame(
                 0,
                 "agent_finish",
-                r#"{"status":"success","result":"child completed","sources":["src/lib.rs"]}"#,
+                r#"{"status":"success","result":"subagent completed","sources":["src/lib.rs"]}"#,
             )],
         )],
     )
@@ -830,15 +830,15 @@ async fn compiled_binary_persists_and_resumes_child_run_transcripts() {
                 TempDir::new().expect("tempdir"),
                 &provider_env,
                 &["--auto-approve-spawn"],
-                "Delegate a repository inspection to a child.",
+                "Delegate a repository inspection to a subagent.",
             )
         }
     })
     .await
-    .expect("the child run completes");
+    .expect("the subagent run completes");
     assert!(
         first.output.status.success(),
-        "the child run succeeds; stderr:\n{}",
+        "the subagent run succeeds; stderr:\n{}",
         first.stderr()
     );
 
@@ -848,37 +848,39 @@ async fn compiled_binary_persists_and_resumes_child_run_transcripts() {
         .find(|session| session.parent_session.is_none())
         .expect("the parent session is listed");
     let root_events = read_events(&root_session.path);
-    let child_run_id = root_events
+    let subagent_run_id = root_events
         .iter()
         .find_map(|event| match event {
-            StoreEvent::ChildStart { id, .. } => Some(*id),
+            StoreEvent::SubagentStart { id, .. } => Some(*id),
             _ => None,
         })
-        .expect("the parent records the child start");
-    let child_runs = Store::read_child_runs(&root_session.path).expect("child runs are readable");
-    let child_run = child_runs
+        .expect("the parent records the subagent start");
+    let subagent_runs =
+        Store::read_subagent_runs(&root_session.path).expect("subagent runs are readable");
+    let subagent_run = subagent_runs
         .iter()
-        .find(|run| run.run_id == child_run_id)
-        .expect("the child lifecycle is paired");
-    assert_eq!(child_run.status.as_deref(), Some("success"));
-    assert_eq!(child_run.result.as_deref(), Some("child completed"));
-    assert!(child_run.duration.is_some());
+        .find(|run| run.run_id == subagent_run_id)
+        .expect("the subagent lifecycle is paired");
+    assert_eq!(subagent_run.status.as_deref(), Some("success"));
+    assert_eq!(subagent_run.result.as_deref(), Some("subagent completed"));
+    assert!(subagent_run.duration.is_some());
 
-    let child_transcript_path = session_path(&first.chats_root(), &first.project_key, child_run_id);
+    let subagent_transcript_path =
+        session_path(&first.chats_root(), &first.project_key, subagent_run_id);
     assert!(
-        child_transcript_path.is_file(),
-        "the child transcript uses the stable run-id path"
+        subagent_transcript_path.is_file(),
+        "the subagent transcript uses the stable run-id path"
     );
-    let child_messages =
-        Store::read_messages(&child_transcript_path).expect("child transcript is readable");
-    assert!(child_messages.iter().any(|message| {
+    let subagent_messages =
+        Store::read_messages(&subagent_transcript_path).expect("subagent transcript is readable");
+    assert!(subagent_messages.iter().any(|message| {
         matches!(
             message,
             ylva::Message::User { content, .. }
-                if content == "Inspect the repository and report a child result."
+                if content == "Inspect the repository and report a subagent result."
         )
     }));
-    assert!(child_messages.iter().any(|message| {
+    assert!(subagent_messages.iter().any(|message| {
         matches!(
             message,
             ylva::Message::ToolResult {
@@ -915,16 +917,19 @@ async fn compiled_binary_persists_and_resumes_child_run_transcripts() {
         .into_iter()
         .find(|session| session.session_id == root_session.session_id)
         .expect("the resumed parent session remains addressable");
-    let resumed_child_run = Store::read_child_runs(&resumed_root.path)
-        .expect("resumed child lifecycle is readable")
+    let resumed_subagent_run = Store::read_subagent_runs(&resumed_root.path)
+        .expect("resumed subagent lifecycle is readable")
         .into_iter()
-        .find(|run| run.run_id == child_run_id)
-        .expect("the resumed parent still exposes the child bubble metadata");
-    assert_eq!(resumed_child_run.status.as_deref(), Some("success"));
-    assert_eq!(resumed_child_run.result.as_deref(), Some("child completed"));
+        .find(|run| run.run_id == subagent_run_id)
+        .expect("the resumed parent still exposes the subagent bubble metadata");
+    assert_eq!(resumed_subagent_run.status.as_deref(), Some("success"));
+    assert_eq!(
+        resumed_subagent_run.result.as_deref(),
+        Some("subagent completed")
+    );
     assert!(
-        session_path(&resumed.chats_root(), &resumed.project_key, child_run_id).is_file(),
-        "the resumed parent can still locate the child drill-in transcript"
+        session_path(&resumed.chats_root(), &resumed.project_key, subagent_run_id).is_file(),
+        "the resumed parent can still locate the subagent drill-in transcript"
     );
     server.abort();
 }

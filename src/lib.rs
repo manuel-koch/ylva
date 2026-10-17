@@ -61,23 +61,22 @@ mod test_support;
 pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 pub use run_outcome::RunOutcome;
 
-pub use agent::child_agent_manager;
+pub use agent::subagent_manager;
 pub use agent::tools::{
     default_registry, spawn_subagent::AgentTypeInfo, AutoApproveTool, Tool, ToolCall,
     ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig, DEFAULT_CLI_TOOLS,
     DEFAULT_TUI_TOOLS,
 };
 pub use agent::{
-    AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus,
-    ChildRoleConfig, Context, ContextUsageSource, DeltaChunk, Message, PendingTool, Role,
-    StreamEvent, ToolAttachment, ToolCallRequest, ToolResult, UiUpdate, UserMessageKind,
+    AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus, Context,
+    ContextUsageSource, DeltaChunk, Message, PendingTool, Role, StreamEvent, SubagentRoleConfig,
+    ToolAttachment, ToolCallRequest, ToolResult, UiUpdate, UserMessageKind,
     DEFAULT_MAX_TOOL_USE_ITERATIONS, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_CALLS_PER_RESPONSE,
     TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;
 pub use app::App;
 pub use build_info::{BuildInfo, BUILD_INFO};
-pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
 pub use cli::{Cli, CliColorMode, CliCommand, SkillCommand};
 pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
 pub use config::compaction_prompt::{load_compaction_prompt, DEFAULT_COMPACTION_PROMPT};
@@ -120,6 +119,7 @@ pub use store::{
     default_chats_root, project_key, session_path, SessionMeta, SessionState, SessionSummary,
     Store, StoreError, StoreEvent,
 };
+pub use subagent_manager::{FinishResult, SpawnRequest, SpawnStatus, SubagentManager};
 pub use tui_driver::TuiApp;
 pub use tui_reducer_state::{
     ActiveSubagentCounts, AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, ContextUsage,

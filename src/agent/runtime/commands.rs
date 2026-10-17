@@ -88,7 +88,7 @@ impl RunState {
                 return LoopControl::PollAgain;
             }
             AgentCommand::Compact => {
-                if self.is_child {
+                if self.is_subagent {
                     let _ = self
                         .ui_tx
                         .send(UiUpdate::Notice {
@@ -198,7 +198,7 @@ impl RunState {
                     if pending.call.name() == tools::spawn_subagent::SpawnSubagentTool::NAME {
                         resolve_spawn_subagent(
                             pending,
-                            &mut self.child_agent_manager,
+                            &mut self.subagent_manager,
                             &mut self.context,
                             &self.ui_tx,
                             &mut self.spawn_content_sections,
@@ -375,11 +375,11 @@ impl RunState {
             }
             AgentCommand::Stop { reason } => {
                 self.reset_compaction().await;
-                if let Some(manager) = self.child_agent_manager.as_mut() {
+                if let Some(manager) = self.subagent_manager.as_mut() {
                     let cancelled_spawns = manager.cancel_all().await;
                     let cancelled_count = cancelled_spawns.len();
                     for (index, cancelled) in cancelled_spawns.into_iter().enumerate() {
-                        // Store integration (child_result JSONL
+                        // Store integration (subagent_result JSONL
                         // record) lands in Phase 6.11; for now
                         // the cancellation is only logged, but
                         // the tool bubble/context still get a
@@ -388,7 +388,7 @@ impl RunState {
                         tracing::info!(
                             run_id = %cancelled.run_id,
                             tool_call_id = %cancelled.call_id,
-                            "child agent cancelled on parent stop"
+                            "subagent cancelled on parent stop"
                         );
                         self.cancelled_run_ids.insert(cancelled.run_id);
                         let mut content_sections = self
@@ -398,25 +398,26 @@ impl RunState {
                         content_sections.push(tools::Section::Content(tools::ContentSection {
                             label: Some("Result".to_string()),
                             content:
-                                "Cancelled: the parent agent stopped before the child finished."
+                                "Cancelled: the parent agent stopped before the subagent finished."
                                     .to_string(),
                             file_extension: Some("md".to_string()),
                             line_number_offset: None,
                         }));
-                        let cancellation_result = crate::child_agent_manager::FinishResult {
+                        let cancellation_result = crate::subagent_manager::FinishResult {
                             run_id: cancelled.run_id,
                             call_id: cancelled.call_id,
-                            origin: crate::child_agent_manager::FinishResultOrigin::Runtime,
+                            origin: crate::subagent_manager::FinishResultOrigin::Runtime,
                             status: "cancelled".to_string(),
                             result: None,
                             error: Some(
-                                "The parent agent stopped before the child finished.".to_string(),
+                                "The parent agent stopped before the subagent finished."
+                                    .to_string(),
                             ),
                             sources: vec![],
                         };
                         let _ = self
                             .ui_tx
-                            .send(UiUpdate::ChildAgentDone {
+                            .send(UiUpdate::SubagentDone {
                                 run_id: cancelled.run_id,
                                 status: cancellation_result.status.clone(),
                                 result: None,
@@ -432,7 +433,7 @@ impl RunState {
                                                 "Subagent completion event for \
                                                  `{tool_name}`; the structured JSON is harness \
                                                  metadata, not a user-facing message. The parent \
-                                                 stop cancelled this child, so no continuation will \
+                                                 stop cancelled this subagent, so no continuation will \
                                                  be started:\n{result_text}",
                                                 tool_name = tools::spawn_subagent::SpawnSubagentTool::NAME,
                                             ));
@@ -567,7 +568,7 @@ impl RunState {
                 // Interrupt whatever was in flight before
                 // swapping in `fresh_context`, mirroring
                 // `AgentCommand::Stop`'s cleanup — otherwise
-                // the old stream/tool/children keep running
+                // the old stream/tool/subagents keep running
                 // against a `Context` nobody can see anymore
                 // and their eventual `AgentEvent`s land in the
                 // new, unrelated conversation instead (see
@@ -587,12 +588,12 @@ impl RunState {
                 if let Some(tool_cancel) = self.current_tool_cancel.take() {
                     tool_cancel.cancel();
                 }
-                if let Some(manager) = self.child_agent_manager.as_mut() {
+                if let Some(manager) = self.subagent_manager.as_mut() {
                     for cancelled in manager.cancel_all().await {
                         tracing::info!(
                             run_id = %cancelled.run_id,
                             tool_call_id = %cancelled.call_id,
-                            "child agent cancelled on clear_context"
+                            "subagent cancelled on clear_context"
                         );
                         self.cancelled_run_ids.insert(cancelled.run_id);
                         self.spawn_content_sections.remove(&cancelled.call_id);
@@ -623,7 +624,7 @@ impl RunState {
                 self.context = fresh_context;
                 self.session_id = self.context.store().map(|store| store.session_id());
                 self.store_for_commands = self.context.store();
-                if let Some(manager) = self.child_agent_manager.as_mut() {
+                if let Some(manager) = self.subagent_manager.as_mut() {
                     manager.set_store(self.context.store());
                 }
                 *self
@@ -655,16 +656,16 @@ impl RunState {
                 )
                 .await;
             }
-            AgentCommand::ForChild { run_id, command } => {
-                // Only a root loop's `child_agent_manager` can
-                // resolve `run_id` to a live child command
+            AgentCommand::ForSubagent { run_id, command } => {
+                // Only a root loop's `subagent_manager` can
+                // resolve `run_id` to a live subagent command
                 // channel; forward the inner command verbatim
-                // — the child's own loop never sees `ForChild`
+                // — the subagent's own loop never sees `ForSubagent`
                 // itself, only plain `ApproveTool`/`DenyTool`/
                 // `AnswerClarify`/`AbortClarify` on its own
                 // channel, exactly as if sent directly.
                 let sender = self
-                    .child_agent_manager
+                    .subagent_manager
                     .as_ref()
                     .and_then(|manager| manager.running_command_sender(run_id));
                 match sender {
@@ -674,8 +675,8 @@ impl RunState {
                     None => {
                         tracing::warn!(
                             %run_id,
-                            "AgentCommand::ForChild targets a run_id with no \
-                             running child (already finished/cancelled); dropping"
+                            "AgentCommand::ForSubagent targets a run_id with no \
+                             running subagent (already finished/cancelled); dropping"
                         );
                     }
                 }

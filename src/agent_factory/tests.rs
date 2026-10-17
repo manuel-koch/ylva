@@ -194,8 +194,8 @@ fn factory_for_two_engine_profile(profile: &ProfileConfig) -> AgentFactory {
     AgentFactory::new(engines)
 }
 
-mod children;
 mod configuration;
 mod roles;
 mod selection;
 mod skills;
+mod subagents;

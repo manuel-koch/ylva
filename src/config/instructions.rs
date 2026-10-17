@@ -665,7 +665,7 @@ mod tests {
         // with `NotADirectory`, which — like a permission error — must not be
         // mistaken for an absent directory.
         write_file(&workspace_root.join("blocked"), "");
-        let working_directory = workspace_root.join("blocked").join("child");
+        let working_directory = workspace_root.join("blocked").join("subagent");
 
         let error = load_trusted_instructions_from_roots(
             Some(&workspace_root),

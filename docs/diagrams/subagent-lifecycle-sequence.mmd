@@ -6,18 +6,18 @@ sequenceDiagram
     autonumber
     participant Root as Root outer loop
     participant Context as Root Context
-    participant Manager as ChildAgentManager
-    participant Child as Subagent loop + forwarder
+    participant Manager as SubagentManager
+    participant Subagent as Subagent loop + forwarder
     participant Host as CLI / TUI driver
     participant Store as Session storage
 
-    %% Sources: agent/tool_queue/spawn.rs, agent/child_agent_manager.rs,
+    %% Sources: agent/tool_queue/spawn.rs, agent/subagent_manager.rs,
     %% agent_factory.rs, agent/runtime/{subagents,commands}.rs.
 
     Root->>Manager: Approved spawn_subagent(task, type, briefing, call_id)
     alt Concurrency slot available
-        Manager->>Child: Start via factory-built spawn closure
-        Manager->>Store: Parent child_start event
+        Manager->>Subagent: Start via factory-built spawn closure
+        Manager->>Store: Parent subagent_start event
         Manager-->>Root: Started(run_id)
     else Cap reached
         Manager->>Manager: Enqueue SpawnRequest FIFO
@@ -25,37 +25,37 @@ sequenceDiagram
     end
     Root->>Context: One tool result: subagent_accepted (running / queued)
     Note over Root,Host: Admission is not completion.<br/>The spawn bubble remains running / queued.
-    Note over Manager,Child: The profile controls concurrent subagents. Non-positive means unlimited.<br/>Delegation is one level: subagent registries cannot spawn subagents.
+    Note over Manager,Subagent: The profile controls concurrent subagents. Non-positive means unlimited.<br/>Delegation is one level: subagent registries cannot spawn subagents.
 
     par Root may continue independent work
         Root->>Root: Continue ordinary tool / model loop, or settle idle
     and Subagents execute concurrently
         loop Live subagent activity
-            Child-->>Root: UI updates tagged with run_id
+            Subagent-->>Root: UI updates tagged with run_id
             Root-->>Host: Forward tokens, usage, tools, or interactive pause
             opt Approval or clarify requires user input
-                Host->>Root: ForChild(run_id, verdict / answer)
-                Root->>Child: Route command to matching live subagent
-                Note over Child,Host: Waiting for one subagent's input does not pause siblings.
+                Host->>Root: ForSubagent(run_id, verdict / answer)
+                Root->>Subagent: Route command to matching live subagent
+                Note over Subagent,Host: Waiting for one subagent's input does not pause siblings.
             end
         end
     end
 
     alt Normal or failed terminal outcome
-        Child->>Child: agent_finish result or harness-derived outcome
-        Child->>Child: Drain UI forwarder after loop exits
+        Subagent->>Subagent: agent_finish result or harness-derived outcome
+        Subagent->>Subagent: Drain UI forwarder after loop exits
         opt Loop returned a completed Context
-            Child->>Store: Persist finished subagent transcript
+            Subagent->>Store: Persist finished subagent transcript
         end
-        Child-->>Root: FinishResult (after final UI updates)
+        Subagent-->>Root: FinishResult (after final UI updates)
         Root->>Context: Append hidden completion notice (canonical + bounded model view)
-        Root-->>Host: ChildAgentDone, then spawn ToolDone
-        Root->>Manager: record_child_result, then on_child_finished(run_id)
-        Manager->>Store: Parent child_result event
+        Root-->>Host: SubagentDone, then spawn ToolDone
+        Root->>Manager: record_subagent_result, then on_subagent_finished(run_id)
+        Manager->>Store: Parent subagent_result event
         Manager->>Manager: Free only this slot
         loop FIFO requests while slots are free
-            Manager->>Child: Start next queued subagent
-            Manager->>Store: Parent child_start event
+            Manager->>Subagent: Start next queued subagent
+            Manager->>Store: Parent subagent_start event
         end
         alt Other running or queued runs remain
             Root->>Root: Record completion without a completion-only reprompt
@@ -68,8 +68,8 @@ sequenceDiagram
         end
     else Stop or clear
         Root->>Manager: cancel_all()
-        Manager->>Child: Cancel running tasks and remove queued requests
-        Child-->>Manager: Join cancelled tasks
+        Manager->>Subagent: Cancel running tasks and remove queued requests
+        Subagent-->>Manager: Join cancelled tasks
         Manager-->>Root: Cancellation bookkeeping
         Root->>Root: Do not resume root for cancelled completions
         Note over Root,Context: Clear also changes generation and replaces context/session.<br/>Late outcomes from cancelled runs cannot enter the new conversation.

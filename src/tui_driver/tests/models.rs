@@ -98,18 +98,18 @@ fn picker_preview_and_confirmation_keep_explicit_compaction_fixed_and_implicit_c
                     .compaction_engine
                     .clone()
                     .expect("compaction");
-                let child_run_id = uuid::Uuid::new_v4();
-                let mut child_display = state.engine_display.clone();
-                child_display.inherits_parent_runtime = true;
-                let child_compaction = child_display
+                let subagent_run_id = uuid::Uuid::new_v4();
+                let mut subagent_display = state.engine_display.clone();
+                subagent_display.inherits_parent_runtime = true;
+                let subagent_compaction = subagent_display
                     .compaction_engine
                     .as_mut()
-                    .expect("child compaction");
-                child_compaction.follows_conversation = explicit_compaction;
-                child_compaction.shares_conversation = explicit_compaction;
+                    .expect("subagent compaction");
+                subagent_compaction.follows_conversation = explicit_compaction;
+                subagent_compaction.shares_conversation = explicit_compaction;
                 state
-                    .child_engine_displays
-                    .insert(child_run_id, child_display);
+                    .subagent_engine_displays
+                    .insert(subagent_run_id, subagent_display);
                 apply_model_list_result(
                     &mut state,
                     None,
@@ -196,19 +196,19 @@ fn picker_preview_and_confirmation_keep_explicit_compaction_fixed_and_implicit_c
                     state.engine_display.compaction_engine.as_ref(),
                     Some(&actual_compaction)
                 );
-                let child_display = &state.child_engine_displays[&child_run_id];
-                assert_eq!(child_display.model, model);
-                let child_compaction = child_display
+                let subagent_display = &state.subagent_engine_displays[&subagent_run_id];
+                assert_eq!(subagent_display.model, model);
+                let subagent_compaction = subagent_display
                     .compaction_engine
                     .as_ref()
-                    .expect("child compaction");
+                    .expect("subagent compaction");
                 if explicit_compaction {
-                    assert_eq!(child_compaction.model, model);
-                    assert_eq!(child_compaction.context_length, expected_window);
+                    assert_eq!(subagent_compaction.model, model);
+                    assert_eq!(subagent_compaction.context_length, expected_window);
                 } else {
-                    assert_eq!(child_compaction.model, "configured-local");
-                    assert_eq!(child_compaction.context_length, 98_304);
-                    assert!(!child_compaction.shares_conversation);
+                    assert_eq!(subagent_compaction.model, "configured-local");
+                    assert_eq!(subagent_compaction.context_length, 98_304);
+                    assert!(!subagent_compaction.shares_conversation);
                 }
                 if explicit_compaction {
                     assert_eq!(actual_compaction, initial_compaction);

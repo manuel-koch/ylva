@@ -17,17 +17,17 @@ use super::*;
 impl RunState {
     pub(super) async fn handle_subagent_finish(
         &mut self,
-        finish_result: crate::child_agent_manager::FinishResult,
+        finish_result: crate::subagent_manager::FinishResult,
     ) -> LoopControl {
         if self.session_switch_frozen {
-            tracing::debug!("ignoring child completion while session replacement is frozen");
+            tracing::debug!("ignoring subagent completion while session replacement is frozen");
             return LoopControl::PollAgain;
         }
         // The tool-calling wire protocol allows exactly one
         // `role:"tool"` response per `tool_call_id`; that slot
         // was already spent on `spawn_subagent`'s immediate
         // `{"status":"running"/"queued"}` result (see
-        // `resolve_spawn_subagent`). So the child's *real*
+        // `resolve_spawn_subagent`). So the subagent's *real*
         // outcome, arriving asynchronously and possibly after
         // further assistant turns, is appended as a brand-new
         // hidden harness notice instead of rewriting/duplicating
@@ -38,18 +38,18 @@ impl RunState {
         // over it by mutating a past message in place. A
         // completion is appended to context immediately, but
         // the root is re-prompted only after all currently
-        // outstanding child runs are terminal. This avoids
+        // outstanding subagent runs are terminal. This avoids
         // acknowledgement turns for intermediate results
         // while preserving a single continuation point for
         // the aggregate answer.
         let run_id = finish_result.run_id;
         if self.cancelled_run_ids.remove(&run_id) {
-            // This child was cancelled by a `Stop`/`ClearContext`
+            // This subagent was cancelled by a `Stop`/`ClearContext`
             // that already resolved (or discarded) its
             // tool bubble/context entry synchronously; the
             // manager only *requested* cancellation (a
             // `CancellationToken` is cooperative, not
-            // immediate), so the child's task can still race
+            // immediate), so the subagent's task can still race
             // in a real `FinishResult` afterwards. Applying it
             // now would duplicate an already-settled entry or
             // — after `ClearContext` — push content into an
@@ -57,27 +57,27 @@ impl RunState {
             tracing::debug!(
                 %run_id,
                 tool_call_id = %finish_result.call_id,
-                "dropping stale child finish result for a cancelled run"
+                "dropping stale subagent finish result for a cancelled run"
             );
             return LoopControl::PollAgain;
         }
         let call_id = finish_result.call_id;
         let status = finish_result.status.clone();
         let label = self
-            .child_agent_manager
+            .subagent_manager
             .as_ref()
             .and_then(|manager| manager.label_for(run_id))
             .unwrap_or_default()
             .to_string();
         let outstanding_count = self
-            .child_agent_manager
+            .subagent_manager
             .as_ref()
             .map(|manager| manager.outstanding_count_after_completion(run_id))
             .unwrap_or(0);
         let all_done = outstanding_count == 0;
         if self.mode == AgentMode::Idle && self.pending_tools.is_empty() {
             // Apply any completed prefix summary or hard
-            // fallback before deciding whether this child
+            // fallback before deciding whether this subagent
             // report itself needs summarization.
             sweep_compaction_and_report(
                 &mut self.compaction,
@@ -125,14 +125,14 @@ impl RunState {
             .remove(&call_id)
             .unwrap_or_default();
         content_sections.extend(finish_result.content_sections());
-        tracing::info!(%run_id, tool_call_id = %call_id, %status, "child agent finished");
+        tracing::info!(%run_id, tool_call_id = %call_id, %status, "subagent finished");
         let next_step_note = if !all_done {
             format!(
                                     "{outstanding_count} other subagent run(s) remain outstanding. \
                                      This is an intermediate completion; do not produce an \
                                      acknowledgement or a user-facing progress update solely for \
                                      this event. The harness will provide one continuation after \
-                                     all outstanding child results are available. This is expected, \
+                                     all outstanding subagent results are available. This is expected, \
                                      normal operation — do not reason about scheduler/concurrency \
                                      internals or speculate on timing. Continue only genuinely \
                                      independent work. If none remains, end this response \
@@ -169,19 +169,19 @@ impl RunState {
             self.context.project_last_harness_notice(projected_notice);
         }
         self.context.limit_last_model_message(result_token_budget);
-        // Computed before `on_child_finished` clears the running slot.
+        // Computed before `on_subagent_finished` clears the running slot.
         let duration = self
-            .child_agent_manager
+            .subagent_manager
             .as_ref()
             .and_then(|manager| manager.running_duration(run_id))
             .unwrap_or_default();
         // Emitted before the `spawn_subagent` bubble's own
         // `ToolDone` so the driver can auto-return from the
-        // child conversation view (if it auto-switched into
+        // subagent conversation view (if it auto-switched into
         // it) ahead of the parent bubble settling.
         let _ = self
             .ui_tx
-            .send(UiUpdate::ChildAgentDone {
+            .send(UiUpdate::SubagentDone {
                 run_id,
                 status: status.clone(),
                 result: finish_result.result.clone(),
@@ -199,14 +199,14 @@ impl RunState {
                 run_id: None,
             })
             .await;
-        if let Some(manager) = self.child_agent_manager.as_mut() {
-            manager.record_child_result(&finish_result);
-            manager.on_child_finished(run_id);
+        if let Some(manager) = self.subagent_manager.as_mut() {
+            manager.record_subagent_result(&finish_result);
+            manager.on_subagent_finished(run_id);
         }
         tracing::debug!(
             tool_call_id = %call_id,
             mode = ?self.mode,
-            "finish_rx: deciding whether to reprompt root after child result"
+            "finish_rx: deciding whether to reprompt root after subagent result"
         );
         if all_done && self.mode == AgentMode::Idle {
             // Same iteration budget as any other re-prompt
@@ -239,7 +239,7 @@ impl RunState {
                 self.start_request();
             }
         } else if all_done {
-            self.pending_child_finish_reprompt = true;
+            self.pending_subagent_finish_reprompt = true;
             tracing::debug!(
                 tool_call_id = %call_id,
                 mode = ?self.mode,
@@ -250,31 +250,31 @@ impl RunState {
                 tool_call_id = %call_id,
                 outstanding_count,
                 mode = ?self.mode,
-                "finish_rx: intermediate child result recorded without reprompt"
+                "finish_rx: intermediate subagent result recorded without reprompt"
             );
         }
         LoopControl::CheckCompletion
     }
     pub(super) async fn forward_subagent_update(&mut self, update: UiUpdate) {
         // Phase 6.10 drill-in conversation model: the
-        // child's own text/thinking tokens must never leak
+        // subagent's own text/thinking tokens must never leak
         // into the parent's own `partial_assistant_text`
-        // (they render in the dedicated child transcript
-        // instead), and the child's own stream lifecycle
+        // (they render in the dedicated subagent transcript
+        // instead), and the subagent's own stream lifecycle
         // (`StreamStarted`/`StreamDone`/`StreamCancelled`)
         // must never flip the parent's own `TuiMode` —
-        // only `ChildAgentStarted`/`ChildAgentDone` (see
-        // `ChildAgentManager::start` and this loop's
-        // `finish_rx` arm) mark the child conversation's
+        // only `SubagentStarted`/`SubagentDone` (see
+        // `SubagentManager::start` and this loop's
+        // `finish_rx` arm) mark the subagent conversation's
         // lifecycle boundaries for the UI. Everything else
         // (tool approvals/progress/errors, already stamped
-        // with the child's own `run_id`) is forwarded as-is.
+        // with the subagent's own `run_id`) is forwarded as-is.
         match update {
-            // Child text and thinking arrive already attributed to their own
-            // `run_id` (see `attribute_child_update`), so no running-child
-            // lookup is needed and concurrent children stay separated.
+            // Subagent text and thinking arrive already attributed to their own
+            // `run_id` (see `attribute_subagent_update`), so no running-subagent
+            // lookup is needed and concurrent subagents stay separated.
             UiUpdate::AppendText(_) | UiUpdate::AppendThinking(_) => {
-                tracing::warn!("dropping child text that was not attributed to a run");
+                tracing::warn!("dropping subagent text that was not attributed to a run");
             }
             UiUpdate::StreamStarted
             | UiUpdate::StreamDone
@@ -282,10 +282,10 @@ impl RunState {
             | UiUpdate::AgentIdle => {
                 // Intentionally swallowed — see comment above.
             }
-            update @ UiUpdate::ChildContextUsage { .. } => {
-                // Child readouts are already scoped to their
+            update @ UiUpdate::SubagentContextUsage { .. } => {
+                // Subagent readouts are already scoped to their
                 // run; forward them so the TUI can retain each
-                // child independently of the parent view.
+                // subagent independently of the parent view.
                 let _ = self.ui_tx.send(update).await;
             }
             other => {

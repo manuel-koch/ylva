@@ -155,9 +155,9 @@ fn the_summary_request_is_tool_free_and_framed_by_the_prompt() {
 }
 
 #[test]
-fn oversized_child_report_projection_is_marked_and_bounded() {
+fn oversized_subagent_report_projection_is_marked_and_bounded() {
     let message = Message::User {
-        content: "verbose child report ".repeat(200),
+        content: "verbose subagent report ".repeat(200),
         kind: UserMessageKind::ImplicitToolNote,
     };
     let projection = recovery::project_body(crate::llm::TokenEstimator::Tiktoken, &message, 256)
@@ -170,7 +170,7 @@ fn oversized_child_report_projection_is_marked_and_bounded() {
         matches!(projection, Message::User { content, .. } if content.contains(recovery::RESULT_OMISSION_MARKER))
     );
     assert!(
-        matches!(message, Message::User { content, .. } if content == "verbose child report ".repeat(200))
+        matches!(message, Message::User { content, .. } if content == "verbose subagent report ".repeat(200))
     );
 }
 

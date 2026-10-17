@@ -54,7 +54,7 @@ fn root_spawn_tool_advertises_configured_agent_type_descriptions() {
 }
 
 #[test]
-fn root_and_child_contexts_share_global_and_agent_type_prompt_once() {
+fn root_and_subagent_contexts_share_global_and_agent_type_prompt_once() {
     crate::test_support::run_locked(async {
         let provider = Arc::new(MockProvider::new(
             vec!["answer".to_string()],
@@ -117,31 +117,33 @@ fn root_and_child_contexts_share_global_and_agent_type_prompt_once() {
 
         let (finish_tx, _finish_rx) = mpsc::channel(1);
         let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
-        let (mut child, _child_ui_rx) = factory
+        let (mut subagent, _subagent_ui_rx) = factory
             .create(
                 &profile,
                 "specialist",
-                Role::Child(ChildRoleConfig {
+                Role::Subagent(SubagentRoleConfig {
                     run_id: Uuid::new_v4(),
                     call_id: Uuid::new_v4(),
                     session_id: None,
-                    briefing: Some("child briefing".to_string()),
+                    briefing: Some("subagent briefing".to_string()),
                     parent_cancel: CancellationToken::new(),
                     subagent_ui_tx,
                     finish_tx,
                 }),
             )
-            .expect("child construction succeeds");
-        let child_handle = child.run();
-        child
-            .send_command(crate::agent::AgentCommand::Prompt("child task".to_string()))
+            .expect("subagent construction succeeds");
+        let subagent_handle = subagent.run();
+        subagent
+            .send_command(crate::agent::AgentCommand::Prompt(
+                "subagent task".to_string(),
+            ))
             .await;
-        let child_context = tokio::time::timeout(Duration::from_secs(2), child_handle)
+        let subagent_context = tokio::time::timeout(Duration::from_secs(2), subagent_handle)
             .await
-            .expect("child run completes")
-            .expect("child task does not panic")
-            .expect("child task succeeds");
-        let child_system_messages: Vec<_> = child_context
+            .expect("subagent run completes")
+            .expect("subagent task does not panic")
+            .expect("subagent task succeeds");
+        let subagent_system_messages: Vec<_> = subagent_context
             .messages()
             .iter()
             .filter_map(|message| match message {
@@ -150,18 +152,18 @@ fn root_and_child_contexts_share_global_and_agent_type_prompt_once() {
             })
             .collect();
         assert_eq!(
-            child_system_messages.first().copied(),
+            subagent_system_messages.first().copied(),
             Some("global soul\n\nspecialist persona")
         );
         assert_eq!(
-            child_system_messages
+            subagent_system_messages
                 .iter()
                 .filter(|content| content.contains("global soul"))
                 .count(),
             1
         );
-        assert!(child_system_messages.contains(&"child briefing"));
-        assert!(child_system_messages
+        assert!(subagent_system_messages.contains(&"subagent briefing"));
+        assert!(subagent_system_messages
             .iter()
             .any(|content| content.contains("tool-use")));
     });
@@ -172,7 +174,7 @@ fn create_honors_per_agent_type_allowed_tools_override() {
     // Regression test for Part A: `profile.agents.<agent_type>.allowed_tools`
     // must be honored per `agent_type`, not silently ignored in favor of
     // the factory-wide default list — so a distinct `agent_type` (e.g. a
-    // restricted child role) can genuinely be limited to a different tool
+    // restricted subagent role) can genuinely be limited to a different tool
     // set than the root.
     let (factory, profile) = make_factory();
 

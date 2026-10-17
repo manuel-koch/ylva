@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `agent_finish`: the tool a child agent (`Role::Child`) calls to report its
-//! outcome back to the parent. Injected only into `Role::Child` tool
+//! `agent_finish`: the tool a subagent (`Role::Subagent`) calls to report its
+//! outcome back to the parent. Injected only into `Role::Subagent` tool
 //! registries — `AgentFactory::create` never registers it for `Role::Root`.
 //!
-//! Calling `agent_finish` sends a [`FinishResult`] over the child's `finish_tx`
+//! Calling `agent_finish` sends a [`FinishResult`] over the subagent's `finish_tx`
 //! immediately (not deferred to a later `ToolDone`/re-prompt cycle); the
 //! surrounding `AgentLoop::run` loop recognises this tool by name and exits
-//! the child's ReAct loop unconditionally afterwards — the only tool call
+//! the subagent's ReAct loop unconditionally afterwards — the only tool call
 //! exempt from `DEFAULT_MAX_TOOL_USE_ITERATIONS`.
 
 use futures::FutureExt;
@@ -30,10 +30,10 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::{Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS};
-use crate::child_agent_manager::{FinishResult, FinishResultOrigin};
 use crate::sandbox::ApprovalCheck;
+use crate::subagent_manager::{FinishResult, FinishResultOrigin};
 
-/// The status a child reports for its own run.
+/// The status a subagent reports for its own run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentFinishStatus {
@@ -50,7 +50,7 @@ impl AgentFinishStatus {
     }
 }
 
-/// `agent_finish` arguments: the child's final report to its parent.
+/// `agent_finish` arguments: the subagent's final report to its parent.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct AgentFinishArgs {
     /// Whether the task succeeded or failed. Required — always specify this,
@@ -90,7 +90,7 @@ impl AgentFinishArgs {
     }
 }
 
-/// Configuration a specific child run's `agent_finish` tool needs to construct and
+/// Configuration a specific subagent run's `agent_finish` tool needs to construct and
 /// send its [`FinishResult`].
 #[derive(Debug, Clone)]
 pub struct AgentFinishToolConfig {

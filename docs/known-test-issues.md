@@ -64,8 +64,8 @@ without a subscriber; refreshing after the priming call completes avoids
 the first-registration race. Priming supplements the capture helper's lock;
 it does not replace subscriber isolation.
 
-Factory child-lifecycle tests also hold the shared lock while exercising
-transcript-writing and child-driver callsites. Factory child-session and agent
+Factory subagent-lifecycle tests also hold the shared lock while exercising
+transcript-writing and subagent-driver callsites. Factory subagent-session and agent
 session-span capture tests prime shared Store callsites under the capture
 subscriber, then rebuild interest before the asserted operations. Store tests
 can first-register those callsites without a subscriber; the priming pass keeps
@@ -190,7 +190,7 @@ the limit at 30 iterations (31 rounds ≈ 93 of 100 slots) can stall at 50.
 Drain `ui_rx` **concurrently** with `run()`, mirroring the drivers: a
 `tokio::select!` loop over the run handle and `ui_rx.recv()`, followed by a
 non-blocking `try_recv` drain to pick up updates `run()` posted just before it
-returned. See `child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok`
+returned. See `subagent_role_iteration_cap_exceeded_returns_err_not_unstructured_ok`
 in `src/agent/tests/subagents.rs` for the pattern. Queue/approval,
 cancellation and subagent integration cases retain the `tools_agent_loop`
 target, with their implementations under `tests/tools_agent_loop/`.
@@ -198,7 +198,7 @@ target, with their implementations under `tests/tools_agent_loop/`.
 A test that awaits the agent's join handle while still holding its `AgentLoop`
 also hangs: the loop exits only after every `AgentLoop` handle is dropped. Call
 `drop(agent)` before `handle.await`; see
-`child_completion_is_delivered_after_the_child_tool_done_that_precedes_it` in
+`subagent_completion_is_delivered_after_the_subagent_tool_done_that_precedes_it` in
 `tests/tools_agent_loop/subagents.rs`.
 
 ## Fixed-delay shutdown can discard an unfinished TUI turn

@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::tui_reducer_state::{
-    ChildRunInfo, ConfirmKey, ContextUsage, DomainEvent, Effect, UserMessageState,
+    ConfirmKey, ContextUsage, DomainEvent, Effect, SubagentRunInfo, UserMessageState,
 };
 
 mod domain;
@@ -138,9 +138,9 @@ fn key_event(code: KeyCode) -> crossterm::event::KeyEvent {
 
 // ── Phase 6.10 drill-in view tests ─────────────────────────────────────────
 
-fn tracked_child(state: &mut AppState) -> Uuid {
+fn tracked_subagent(state: &mut AppState) -> Uuid {
     let run_id = Uuid::new_v4();
-    state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+    state.start_subagent_run(crate::tui_reducer_state::SubagentRunInfo {
         run_id,
         bubble_id: Uuid::new_v4(),
         agent_type: "reviewer".to_string(),

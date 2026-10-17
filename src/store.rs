@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Append-only JSONL persistence for conversations and child-agent runs.
+//! Append-only JSONL persistence for conversations and subagent runs.
 //! See `docs/persistence.md` for the on-disk and replay contracts.
 //!
 //! On-disk layout:
@@ -43,9 +43,9 @@ use uuid::Uuid;
 
 use crate::agent::tools::agent_finish::{AgentFinishArgs, AgentFinishStatus, AgentFinishTool};
 use crate::agent::{Message, UserMessageKind};
-use crate::child_agent_manager::FinishResultOrigin;
 use crate::home_relative_path::display_path;
 use crate::sandbox::SandboxContext;
+use crate::subagent_manager::FinishResultOrigin;
 use crate::ylva_home::ylva_home;
 
 mod archive;
@@ -56,7 +56,7 @@ mod session_file;
 mod writer;
 
 pub use event::{
-    now_timestamp, ChildRunRecord, SessionMeta, StoreEvent, EVENT_VERSION, SCHEMA_VERSION,
+    now_timestamp, SessionMeta, StoreEvent, SubagentRunRecord, EVENT_VERSION, SCHEMA_VERSION,
     TITLE_MAX_CHARS,
 };
 pub use maintenance::{MaintenanceAction, MaintenanceReport, SessionSelection};
@@ -92,11 +92,11 @@ pub enum StoreError {
     #[error("session '{session_id}' writer is no longer available")]
     WriterClosed { session_id: Uuid },
     #[error(
-        "session '{session_id}' is a child transcript at {}; only top-level sessions can be \
+        "session '{session_id}' is a subagent transcript at {}; only top-level sessions can be \
          cloned",
         display_path(path)
     )]
-    SessionIsChild { session_id: Uuid, path: PathBuf },
+    SessionIsSubagent { session_id: Uuid, path: PathBuf },
     #[error(
         "session '{session_id}' at {} has no readable metadata header; it cannot be cloned",
         display_path(path)
@@ -309,12 +309,12 @@ impl Store {
     ///
     /// The source is read under a nonblocking exclusive lock held only for
     /// the read: another Ylva process holding the source (or a source that is
-    /// a child transcript) fails before anything is created. The source file
+    /// a subagent transcript) fails before anything is created. The source file
     /// itself is never repaired, rewritten, or appended to. The clone gets a
     /// fresh session id, its own `meta` header naming the source in
     /// `cloned_from` with `parent_session` unset, and every copied event
-    /// except the old header — with `child_start`/`child_result` records
-    /// rebased onto the new id. Child transcript files stay where they are
+    /// except the old header — with `subagent_start`/`subagent_result` records
+    /// rebased onto the new id. Subagent transcript files stay where they are
     /// and are reused as read-only history.
     ///
     /// `agent_type` is the effective root type for the clone (an explicit
@@ -350,7 +350,7 @@ impl Store {
                 path: source_path.clone(),
             })?;
             if source_meta.parent_session.is_some() {
-                return Err(StoreError::SessionIsChild {
+                return Err(StoreError::SessionIsSubagent {
                     session_id: source_id,
                     path: source_path,
                 });
@@ -391,10 +391,10 @@ impl Store {
                 // The source's header is replaced by `clone_meta` above.
                 StoreEvent::Meta(_) => continue,
                 // Parent lifecycle records now name the clone, so a later
-                // resume of the clone resolves its child runs from its own
-                // session id. The child transcript files themselves are
+                // resume of the clone resolves its subagent runs from its own
+                // session id. The subagent transcript files themselves are
                 // untouched and stay shared read-only history.
-                StoreEvent::ChildStart {
+                StoreEvent::SubagentStart {
                     version,
                     created_at,
                     id,
@@ -403,7 +403,7 @@ impl Store {
                     agent_type,
                     task,
                     label,
-                } if parent_session == source_id => StoreEvent::ChildStart {
+                } if parent_session == source_id => StoreEvent::SubagentStart {
                     version,
                     created_at,
                     id,
@@ -413,7 +413,7 @@ impl Store {
                     task,
                     label,
                 },
-                StoreEvent::ChildResult {
+                StoreEvent::SubagentResult {
                     version,
                     completed_at,
                     id,
@@ -423,7 +423,7 @@ impl Store {
                     result,
                     sources,
                     origin,
-                } if parent_session == source_id => StoreEvent::ChildResult {
+                } if parent_session == source_id => StoreEvent::SubagentResult {
                     version,
                     completed_at,
                     id,
@@ -460,7 +460,7 @@ impl Store {
 
     /// Start a brand-new session in the same project directory: used both by
     /// the `/clear` slash command (resets the conversation mid-run, no
-    /// parent) and by [`Store::write_child_transcript`] (a child-agent run,
+    /// parent) and by [`Store::write_subagent_transcript`] (a subagent run,
     /// `parent_session` names this store's own `session_id`).
     pub fn start_new_session(
         &self,
@@ -753,9 +753,9 @@ impl Store {
         });
     }
 
-    /// Enqueue the `child_start` record written to the **parent** session
-    /// before a child run begins.
-    pub fn record_child_start(
+    /// Enqueue the `subagent_start` record written to the **parent** session
+    /// before a subagent run begins.
+    pub fn record_subagent_start(
         &self,
         run_id: Uuid,
         call_id: Uuid,
@@ -763,7 +763,7 @@ impl Store {
         task: &str,
         label: &str,
     ) {
-        self.record_event(StoreEvent::ChildStart {
+        self.record_event(StoreEvent::SubagentStart {
             version: EVENT_VERSION,
             created_at: now_timestamp(),
             id: run_id,
@@ -775,9 +775,9 @@ impl Store {
         });
     }
 
-    /// Enqueue the `child_result` record written to the **parent** session
-    /// when a child run completes.
-    pub fn record_child_result(
+    /// Enqueue the `subagent_result` record written to the **parent** session
+    /// when a subagent run completes.
+    pub fn record_subagent_result(
         &self,
         run_id: Uuid,
         call_id: Uuid,
@@ -786,7 +786,7 @@ impl Store {
         sources: Vec<String>,
         origin: FinishResultOrigin,
     ) {
-        self.record_event(StoreEvent::ChildResult {
+        self.record_event(StoreEvent::SubagentResult {
             version: EVENT_VERSION,
             completed_at: now_timestamp(),
             id: run_id,
@@ -799,78 +799,82 @@ impl Store {
         });
     }
 
-    /// Write a completed child-agent transcript **once**, into its own
+    /// Write a completed subagent transcript **once**, into its own
     /// sub-session file under the same `project_key`, with its own `meta`
     /// header titled asynchronously from the first explicit user message and
-    /// structured `agent_finish` outcome, or a complete assistant reply. Child
+    /// structured `agent_finish` outcome, or a complete assistant reply. Subagent
     /// transcripts are never streamed live.
     ///
-    /// `provider_connection_and_model` is the child's own resolved engine —
-    /// which can differ from the parent's. `None` (the child's engine
+    /// `provider_connection_and_model` is the subagent's own resolved engine —
+    /// which can differ from the parent's. `None` (the subagent's engine
     /// configuration could not be resolved) falls back to an empty
     /// `meta.provider_connection`/`model`
     /// pair and skips the initial [`StoreEvent::ModelChanged`] record rather
     /// than persisting a misleading empty one. The supplied messages retain
     /// their order and are persisted as given.
-    pub async fn write_child_transcript(
+    pub async fn write_subagent_transcript(
         &self,
         provider_connection_and_model: Option<(&str, &str)>,
         messages: &[Message],
     ) -> Result<Uuid, StoreError> {
         Ok(self
-            .write_child_transcript_store(provider_connection_and_model, messages)
+            .write_subagent_transcript_store(provider_connection_and_model, messages)
             .await?
             .session_id())
     }
 
-    /// Write a child transcript and retain its store handle for follow-up
+    /// Write a subagent transcript and retain its store handle for follow-up
     /// metadata operations such as utility-engine title generation.
-    pub async fn write_child_transcript_store(
+    pub async fn write_subagent_transcript_store(
         &self,
         provider_connection_and_model: Option<(&str, &str)>,
         messages: &[Message],
     ) -> Result<Store, StoreError> {
         let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
-        let child_store = self.start_new_session(
+        let subagent_store = self.start_new_session(
             provider_connection,
             model,
             Some(self.inner.session_id),
             None,
         )?;
         if provider_connection_and_model.is_some() {
-            child_store.record_model_changed(provider_connection, model);
+            subagent_store.record_model_changed(provider_connection, model);
         }
-        child_store.record_child_transcript_messages(messages);
-        child_store.flush().await;
-        Ok(child_store)
+        subagent_store.record_subagent_transcript_messages(messages);
+        subagent_store.flush().await;
+        Ok(subagent_store)
     }
 
-    /// Write a child transcript using the child run id as its session id.
-    /// Parent `child_start` records already persist that run id, so this stable
+    /// Write a subagent transcript using the subagent run id as its session id.
+    /// Parent `subagent_start` records already persist that run id, so this stable
     /// path lets replay locate the transcript without adding another
     /// cross-file identifier to the parent event schema.
-    pub async fn write_child_transcript_for_run(
+    pub async fn write_subagent_transcript_for_run(
         &self,
         run_id: Uuid,
         provider_connection_and_model: Option<(&str, &str)>,
         messages: &[Message],
     ) -> Result<Uuid, StoreError> {
         Ok(self
-            .write_child_transcript_for_run_store(run_id, provider_connection_and_model, messages)
+            .write_subagent_transcript_for_run_store(
+                run_id,
+                provider_connection_and_model,
+                messages,
+            )
             .await?
             .session_id())
     }
 
-    /// Write a child transcript using the run id and retain its store handle
+    /// Write a subagent transcript using the run id and retain its store handle
     /// for follow-up metadata operations.
-    pub async fn write_child_transcript_for_run_store(
+    pub async fn write_subagent_transcript_for_run_store(
         &self,
         run_id: Uuid,
         provider_connection_and_model: Option<(&str, &str)>,
         messages: &[Message],
     ) -> Result<Store, StoreError> {
         let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
-        let child_store = self.start_new_session_with_id(
+        let subagent_store = self.start_new_session_with_id(
             run_id,
             provider_connection,
             model,
@@ -878,14 +882,14 @@ impl Store {
             None,
         )?;
         if provider_connection_and_model.is_some() {
-            child_store.record_model_changed(provider_connection, model);
+            subagent_store.record_model_changed(provider_connection, model);
         }
-        child_store.record_child_transcript_messages(messages);
-        child_store.flush().await;
-        Ok(child_store)
+        subagent_store.record_subagent_transcript_messages(messages);
+        subagent_store.flush().await;
+        Ok(subagent_store)
     }
 
-    fn record_child_transcript_messages(&self, messages: &[Message]) {
+    fn record_subagent_transcript_messages(&self, messages: &[Message]) {
         for message in messages {
             self.record_message(message);
         }

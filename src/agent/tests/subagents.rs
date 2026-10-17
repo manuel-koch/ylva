@@ -15,10 +15,10 @@
 use super::*;
 
 #[test]
-fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projection() {
+fn oversized_subagent_result_preserves_canonical_output_and_bounds_parent_projection() {
     crate::test_support::run_locked(async {
         use crate::agent::tools::{default_registry, ToolRegistryConfig};
-        use crate::child_agent_manager::{ChildAgentManager, FinishResult};
+        use crate::subagent_manager::{FinishResult, SubagentManager};
 
         let root_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
             Arc::new(MockProvider::with_script(
@@ -58,10 +58,10 @@ fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projectio
             },
         ));
         let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
-        let manager = ChildAgentManager::new(
+        let manager = SubagentManager::new(
             subagent_ui_tx,
             Box::new(
-                |_request, _cancel, _ui_tx| crate::child_agent_manager::SpawnOutcome {
+                |_request, _cancel, _ui_tx| crate::subagent_manager::SpawnOutcome {
                     command_sender: None,
                     handle: tokio::spawn(async {}),
                 },
@@ -78,11 +78,13 @@ fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projectio
             )),
         );
         let mut agent_loop = agent_loop
-            .with_child_agent_manager(manager, finish_rx, parent_subagent_ui_rx)
+            .with_subagent_manager(manager, finish_rx, parent_subagent_ui_rx)
             .with_compaction_engine(summary_engine);
         let handle = agent_loop.run();
         agent_loop
-            .send_command(AgentCommand::Prompt("Use the child findings.".to_string()))
+            .send_command(AgentCommand::Prompt(
+                "Use the subagent findings.".to_string(),
+            ))
             .await;
 
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -90,9 +92,9 @@ fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projectio
             .send(FinishResult {
                 run_id: Uuid::new_v4(),
                 call_id: Uuid::new_v4(),
-                origin: crate::child_agent_manager::FinishResultOrigin::Agent,
+                origin: crate::subagent_manager::FinishResultOrigin::Agent,
                 status: "success".to_string(),
-                result: Some("verbose child report ".repeat(6_000)),
+                result: Some("verbose subagent report ".repeat(6_000)),
                 error: None,
                 sources: vec!["src/store.rs".to_string()],
             })
@@ -113,7 +115,7 @@ fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projectio
             _ => None,
         });
         let completion_notice = completion_notice.expect("completion event reaches parent");
-        assert!(completion_notice.contains("verbose child report"));
+        assert!(completion_notice.contains("verbose subagent report"));
         let projected_notice = context
             .model_messages()
             .into_iter()
@@ -124,7 +126,7 @@ fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projectio
                 } if content.contains("Subagent completion event") => Some(content),
                 _ => None,
             })
-            .expect("projected child event");
+            .expect("projected subagent event");
         let event: Value = serde_json::from_str(
             projected_notice
                 .lines()
@@ -158,9 +160,9 @@ fn oversized_child_result_preserves_canonical_output_and_bounds_parent_projectio
 }
 
 #[test]
-fn child_role_run_returns_immediately_after_finish_tool_is_called() {
+fn subagent_role_run_returns_immediately_after_finish_tool_is_called() {
     crate::test_support::run_locked(async {
-        // Regression/integration test for Phase 6.9: a `Role::Child` agent
+        // Regression/integration test for Phase 6.9: a `Role::Subagent` agent
         // whose model calls `agent_finish` must have its context carry the tool
         // result, must send the `FinishResult` through `finish_tx`, and must
         // return from `run()` without waiting for a tool-free `StreamDone`.
@@ -210,7 +212,7 @@ fn child_role_run_returns_immediately_after_finish_tool_is_called() {
         ));
 
         let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
-        agent_loop = agent_loop.with_child_role(ChildRoleConfig {
+        agent_loop = agent_loop.with_subagent_role(SubagentRoleConfig {
             run_id,
             call_id,
             session_id: None,
@@ -222,12 +224,12 @@ fn child_role_run_returns_immediately_after_finish_tool_is_called() {
 
         let handle = agent_loop.run();
         agent_loop
-            .send_command(AgentCommand::Prompt("child task".into()))
+            .send_command(AgentCommand::Prompt("subagent task".into()))
             .await;
 
         let context = tokio::time::timeout(Duration::from_secs(2), handle)
             .await
-            .expect("child run() should return promptly after finish")
+            .expect("subagent run() should return promptly after finish")
             .expect("run() task should not panic")
             .expect("run() should not return an error");
 
@@ -245,7 +247,7 @@ fn child_role_run_returns_immediately_after_finish_tool_is_called() {
                 message,
                 Message::System { content } if content.contains("tool-use") && content.contains(&DEFAULT_MAX_TOOL_USE_ITERATIONS.to_string())
             )),
-            "a child must receive a heads-up system message stating its \
+            "a subagent must receive a heads-up system message stating its \
              tool-use iteration budget, so it can wrap up before hitting it"
         );
 
@@ -277,9 +279,9 @@ fn child_role_run_returns_immediately_after_finish_tool_is_called() {
 }
 
 #[test]
-fn root_role_does_not_receive_the_child_iteration_budget_heads_up() {
+fn root_role_does_not_receive_the_subagent_iteration_budget_heads_up() {
     crate::test_support::run_locked(async {
-        // The heads-up message is only meaningful for a `Role::Child` loop
+        // The heads-up message is only meaningful for a `Role::Subagent` loop
         // (only it can be silently cut off with no one to explain things to);
         // a root loop's `Interrupted` assistant bubble already tells a human
         // what happened, so it must not get this extra system message too.
@@ -325,22 +327,22 @@ fn root_role_does_not_receive_the_child_iteration_budget_heads_up() {
                 .messages()
                 .iter()
                 .any(|message| matches!(message, Message::System { content } if content.contains("tool-use"))),
-            "a root loop must not receive the child-only iteration-budget heads-up"
+            "a root loop must not receive the subagent-only iteration-budget heads-up"
         );
     });
 }
 
 #[test]
-fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
+fn subagent_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
     crate::test_support::run_locked(async {
-        // Regression test: a `Role::Child` loop whose model keeps calling
+        // Regression test: a `Role::Subagent` loop whose model keeps calling
         // tools without ever calling `agent_finish` must, once the iteration
-        // cap trips, report a clear `Err` (→ `drive_child_to_completion`'s
+        // cap trips, report a clear `Err` (→ `drive_subagent_to_completion`'s
         // `Ok(Err(error))` arm, `status: "failure"`) rather than the
         // "unstructured" `Ok(context)` fallback that would otherwise mistake
         // the guard's boilerplate message for a genuine final answer.
         // The mock replays this single scripted tool call on every fresh
-        // request, so the child keeps calling "read" (auto-approved inside
+        // request, so the subagent keeps calling "read" (auto-approved inside
         // the sandbox root, so no approval round-trip is needed) forever
         // without ever calling `agent_finish`, tripping the iteration guard.
         let script = vec![MockEvent::Delta(DeltaChunk {
@@ -382,21 +384,22 @@ fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
         let call_id = Uuid::new_v4();
 
         let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
-        agent_loop = agent_loop
-            .with_max_tool_iterations(3)
-            .with_child_role(ChildRoleConfig {
-                run_id,
-                call_id,
-                session_id: None,
-                briefing: Some("do the task".to_string()),
-                parent_cancel: CancellationToken::new(),
-                subagent_ui_tx,
-                finish_tx,
-            });
+        agent_loop =
+            agent_loop
+                .with_max_tool_iterations(3)
+                .with_subagent_role(SubagentRoleConfig {
+                    run_id,
+                    call_id,
+                    session_id: None,
+                    briefing: Some("do the task".to_string()),
+                    parent_cancel: CancellationToken::new(),
+                    subagent_ui_tx,
+                    finish_tx,
+                });
 
         let handle = agent_loop.run();
         agent_loop
-            .send_command(AgentCommand::Prompt("child task".into()))
+            .send_command(AgentCommand::Prompt("subagent task".into()))
             .await;
 
         // Drain `ui_rx` *while* `run()` is in flight, exactly like the
@@ -423,7 +426,7 @@ fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
             }
         })
         .await
-        .expect("child run() should return promptly once the iteration cap trips")
+        .expect("subagent run() should return promptly once the iteration cap trips")
         .expect("run() task should not panic");
 
         // Collect anything `run()` posted just before returning that the
@@ -434,7 +437,7 @@ fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
         }
 
         let error = result.expect_err(
-            "a child hitting the iteration cap must return Err, not Ok(context) \
+            "a subagent hitting the iteration cap must return Err, not Ok(context) \
              (which would be mistaken for an 'unstructured' final answer)",
         );
         assert!(
@@ -453,7 +456,7 @@ fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
         assert_eq!(
             errors.len(),
             1,
-            "the child must emit its iteration-cap error"
+            "the subagent must emit its iteration-cap error"
         );
         assert_eq!(errors[0].1, &Some(run_id));
         assert!(errors[0].0.contains("iterations"));
@@ -479,10 +482,10 @@ fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
 }
 
 #[tokio::test]
-async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_child() {
+async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_subagent() {
     use crate::agent::tools::spawn_subagent::SpawnSubagentTool;
     use crate::agent::tools::Tool;
-    use crate::child_agent_manager::ChildAgentManager;
+    use crate::subagent_manager::SubagentManager;
     use std::sync::Mutex;
 
     let call_id = Uuid::new_v4();
@@ -500,18 +503,18 @@ async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_child() {
     let started: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let started_clone = started.clone();
     let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::unbounded_channel();
-    let manager = ChildAgentManager::new(
+    let manager = SubagentManager::new(
         subagent_ui_tx,
         Box::new(move |request, _cancel, _ui_tx| {
             started_clone.lock().unwrap().push(request.task.clone());
-            crate::child_agent_manager::SpawnOutcome {
+            crate::subagent_manager::SpawnOutcome {
                 command_sender: None,
                 handle: tokio::spawn(async {}),
             }
         }),
         Some(1),
     );
-    let mut child_agent_manager = Some(manager);
+    let mut subagent_manager = Some(manager);
 
     let (ui_tx, mut ui_rx) = mpsc::channel(8);
     let mut context = Context::new();
@@ -520,7 +523,7 @@ async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_child() {
 
     resolve_spawn_subagent(
         pending,
-        &mut child_agent_manager,
+        &mut subagent_manager,
         &mut context,
         &ui_tx,
         &mut spawn_content_sections,
@@ -533,8 +536,8 @@ async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_child() {
         "the stub spawn_fn should have been invoked with the task"
     );
     assert!(
-        child_agent_manager.as_ref().unwrap().is_running(),
-        "manager should report a running child"
+        subagent_manager.as_ref().unwrap().is_running(),
+        "manager should report a running subagent"
     );
 
     let tool_result = context
@@ -564,15 +567,15 @@ async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_child() {
         Some(UiUpdate::ToolStart { name, .. }) if name == "spawn_subagent"
     ));
 
-    // `ChildAgentManager::start` first reports `ChildAgentStarted` (the
-    // child-lifecycle boundary for the drill-in view), then the
+    // `SubagentManager::start` first reports `SubagentStarted` (the
+    // subagent-lifecycle boundary for the drill-in view), then the
     // "running" status as a `ToolProgress` on the manager's own
     // `subagent_ui_tx` (forwarded to the parent's `ui_tx` in production
     // by `AgentLoop::run`'s `recv_subagent_ui` arm — bypassed here since
     // this test calls `resolve_spawn_subagent` directly).
     assert!(matches!(
         subagent_ui_rx.recv().await,
-        Some(UiUpdate::ChildAgentStarted { agent_type, task, .. })
+        Some(UiUpdate::SubagentStarted { agent_type, task, .. })
             if agent_type == "default" && task == "do the thing"
     ));
     match subagent_ui_rx.recv().await {
@@ -592,7 +595,7 @@ async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_child() {
 
     // The task/briefing content sections shown while pending approval
     // must be stashed so the eventual real `ToolDone` (sent once the
-    // child actually finishes) can still show them alongside the result.
+    // subagent actually finishes) can still show them alongside the result.
     let stashed = spawn_content_sections
         .get(&call_id)
         .expect("task/briefing sections should be stashed for this call id");

@@ -88,16 +88,16 @@ pub enum AgentCommand {
     /// Abort the pending clarify call without an answer.
     /// The agent records a tool error and continues, so the LLM can react.
     AbortClarify,
-    /// Routes `command` to the child agent identified by `run_id` instead of
+    /// Routes `command` to the subagent identified by `run_id` instead of
     /// the receiving loop's own state. Only a `Role::Root` loop's dispatch
     /// handles this variant: it looks up `run_id` in its
-    /// `ChildAgentManager` and forwards `*command` verbatim into that
-    /// child's own command channel — the child's own loop logic never sees
-    /// `ForChild` itself, only the plain, unwrapped `command`. If `run_id`
-    /// is stale (the child already finished/was cancelled), the command is
+    /// `SubagentManager` and forwards `*command` verbatim into that
+    /// subagent's own command channel — the subagent's own loop logic never sees
+    /// `ForSubagent` itself, only the plain, unwrapped `command`. If `run_id`
+    /// is stale (the subagent already finished/was cancelled), the command is
     /// dropped and a warning is logged; this can't cause a hang, since a
-    /// child that's already gone isn't waiting on anything.
-    ForChild {
+    /// subagent that's already gone isn't waiting on anything.
+    ForSubagent {
         run_id: Uuid,
         command: Box<AgentCommand>,
     },
@@ -137,7 +137,7 @@ pub(super) fn agent_command_name(command: &AgentCommand) -> &'static str {
         AgentCommand::DenyTool { .. } => "deny_tool",
         AgentCommand::AnswerClarify(_) => "answer_clarify",
         AgentCommand::AbortClarify => "abort_clarify",
-        AgentCommand::ForChild { .. } => "for_child",
+        AgentCommand::ForSubagent { .. } => "for_subagent",
         AgentCommand::ClearContext => "clear_context",
         AgentCommand::RecordModelChanged { .. } => "record_model_changed",
     }
@@ -192,7 +192,7 @@ pub(super) fn log_agent_command(
                 "agent command received"
             );
         }
-        AgentCommand::ForChild { run_id, command } => {
+        AgentCommand::ForSubagent { run_id, command } => {
             tracing::debug!(
                 command = command_name,
                 ?mode,
@@ -300,7 +300,7 @@ pub enum UiUpdate {
     Error {
         message: String,
         /// `None` when this error originates in the root's own loop;
-        /// `Some(run_id)` identifies which child raised it (see
+        /// `Some(run_id)` identifies which subagent raised it (see
         /// `AgentLoop::own_run_id`). See `UiUpdate::ToolPending::run_id`.
         run_id: Option<Uuid>,
     },
@@ -328,16 +328,16 @@ pub enum UiUpdate {
         content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
         /// `None` when this is the root's own pending tool call; `Some(run_id)`
-        /// identifies which child raised it (see `AgentLoop::own_run_id`).
+        /// identifies which subagent raised it (see `AgentLoop::own_run_id`).
         /// Drivers use this to route the resulting `ApproveTool`/`DenyTool`
-        /// command back to the correct agent loop via `AgentCommand::ForChild`.
+        /// command back to the correct agent loop via `AgentCommand::ForSubagent`.
         run_id: Option<Uuid>,
     },
     /// A still-running call reports an interim status update without
     /// transitioning to a terminal state — the bubble stays `Running`
     /// (spinner keeps going). Used by `spawn_subagent`: the call is not
-    /// "done" merely because the child was accepted/queued, only once the
-    /// child's `agent_finish` result (or cancellation) actually arrives does a
+    /// "done" merely because the subagent was accepted/queued, only once the
+    /// subagent's `agent_finish` result (or cancellation) actually arrives does a
     /// `ToolDone` follow. Patches `title_arguments` on the existing
     /// `Running` bubble state; a no-op if the bubble isn't `Running`.
     ToolProgress {
@@ -390,10 +390,10 @@ pub enum UiUpdate {
     /// the pending bubble itself before sending the command.
     SteerQueued {
         /// `None` when this loop's own root steer queue changed; `Some(run_id)`
-        /// identifies which child raised it (see `AgentLoop::own_run_id`).
-        /// Today no driver ever routes a `Prompt` to a child (only
+        /// identifies which subagent raised it (see `AgentLoop::own_run_id`).
+        /// Today no driver ever routes a `Prompt` to a subagent (only
         /// `ApproveTool`/`DenyTool`/`AnswerClarify`/`AbortClarify` cross
-        /// `AgentCommand::ForChild`), so `Some` is unreachable in practice —
+        /// `AgentCommand::ForSubagent`), so `Some` is unreachable in practice —
         /// carried anyway so this can never silently misattribute to the
         /// root if that changes. See `UiUpdate::ToolPending::run_id`.
         run_id: Option<Uuid>,
@@ -408,15 +408,15 @@ pub enum UiUpdate {
     /// accumulator; flushed into a `ChatEntry::ThinkingMessage` bubble ahead
     /// of the assistant bubble on `StreamDone`.
     AppendThinking(String),
-    /// A child agent actually started running (dequeued from
-    /// `ChildAgentManager`'s FIFO, or started immediately). Emitted by
-    /// `ChildAgentManager::start`. Drives the drill-in conversation model
+    /// A subagent actually started running (dequeued from
+    /// `SubagentManager`'s FIFO, or started immediately). Emitted by
+    /// `SubagentManager::start`. Drives the drill-in conversation model
     /// (Phase 6.10): the driver creates/updates the spawn-bubble and tracks
-    /// `run_id` as the current child conversation, but does **not** switch
+    /// `run_id` as the current subagent conversation, but does **not** switch
     /// `active_view` — the user stays in the parent view until they
     /// navigate manually or an interactive pause (`ToolPending`/
     /// `ClarifyPending` carrying this same `run_id`) forces the switch.
-    ChildAgentStarted {
+    SubagentStarted {
         run_id: Uuid,
         /// The `spawn_subagent` tool-call id this run belongs to (== the
         /// root `ToolBubble`'s `id`) — lets the TUI correlate this run to
@@ -427,36 +427,36 @@ pub enum UiUpdate {
         task: String,
         label: String,
     },
-    /// The child engine's provider-connection/model identity, emitted immediately after
-    /// the child has been constructed so the TUI can label its conversation
+    /// The subagent engine's provider-connection/model identity, emitted immediately after
+    /// the subagent has been constructed so the TUI can label its conversation
     /// independently from the root engine.
-    ChildAgentEngineConfigured {
+    SubagentEngineConfigured {
         run_id: Uuid,
         engine: crate::llm::engine::EngineDisplayInfo,
     },
     /// A fragment of `run_id`'s own assistant text/thinking output,
-    /// forwarded from that child's `AppendText`/`AppendThinking` and
-    /// rendered into that child's own conversation transcript only — never
+    /// forwarded from that subagent's `AppendText`/`AppendThinking` and
+    /// rendered into that subagent's own conversation transcript only — never
     /// mixed into the parent's own `partial_assistant_text`, nor into a
-    /// different child's transcript (`run_id` disambiguates which one,
-    /// since a queued child can start streaming while an earlier child's
+    /// different subagent's transcript (`run_id` disambiguates which one,
+    /// since a queued subagent can start streaming while an earlier subagent's
     /// transcript is still being viewed).
-    ChildAgentToken {
+    SubagentToken {
         run_id: Uuid,
         text: String,
         /// `true` when this fragment came from `AppendThinking` (extended
         /// reasoning), `false` for `AppendText` (visible reply text) — lets
-        /// the child's own `TurnBuffer` route it to the right accumulator,
+        /// the subagent's own `TurnBuffer` route it to the right accumulator,
         /// mirroring how the root distinguishes `StreamChunk` from
         /// `StreamThinkingChunk`.
         is_thinking: bool,
     },
-    /// The child agent run identified by `run_id` has finished
+    /// The subagent run identified by `run_id` has finished
     /// (successfully, with an error, or via the "unstructured" fallback).
-    /// `status`/`result` mirror `crate::child_agent_manager::FinishResult`.
-    /// If the driver had auto-switched into `run_id`'s child view for an
+    /// `status`/`result` mirror `crate::subagent_manager::FinishResult`.
+    /// If the driver had auto-switched into `run_id`'s subagent view for an
     /// interactive pause, it auto-returns to the parent view now.
-    ChildAgentDone {
+    SubagentDone {
         run_id: Uuid,
         status: String,
         result: Option<String>,
@@ -469,10 +469,10 @@ pub enum UiUpdate {
         context_length: usize,
         source: ContextUsageSource,
     },
-    /// An estimate against the active context window for one child run. The
+    /// An estimate against the active context window for one subagent run. The
     /// parent loop forwards this update unchanged; the TUI keeps it keyed by
-    /// `run_id` so background children cannot replace the root footer value.
-    ChildContextUsage {
+    /// `run_id` so background subagents cannot replace the root footer value.
+    SubagentContextUsage {
         run_id: Uuid,
         estimated_tokens: usize,
         context_length: usize,
@@ -483,7 +483,7 @@ pub enum UiUpdate {
     /// tail begins. `entry_index` counts the chat entries built from the
     /// messages before the cut; `summarized_messages` is how many transcript
     /// messages the snapshot summarizes (rebuilt system prompts excluded).
-    /// `run_id` scopes the marker to the owning root or child transcript.
+    /// `run_id` scopes the marker to the owning root or subagent transcript.
     CompactionApplied {
         run_id: Option<Uuid>,
         entry_index: usize,

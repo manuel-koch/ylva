@@ -161,10 +161,10 @@ fn closure(roots: &BTreeSet<Uuid>, links: &BTreeMap<Uuid, BTreeSet<Uuid>>) -> BT
     let mut reached = roots.clone();
     let mut pending: Vec<_> = roots.iter().copied().collect();
     while let Some(identity) = pending.pop() {
-        if let Some(children) = links.get(&identity) {
-            for child in children {
-                if reached.insert(*child) {
-                    pending.push(*child);
+        if let Some(subagents) = links.get(&identity) {
+            for subagent in subagents {
+                if reached.insert(*subagent) {
+                    pending.push(*subagent);
                 }
             }
         }
@@ -183,11 +183,13 @@ fn deletion_groups(
             links.entry(parent).or_default().insert(session.session_id);
         }
         for event in Store::read_events(&session.path)? {
-            if let StoreEvent::ChildStart { id, .. } | StoreEvent::ChildResult { id, .. } = event {
+            if let StoreEvent::SubagentStart { id, .. } | StoreEvent::SubagentResult { id, .. } =
+                event
+            {
                 // Only transcript identities are descendants; cloned_from is provenance.
                 if sessions
                     .get(&id)
-                    .is_some_and(|child| child.parent_session.is_some())
+                    .is_some_and(|subagent| subagent.parent_session.is_some())
                 {
                     links.entry(session.session_id).or_default().insert(id);
                 }
@@ -222,7 +224,7 @@ fn deletion_groups(
                 group.insert(descendant);
             }
         }
-        // Overlapping selected roots/children form one lock-protected group.
+        // Overlapping selected roots/subagents form one lock-protected group.
         let mut index = 0;
         while index < groups.len() {
             if !groups[index].is_disjoint(&group) {
