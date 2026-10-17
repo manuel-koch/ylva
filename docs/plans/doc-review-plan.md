@@ -647,12 +647,14 @@ evidence that current behavior should change.
 
 ### I02 - Web-search idea incorrectly marks StartPage as shipped
 
-- [ ] Correct web-search backend implementation status.
+- [x] Correct web-search backend implementation status.
 - Evidence: [web search](../ideas/web-search.md), lines 3-9, checks off StartPage
   and omits Brave. [Configuration](../configuration.md), lines 703-713, names the
   current backends as DuckDuckGo, SearXNG, and Brave.
 - Resolution: distinguish implemented selection from future backend proposals;
   mark StartPage proposed and link to the current backend reference.
+- Applied: the idea note now lists DuckDuckGo, SearXNG, and Brave as implemented,
+  marks StartPage proposed, and links the web-search configuration reference.
 
 ### I03 - Actionable proposal text uses obsolete public identifiers
 
