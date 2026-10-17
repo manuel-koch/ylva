@@ -33,6 +33,12 @@ the metadata header fields. Stable `<session_id>.lock` files and
 `.project.lock` coordinate writers and maintenance; they are retained and are
 not transcripts. Temporary transition/rewrite files are ignored by discovery.
 
+On Unix, Ylva creates session, lock and project-lock files with mode `0600` and
+the chats root and project directories with mode `0700`, as basic hygiene so
+other local users cannot read them. Existing files and directories keep their
+permissions. Transcripts are not a secure store: Ylva does not guarantee that
+they are free of secrets, so keep secrets out of conversations.
+
 ### Relocating the Ylva home with `YLVA_HOME`
 
 Setting `YLVA_HOME=/some/dir` makes Ylva read and write `/some/dir` directly

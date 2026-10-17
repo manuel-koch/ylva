@@ -93,17 +93,17 @@ debt. Findings that touch the same file are kept adjacent.
    3. [x] Docs: `docs/implementation-notes.md` if terminal lifecycle is
       described.
    4. [x] Gate.
-5. [ ] **M07 (Medium)** - Secret-bearing files use default permissions.
+5. [x] **M07 (Medium)** - Secret-bearing files use default permissions.
    Where: `src/init_command.rs:239-247`,
    `src/store/session_file.rs:121-136,214-229` (**verified**: no `0o600`/`mode(...)`
    in production code). Profile `.env` files hold API keys; transcripts can
    hold secrets.
-   1. [ ] Unix-gated tests: created `.env` and session files have mode `0600`,
+   1. [x] Unix-gated tests: created `.env` and session files have mode `0600`,
       created directories `0700`.
-   2. [ ] Create with `OpenOptionsExt::mode(0o600)` and
+   2. [x] Create with `OpenOptionsExt::mode(0o600)` and
       `DirBuilderExt::mode(0o700)` under `#[cfg(unix)]`.
-   3. [ ] Docs: guarantee in `docs/persistence.md` and `docs/configuration.md`.
-   4. [ ] Gate.
+   3. [x] Docs: guarantee in `docs/persistence.md` and `docs/configuration.md`.
+   4. [x] Gate.
 6. [ ] **M08 + S07 (Medium/Low)** - One atomic, durable replace helper (SSOT).
    Where: `src/store/writer.rs:158-176` (no `sync_all` before `rename`),
    `src/init_command.rs:196-218` (`.gitignore` written in place),

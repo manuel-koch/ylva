@@ -118,13 +118,13 @@ pub(super) type IdentityLock = std::fs::File;
 pub(super) fn lock_identity(path: &Path, session_id: Uuid) -> Result<IdentityLock, StoreError> {
     let lock_path = path.with_file_name(format!("{session_id}.lock"));
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| StoreError::Io {
+        crate::private_fs::create_private_dir_all(parent).map_err(|source| StoreError::Io {
             path: parent.into(),
             source,
         })?;
     }
 
-    let file = std::fs::OpenOptions::new()
+    let file = crate::private_fs::private_open_options()
         .read(true)
         .write(true)
         .create(true)
@@ -157,12 +157,12 @@ pub(super) fn probe_identity(
 }
 
 pub(super) fn lock_project(directory: &Path) -> Result<IdentityLock, StoreError> {
-    std::fs::create_dir_all(directory).map_err(|source| StoreError::Io {
+    crate::private_fs::create_private_dir_all(directory).map_err(|source| StoreError::Io {
         path: directory.into(),
         source,
     })?;
     let path = directory.join(".project.lock");
-    let file = std::fs::OpenOptions::new()
+    let file = crate::private_fs::private_open_options()
         .read(true)
         .write(true)
         .create(true)
@@ -211,12 +211,12 @@ pub(super) fn open_locked_session_file(
         }
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| StoreError::Io {
+        crate::private_fs::create_private_dir_all(parent).map_err(|source| StoreError::Io {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    let file = std::fs::OpenOptions::new()
+    let file = crate::private_fs::private_open_options()
         .read(true)
         .write(true)
         .create(!must_exist)

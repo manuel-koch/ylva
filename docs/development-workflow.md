@@ -6,6 +6,9 @@ single mandatory test gate, `make test-coverage`.
 `make test-coverage` runs the full test suite and enforces the coverage
 threshold, so running `make test` in addition is redundant and is not required.
 
+When dependencies change (`Cargo.toml` or `Cargo.lock`), also run `make audit`
+(see [Dependency audit](#dependency-audit)).
+
 For new features come up with appropriate test case(s) to verify them.
 
 Bugfixes MUST add or strengthen a test that fails before the fix and passes after.

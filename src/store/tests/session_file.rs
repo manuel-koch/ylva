@@ -150,3 +150,46 @@ async fn a_session_without_events_still_gets_its_meta_header() {
     let events = read_events(&path);
     assert!(matches!(events.as_slice(), [StoreEvent::Meta(_)]));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn created_session_files_and_directories_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode_of = |path: &Path| {
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chats_root = temp.path().join("chats");
+    let session_id = Uuid::new_v4();
+    let store = Store::create(
+        &chats_root,
+        temp.path(),
+        session_id,
+        "openrouter",
+        "gpt-4o",
+        None,
+    )
+    .expect("store created");
+    store.record_message(&user_message("secret"));
+    store.flush().await;
+
+    let session_path = store.path().to_path_buf();
+    let project_directory = session_path.parent().expect("project directory");
+    assert_eq!(mode_of(&session_path), 0o600, "session file");
+    assert_eq!(
+        mode_of(&project_directory.join(format!("{session_id}.lock"))),
+        0o600,
+        "identity lock file"
+    );
+    assert_eq!(
+        mode_of(&project_directory.join(".project.lock")),
+        0o600,
+        "project lock file"
+    );
+    assert_eq!(mode_of(project_directory), 0o700, "project directory");
+    assert_eq!(mode_of(&chats_root), 0o700, "chats root");
+}

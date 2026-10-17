@@ -306,9 +306,12 @@ default profile config and `.env` starters plus `.gitignore` under the
 discovered workspace root. The workspace `.gitignore` lists `.env`, `.envrc`, and
 `chats/`. Both commands write only missing files unless
 `--force` is supplied; an existing `.gitignore` is never overwritten, and only
-its missing entries are appended. Global, profile-scoped, and project-scoped
-`agents/*.md` and `agents/*.toml` files are discovered while resolving profiles; richer
-examples are documented below rather than shipped as repository templates.
+its missing entries are appended. On Unix, `ylva init` creates the directories it
+needs with mode `0700` and each newly created `.env` with mode `0600`, as basic
+hygiene for a file that holds API keys; an existing `.env` keeps its permissions.
+Global, profile-scoped, and project-scoped `agents/*.md` and `agents/*.toml` files are discovered while
+resolving profiles; richer examples are documented below rather than shipped as
+repository templates.
 
 ### Managing profiles and shims
 

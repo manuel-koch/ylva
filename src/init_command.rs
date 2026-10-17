@@ -236,17 +236,33 @@ fn seed_file(
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| ConfigError::Unreadable {
-            path: parent.to_path_buf(),
-            source,
+        crate::private_fs::create_private_dir_all(parent).map_err(|source| {
+            ConfigError::Unreadable {
+                path: parent.to_path_buf(),
+                source,
+            }
         })?;
     }
-    std::fs::write(&path, contents).map_err(|source| ConfigError::Unreadable {
+    write_seed_contents(&path, contents).map_err(|source| ConfigError::Unreadable {
         path: path.clone(),
         source,
     })?;
     report.written.push(path);
     Ok(())
+}
+
+/// Writes `contents`; the secret-bearing `.env` file is created owner-only on Unix.
+fn write_seed_contents(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if path.file_name().and_then(|name| name.to_str()) != Some(crate::PROFILE_ENV_FILE_NAME) {
+        return std::fs::write(path, contents);
+    }
+    let mut file = crate::private_fs::private_open_options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(contents.as_bytes())
 }
 
 #[cfg(test)]
@@ -255,6 +271,33 @@ mod tests {
 
     /// `SOUL.md`, the default profile's `config.toml`, and its `.env`.
     const HOME_STARTER_FILE_COUNT: usize = 3;
+
+    #[cfg(unix)]
+    #[test]
+    fn home_init_creates_the_environment_file_and_directories_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode_of = |path: &Path| {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        let temporary_directory = tempfile::tempdir().expect("tempdir");
+        let home = temporary_directory.path().join("home");
+
+        run_init(&home, false).expect("initialization succeeds");
+
+        let profile_directory = home
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME);
+        assert_eq!(
+            mode_of(&profile_directory.join(PROFILE_ENV_FILE_NAME)),
+            0o600
+        );
+        assert_eq!(mode_of(&profile_directory), 0o700);
+        assert_eq!(mode_of(&home), 0o700);
+    }
 
     #[test]
     fn home_init_seeds_the_standard_files_and_is_idempotent_without_force() {

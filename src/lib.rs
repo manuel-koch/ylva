@@ -30,6 +30,7 @@ pub mod llm;
 pub mod logging;
 pub mod markdown;
 pub mod presenter;
+pub(crate) mod private_fs;
 pub mod profile_command;
 pub mod profile_shim;
 pub(crate) mod prompt;
