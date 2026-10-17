@@ -348,7 +348,7 @@ line coverage.
 
 ### D10 - Request-dump format follows the token-dump paragraph without a named subject
 
-- [ ] Separate request-dump and token-dump explanations.
+- [x] Separate request-dump and token-dump explanations.
 
 **Priority: Low. Category: ambiguity and misplaced explanation.**
 
@@ -360,6 +360,10 @@ line coverage.
   metadata-only token diagnostic.
 - Resolution: separate the two existing variables into clearly named subsections
   or explicitly name `YLVA_REQUEST_DUMP_PATH` at the transition.
+- Applied: split the Debug explanations in `docs/cli-options.md` into named
+  subsections for `YLVA_TOKEN_USAGE_DUMP_PATH` and `YLVA_REQUEST_DUMP_PATH`,
+  explicitly identifying the single metadata-only file versus the HTTP dump
+  path template. Runtime behavior is unchanged.
 
 ### D11 - Blanket lint-suppression prohibition conflicts with a required exception
 

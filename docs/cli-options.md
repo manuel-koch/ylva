@@ -446,18 +446,23 @@ environment values are never written to logs.
 | `YLVA_REQUEST_DUMP_PATH` | — | When set, every outbound HTTP request is dumped, including model catalogs, Ollama metadata, chat/SSE, and web search. Request and response files share a timestamp and per-request id. A relative directory is resolved against the process working directory. Used by `make build-debug-and-run-with-logs`. |
 | `YLVA_TOKEN_USAGE_DUMP_PATH` | — | When set, append one metadata-only JSONL record per model request to this file. Records pair the pre-send `cl100k_base` estimate of the serialized Chat Completions body with provider-reported input usage for that request when present. Each record includes its UTC request timestamp and session ID when associated with a persisted session (`null` for standalone utility requests). A relative path is resolved against the process working directory. No conversation content, credentials, or request payload is written. This is diagnostic data, not billed usage, and is independent of `YLVA_REQUEST_DUMP_PATH` and session persistence. |
 
-The token usage dump is a single append-only JSONL file. Each record contains a
-request correlation ID, UTC timestamp, nullable session ID, provider
-implementation and connection, model, local estimated input-token count and estimate source, and nullable
-`reported_input_tokens`/`reported_source` fields. OpenAI-compatible streams request
-usage and recognize `usage.prompt_tokens` or `usage.input_tokens`; provider
-support varies, so a missing or interrupted observation is `null`, never zero.
+#### Token usage dump (`YLVA_TOKEN_USAGE_DUMP_PATH`)
+
+`YLVA_TOKEN_USAGE_DUMP_PATH` names a single append-only JSONL file. Each record
+contains a request correlation ID, UTC timestamp, nullable session ID, provider
+implementation and connection, model, local estimated input-token count and
+estimate source, and nullable `reported_input_tokens`/`reported_source` fields.
+OpenAI-compatible streams request usage and recognize `usage.prompt_tokens` or
+`usage.input_tokens`; provider support varies, so a missing or interrupted observation
+is `null`, never zero.
 The local estimate tokenizes the exact serialized request JSON with
 `cl100k_base`; it is a consistent comparison baseline, not a prediction of the
 provider's model-native token count.
 
-The value is a path template: the directory and filename stem are extracted and
-the request is written as
+#### HTTP request and response dumps (`YLVA_REQUEST_DUMP_PATH`)
+
+`YLVA_REQUEST_DUMP_PATH` is a path template: the directory and filename stem are
+extracted and the request is written as
 `<stem>_<timestamp>_<dump_id>_request.jsonl`. Its first line contains the
 request's `scheme`/`host`/`path`/`query`/`headers`; `Authorization`, `Cookie`,
 and API-key-style header values are redacted as `<REDACTED>`, and so is every
