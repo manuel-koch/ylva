@@ -747,12 +747,14 @@ evidence that current behavior should change.
 
 ### I09 - Sample-prompt Markdown fails the configured linter
 
-- [ ] Fix the sample-prompt Markdown lint issue.
+- [x] Fix the sample-prompt Markdown lint issue.
 - Evidence: [sample prompts](../ideas/sample-prompts.md), line 228:
   `MD012`, multiple consecutive blank lines.
 - Resolution: remove the extra blank line in an authorized cleanup.
 
 ### I10 - Twenty-four idea documents have no inbound Markdown link
+
+WON'T FIX: These are not relevant topics for current review.
 
 - [ ] Resolve idea-document discoverability disposition.
 - Evidence: local link-graph inspection found no inbound Markdown link for:
