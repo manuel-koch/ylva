@@ -398,8 +398,8 @@ async fn resolve_account_info(
 ```
 
 For Individual Pro subscribers, the endpoint is
-`api.individual.githubcopilot.com` and the raw `ghu_` token may work directly as
-Bearer without the exchange step. For Business/Enterprise, the exchanged session
+`api.individual.githubcopilot.com` and the raw `ghu_` token may work directly as a
+bearer token, skipping the exchange step. For Business/Enterprise, the exchanged session
 token is required [1][2].
 
 ### Token Caching Strategy
@@ -840,7 +840,7 @@ curl -X POST 'https://github.com/login/oauth/access_token' \
   -d '{"client_id":"Iv1.b507a08c87ecfe98","device_code":"DEVICE_CODE","grant_type":"urn:ietf:params:oauth:grant-type:device_code"}'
 
 # Optional: Discover account type and correct endpoint
-curl -s -H "Authorization: token GHO_TOKEN" \
+curl -s -H "Authorization: token GHU_TOKEN" \
   -H "User-Agent: GitHubCopilotChat/0.26.7" \
   https://api.github.com/copilot_internal/user | jq '{copilot_plan, endpoints}'
 
@@ -855,14 +855,15 @@ curl -X GET 'https://api.github.com/copilot_internal/v2/token' \
   --compressed
 
 # List all models (including premium) with session token + integration headers
-curl -s 'https://api.githubcopilot.com/models' \
+# (API_BASE: endpoints.api from the exchange response, else https://api.githubcopilot.com)
+curl -s "API_BASE/models" \
   -H "Authorization: Bearer SESSION_TOKEN" \
   -H "Copilot-Integration-Id: vscode-chat" \
   -H "Editor-Version: vscode/1.99.3" \
   -H "Editor-Plugin-Version: copilot-chat/0.26.7"
 
-# Chat with tools and a premium model (replace SESSION_TOKEN)
-curl -X POST 'https://api.githubcopilot.com/chat/completions' \
+# Chat with tools and a premium model (replace API_BASE and SESSION_TOKEN)
+curl -X POST "API_BASE/chat/completions" \
   -H "Authorization: Bearer SESSION_TOKEN" \
   -H "Copilot-Integration-Id: vscode-chat" \
   -H "Editor-Version: vscode/1.99.3" \

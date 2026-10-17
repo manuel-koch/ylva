@@ -688,7 +688,7 @@ evidence that current behavior should change.
 
 ### I05 - Copilot verification examples were damaged by redaction and editing
 
-- [ ] Repair redacted Copilot examples without exposing secrets.
+- [x] Repair redacted Copilot examples without exposing secrets.
 - Evidence: [Copilot provider](../ideas/copilot-provider.md), lines 497 and 545,
   has `format!("******", copilot_token)` with an unused formatting argument.
   Line 465 has an unmatched inline-code delimiter. Lines 859 and 866 show
@@ -700,6 +700,12 @@ evidence that current behavior should change.
 - Resolution: preserve all redaction but use consistent non-secret placeholders;
   feed the discovered endpoint into illustrative follow-up commands and repair
   the table/prose. No live authentication claim was verified.
+- Applied: `GHO_TOKEN` became `GHU_TOKEN`; follow-up curl commands use an
+  `API_BASE` placeholder (`endpoints.api`, falling back to the generic origin).
+  Re-inspecting the raw bytes showed the file's authorization values, `format!`
+  calls, table row, and inline-code delimiters were already intact; the reported
+  `******` damage was display-side masking of `Bearer` values in the review
+  tooling, so no change was needed there. No live authentication claim was verified.
 
 ### I06 - Sample prompt assumes unimplemented structured CLI conversation output
 
