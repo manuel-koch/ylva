@@ -9,7 +9,7 @@ If possible support using GH_TOKEN with content of a personal-access-token.
 * Do we need a new slash-command `/connect` to guide user thru the
   process of adding a provider-connection for _copilot_ to current
   profile config ?
-  * edit `config.toml` and add a new `provider_configs.*`
+  * edit `config.toml` and add a new `[provider_connections.<name>]`
     table
   * update `.env` with appropriate secret envvars ( token we get during
     onboarding process )

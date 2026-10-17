@@ -658,7 +658,7 @@ evidence that current behavior should change.
 
 ### I03 - Actionable proposal text uses obsolete public identifiers
 
-- [ ] Correct obsolete public identifiers in actionable proposals.
+- [x] Correct obsolete public identifiers in actionable proposals.
 - Evidence: [system prompt versus tools](../ideas/system-prompt-vs-tools.md),
   lines 8-23, 34-40, 50-57, and 73-76, uses `read_file` as a callable tool and
   suggests a per-profile persona field. Current public names/ownership are `read`,
@@ -670,6 +670,10 @@ evidence that current behavior should change.
 - Resolution: correct actionable identifiers and link to the tool/configuration
   references without turning the rest of each proposal into an implemented contract.
   Do not rename real internal functions merely because public tool names differ.
+- Applied: `read_file` became `read`; the persona suggestion now names the
+  global `SOUL.md` fallback (`DEFAULT_SOUL`, a real internal constant, kept) and
+  per-agent-type `persona`, with links; `provider_configs.*` became
+  `[provider_connections.<name>]`; `finish` became `agent_finish`.
 
 ### I04 - Tirith proposal still depends on an implemented prerequisite
 

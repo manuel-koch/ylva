@@ -5,7 +5,7 @@
 Models vary widely in how efficiently they use tools. The most common
 failure modes observed:
 
-- **Full-file reads instead of search.** The model uses `read_file` to look
+- **Full-file reads instead of search.** The model uses `read` to look
   for a symbol or pattern instead of `search`, pulling large files into the
   context window unnecessarily. Each file read is one tool-call round, so a
   task that touches many files inflates context and burns through the
@@ -20,7 +20,7 @@ failure modes observed:
   a specific function).
 
 - **Re-reading files already in context.** Particularly with weaker models,
-  the model calls `read_file` on content it received in a prior round.
+  the model calls `read` on content it received in a prior round.
 
 Whether this is a model capability issue or a prompt/description gap is hard
 to disentangle. Stronger models (GPT-4-class and above) tend to self-select
@@ -31,8 +31,11 @@ the most literal interpretation of the task ("read the file").
 
 ### 1. System prompt guidance
 
-Add an efficiency section to the built-in `DEFAULT_SOUL` (or to the per-profile
-`persona` field) that explicitly names preferred patterns:
+Add an efficiency section to the built-in `DEFAULT_SOUL` (the code-owned
+fallback for the independently resolved global `SOUL.md`; see
+[global persona](../configuration.md#global-persona-soulmd)) or to a per-agent-type
+`persona` (see [per-agent configuration](../configuration.md#per-agent-configuration))
+that explicitly names preferred patterns:
 
 ```text
 Prefer search over read_file when locating symbols, declarations, or
@@ -49,11 +52,11 @@ if the prompt is swapped out.
 
 Add self-contained usage tips inside each tool's description:
 
-- `read_file`: "Use `offset`/`limit` when only a region is needed. Prefer
+- `read`: "Use `offset`/`limit` when only a region is needed. Prefer
   the `search` tool when you only need to locate a pattern rather than read
   content."
 - `search`: "The preferred first step for locating symbols, declarations, or
-  patterns across files — avoid reaching for `read_file` just to check
+  patterns across files — avoid reaching for `read` just to check
   whether something exists."
 
 **Pro:** guidance travels with the schema; works even when the system prompt
@@ -72,7 +75,7 @@ rules (search-first, batching independent reads).
 
 Implement option 3 as a low-risk incremental improvement:
 
-1. Update `read_file` and `search` descriptions with the nudges above.
+1. Update `read` and `search` descriptions (see [tools](../features.md#tools-to-be-used-by-models)) with the nudges above.
 2. Append a short "Tool use" paragraph to the built-in `DEFAULT_SOUL`.
 3. Observe whether the iteration-heavy prompt in `docs/ideas/sample-prompts.md`
    (module-tree tracing) completes within the limit with a capable model.

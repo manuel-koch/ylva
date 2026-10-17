@@ -21,7 +21,7 @@ Tool-specific source bounds are separate from the model-view budget:
 | `bash` | 1000 lines / 64 KiB |
 | `search` | 1000 lines / 64 KiB |
 | `glob` | no default hard path-count/byte ceiling; optional `limit` and runtime token allowance |
-| `edit` diffs, child `finish`, future tools | none |
+| `edit` diffs, child `agent_finish`, future tools | none |
 
 Consequences:
 
