@@ -415,7 +415,8 @@ impl SandboxContext {
             | NamedSandboxRule::VariableAssignmentPrefix
             | NamedSandboxRule::UnquotedGlob
             | NamedSandboxRule::UnquotedBraceExpansion
-            | NamedSandboxRule::NetworkRequest => false,
+            | NamedSandboxRule::NetworkRequest
+            | NamedSandboxRule::NetworkPrivateAddress => false,
         }
     }
 

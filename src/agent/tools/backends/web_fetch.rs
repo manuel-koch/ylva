@@ -40,7 +40,7 @@ use crate::agent::tools::read::supported_media_type;
 /// Implementation modules, one per [`WebFetchBackend`] backend kind.
 pub mod native;
 
-pub use native::HttpFetchBackend;
+pub use native::{HttpFetchBackend, MAX_REDIRECTS};
 
 /// Maximum number of bytes of model-facing text (HTML-derived markdown or
 /// verbatim text) a `web_fetch` result carries. Longer output is truncated on
@@ -171,9 +171,39 @@ pub enum WebFetchError {
     /// not valid UTF-8).
     #[error("web fetch response content is not supported: {detail}")]
     UnsupportedContentType { detail: String },
+    /// A redirect hop or request target was refused by the hop policy: too
+    /// many redirects, a non-`http(s)` scheme, a private or reserved address,
+    /// or an explicit `deny` rule.
+    #[error("web fetch of '{url}' was refused: {reason}")]
+    Refused { url: String, reason: String },
     /// The body is HTML but `htmd` could not convert it to markdown.
     #[error("web fetch response could not be converted to markdown: {detail}")]
     Conversion { detail: String },
+}
+
+/// Sandbox decisions the backend consults while following a fetch.
+///
+/// Both callbacks receive a hop's `scheme://host[:port]` match key. Neither
+/// ever prompts.
+#[derive(Clone, Copy)]
+pub struct HopPolicy<'a> {
+    /// Explicit `deny` rules for a redirect hop to a different target:
+    /// returns the denial reason, or `None` when the hop may proceed.
+    pub deny: &'a (dyn Fn(&str) -> Option<String> + Send + Sync),
+    /// Whether a connection to a private or reserved address is permitted for
+    /// the target (the `network_private_address` rule).
+    pub allow_private_address: &'a (dyn Fn(&str) -> bool + Send + Sync),
+}
+
+impl HopPolicy<'static> {
+    /// No denials and private addresses allowed; for tests and callers
+    /// without a sandbox.
+    pub const fn permissive() -> Self {
+        HopPolicy {
+            deny: &|_| None,
+            allow_private_address: &|_| true,
+        }
+    }
 }
 
 /// A fetch backend the `web_fetch` tool can call.
@@ -182,7 +212,17 @@ pub enum WebFetchError {
 /// [`crate::web_search::WebSearchBackend`]).
 pub trait WebFetchBackend: Send + Sync + std::fmt::Debug {
     /// Issue an HTTP `GET` for `url` and return the classified response.
-    fn fetch<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Result<WebFetchResponse, WebFetchError>>;
+    ///
+    /// The requested URL is approved by the caller. Redirects are followed by
+    /// the backend under `policy`: at most [`MAX_REDIRECTS`] hops,
+    /// `http`/`https` only, no private or reserved addresses unless
+    /// `policy.allow_private_address` permits the hop's target, and
+    /// `policy.deny` is consulted for every hop to a different target.
+    fn fetch<'a>(
+        &'a self,
+        url: &'a str,
+        policy: HopPolicy<'a>,
+    ) -> BoxFuture<'a, Result<WebFetchResponse, WebFetchError>>;
 }
 
 // ── URL validation and approval matching ──────────────────────────────────────

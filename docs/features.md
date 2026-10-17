@@ -718,9 +718,14 @@ Result metadata carries `url`, `final_url` (after redirects), `status`,
 renders these response facts as a wrapped `Response` content section
 (`final_url` only when a redirect was followed) instead of truncating
 them into the one-line summary, which keeps only the `truncated` flag.
-Redirects are followed
-normally, but host-scoped `network_request` `target` rules evaluate the
-requested URL only (see `docs/configuration.md`). Requires user approval
+Redirects are followed by the backend under a non-interactive hop policy:
+at most 10 hops, `http`/`https` only, and no loopback, private, link-local
+or otherwise reserved destination address unless a `network_private_address`
+rule permits it (checked on every hop, including
+the first; the connection is pinned to the checked addresses). Approval and
+host-scoped `network_request` `target` rules apply to the requested URL;
+a hop to a different host is refused only by an explicit `deny` rule (see
+`docs/configuration.md`). Requires user approval
 before execution unless a `[tools.web_fetch]` `network_request` rule or
 `--auto-approve-web-fetch` states a verdict.
 

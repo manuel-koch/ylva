@@ -191,6 +191,7 @@ impl SandboxContext {
             | NamedSandboxRule::DotPath
             | NamedSandboxRule::CrossFilesystem
             | NamedSandboxRule::NetworkRequest
+            | NamedSandboxRule::NetworkPrivateAddress
             | NamedSandboxRule::SkillSidecar => false,
         }
     }

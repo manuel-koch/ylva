@@ -836,6 +836,10 @@ backend = "native"
 timeout_secs = 30
 ```
 
+Fetching private or reserved addresses (e.g. a local docs server) is allowed
+by a `network_private_address` rule, see
+[Private and reserved addresses](#private-and-reserved-addresses-network_private_address).
+
 An absent `[web_fetch]` table behaves exactly like the written-out default.
 
 ## Sandbox (tool-approval rules)
@@ -1092,7 +1096,8 @@ path nor a command argument, so path/command rules are rejected under
 `[tools.web_search]`/`[tools.web_fetch]` (and their
 `[agents.<type>.tools.<name>]` equivalents) at startup, just like `bash`'s
 rule-kind restrictions work in reverse. The only rule kind these tables
-accept is the network-tool named rule `network_request`, with an optional
+accept are the network-tool named rules `network_request` (and
+`network_private_address`, see below), with an optional
 `target` parameter:
 
 ```toml
@@ -1134,7 +1139,8 @@ host-shaped (never a path):
 A non-matching `target` abstains — the tool's own default
 (`user_approval_required`) then applies. The bare patterns `*`/`**` are
 rejected (omit `target` to match every call), and an invalid pattern is a
-hard startup error. `target` is only valid on a `network_request` rule; on
+hard startup error. `target` is only valid on the network rules
+(`network_request`, `network_private_address`); on
 any other rule kind it is a hard startup error. Which key a call is matched
 against: `web_fetch` uses the requested URL's key, `web_search` its
 configured backend endpoint's key — `https://html.duckduckgo.com` for the
@@ -1145,8 +1151,34 @@ default backend, the configured instance authority (e.g.
 `verdict`/`reason` behave like every other named rule, rules are evaluated
 in list order with last-match-wins, and `--auto-approve-web-search`/
 `--auto-approve-web-fetch` append their `auto_approved` catch-all last so
-the flag always wins. Redirect caveat: `web_fetch` follows HTTP redirects
-normally (and reports the final URL in its result metadata), but a
-`target` rule is evaluated against the **requested** URL only and is not
-re-evaluated per redirect hop — an auto-approved host can redirect to
-another host.
+the flag always wins. Redirect hops: `web_fetch` follows redirects itself
+(max 10, `http`/`https` only). A `target` rule is evaluated against the
+**requested** URL for approval; for a hop to a different host only an
+explicit `deny` verdict refuses it — hops never prompt, and an
+auto-approved host can still redirect to another non-denied public host.
+`--auto-approve-web-fetch` appends a catch-all that also overrides hop
+`deny` rules.
+
+#### Private and reserved addresses (`network_private_address`)
+
+`web_fetch` refuses to connect to loopback, private (RFC 1918), link-local
+(e.g. `169.254.169.254`), shared, multicast and other reserved addresses,
+checked after DNS resolution on the requested URL and on every redirect hop.
+The named rule `network_private_address` permits them. It accepts the same
+`target` parameter as `network_request`, matched against the
+`scheme://host[:port]` key of the URL being connected to (the hop's own key,
+not the originally requested one):
+
+```toml
+[tools.web_fetch]
+rules = [
+  { rule = "network_private_address", target = "http://localhost:*", verdict = "auto_approved" },
+]
+```
+
+Only `verdict = "auto_approved"` permits; any other verdict leaves the
+refusal in place, and the last matching rule wins (so a later
+`auto_denied` rule can narrow an earlier broad one). It is separate from
+`network_request`: approving a request does not permit a private address,
+and `--auto-approve-web-fetch` never does either. Behind an HTTP proxy the
+proxy resolves the destination, so the address check cannot see it.

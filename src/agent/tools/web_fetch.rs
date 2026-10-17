@@ -43,7 +43,7 @@ use serde_json::Value;
 use tracing::Instrument;
 
 use super::backends::web_fetch::{
-    network_target, WebFetchBackend, WebFetchBackendKind, WebFetchBody, WebFetchError,
+    network_target, HopPolicy, WebFetchBackend, WebFetchBackendKind, WebFetchBody, WebFetchError,
     WebFetchResponse, WEB_FETCH_MAX_OUTPUT_BYTES, WEB_FETCH_OUTER_TIMEOUT_GRACE_SECS,
 };
 use super::{
@@ -338,7 +338,9 @@ fn web_fetch_tool_error(url: &str, error: WebFetchError) -> ToolError {
         WebFetchError::Conversion { detail } => {
             format!("failed to fetch '{url}': could not convert HTML to markdown: {detail}")
         }
-        WebFetchError::InvalidUrl { .. } | WebFetchError::Status { .. } => error.to_string(),
+        WebFetchError::InvalidUrl { .. }
+        | WebFetchError::Status { .. }
+        | WebFetchError::Refused { .. } => error.to_string(),
     };
     ToolError::failed(WebFetchTool::NAME, message)
 }
@@ -413,18 +415,32 @@ impl ToolCall for WebFetchCall {
                 network_target(&args.url)
                     .map_err(|error| web_fetch_tool_error(&args.url, error))?;
                 let outer_timeout = Duration::from_secs(tool.timeout_secs);
-                let response = tokio::time::timeout(outer_timeout, tool.backend.fetch(&args.url))
-                    .await
-                    .map_err(|_| {
-                        ToolError::failed(
-                            WebFetchTool::NAME,
-                            format!(
-                                "web fetch of '{}' timed out after {} seconds",
-                                args.url, tool.timeout_secs
-                            ),
-                        )
-                    })?
-                    .map_err(|error| web_fetch_tool_error(&args.url, error))?;
+                // Redirect hops are never prompted for; only an explicit
+                // `deny` rule refuses a hop, and private addresses need a
+                // `network_private_address` rule.
+                let deny = |target: &str| match tool.sandbox_context.check_network_request(target) {
+                    Some(ApprovalCheck::AutoDenied { reason }) => Some(reason),
+                    _ => None,
+                };
+                let allow_private_address =
+                    |target: &str| tool.sandbox_context.check_private_address(target);
+                let policy = HopPolicy {
+                    deny: &deny,
+                    allow_private_address: &allow_private_address,
+                };
+                let response =
+                    tokio::time::timeout(outer_timeout, tool.backend.fetch(&args.url, policy))
+                        .await
+                        .map_err(|_| {
+                            ToolError::failed(
+                                WebFetchTool::NAME,
+                                format!(
+                                    "web fetch of '{}' timed out after {} seconds",
+                                    args.url, tool.timeout_secs
+                                ),
+                            )
+                        })?
+                        .map_err(|error| web_fetch_tool_error(&args.url, error))?;
                 let mut result = WebFetchResult::new(args.url, response);
                 if let Some(max_output_tokens) = runtime_output_token_limit {
                     result
@@ -592,6 +608,7 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _url: &'a str,
+            _policy: crate::agent::tools::backends::web_fetch::HopPolicy<'a>,
         ) -> BoxFuture<'a, Result<WebFetchResponse, WebFetchError>> {
             let outcome = self
                 .outcome

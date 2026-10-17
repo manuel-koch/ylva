@@ -410,3 +410,80 @@ fn target_parameter_is_rejected_on_non_network_rule_kinds() {
         "path rules cannot carry a target"
     );
 }
+
+// ── network_private_address rule ──────────────────────────────────────────
+
+fn private_address_rule(verdict: ApprovalVerdictConfig, target: Option<&str>) -> SandboxRuleConfig {
+    SandboxRuleConfig::Named {
+        rule: NamedSandboxRule::NetworkPrivateAddress,
+        verdict,
+        reason: None,
+        target: target.map(str::to_string),
+    }
+}
+
+fn context_with(rules: Vec<SandboxRuleConfig>) -> SandboxContext {
+    let temporary_dir = tempfile::tempdir().unwrap();
+    SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(rules)
+}
+
+#[test]
+fn private_addresses_are_not_allowed_without_a_rule() {
+    let context = context_with(vec![network_request_rule(
+        ApprovalVerdictConfig::AutoApproved,
+        None,
+        None,
+    )]);
+    assert!(!context.check_private_address("http://localhost:8080"));
+}
+
+#[test]
+fn an_approving_private_address_rule_is_scoped_by_target() {
+    let context = context_with(vec![private_address_rule(
+        ApprovalVerdictConfig::AutoApproved,
+        Some("http://localhost:*"),
+    )]);
+    assert!(context.check_private_address("http://localhost:8080"));
+    assert!(!context.check_private_address("http://127.0.0.1:8080"));
+    assert!(!context.check_private_address("https://localhost"));
+
+    let everywhere = context_with(vec![private_address_rule(
+        ApprovalVerdictConfig::AutoApproved,
+        None,
+    )]);
+    assert!(everywhere.check_private_address("http://10.0.0.5"));
+}
+
+#[test]
+fn private_address_last_match_wins_and_only_approval_allows() {
+    let denied_later = context_with(vec![
+        private_address_rule(ApprovalVerdictConfig::AutoApproved, None),
+        private_address_rule(
+            ApprovalVerdictConfig::AutoDenied,
+            Some("http://localhost:*"),
+        ),
+    ]);
+    assert!(!denied_later.check_private_address("http://localhost:8080"));
+    assert!(denied_later.check_private_address("http://10.0.0.5"));
+
+    let needs_approval = context_with(vec![private_address_rule(
+        ApprovalVerdictConfig::UserApprovalRequired,
+        None,
+    )]);
+    assert!(!needs_approval.check_private_address("http://localhost"));
+}
+
+#[test]
+fn private_address_rule_does_not_affect_network_request_and_the_cli_flag_does_not_grant_it() {
+    let context = context_with(vec![private_address_rule(
+        ApprovalVerdictConfig::AutoApproved,
+        None,
+    )]);
+    assert_eq!(context.check_network_request("http://localhost"), None);
+
+    let flagged = context_with(Vec::new()).with_rule(SandboxRule {
+        verdict: ApprovalCheck::AutoApproved,
+        pattern: glob::Pattern::new("**").unwrap(),
+    });
+    assert!(!flagged.check_private_address("http://localhost"));
+}

@@ -151,6 +151,14 @@ pub enum NamedSandboxRule {
     /// `[tools.web_search]`/`[tools.web_fetch]`/
     /// `[agents.<type>.tools.web_search]`/`[agents.<type>.tools.web_fetch]`.
     NetworkRequest,
+    /// Permits a network tool to connect to loopback, private, link-local or
+    /// otherwise reserved addresses. Refused by default; only
+    /// `verdict = "auto_approved"` permits, any other verdict leaves the
+    /// refusal in place (last match wins). The optional `target` is matched
+    /// against the `scheme://host[:port]` key of the request or redirect hop
+    /// being connected to. It is never granted by `--auto-approve-web-fetch`.
+    /// Valid only where [`NamedSandboxRule::NetworkRequest`] is.
+    NetworkPrivateAddress,
 }
 
 /// The serde-friendly counterpart of [`ApprovalCheck`]'s variants, without
@@ -380,7 +388,7 @@ impl SandboxRuleConfig {
         matches!(
             self,
             SandboxRuleConfig::Named {
-                rule: NamedSandboxRule::NetworkRequest,
+                rule: NamedSandboxRule::NetworkRequest | NamedSandboxRule::NetworkPrivateAddress,
                 ..
             }
         )
@@ -501,6 +509,7 @@ impl ResolvedRule {
                     NamedSandboxRule::UnquotedGlob => UNQUOTED_GLOB_REASON,
                     NamedSandboxRule::UnquotedBraceExpansion => UNQUOTED_BRACE_EXPANSION_REASON,
                     NamedSandboxRule::NetworkRequest => NETWORK_REQUEST_REASON,
+                    NamedSandboxRule::NetworkPrivateAddress => NETWORK_REQUEST_REASON,
                 };
                 ResolvedRule::Named {
                     rule,

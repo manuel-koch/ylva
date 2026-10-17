@@ -352,6 +352,20 @@ cancellation, so grandchildren do not outlive the command. See
 [features](./features.md#tools-to-be-used-by-models) for timeout and output
 limits.
 
+`HttpFetchBackend` (`backends/web_fetch/native.rs`) builds a fresh
+`reqwest` client per hop with `redirect::Policy::none()` and follows
+`Location` itself (`MAX_REDIRECTS` = 10). Each hop resolves the host with
+`tokio::net::lookup_host`, rejects it via `is_private_or_reserved` (IPv4-mapped
+and NAT64 addresses are unwrapped) unless the hop's key passes
+`SandboxContext::check_private_address` (the `network_private_address` rule;
+configured rules only, so the CLI catch-all never grants it), and pins the
+client to the checked addresses with `resolve_to_addrs`, closing the
+DNS-rebinding gap. The tool passes the backend a `HopPolicy` of two closures:
+`deny`, built from `check_network_request` (only `AutoDenied` maps to a
+refusal, consulted only when a hop's `scheme://host[:port]` key differs from
+the requested URL's), and `allow_private_address`. Refusals surface as
+`WebFetchError::Refused`.
+
 ## CLI driver
 
 The CLI builds a separate registry for tool display. It must receive the same

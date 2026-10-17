@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ylva::agent::tools::backends::web_fetch::{
-    HttpFetchBackend, WebFetchBackend, WebFetchBody, WebFetchError, WebFetchResponse,
-    WEB_FETCH_MAX_OUTPUT_BYTES,
+    HopPolicy, HttpFetchBackend, WebFetchBackend, WebFetchBody, WebFetchError, WebFetchResponse,
+    MAX_REDIRECTS, WEB_FETCH_MAX_OUTPUT_BYTES,
 };
 use ylva::agent::tools::read::READ_MEDIA_MAX_BYTES;
 
@@ -176,7 +176,7 @@ fn backend() -> HttpFetchBackend {
 }
 
 async fn fetch(url: &str) -> Result<WebFetchResponse, WebFetchError> {
-    backend().fetch(url).await
+    backend().fetch(url, HopPolicy::permissive()).await
 }
 
 fn text_body(response: &WebFetchResponse) -> &str {
@@ -389,6 +389,210 @@ async fn redirects_are_followed_and_final_url_is_reported() {
     let response = fetch(&server.url("/start")).await.expect("redirect fetch");
     assert_eq!(text_body(&response), r#"{"landed": true}"#);
     assert_eq!(response.final_url, server.url("/final"));
+}
+
+fn redirect_route(location: String) -> MockRoute {
+    MockRoute::with_status("HTTP/1.1 302 Found", "text/plain", b"".to_vec())
+        .with_header(format!("Location: {location}"))
+}
+
+fn refusal_reason(result: Result<WebFetchResponse, WebFetchError>) -> String {
+    match result {
+        Err(WebFetchError::Refused { reason, .. }) => reason,
+        other => panic!("expected a refused fetch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn redirect_chains_beyond_the_hop_limit_are_refused() {
+    let mut routes = HashMap::new();
+    routes.insert("/loop".to_string(), redirect_route("/loop".to_string()));
+    let server = MockHttpServer::start(routes).await;
+
+    let reason = refusal_reason(fetch(&server.url("/loop")).await);
+
+    assert!(reason.contains("too many redirects"), "{reason}");
+    assert_eq!(
+        server.recorded_requests().len(),
+        MAX_REDIRECTS + 1,
+        "the initial request plus one request per allowed hop"
+    );
+}
+
+#[tokio::test]
+async fn redirects_to_non_http_schemes_are_refused() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/start".to_string(),
+        redirect_route("ftp://example.com/file".to_string()),
+    );
+    let server = MockHttpServer::start(routes).await;
+
+    let reason = refusal_reason(fetch(&server.url("/start")).await);
+
+    assert!(reason.contains("http"), "{reason}");
+}
+
+#[tokio::test]
+async fn a_redirect_without_location_is_a_status_error() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/start".to_string(),
+        MockRoute::with_status("HTTP/1.1 302 Found", "text/plain", b"".to_vec()),
+    );
+    let server = MockHttpServer::start(routes).await;
+
+    match fetch(&server.url("/start")).await {
+        Err(WebFetchError::Status { status: 302, .. }) => {}
+        other => panic!("expected a 302 status error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn private_addresses_are_refused_on_the_first_hop_unless_a_rule_allows_them() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "/page".to_string(),
+        MockRoute::ok("text/plain", b"internal".to_vec()),
+    );
+    let server = MockHttpServer::start(routes).await;
+    let strict_policy = HopPolicy {
+        deny: &|_| None,
+        allow_private_address: &|_| false,
+    };
+    let named_url = server.url("/page").replace("127.0.0.1", "localhost");
+
+    for url in [server.url("/page"), named_url] {
+        let reason = refusal_reason(backend().fetch(&url, strict_policy).await);
+        assert!(reason.contains("private or reserved"), "{url}: {reason}");
+        assert!(
+            reason.contains("network_private_address"),
+            "{url}: {reason}"
+        );
+    }
+    assert!(
+        server.recorded_requests().is_empty(),
+        "no request must reach a refused address"
+    );
+
+    let allowed_target = server.base_url.clone();
+    let scoped_policy = HopPolicy {
+        deny: &|_| None,
+        allow_private_address: &|target| target == allowed_target,
+    };
+    backend()
+        .fetch(&server.url("/page"), scoped_policy)
+        .await
+        .expect("a rule matching the hop's target permits the private address");
+}
+
+#[tokio::test]
+async fn redirects_to_private_addresses_are_refused_on_every_hop() {
+    let internal = MockHttpServer::start(HashMap::from([(
+        "/secret".to_string(),
+        MockRoute::ok("text/plain", b"internal".to_vec()),
+    )]))
+    .await;
+    let public = MockHttpServer::start_with(|_| {
+        HashMap::from([(
+            "/start".to_string(),
+            redirect_route(internal.url("/secret")),
+        )])
+    })
+    .await;
+    // Only the first server's target is allowed; the redirect target is private.
+    let public_target = public.base_url.clone();
+    let policy = HopPolicy {
+        deny: &|_| None,
+        allow_private_address: &|target| target == public_target,
+    };
+
+    let reason = refusal_reason(backend().fetch(&public.url("/start"), policy).await);
+
+    assert!(reason.contains("private or reserved"), "{reason}");
+    assert!(
+        internal.recorded_requests().is_empty(),
+        "the private redirect target must never be contacted"
+    );
+}
+
+#[tokio::test]
+async fn redirects_to_another_host_are_followed_without_a_prompt() {
+    let target_server = MockHttpServer::start(HashMap::from([(
+        "/final".to_string(),
+        MockRoute::ok("text/plain", b"landed".to_vec()),
+    )]))
+    .await;
+    let redirecting_server = MockHttpServer::start_with(|_| {
+        HashMap::from([(
+            "/start".to_string(),
+            redirect_route(target_server.url("/final")),
+        )])
+    })
+    .await;
+    let checked_targets = Mutex::new(Vec::new());
+
+    let response = backend()
+        .fetch(
+            &redirecting_server.url("/start"),
+            HopPolicy {
+                deny: &|target| {
+                    checked_targets
+                        .lock()
+                        .expect("targets lock")
+                        .push(target.to_string());
+                    None
+                },
+                allow_private_address: &|_| true,
+            },
+        )
+        .await
+        .expect("unknown host is followed");
+
+    assert_eq!(text_body(&response), "landed");
+    assert_eq!(
+        *checked_targets.lock().expect("targets lock"),
+        vec![target_server.base_url.clone()],
+        "only the cross-host hop is checked against deny rules"
+    );
+}
+
+#[tokio::test]
+async fn a_hop_to_a_host_matching_a_deny_rule_is_refused() {
+    let server = MockHttpServer::start_with(|base_url| {
+        let denied_location = base_url.replace("127.0.0.1", "localhost");
+        HashMap::from([
+            (
+                "/start".to_string(),
+                redirect_route(format!("{denied_location}/final")),
+            ),
+            (
+                "/final".to_string(),
+                MockRoute::ok("text/plain", b"landed".to_vec()),
+            ),
+        ])
+    })
+    .await;
+    let denied_target = server.base_url.replace("127.0.0.1", "localhost");
+
+    let reason = refusal_reason(
+        backend()
+            .fetch(
+                &server.url("/start"),
+                HopPolicy {
+                    deny: &|target| (target == denied_target).then(|| "denied by rule".to_string()),
+                    allow_private_address: &|_| true,
+                },
+            )
+            .await,
+    );
+
+    assert!(reason.contains("denied by rule"), "{reason}");
+    assert_eq!(
+        server.recorded_requests().len(),
+        1,
+        "the denied hop must not be requested"
+    );
 }
 
 #[tokio::test]

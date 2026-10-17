@@ -124,7 +124,7 @@ debt. Findings that touch the same file are kept adjacent.
 
 ### Phase 2: security design
 
-7. [ ] **H01 (High)** - Web fetch has no redirect hop policy; private
+7. [x] **H01 (High)** - Web fetch has no redirect hop policy; private
    addresses reachable.
    Where: `src/agent/tools/backends/web_fetch/native.rs:20-22,78-107`
    (**verified**: no redirect policy configured); related
@@ -135,26 +135,27 @@ debt. Findings that touch the same file are kept adjacent.
    approval prompts are rejected (redirect targets are often unknown or
    runtime-dependent, e.g. CDNs, so prompts would be frequent and hard to
    judge). Instead apply a non-interactive hop policy.
-   1. [ ] Read `docs/architecture-design-records/`, `docs/features.md` and
+   1. [x] Read `docs/architecture-design-records/`, `docs/features.md` and
       `docs/configuration.md` (redirect caveat) for the current policy (the
-      ADR directory was empty on 2026-10-17). Record the decision above in an
-      ADR (use the architecture-decision-record skill).
-   2. [ ] Tests with a mock server: hop limit enforced; non-http(s) scheme hop
+      ADR directory was empty on 2026-10-17). No ADR is written (user
+      decision, 2026-10-17); the decision above and the docs below are the
+      record.
+   2. [x] Tests with a mock server: hop limit enforced; non-http(s) scheme hop
       refused; redirect to an approved or unknown host is followed without a
       new prompt; private, loopback, link-local and reserved addresses
       rejected on every hop including the first (after DNS resolution) unless
       explicitly opted in; a hop to a different host that an explicit `deny`
       rule matches is refused.
-   3. [ ] Disable automatic `reqwest` redirects; follow manually with a hop
+   3. [x] Disable automatic `reqwest` redirects; follow manually with a hop
       limit, scheme check and resolved-address check per hop. Evaluate
       explicit `deny` rules (never prompt) for cross-host hops. Pin the
       resolved address for the connection to avoid DNS rebinding.
-   4. [ ] Add an opt-in config flag permitting private/reserved addresses
-      (default off).
-   5. [ ] Docs: `docs/features.md`, `docs/configuration.md` (replace the
-      redirect caveat, document the flag), `docs/implementation-notes.md`;
-      new ADR.
-   6. [ ] Gate.
+   4. [x] Permit private/reserved addresses via a named, optionally
+      target-scoped `network_private_address` rule (default refused; replaces
+      the earlier global config flag).
+   5. [x] Docs: `docs/features.md`, `docs/configuration.md` (replace the
+      redirect caveat, document the flag), `docs/implementation-notes.md`.
+   6. [x] Gate.
 8. [ ] **M-H03 (Medium, downgraded from High)** - Write/edit approval and
    mutation separated (TOCTOU).
    Where: `src/agent/tools/write.rs:290-302,380-395`,
@@ -452,7 +453,7 @@ debt. Findings that touch the same file are kept adjacent.
 33. [ ] Final documentation pass: confirm these were updated by the steps above
     - `docs/development-workflow.md` (D3), `docs/features.md`,
       `docs/implementation-notes.md`, `docs/persistence.md`,
-      `docs/configuration.md`, new ADR if H01 changed or recorded policy.
+      `docs/configuration.md`.
     Verify the commit history keeps pure refactors (M13, L02, L03) separate
     from behavior-changing fixes (`git log --stat` review) and report any
     mixed commit. Run `rumdl check .`; run the full gate once more.

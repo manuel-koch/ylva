@@ -92,6 +92,31 @@ impl SandboxContext {
         verdict
     }
 
+    /// Whether a connection to a loopback, private or otherwise reserved
+    /// address is permitted for `target` (the `scheme://host[:port]` key of the
+    /// request or redirect hop). Refused unless the last matching configured
+    /// [`NamedSandboxRule::NetworkPrivateAddress`] rule is `auto_approved`.
+    /// Appended rules (the `--auto-approve-web-fetch` catch-all) never grant it.
+    pub fn check_private_address(&self, target: &str) -> bool {
+        let mut allowed = false;
+        for rule in self.configured_rules.iter().flatten() {
+            if let ResolvedRule::Named {
+                rule: NamedSandboxRule::NetworkPrivateAddress,
+                verdict,
+                target: rule_target,
+            } = rule
+            {
+                if rule_target
+                    .as_ref()
+                    .is_none_or(|pattern| pattern.matches(target))
+                {
+                    allowed = matches!(verdict, ApprovalCheck::AutoApproved);
+                }
+            }
+        }
+        allowed
+    }
+
     /// Only [`NamedSandboxRule::NetworkRequest`] matches a network call;
     /// path and `bash` named rules never do (config validation rejects them
     /// under network-tool tables; defense in depth if they slip through). A

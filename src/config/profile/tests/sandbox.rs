@@ -716,6 +716,36 @@ rules = [
 }
 
 #[test]
+fn network_private_address_rule_loads_under_web_fetch_and_is_rejected_elsewhere() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "private-address-web-fetch",
+        r#"
+[tools.web_fetch]
+rules = [
+  { rule = "network_private_address", target = "http://localhost:*", verdict = "auto_approved" },
+]
+"#,
+    );
+    ProfileConfig::load(temp.path(), "private-address-web-fetch")
+        .expect("the rule loads under web_fetch");
+
+    write_profile_config(
+        temp.path(),
+        "private-address-read",
+        r#"
+[tools.read]
+rules = [
+  { rule = "network_private_address", verdict = "auto_approved" },
+]
+"#,
+    );
+    ProfileConfig::load(temp.path(), "private-address-read")
+        .expect_err("the rule is network-tool-only");
+}
+
+#[test]
 fn network_request_rule_loads_under_agent_scoped_web_search() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_profile_config(
