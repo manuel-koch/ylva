@@ -385,7 +385,7 @@ line coverage.
 
 ### D12 - Queue indicator still describes a single subagent slot
 
-- [ ] Correct the single-slot subagent queue description.
+- [x] Correct the single-slot subagent queue description.
 
 **Priority: Low. Category: stale behavior description.**
 
@@ -394,6 +394,10 @@ line coverage.
   [configuration](../configuration.md), line 246, document a default cap of four
   and configurable unlimited execution.
 - Resolution: say "an available scheduler slot" and link to the concurrency setting.
+- Applied: updated `docs/features.md` to describe queued subagent bubbles as
+  waiting for an available scheduler slot and linked to the authoritative
+  `max_concurrent_subagents` configuration table. Markdown lint passes;
+  runtime behavior is unchanged.
 
 ### D13 - Implementation notes contain an interrupted session-command explanation
 

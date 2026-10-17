@@ -1000,7 +1000,8 @@ for the full mechanics.
   streaming…"`, or `"Subagent done, parent working…"`) so it's never
   ambiguous which agent — parent or child — is doing what.
 - **Queued subagent bubbles** show a static `≡` glyph instead of the animated
-  spinner while waiting for the one running-child slot to free up. The
+  spinner while waiting for an available scheduler slot under the profile's
+  [`max_concurrent_subagents` setting](configuration.md#top-level-profile-fields). The
   internal `run_id` used to correlate child lifecycle events is omitted from
   the bubble title in both the root and child conversation views, and live
   `running`/`queued` state is communicated by the indicator and footer rather
