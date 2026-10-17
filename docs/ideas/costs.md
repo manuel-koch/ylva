@@ -2,6 +2,11 @@
 
 ## Context usage
 
+Partly implemented: the TUI footer already shows an approximate context-token
+estimate against the context limit; see
+[features](../features.md#context-management-and-compaction). Model usage costs
+below remain a proposal.
+
 Show the estimated tokens in the active model context and the configured
 context limit. The estimate is approximate and exists to explain compaction,
 not to represent provider-billed tokens. Do not persist usage history.

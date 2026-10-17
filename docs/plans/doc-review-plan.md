@@ -720,7 +720,7 @@ evidence that current behavior should change.
 
 ### I07 - Timing/cost proposals do not identify their already-implemented portions
 
-- [ ] Distinguish shipped timing/cost features from proposals.
+- [x] Distinguish shipped timing/cost features from proposals.
 - Evidence: [timing](../ideas/timing.md), lines 3-15, proposes running-thinking
   timing without acknowledging existing thinking timers and completed tool
   durations. [Costs](../ideas/costs.md), lines 3-7, proposes the already-present
@@ -728,6 +728,11 @@ evidence that current behavior should change.
 - Resolution: label partial implementation and keep extra timing breakdowns,
   post-mortem analysis, and billed-cost totals explicitly deferred. Approximate
   context estimates must not be described as billed usage.
+- Applied: the timing note now has an implementation-status section naming the
+  shipped thinking/tool/subagent timers and keeping request/idle timing, the
+  timing row, and post-mortem analysis proposed; the costs note labels the
+  context readout as partly implemented, still an estimate, and keeps billed-cost
+  totals deferred.
 
 ### I08 - Redaction proposal contradicts its own absolute guarantee
 
