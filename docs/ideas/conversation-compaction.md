@@ -317,7 +317,9 @@ Keep `cl100k_base` as the local estimate for every provider and model.
 
 - **Advantages:** no additional requests or state; fast and deterministic.
 - **Disadvantages:** ignores model identity, so tokenizer mismatch is common, and
-  the current totals omit much of the actual wire payload. A broad
+  the totals at the time of this research omitted much of the actual wire
+  payload (superseded: the model-view estimate and footer request baseline now
+  cover it; see [Token estimates](../features.md#context-management-and-compaction)). A broad
   fixed estimate cannot be assumed accurate for the selected model.
 - **Assessment:** inadequate as the primary count for reliable compaction.
 
@@ -450,7 +452,10 @@ Use a **hybrid, provider-aware measurement strategy**:
    on every turn. Record that OpenAI's count API requires Responses-shaped
    input, and Anthropic's endpoint has a documented small estimation variance.
 
-This separates two needs that the current single integer blends together:
+Historical framing (superseded: the implementation now keeps the local
+estimate and the provider-observed count separate; see
+[features](../features.md#context-management-and-compaction)). This separates
+two needs that a single integer blends together:
 the **pre-send estimate** needed to make compaction decisions before context
 overflow, and the **observed input-token count** returned after inference. The
 first protects the next request; the second provides the best feedback for
@@ -600,7 +605,9 @@ actual response payloads.
 
 ## Deferred
 
-- A manual `/compact` command.
+Manual `/compact` is implemented; see
+[slash commands](../features.md#slash-commands).
+
 - Hierarchical summarization if the compact engine cannot accept the selected
   prefix.
 - Per-result wire-size protection and the default `glob` ceiling. See

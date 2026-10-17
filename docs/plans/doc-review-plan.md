@@ -630,7 +630,7 @@ evidence that current behavior should change.
 
 ### I01 - Compaction research mixes updated facts and superseded recommendations
 
-- [ ] Label superseded compaction research.
+- [x] Label superseded compaction research.
 - Evidence: [conversation compaction](../ideas/conversation-compaction.md),
   lines 319-321, says current totals omit much of the wire payload; lines 453-457
   describe a single integer conflating estimates and observed usage. Lines 10-23
@@ -640,6 +640,10 @@ evidence that current behavior should change.
 - Resolution: label superseded research, link current accounting contracts, and
   remove implemented manual compaction from the deferred list. Preserve genuinely
   deferred tokenizer/calibration work.
+- Applied: the two stale passages in the idea note are marked superseded and link
+  the current accounting contract in `docs/features.md`; manual `/compact` is
+  removed from the deferred list, with a pointer to the slash-command reference.
+  Remaining deferred items are unchanged.
 
 ### I02 - Web-search idea incorrectly marks StartPage as shipped
 
