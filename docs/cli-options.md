@@ -472,7 +472,9 @@ the compact JSON request body, or `null` for a request without a body. Base64
 tool-result payloads and inline image/file data are replaced with stable
 redaction markers while roles, IDs, media types, filenames, and other safe
 metadata remain. Client-level default headers, such as Ylva's `User-Agent`, are
-not included in the header projection. The live request is not changed.
+not included in the header projection. The live request is not changed. The
+dump keeps the raw `query` string (unlike logs and error messages, which redact
+query values), so treat dump files as sensitive.
 
 The paired response is written as
 `<stem>_<timestamp>_<dump_id>_response.<extension>`. The extension and file

@@ -434,6 +434,8 @@ async fn send_with_retry<RequestBuilderFactory>(
 where
     RequestBuilderFactory: FnMut() -> reqwest::RequestBuilder,
 {
+    let display_url = redacted_url_for_display(url);
+    let url = display_url.as_str();
     let mut retries = 0usize;
     loop {
         let request = build_request();
@@ -453,6 +455,7 @@ where
         let response = match response {
             Ok(response) => response,
             Err(error) => {
+                let error = error.without_url();
                 if retries >= MAX_RETRIES {
                     tracing::error!(url, retry = retries, error = %error, "request failed after retries");
                     return Err(anyhow::anyhow!(
@@ -581,6 +584,52 @@ pub(crate) fn network_target(url: &str) -> Option<String> {
     })
 }
 
+/// Placeholder written in place of every query parameter value and the
+/// userinfo by [`redacted_url_for_display`].
+const REDACTED_URL_VALUE: &str = "<REDACTED>";
+
+/// Render `url` for logs and error messages: scheme, host, port and path are
+/// kept, every query parameter value is replaced by [`REDACTED_URL_VALUE`],
+/// each userinfo part is replaced by the same placeholder (`<REDACTED>@` or
+/// `<REDACTED>:<REDACTED>@`) and the fragment is dropped. Unparsable input yields a fixed
+/// placeholder so nothing from it can leak. The opt-in request dump keeps the
+/// raw query and does not use this helper.
+pub(crate) fn redacted_url_for_display(url: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return "<invalid URL>".to_string();
+    };
+    let mut redacted = parsed.scheme().to_string();
+    redacted.push_str("://");
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        redacted.push_str(REDACTED_URL_VALUE);
+        if parsed.password().is_some() {
+            redacted.push(':');
+            redacted.push_str(REDACTED_URL_VALUE);
+        }
+        redacted.push('@');
+    }
+    redacted.push_str(parsed.host_str().unwrap_or(""));
+    if let Some(port) = parsed.port() {
+        redacted.push_str(&format!(":{port}"));
+    }
+    redacted.push_str(parsed.path());
+    if let Some(query) = parsed.query() {
+        let parameters = query
+            .split('&')
+            .filter(|parameter| !parameter.is_empty())
+            .map(|parameter| {
+                let name = parameter.split('=').next().unwrap_or("");
+                format!("{name}={REDACTED_URL_VALUE}")
+            })
+            .collect::<Vec<_>>();
+        if !parameters.is_empty() {
+            redacted.push('?');
+            redacted.push_str(&parameters.join("&"));
+        }
+    }
+    redacted
+}
+
 /// Render `headers` as a JSON object for the request dump, replacing the
 /// value of any [`is_sensitive_header_name`] header with
 /// [`REDACTED_HEADER_VALUE`] so an `Authorization`/API-key value is never
@@ -627,7 +676,7 @@ pub(crate) fn dump_request(
     let parsed_url = match reqwest::Url::parse(url) {
         Ok(parsed) => parsed,
         Err(error) => {
-            tracing::warn!(url, error = %error, "failed to parse request URL for dump");
+            tracing::warn!(error = %error, "failed to parse request URL for dump");
             return;
         }
     };
@@ -809,6 +858,7 @@ fn status_error(
     retries: usize,
 ) -> anyhow::Error {
     let status_number = status.as_u16();
+    let url = redacted_url_for_display(url);
     let body = if body_snippet.is_empty() {
         String::new()
     } else {

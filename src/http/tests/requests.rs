@@ -352,3 +352,103 @@ async fn provider_client_fails_a_server_that_never_answers() {
     assert!(error.is_timeout());
     server.abort();
 }
+
+#[test]
+fn redacted_url_for_display_keeps_parameter_names_only() {
+    assert_eq!(
+        redacted_url_for_display(
+            "https://user:pass@example.com:8443/v1/search?q=secret&page=2#frag"
+        ),
+        "https://<REDACTED>:<REDACTED>@example.com:8443/v1/search?q=<REDACTED>&page=<REDACTED>"
+    );
+    assert_eq!(
+        redacted_url_for_display("http://user@example/api"),
+        "http://<REDACTED>@example/api"
+    );
+    assert_eq!(
+        redacted_url_for_display("http://example/api"),
+        "http://example/api"
+    );
+    assert_eq!(
+        redacted_url_for_display("http://example/api?flag"),
+        "http://example/api?flag=<REDACTED>"
+    );
+    assert_eq!(
+        redacted_url_for_display("not a url?token=secret"),
+        "<invalid URL>"
+    );
+}
+
+#[test]
+fn status_error_redacts_query_values() {
+    let message = status_error(
+        reqwest::StatusCode::BAD_REQUEST,
+        "https://user:pass@example.com/api?key=topsecret",
+        "request",
+        "",
+        0,
+    )
+    .to_string();
+    assert_eq!(
+        message,
+        "request failed with HTTP 400 for https://<REDACTED>:<REDACTED>@example.com/api?key=<REDACTED>"
+    );
+}
+
+#[test]
+fn http_status_failure_logs_and_errors_without_query_values() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let client = reqwest::Client::new();
+    let mut error_text = String::new();
+    let logs = crate::test_support::capture_logs(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("server address");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write response");
+        });
+        let url = format!("http://{address}/search?q=topsecret&page=2");
+        error_text = get_json(&client, &url, None, "search")
+            .await
+            .expect_err("400 fails")
+            .to_string();
+    });
+    assert!(error_text.contains("/search?q=<REDACTED>&page=<REDACTED>"));
+    assert!(logs.contains("/search?q=<REDACTED>&page=<REDACTED>"));
+    for text in [&error_text, &logs] {
+        assert!(!text.contains("topsecret"), "leaked query value: {text}");
+    }
+}
+
+#[test]
+fn connection_failure_logs_and_errors_without_query_values() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    drop(listener);
+    let url = format!("http://user:hunter2@{address}/search?q=topsecret");
+    let client = reqwest::Client::new();
+    let mut error_text = String::new();
+    let logs = crate::test_support::capture_logs(async {
+        tokio::time::pause();
+        error_text = get_json(&client, &url, None, "search")
+            .await
+            .expect_err("refused connection fails")
+            .to_string();
+    });
+    assert!(error_text.contains("/search?q=<REDACTED>"));
+    assert!(error_text.contains("<REDACTED>:<REDACTED>@"));
+    for text in [&error_text, &logs] {
+        assert!(!text.contains("topsecret"), "leaked query value: {text}");
+        assert!(!text.contains("hunter2"), "leaked userinfo: {text}");
+        assert!(!text.contains("user:"), "leaked username: {text}");
+    }
+}

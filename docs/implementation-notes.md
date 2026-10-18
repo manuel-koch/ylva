@@ -387,6 +387,14 @@ The snippet reaches the logs and the UI deliberately so users can diagnose
 provider failures; it is not redacted. Request headers (API keys) are never
 part of it.
 
+`http::redacted_url_for_display` is the single URL form for `tracing` fields
+and error strings in `src/http.rs` (`send_with_retry`, `status_error`): scheme,
+host, port, path and query parameter names are kept, values become
+`<REDACTED>`, userinfo becomes `<REDACTED>@` or `<REDACTED>:<REDACTED>@`, the
+fragment is dropped, and an unparsable URL renders
+as `<invalid URL>`. `reqwest` errors are logged via `without_url()` for the
+same reason. The opt-in request dump deliberately keeps the raw query.
+
 `HttpFetchBackend` (`backends/web_fetch/native.rs`) builds a fresh
 `reqwest` client per hop with `redirect::Policy::none()` and follows
 `Location` itself (`MAX_REDIRECTS` = 10). Each hop resolves the host with

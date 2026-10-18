@@ -239,7 +239,7 @@ debt. Findings that touch the same file are kept adjacent.
        logs is deliberate functionality.
     2. [x] No code change; documented in `docs/implementation-notes.md`.
        Gate.
-15. [ ] **S02 (Medium)** - Full request URLs are logged and echoed in errors.
+15. [x] **S02 (Medium)** - Full request URLs are logged and echoed in errors.
     Where: `src/http.rs:437,443,461,472,488` (`tracing` fields) and the
     error strings built from `{url}` (`request to {url} failed…`,
     `status_error`), which reach the UI and possibly the model context. URLs
@@ -249,17 +249,17 @@ debt. Findings that touch the same file are kept adjacent.
     that already stores `query` separately and redacts headers/media only).
     Redacted form: scheme, host, path, query parameter names with values
     replaced by `<REDACTED>` (e.g. `?q=<REDACTED>&page=<REDACTED>`); userinfo
-    and fragment dropped.
-    1. [ ] Tests (see `docs/known-test-issues.md` for `tracing` tests): logged
+    is replaced by `<REDACTED>@` or `<REDACTED>:<REDACTED>@`; fragment dropped.
+    1. [x] Tests (see `docs/known-test-issues.md` for `tracing` tests): logged
        text and returned error text contain scheme, host, path and parameter
        names but no query values, userinfo or fragment; the request dump still
        contains the full query.
-    2. [ ] Add one display helper (e.g. `redacted_url_for_display`) in
+    2. [x] Add one display helper (e.g. `redacted_url_for_display`) in
        `src/http.rs` and use it for every `tracing` URL field and error
        string (do after M06; same file).
-    3. [ ] Docs: `docs/cli-options.md` (dump keeps raw query strings),
+    3. [x] Docs: `docs/cli-options.md` (dump keeps raw query strings),
        `docs/implementation-notes.md` (URL redaction policy).
-    4. [ ] Gate.
+    4. [x] Gate.
 
 ### Phase 4: robustness and correctness
 
