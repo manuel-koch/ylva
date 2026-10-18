@@ -298,3 +298,57 @@ async fn response_body_detail_stops_reading_a_huge_error_body() {
     assert_eq!(detail.chars().count(), RESPONSE_BODY_SNIPPET_MAX_CHARS);
     server.abort();
 }
+
+#[tokio::test]
+async fn provider_client_fails_a_response_that_stalls_after_headers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("server address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).await.expect("read request");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
+            .await
+            .expect("write partial response");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let client = provider_client_builder(Duration::from_secs(5), Duration::from_millis(200))
+        .build()
+        .expect("client");
+
+    let response = client
+        .get(format!("http://{address}/"))
+        .send()
+        .await
+        .expect("headers arrive");
+    let error = response.bytes().await.expect_err("stalled body must fail");
+    assert!(error.is_timeout());
+    server.abort();
+}
+
+#[tokio::test]
+async fn provider_client_fails_a_server_that_never_answers() {
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("server address");
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept request");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let client = provider_client_builder(Duration::from_secs(5), Duration::from_millis(200))
+        .build()
+        .expect("client");
+
+    let error = client
+        .get(format!("http://{address}/"))
+        .send()
+        .await
+        .expect_err("silent server must time out");
+    assert!(error.is_timeout());
+    server.abort();
+}

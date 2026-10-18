@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{DeltaChunk, Message, StreamEvent};
-use crate::http::{RequestConcurrencyLimiter, OUTBOUND_USER_AGENT};
+use crate::http::RequestConcurrencyLimiter;
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::openai_compatible_messages::{serialize_messages_with_policy, ContentPartFormat};
 use crate::llm::token_usage::{TokenUsageDumpSource, TokenUsageRecord};
@@ -275,10 +275,12 @@ impl OpenAiCompatibleProvider {
                 input_modalities: None,
             })),
             api_key,
-            client: reqwest::Client::builder()
-                .user_agent(OUTBOUND_USER_AGENT)
-                .build()
-                .expect("shared HTTP client construction must succeed"),
+            client: crate::http::provider_client_builder(
+                crate::http::CONNECT_TIMEOUT,
+                crate::http::READ_IDLE_TIMEOUT,
+            )
+            .build()
+            .expect("shared HTTP client construction must succeed"),
             request_body_customizer,
             request_body_redactor,
             content_part_format,

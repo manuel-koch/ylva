@@ -151,7 +151,9 @@ impl TitleAttempt {
                     prompt_chars,
                     "session title utility request started"
                 );
-                match generate_title(engine, prompt, Some(session_id)).await {
+                match generate_title_within(TITLE_REQUEST_TIMEOUT, engine, prompt, Some(session_id))
+                    .await
+                {
                     Ok(title) => {
                         let title_chars = title.chars().count();
                         tracing::info!(
@@ -202,6 +204,21 @@ impl TitleAttempt {
 /// Most response bytes read for a title; the rest of a runaway response is
 /// dropped and the title is cut from this prefix.
 const TITLE_RESPONSE_MAX_BYTES: usize = 4 * 1024;
+
+/// Wall-clock limit for one title request; dropping the timed-out future
+/// cancels the provider stream.
+const TITLE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn generate_title_within(
+    timeout: std::time::Duration,
+    engine: Arc<dyn Engine>,
+    prompt: String,
+    session_id: Option<uuid::Uuid>,
+) -> anyhow::Result<String> {
+    tokio::time::timeout(timeout, generate_title(engine, prompt, session_id))
+        .await
+        .map_err(|_| anyhow::anyhow!("title request timed out after {}s", timeout.as_secs_f32()))?
+}
 
 async fn generate_title(
     engine: Arc<dyn Engine>,
@@ -462,6 +479,66 @@ mod tests {
             .await
             .expect("title generated");
         assert_eq!(title.chars().count(), TITLE_MAX_CHARS);
+    }
+
+    struct StalledEngine {
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Engine for StalledEngine {
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            let cancelled = Arc::clone(&self.cancelled);
+            Box::pin(async move {
+                let (sender, receiver) = mpsc::channel(1);
+                tokio::spawn(async move {
+                    cancel.cancelled().await;
+                    cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                    drop(sender);
+                });
+                Ok(receiver)
+            })
+        }
+
+        fn config(&self) -> EngineConfig {
+            RecordingEngine {
+                request: Arc::new(Mutex::new(None)),
+                response: String::new(),
+            }
+            .config()
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn switch_model(&self, _model: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_title_request_times_out_and_cancels_the_stream() {
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let engine: Arc<dyn Engine> = Arc::new(StalledEngine {
+            cancelled: Arc::clone(&cancelled),
+        });
+
+        let error = generate_title_within(
+            Duration::from_millis(50),
+            engine,
+            "prompt".to_string(),
+            None,
+        )
+        .await
+        .expect_err("stalled request must time out");
+        assert!(error.to_string().contains("timed out"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(cancelled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]

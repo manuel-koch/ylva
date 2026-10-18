@@ -722,6 +722,17 @@ utility generation still uses `TitleAttempt`, with no transcript mutation or
 task-label substitution.
 `generate_title` reads at most `TITLE_RESPONSE_MAX_BYTES` (4 KiB) of the
 response, then stops and cancels the stream; the title is cut from that prefix.
+The whole title request is limited to `TITLE_REQUEST_TIMEOUT` (60 s); on
+expiry the future is dropped, which cancels the provider stream, and the
+failure is logged without a fallback title.
+
+The OpenAI-compatible provider client is built by
+`http::provider_client_builder` with a 30 s connect timeout and a 300 s idle
+read timeout (`CONNECT_TIMEOUT`, `READ_IDLE_TIMEOUT`). The idle limit applies
+to response headers and between body chunks, so a stalled server or stream
+fails (and is retried for headers) while long, steadily streaming responses are
+unaffected. These limits are not configurable. Web fetch/search clients and
+compaction keep their own configured timeouts.
 
 `store/tests.rs` holds shared fixtures and cross-owner lifecycle assertions;
 event, session-file, writer, replay, archive and maintenance suites live under

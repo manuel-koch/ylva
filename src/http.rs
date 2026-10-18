@@ -32,6 +32,24 @@ use crate::bounded_buffer::BoundedBuffer;
 /// call site.
 pub const OUTBOUND_USER_AGENT: &str = concat!("ylva/", env!("CARGO_PKG_VERSION"));
 
+/// Longest a new connection may take to establish.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest a connection may stay silent (no response headers or body bytes)
+/// before the request fails and the stream is dropped. This is an idle
+/// limit, so long streaming responses that keep producing data are unaffected.
+pub(crate) const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Client builder for LLM provider traffic with connect and idle timeouts.
+pub(crate) fn provider_client_builder(
+    connect_timeout: Duration,
+    read_idle_timeout: Duration,
+) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(OUTBOUND_USER_AGENT)
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_idle_timeout)
+}
+
 /// Maximum number of retries (after the initial attempt).
 pub(crate) const MAX_RETRIES: usize = 3;
 /// Base backoff for the first retry, in seconds.

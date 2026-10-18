@@ -220,15 +220,15 @@ debt. Findings that touch the same file are kept adjacent.
        runaway title is truncated.
     2. [x] Stop after a bounded multiple of the expected size.
     3. [x] Gate.
-13. [ ] **M05 (Medium)** - HTTP and title requests lack explicit timeouts.
+13. [x] **M05 (Medium)** - HTTP and title requests lack explicit timeouts.
     Where: `src/http.rs:371-462`, `src/session_title.rs:146-175`. **Partly
     verified**: title generation has a timeout only at
     `session_title.rs:499`; callers such as web fetch pass `http_timeout`.
-    1. [ ] Determine which provider paths are actually unbounded.
-    2. [ ] Test (stalled mock server) for each unbounded path.
-    3. [ ] Set a connect timeout on the shared client and a per-attempt timeout
+    1. [x] Determine which provider paths are actually unbounded.
+    2. [x] Test (stalled mock server) for each unbounded path.
+    3. [x] Set a connect timeout on the shared client and a per-attempt timeout
        on provider and title requests; cancel the stream on expiry.
-    4. [ ] Docs: `docs/configuration.md` if a timeout becomes configurable.
+    4. [x] Docs: `docs/configuration.md` if a timeout becomes configurable.
        Gate.
 14. [ ] **M06 (Medium)** - Provider error snippets may echo sensitive data.
     Where: `src/http.rs:777-785` (up to 512 characters of the body reach logs
