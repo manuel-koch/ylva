@@ -566,6 +566,9 @@ after summarizer metadata hydration and within the summary timeout,
 including message framing and the shared fixed request-overhead allowance, and
 emits a root/subagent-scoped `UiUpdate::Notice` if it exceeds the summarizer window.
 Neither check clips source messages or changes summary/fallback policy.
+`generate_summary` collects the summary in a `BoundedBuffer` of
+`COMPACTION_SUMMARY_MAX_BYTES` (256 KiB); a runaway summary fails the attempt
+like an empty one, so the existing history is kept and fallback policy applies.
 If catalog hydration changes the conversation window during preflight,
 `ContextWindowChanged` re-enters the outer loop's budget gate before dispatch.
 
@@ -717,6 +720,8 @@ precedence over intermediate assistant text. Root title eligibility remains
 text-reply based. Subagent persistence and resume both reconstruct this snapshot;
 utility generation still uses `TitleAttempt`, with no transcript mutation or
 task-label substitution.
+`generate_title` reads at most `TITLE_RESPONSE_MAX_BYTES` (4 KiB) of the
+response, then stops and cancels the stream; the title is cut from that prefix.
 
 `store/tests.rs` holds shared fixtures and cross-owner lifecycle assertions;
 event, session-file, writer, replay, archive and maintenance suites live under

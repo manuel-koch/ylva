@@ -611,6 +611,71 @@ async fn an_empty_summary_response_is_a_failure() {
 }
 
 #[tokio::test]
+async fn a_runaway_summary_fails_instead_of_buffering_without_bound() {
+    struct RunawayProvider;
+
+    impl crate::llm::Provider for RunawayProvider {
+        fn name(&self) -> &str {
+            "runaway"
+        }
+
+        fn list_models(
+            &self,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            Box::pin(async move {
+                let (tx, rx) = mpsc::channel(4);
+                tokio::spawn(async move {
+                    // Endless until the consumer gives up and drops the receiver.
+                    while tx
+                        .send(StreamEvent::Text("s".repeat(64 * 1024)))
+                        .await
+                        .is_ok()
+                    {}
+                });
+                Ok(rx)
+            })
+        }
+    }
+
+    let engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
+        Arc::new(RunawayProvider),
+        crate::llm::EngineConfig {
+            provider_connection: "mock".to_string(),
+            model: "summary-model".to_string(),
+            temperature: None,
+            context_length: None,
+            api_base_url: None,
+            api_key: None,
+            reasoning: None,
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
+        },
+    ));
+
+    let error = generate_summary(
+        engine,
+        build_summary_request(&[user("hello")], COMPACTION_SUMMARY_PROMPT),
+        None,
+        CancellationToken::new(),
+        crate::http::RequestDumpFailureHandler::default(),
+        None,
+    )
+    .await
+    .expect_err("a runaway summary must fail so the fallback runs");
+    assert!(error.to_string().contains("exceeded"), "{error}");
+}
+
+#[tokio::test]
 async fn summary_timeout_records_failure_on_the_request_dump() {
     let handler = crate::http::RequestDumpFailureHandler::default();
     let recorded_failure = Arc::new(Mutex::new(None::<String>));

@@ -38,6 +38,7 @@ use uuid::Uuid;
 pub(crate) mod recovery;
 
 use crate::agent::{Context, Message, StreamEvent, UserMessageKind};
+use crate::bounded_buffer::BoundedBuffer;
 use crate::llm::engine::Engine;
 use tokio::sync::{mpsc, Mutex};
 
@@ -499,6 +500,11 @@ pub enum CompactionOutcome {
     },
 }
 
+/// Largest summary accepted from the summarizer. A runaway stream fails the
+/// compaction, which leaves the existing history untouched, instead of being
+/// buffered without bound.
+pub(crate) const COMPACTION_SUMMARY_MAX_BYTES: usize = 256 * 1024;
+
 /// Drive one tool-free summary request to completion and return its text.
 async fn generate_summary(
     engine: Arc<dyn Engine>,
@@ -525,10 +531,15 @@ async fn generate_summary(
             Some(request_dump_failure_handler),
         )
         .await?;
-    let mut summary = String::new();
+    let mut summary = BoundedBuffer::new(COMPACTION_SUMMARY_MAX_BYTES);
     loop {
         match stream.recv().await {
-            Some(StreamEvent::Text(text)) => summary.push_str(&text),
+            Some(StreamEvent::Text(text)) => {
+                anyhow::ensure!(
+                    summary.push(text.as_bytes()),
+                    "compaction summary exceeded {COMPACTION_SUMMARY_MAX_BYTES} bytes"
+                );
+            }
             Some(StreamEvent::Done) => break,
             Some(StreamEvent::Cancelled) => {
                 anyhow::bail!("compaction summary stream was cancelled");
@@ -538,7 +549,9 @@ async fn generate_summary(
             None => break,
         }
     }
-    let summary = summary.trim().to_string();
+    let summary = String::from_utf8_lossy(summary.as_slice())
+        .trim()
+        .to_string();
     anyhow::ensure!(
         !summary.is_empty(),
         "compact engine returned an empty summary"

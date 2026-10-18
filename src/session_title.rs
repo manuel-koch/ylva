@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Message, StreamEvent, UserMessageKind};
 use crate::agent_factory::AgentFactory;
+use crate::bounded_buffer::BoundedBuffer;
 use crate::config::ProfileConfig;
 use crate::llm::engine::Engine;
 use crate::store::{Store, TITLE_MAX_CHARS};
@@ -198,11 +199,17 @@ impl TitleAttempt {
     }
 }
 
+/// Most response bytes read for a title; the rest of a runaway response is
+/// dropped and the title is cut from this prefix.
+const TITLE_RESPONSE_MAX_BYTES: usize = 4 * 1024;
+
 async fn generate_title(
     engine: Arc<dyn Engine>,
     prompt: String,
     session_id: Option<uuid::Uuid>,
 ) -> anyhow::Result<String> {
+    let cancellation_token = CancellationToken::new();
+    let _cancellation_guard = cancellation_token.clone().drop_guard();
     let mut stream = match engine
         .chat_with_session_id(
             vec![Message::User {
@@ -210,7 +217,7 @@ async fn generate_title(
                 kind: UserMessageKind::Explicit,
             }],
             Vec::new(),
-            CancellationToken::new(),
+            cancellation_token,
             session_id,
         )
         .await
@@ -225,10 +232,15 @@ async fn generate_title(
             return Err(error);
         }
     };
-    let mut response = String::new();
+    let mut response = BoundedBuffer::new(TITLE_RESPONSE_MAX_BYTES);
     let termination = loop {
         match stream.recv().await {
-            Some(StreamEvent::Text(text)) => response.push_str(&text),
+            Some(StreamEvent::Text(text)) => {
+                if !response.push(text.as_bytes()) {
+                    // Only the first line becomes the title; stop reading.
+                    break "response_limit";
+                }
+            }
             Some(StreamEvent::Done) => break "done",
             Some(StreamEvent::Cancelled) => {
                 tracing::warn!(
@@ -249,6 +261,8 @@ async fn generate_title(
             None => break "channel_closed",
         }
     };
+    response.trim_incomplete_utf8_suffix();
+    let response = String::from_utf8_lossy(response.as_slice());
     let response_chars = response.chars().count();
     tracing::info!(
         stage = "response_received",
@@ -435,6 +449,19 @@ mod tests {
                 kind: UserMessageKind::Explicit,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn runaway_utility_response_is_cut_to_a_bounded_title() {
+        let engine: Arc<dyn Engine> = Arc::new(RecordingEngine {
+            request: Arc::new(Mutex::new(None)),
+            response: "é".repeat(TITLE_RESPONSE_MAX_BYTES * 100),
+        });
+
+        let title = generate_title(engine, "prompt".to_string(), None)
+            .await
+            .expect("title generated");
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS);
     }
 
     #[tokio::test]

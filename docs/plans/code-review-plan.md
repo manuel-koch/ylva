@@ -214,12 +214,12 @@ debt. Findings that touch the same file are kept adjacent.
     1. [x] Test with a large error body: only a bounded prefix is read.
     2. [x] Accumulate chunks up to the snippet limit, then stop.
     3. [x] Gate.
-12. [ ] **M04 (Medium)** - Compaction and title output have no size limit.
+12. [x] **M04 (Medium)** - Compaction and title output have no size limit.
     Where: `src/agent/compaction.rs:528-546`, `src/session_title.rs:228-247`.
-    1. [ ] Tests: runaway summary fails compaction keeping existing history;
+    1. [x] Tests: runaway summary fails compaction keeping existing history;
        runaway title is truncated.
-    2. [ ] Stop after a bounded multiple of the expected size.
-    3. [ ] Gate.
+    2. [x] Stop after a bounded multiple of the expected size.
+    3. [x] Gate.
 13. [ ] **M05 (Medium)** - HTTP and title requests lack explicit timeouts.
     Where: `src/http.rs:371-462`, `src/session_title.rs:146-175`. **Partly
     verified**: title generation has a timeout only at
