@@ -365,13 +365,20 @@ cancellation, so grandchildren do not outlive the command. See
 [features](./features.md#tools-to-be-used-by-models) for timeout and output
 limits.
 
-Both pipe readers push lines into one shared `OutputCollector` (a mutex, so
-lock order is arrival order) that enforces the line and byte caps as lines
-arrive. After a cap is hit the readers keep draining so the command never
-blocks on a full pipe, but retain nothing. `read_bounded_line` keeps at most
-`BASH_OUTPUT_LIMIT_BYTES` + 1 bytes of any single line and discards the rest,
-so one giant unterminated line cannot grow memory either. Lines are decoded
-lossily, so invalid UTF-8 no longer ends a reader early.
+`bounded_buffer.rs` provides `BoundedBuffer`, the shared accumulator that
+stores at most its limit and records an overflow instead of growing. Both pipe
+readers push lines into one shared `OutputCollector` (a mutex, so lock order is
+arrival order) that adds the line cap on top of a `BoundedBuffer` of
+`BASH_OUTPUT_LIMIT_BYTES`. After a cap is hit the readers keep draining so the
+command never blocks on a full pipe, but retain nothing. `read_bounded_line`
+keeps at most `BASH_OUTPUT_LIMIT_BYTES` + 1 bytes of any single line and
+discards the rest, so one giant unterminated line cannot grow memory either.
+Lines are decoded lossily, so invalid UTF-8 no longer ends a reader early.
+
+`HttpFetchBackend` collects the response body in a `BoundedBuffer` of
+`READ_MEDIA_MAX_BYTES`, so a chunk is cut before it is stored rather than
+after the limit is exceeded. Media overflow fails with `TooLarge`; text
+overflow is flagged truncated and trimmed to a UTF-8 boundary.
 
 `HttpFetchBackend` (`backends/web_fetch/native.rs`) builds a fresh
 `reqwest` client per hop with `redirect::Policy::none()` and follows

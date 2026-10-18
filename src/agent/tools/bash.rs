@@ -42,6 +42,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, BufReader};
 use tracing::Instrument;
 
 use super::{ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError};
+use crate::bounded_buffer::BoundedBuffer;
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
 /// Default timeout for bash commands (seconds). Separate from
@@ -471,7 +472,7 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
 
     // Two async reader tasks drain pipes concurrently into one collector,
     // giving true arrival-order interleaving.
-    let collector = Arc::new(Mutex::new(OutputCollector::default()));
+    let collector = Arc::new(Mutex::new(OutputCollector::new()));
     let stdout_reader_task = spawn_line_reader(stdout, Arc::clone(&collector));
     let stderr_reader_task = spawn_line_reader(stderr, Arc::clone(&collector));
 
@@ -544,34 +545,38 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
 /// byte budget is kept as a UTF-8-safe prefix up to the byte cap rather than
 /// discarded wholesale (so a single oversized first line still yields
 /// non-empty output).
-#[derive(Default)]
 struct OutputCollector {
-    output: String,
-    truncated: bool,
+    buffer: BoundedBuffer,
     line_count: usize,
+    line_limit_hit: bool,
 }
 
 impl OutputCollector {
+    fn new() -> Self {
+        OutputCollector {
+            buffer: BoundedBuffer::new(BASH_OUTPUT_LIMIT_BYTES),
+            line_count: 0,
+            line_limit_hit: false,
+        }
+    }
+
+    fn truncated(&self) -> bool {
+        self.line_limit_hit || self.buffer.overflowed()
+    }
+
     fn push_line(&mut self, line: &str) {
-        if self.truncated {
+        if self.truncated() {
             return;
         }
         if self.line_count >= BASH_OUTPUT_LIMIT_LINES {
-            self.truncated = true;
+            self.line_limit_hit = true;
             return;
         }
-        let remaining_bytes = BASH_OUTPUT_LIMIT_BYTES.saturating_sub(self.output.len());
-        if line.len() > remaining_bytes {
-            let mut prefix_end = remaining_bytes;
-            while prefix_end > 0 && !line.is_char_boundary(prefix_end) {
-                prefix_end -= 1;
-            }
-            self.output.push_str(&line[..prefix_end]);
-            self.truncated = true;
-            return;
+        if self.buffer.push(line.as_bytes()) {
+            self.line_count += 1;
+        } else {
+            self.buffer.trim_incomplete_utf8_suffix();
         }
-        self.output.push_str(line);
-        self.line_count += 1;
     }
 }
 
@@ -579,7 +584,9 @@ fn take_collected_output(collector: &Mutex<OutputCollector>) -> (String, bool) {
     let mut collector = collector
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    (std::mem::take(&mut collector.output), collector.truncated)
+    let truncated = collector.truncated();
+    let output = String::from_utf8_lossy(&collector.buffer.take_bytes()).into_owned();
+    (output, truncated)
 }
 
 /// Longest line kept in memory: one byte beyond the output cap, so an

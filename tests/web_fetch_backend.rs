@@ -336,6 +336,19 @@ async fn oversized_media_streamed_over_the_limit_is_too_large() {
 }
 
 #[tokio::test]
+async fn media_of_exactly_the_limit_is_accepted() {
+    let mut body = png_bytes();
+    body.resize(READ_MEDIA_MAX_BYTES, 0x2a);
+    let mut routes = HashMap::new();
+    routes.insert("/exact.png".to_string(), MockRoute::ok("image/png", body));
+    let server = MockHttpServer::start(routes).await;
+
+    let response = fetch(&server.url("/exact.png")).await.expect("media fetch");
+    assert!(matches!(response.body, WebFetchBody::Media { .. }));
+    assert!(!response.truncated);
+}
+
+#[tokio::test]
 async fn text_over_the_raw_limit_is_truncated_and_flagged() {
     let body = "a".repeat(READ_MEDIA_MAX_BYTES + 128);
     let mut routes = HashMap::new();

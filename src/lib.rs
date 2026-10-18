@@ -15,6 +15,7 @@
 pub mod agent;
 pub mod agent_factory;
 pub mod app;
+pub mod bounded_buffer;
 pub mod build_info;
 pub mod cli;
 pub mod cli_driver;

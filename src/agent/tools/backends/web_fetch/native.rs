@@ -26,6 +26,7 @@ use super::{
     WebFetchBody, WebFetchError, WebFetchResponse,
 };
 use crate::agent::tools::read::{supported_media_type, READ_MEDIA_MAX_BYTES};
+use crate::bounded_buffer::BoundedBuffer;
 use crate::http::OUTBOUND_USER_AGENT;
 
 const SNIFF_PREFIX_BYTES: usize = 32;
@@ -315,7 +316,7 @@ impl WebFetchBackend for HttpFetchBackend {
             let limit = READ_MEDIA_MAX_BYTES;
             let content_length_over_limit =
                 content_length.is_some_and(|length| length > limit as u64);
-            let mut raw_body = Vec::new();
+            let mut raw_body = BoundedBuffer::new(limit);
             let mut stream = response.bytes_stream();
 
             // Decide the body kind from a small prefix (magic numbers first)
@@ -329,16 +330,16 @@ impl WebFetchBackend for HttpFetchBackend {
                         detail: error.to_string(),
                     }
                 })?;
-                raw_body.extend_from_slice(&chunk);
-                if supported_media_type(&raw_body).is_some() {
+                raw_body.push(&chunk);
+                if supported_media_type(raw_body.as_slice()).is_some() {
                     sniffed_media = true;
                     break;
                 }
-                if raw_body.len() >= SNIFF_PREFIX_BYTES {
+                if raw_body.len() >= SNIFF_PREFIX_BYTES || raw_body.overflowed() {
                     break;
                 }
             }
-            if sniffed_media && content_length_over_limit {
+            if sniffed_media && (content_length_over_limit || raw_body.overflowed()) {
                 return Err(WebFetchError::TooLarge {
                     size: content_length.unwrap_or_default() as usize,
                     limit,
@@ -356,10 +357,10 @@ impl WebFetchBackend for HttpFetchBackend {
                             detail: error.to_string(),
                         }
                     })?;
-                    raw_body.extend_from_slice(&chunk);
-                    if raw_body.len() > limit {
+                    let received = raw_body.len() + chunk.len();
+                    if !raw_body.push(&chunk) {
                         return Err(WebFetchError::TooLarge {
-                            size: content_length.unwrap_or(raw_body.len() as u64) as usize,
+                            size: content_length.unwrap_or(received as u64) as usize,
                             limit,
                         });
                     }
@@ -367,7 +368,7 @@ impl WebFetchBackend for HttpFetchBackend {
             } else {
                 // Text is read to at most `limit` bytes; over the limit the
                 // partial body is classified and converted, flagged truncated.
-                while raw_body.len() < limit {
+                while !raw_body.overflowed() {
                     match stream.next().await {
                         None => break,
                         Some(Err(error)) => {
@@ -377,30 +378,18 @@ impl WebFetchBackend for HttpFetchBackend {
                             });
                         }
                         Some(Ok(chunk)) => {
-                            let remaining = limit - raw_body.len();
-                            if chunk.len() > remaining {
-                                raw_body.extend_from_slice(&chunk[..remaining]);
-                                truncated_raw = true;
-                                break;
-                            }
-                            raw_body.extend_from_slice(&chunk);
+                            raw_body.push(&chunk);
                         }
                     }
                 }
-                if !truncated_raw && raw_body.len() == limit && stream.next().await.is_some() {
-                    // The stream carries more than `limit` bytes.
-                    truncated_raw = true;
-                }
+                truncated_raw |= raw_body.overflowed();
                 if truncated_raw {
                     // Cut on a UTF-8 character boundary so the partial text
                     // body stays convertible.
-                    if let Err(utf8_error) = std::str::from_utf8(&raw_body) {
-                        if utf8_error.error_len().is_none() {
-                            raw_body.truncate(utf8_error.valid_up_to());
-                        }
-                    }
+                    raw_body.trim_incomplete_utf8_suffix();
                 }
             }
+            let raw_body = raw_body.into_bytes();
             crate::http::dump_buffered_response(&raw_body, response_dump_path.as_deref());
 
             let body = convert_body_to_result(content_type.as_deref(), &raw_body)?;

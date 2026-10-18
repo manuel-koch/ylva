@@ -200,12 +200,14 @@ debt. Findings that touch the same file are kept adjacent.
    3. [x] Docs: `docs/features.md` / `docs/implementation-notes.md` (output
       bounds).
    4. [x] Gate.
-10. [ ] **M02 (Medium)** - Web fetch buffers media bodies before enforcing the limit.
+10. [x] **M02 (Medium)** - Web fetch buffers media bodies before enforcing the limit.
     Where: `src/agent/tools/backends/web_fetch/native.rs:119-156`.
-    1. [ ] Test with an oversized mock body: rejected without exceeding the limit.
-    2. [ ] Reject when `raw_body.len() + chunk.len()` exceeds the limit, before
+    1. [x] Test with an oversized mock body: rejected without exceeding the limit.
+    2. [x] Reject when `raw_body.len() + chunk.len()` exceeds the limit, before
        extending the buffer.
-    3. [ ] Docs: as in M01. Gate.
+    3. [x] Docs: as in M01. Gate.
+    4. [x] Refactor: extracted `BoundedBuffer` (`src/bounded_buffer.rs`) from
+       `OutputCollector` as the shared bounded accumulator; M03 reuses it.
 11. [ ] **M03 (Medium)** - Error response bodies read unbounded.
     Where: `src/http.rs:697-703` (`response.bytes().await` loads everything
     before truncation to 512 characters).
