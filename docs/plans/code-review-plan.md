@@ -230,12 +230,14 @@ debt. Findings that touch the same file are kept adjacent.
        on provider and title requests; cancel the stream on expiry.
     4. [x] Docs: `docs/configuration.md` if a timeout becomes configurable.
        Gate.
-14. [ ] **M06 (Medium)** - Provider error snippets may echo sensitive data.
+14. [x] **M06 (Medium)** - Provider error snippets may echo sensitive data.
     Where: `src/http.rs:777-785` (up to 512 characters of the body reach logs
     and the UI). Low confidence; depends on diagnostics policy.
-    1. [ ] Decide the policy (keep, redact, or log-only at debug). If the choice
+    1. [x] Decide the policy (keep, redact, or log-only at debug). If the choice
        is non-obvious, ask the user.
-    2. [ ] Implement with a test, document in `docs/implementation-notes.md`.
+       Decided by the user: keep. Showing the provider error in the UI and
+       logs is deliberate functionality.
+    2. [x] No code change; documented in `docs/implementation-notes.md`.
        Gate.
 15. [ ] **S02 (Medium)** - Full request URLs are logged and echoed in errors.
     Where: `src/http.rs:437,443,461,472,488` (`tracing` fields) and the

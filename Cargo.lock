@@ -4322,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "ylva"
-version = "0.26.8"
+version = "0.26.9"
 dependencies = [
  "anyhow",
  "arboard",

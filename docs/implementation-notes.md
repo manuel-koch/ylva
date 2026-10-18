@@ -383,6 +383,9 @@ overflow is flagged truncated and trimmed to a UTF-8 boundary.
 `http::response_body_detail` reads provider error bodies through a
 `BoundedBuffer` of 8 KiB and stops there, so a huge or stalled error body
 cannot be buffered whole; the 512-character snippet is cut from that prefix.
+The snippet reaches the logs and the UI deliberately so users can diagnose
+provider failures; it is not redacted. Request headers (API keys) are never
+part of it.
 
 `HttpFetchBackend` (`backends/web_fetch/native.rs`) builds a fresh
 `reqwest` client per hop with `redirect::Policy::none()` and follows
