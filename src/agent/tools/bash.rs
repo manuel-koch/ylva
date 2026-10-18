@@ -16,7 +16,10 @@
 //! cancellation.
 //!
 //! stdout and stderr are read concurrently by two separate async tasks and
-//! merged in true arrival order via an unbounded channel. Total output is
+//! merged in true arrival order into one shared [`OutputCollector`]. Readers
+//! keep draining the pipes after the caps are hit but retain nothing, and a
+//! single line is never buffered beyond [`BASH_OUTPUT_LIMIT_BYTES`] + 1 bytes,
+//! so memory stays bounded however much a command prints. Total output is
 //! capped at [`BASH_OUTPUT_LIMIT_LINES`] whole lines or
 //! [`BASH_OUTPUT_LIMIT_BYTES`] bytes, whichever is hit first; excess is
 //! silently discarded (a line that alone exceeds the remaining byte budget is
@@ -29,12 +32,13 @@
 //! exit path: normal completion, timeout, or future cancellation (when the
 //! caller drops the `BoxFuture` returned by [`ToolCall::run`]).
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, BufReader};
 use tracing::Instrument;
 
 use super::{ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError};
@@ -465,43 +469,11 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
     let stdout = child.stdout.take().expect("stdout was not captured");
     let stderr = child.stderr.take().expect("stderr was not captured");
 
-    // Two async reader tasks drain pipes concurrently and forward lines to a
-    // single channel, giving true arrival-order interleaving.
-    let (line_sender, mut line_receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-    let stdout_sender = line_sender.clone();
-    let stdout_reader_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let _ = stdout_sender.send(line.clone());
-                }
-            }
-        }
-    });
-
-    let stderr_sender = line_sender.clone();
-    let stderr_reader_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let _ = stderr_sender.send(line.clone());
-                }
-            }
-        }
-    });
-
-    // Drop the original sender so the channel closes once both reader tasks
-    // finish (and have dropped their clones).
-    drop(line_sender);
+    // Two async reader tasks drain pipes concurrently into one collector,
+    // giving true arrival-order interleaving.
+    let collector = Arc::new(Mutex::new(OutputCollector::default()));
+    let stdout_reader_task = spawn_line_reader(stdout, Arc::clone(&collector));
+    let stderr_reader_task = spawn_line_reader(stderr, Arc::clone(&collector));
 
     let effective_timeout_secs = if timeout_secs == 0 {
         DEFAULT_BASH_TIMEOUT_SECS
@@ -517,11 +489,11 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
 
     if exit_status.is_none() {
         // Timed out — abort reader tasks; the guard kills the process group.
-        // Drain whatever lines have already been buffered before aborting so
-        // partial output can be shown in the bubble and communicated to the LLM.
+        // Keep whatever lines were already collected so partial output can be
+        // shown in the bubble and communicated to the LLM.
         stdout_reader_task.abort();
         stderr_reader_task.abort();
-        let (partial_output, _) = collect_output(&mut line_receiver).await;
+        let (partial_output, _) = take_collected_output(&collector);
         tracing::warn!(
             timeout_secs = effective_timeout_secs,
             partial_bytes = partial_output.len(),
@@ -538,8 +510,7 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
     let _ = stdout_reader_task.await;
     let _ = stderr_reader_task.await;
 
-    // Drain the channel, applying the output cap.
-    let (output, truncated) = collect_output(&mut line_receiver).await;
+    let (output, truncated) = take_collected_output(&collector);
 
     let status = exit_status
         .unwrap()
@@ -567,45 +538,104 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
     })
 }
 
-/// Drain `receiver` and accumulate up to [`BASH_OUTPUT_LIMIT_LINES`] whole
-/// lines of text, capped at [`BASH_OUTPUT_LIMIT_BYTES`] total bytes,
-/// whichever limit is hit first. Lines beyond the line cap are received (to
-/// avoid blocking senders) but discarded. A line that alone exceeds the
-/// remaining byte budget is kept as a UTF-8-safe prefix up to the byte cap
-/// rather than discarded wholesale (so a single oversized first line still
-/// yields non-empty output).
-/// Returns `(output, truncated)`.
-async fn collect_output(
-    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> (String, bool) {
-    let mut output = String::new();
-    let mut truncated = false;
-    let mut line_count: usize = 0;
+/// Accumulates up to [`BASH_OUTPUT_LIMIT_LINES`] whole lines of text, capped
+/// at [`BASH_OUTPUT_LIMIT_BYTES`] total bytes, whichever limit is hit first.
+/// Lines beyond a cap are discarded. A line that alone exceeds the remaining
+/// byte budget is kept as a UTF-8-safe prefix up to the byte cap rather than
+/// discarded wholesale (so a single oversized first line still yields
+/// non-empty output).
+#[derive(Default)]
+struct OutputCollector {
+    output: String,
+    truncated: bool,
+    line_count: usize,
+}
 
-    while let Some(line) = receiver.recv().await {
-        if truncated {
-            // Keep draining so senders are not blocked, but discard content.
-            continue;
+impl OutputCollector {
+    fn push_line(&mut self, line: &str) {
+        if self.truncated {
+            return;
         }
-        if line_count >= BASH_OUTPUT_LIMIT_LINES {
-            truncated = true;
-            continue;
+        if self.line_count >= BASH_OUTPUT_LIMIT_LINES {
+            self.truncated = true;
+            return;
         }
-        let remaining_bytes = BASH_OUTPUT_LIMIT_BYTES.saturating_sub(output.len());
+        let remaining_bytes = BASH_OUTPUT_LIMIT_BYTES.saturating_sub(self.output.len());
         if line.len() > remaining_bytes {
             let mut prefix_end = remaining_bytes;
             while prefix_end > 0 && !line.is_char_boundary(prefix_end) {
                 prefix_end -= 1;
             }
-            output.push_str(&line[..prefix_end]);
-            truncated = true;
-            continue;
+            self.output.push_str(&line[..prefix_end]);
+            self.truncated = true;
+            return;
         }
-        output.push_str(&line);
-        line_count += 1;
+        self.output.push_str(line);
+        self.line_count += 1;
     }
+}
 
-    (output, truncated)
+fn take_collected_output(collector: &Mutex<OutputCollector>) -> (String, bool) {
+    let mut collector = collector
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (std::mem::take(&mut collector.output), collector.truncated)
+}
+
+/// Longest line kept in memory: one byte beyond the output cap, so an
+/// oversized line is still recognized as exceeding any remaining budget.
+const MAX_BUFFERED_LINE_BYTES: usize = BASH_OUTPUT_LIMIT_BYTES + 1;
+
+fn spawn_line_reader<Stream>(
+    stream: Stream,
+    collector: Arc<Mutex<OutputCollector>>,
+) -> tokio::task::JoinHandle<()>
+where
+    Stream: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        while let Ok(true) =
+            read_bounded_line(&mut reader, &mut line, MAX_BUFFERED_LINE_BYTES).await
+        {
+            let text = String::from_utf8_lossy(&line);
+            collector
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push_line(&text);
+        }
+    })
+}
+
+/// Read one line (including its newline) into `line`, keeping at most
+/// `max_bytes` of it and discarding the rest of an oversized line. Returns
+/// `false` at end of stream when nothing was read.
+async fn read_bounded_line<Reader>(
+    reader: &mut Reader,
+    line: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<bool>
+where
+    Reader: AsyncBufRead + Unpin,
+{
+    line.clear();
+    let mut read_any = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(read_any);
+        }
+        read_any = true;
+        let newline_position = available.iter().position(|&byte| byte == b'\n');
+        let consumed = newline_position.map_or(available.len(), |position| position + 1);
+        let room = max_bytes.saturating_sub(line.len());
+        line.extend_from_slice(&available[..consumed.min(room)]);
+        reader.consume(consumed);
+        if newline_position.is_some() {
+            return Ok(true);
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -917,6 +947,52 @@ mod tests {
                 "output must never exceed the byte cap: got {} bytes",
                 result.output.len()
             );
+        });
+    }
+
+    #[tokio::test]
+    async fn bounded_line_reader_never_buffers_more_than_the_maximum() {
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(
+            [vec![b'a'; 5_000_000], b"\nnext\n".to_vec()].concat(),
+        ));
+        let mut line = Vec::new();
+
+        assert!(read_bounded_line(&mut reader, &mut line, 100)
+            .await
+            .unwrap());
+        assert_eq!(line.len(), 100);
+        assert!(read_bounded_line(&mut reader, &mut line, 100)
+            .await
+            .unwrap());
+        assert_eq!(line, b"next\n");
+        assert!(!read_bounded_line(&mut reader, &mut line, 100)
+            .await
+            .unwrap());
+    }
+
+    #[test]
+    fn bash_output_far_above_the_cap_is_drained_and_capped() {
+        run_locked(async {
+            // ~100 MB across many lines plus a ~50 MB unterminated tail: the
+            // command must not block on a full pipe, and only the cap is kept.
+            let command = "head -c 100000000 /dev/zero | tr '\\0' 'a' | fold -w 80; \
+                head -c 50000000 /dev/zero | tr '\\0' 'b'";
+            let result = run_bash(make_bash_args(command), 60)
+                .await
+                .expect("command should succeed");
+            assert!(result.truncated);
+            assert!(result.output.len() <= BASH_OUTPUT_LIMIT_BYTES);
+            assert!(!result.output.is_empty());
+        });
+    }
+
+    #[test]
+    fn bash_invalid_utf8_output_does_not_stop_later_lines() {
+        run_locked(async {
+            let result = run_bash(make_bash_args("printf 'a\\377b\\nlater\\n'"), 10)
+                .await
+                .expect("command should succeed");
+            assert!(result.output.contains("later"), "{:?}", result.output);
         });
     }
 

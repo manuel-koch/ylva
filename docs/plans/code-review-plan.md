@@ -190,16 +190,16 @@ debt. Findings that touch the same file are kept adjacent.
 
 ### Phase 3: bounds and timeouts
 
-9. [ ] **M01 (Medium)** - Bash output queued without bound.
+9. [x] **M01 (Medium)** - Bash output queued without bound.
    Where: `src/agent/tools/bash.rs:465-498,542-556`. Reader tasks push every
    line into an unbounded channel; the cap applies only after exit.
-   1. [ ] Test: a command producing output far above the cap keeps memory
+   1. [x] Test: a command producing output far above the cap keeps memory
       bounded and still returns the capped result.
-   2. [ ] Enforce the byte/line cap in the readers (keep draining, discard the
+   2. [x] Enforce the byte/line cap in the readers (keep draining, discard the
       excess) or use a bounded channel.
-   3. [ ] Docs: `docs/features.md` / `docs/implementation-notes.md` (output
+   3. [x] Docs: `docs/features.md` / `docs/implementation-notes.md` (output
       bounds).
-   4. [ ] Gate.
+   4. [x] Gate.
 10. [ ] **M02 (Medium)** - Web fetch buffers media bodies before enforcing the limit.
     Where: `src/agent/tools/backends/web_fetch/native.rs:119-156`.
     1. [ ] Test with an oversized mock body: rejected without exceeding the limit.

@@ -365,6 +365,14 @@ cancellation, so grandchildren do not outlive the command. See
 [features](./features.md#tools-to-be-used-by-models) for timeout and output
 limits.
 
+Both pipe readers push lines into one shared `OutputCollector` (a mutex, so
+lock order is arrival order) that enforces the line and byte caps as lines
+arrive. After a cap is hit the readers keep draining so the command never
+blocks on a full pipe, but retain nothing. `read_bounded_line` keeps at most
+`BASH_OUTPUT_LIMIT_BYTES` + 1 bytes of any single line and discards the rest,
+so one giant unterminated line cannot grow memory either. Lines are decoded
+lossily, so invalid UTF-8 no longer ends a reader early.
+
 `HttpFetchBackend` (`backends/web_fetch/native.rs`) builds a fresh
 `reqwest` client per hop with `redirect::Policy::none()` and follows
 `Location` itself (`MAX_REDIRECTS` = 10). Each hop resolves the host with
