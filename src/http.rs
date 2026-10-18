@@ -23,6 +23,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::bounded_buffer::BoundedBuffer;
+
 /// `User-Agent` value applied as a client-level default on every outbound
 /// HTTP request so remote servers identify Ylva and its package version.
 ///
@@ -738,13 +740,31 @@ pub(crate) fn should_retry(status: reqwest::StatusCode) -> bool {
 
 /// Read a bounded snippet of the response body to attach to an error message,
 /// so backend-specific explanations surface instead of a bare status code.
-/// Returns an empty string when the body cannot be read or is blank.
+/// Reading stops after [`RESPONSE_BODY_SNIPPET_READ_BYTES`], so a huge or
+/// endless error body is never buffered. Returns an empty string when the
+/// body cannot be read or is blank.
 pub(crate) async fn response_body_detail(response: reqwest::Response) -> String {
-    match response.bytes().await {
-        Ok(body) => snippet_from_body(&body),
-        Err(_) => String::new(),
+    use futures::StreamExt;
+
+    let mut stream = response.bytes_stream();
+    let mut body = BoundedBuffer::new(RESPONSE_BODY_SNIPPET_READ_BYTES);
+    while !body.overflowed() {
+        match stream.next().await {
+            Some(Ok(chunk)) => {
+                body.push(&chunk);
+            }
+            Some(Err(_)) if body.is_empty() => return String::new(),
+            Some(Err(_)) | None => break,
+        }
     }
+    body.trim_incomplete_utf8_suffix();
+    snippet_from_body(body.as_slice())
 }
+
+/// Most body bytes read for an error snippet: room for
+/// [`RESPONSE_BODY_SNIPPET_MAX_CHARS`] four-byte characters plus leading
+/// whitespace that the snippet trims.
+const RESPONSE_BODY_SNIPPET_READ_BYTES: usize = 8 * 1024;
 
 /// Maximum characters of a response-body snippet attached to an error message.
 const RESPONSE_BODY_SNIPPET_MAX_CHARS: usize = 512;

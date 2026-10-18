@@ -380,6 +380,10 @@ Lines are decoded lossily, so invalid UTF-8 no longer ends a reader early.
 after the limit is exceeded. Media overflow fails with `TooLarge`; text
 overflow is flagged truncated and trimmed to a UTF-8 boundary.
 
+`http::response_body_detail` reads provider error bodies through a
+`BoundedBuffer` of 8 KiB and stops there, so a huge or stalled error body
+cannot be buffered whole; the 512-character snippet is cut from that prefix.
+
 `HttpFetchBackend` (`backends/web_fetch/native.rs`) builds a fresh
 `reqwest` client per hop with `redirect::Policy::none()` and follows
 `Location` itself (`MAX_REDIRECTS` = 10). Each hop resolves the host with

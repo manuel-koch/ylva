@@ -208,12 +208,12 @@ debt. Findings that touch the same file are kept adjacent.
     3. [x] Docs: as in M01. Gate.
     4. [x] Refactor: extracted `BoundedBuffer` (`src/bounded_buffer.rs`) from
        `OutputCollector` as the shared bounded accumulator; M03 reuses it.
-11. [ ] **M03 (Medium)** - Error response bodies read unbounded.
+11. [x] **M03 (Medium)** - Error response bodies read unbounded.
     Where: `src/http.rs:697-703` (`response.bytes().await` loads everything
     before truncation to 512 characters).
-    1. [ ] Test with a large error body: only a bounded prefix is read.
-    2. [ ] Accumulate chunks up to the snippet limit, then stop.
-    3. [ ] Gate.
+    1. [x] Test with a large error body: only a bounded prefix is read.
+    2. [x] Accumulate chunks up to the snippet limit, then stop.
+    3. [x] Gate.
 12. [ ] **M04 (Medium)** - Compaction and title output have no size limit.
     Where: `src/agent/compaction.rs:528-546`, `src/session_title.rs:228-247`.
     1. [ ] Tests: runaway summary fails compaction keeping existing history;

@@ -264,3 +264,37 @@ fn response_body_detail_returns_empty_for_blank_body() {
     assert_eq!(snippet_from_body(b"   "), "");
     assert_eq!(snippet_from_body(b""), "");
 }
+
+#[tokio::test]
+async fn response_body_detail_stops_reading_a_huge_error_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("server address");
+    // Announces a 1 GiB body, sends 64 KiB and then stalls: reading the whole
+    // body would hang, reading a bounded prefix must not.
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).await.expect("read request");
+        stream
+            .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 1073741824\r\n\r\n")
+            .await
+            .expect("write head");
+        stream
+            .write_all(&vec![b'e'; 64 * 1024])
+            .await
+            .expect("write body prefix");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let response = reqwest::get(format!("http://{address}/"))
+        .await
+        .expect("response head");
+    let detail = tokio::time::timeout(Duration::from_secs(10), response_body_detail(response))
+        .await
+        .expect("a bounded prefix is read without waiting for the whole body");
+    assert_eq!(detail.chars().count(), RESPONSE_BODY_SNIPPET_MAX_CHARS);
+    server.abort();
+}
