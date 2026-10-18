@@ -38,6 +38,7 @@ pub(crate) fn utf8_text_preview(bytes: &[u8]) -> Option<String> {
 }
 
 pub mod agent_finish;
+pub(crate) mod approved_target;
 pub mod backends;
 pub mod bash;
 pub mod clarify;

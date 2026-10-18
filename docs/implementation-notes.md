@@ -345,6 +345,19 @@ See
 [configuration](./configuration.md#sandbox-tool-approval-rules) for the rule's
 contract.
 
+## `read`/`write`/`edit` approval-to-use binding
+
+`create_call` runs before approval, so `ReadCall`, `WriteCall` and `EditCall`
+each capture an `ApprovedTarget` (`agent/tools/approved_target.rs`) holding the
+canonical path the sandbox judges. Before reading or mutating, it
+re-canonicalizes the requested path and refuses the call when the result
+differs (symlink or parent swapped while approval was pending). The file is
+then opened by its canonical path with `O_NOFOLLOW` on Unix, so a symlink
+planted in the final component fails instead of redirecting the access. The
+check and the open are not atomic and parent directories are not pinned (no
+`openat`-style handling), so a swap inside that sub-millisecond window remains
+possible.
+
 ## `bash` tool process-group cleanup
 
 On Unix, `run_bash` kills the process group with `SIGKILL` on timeout or

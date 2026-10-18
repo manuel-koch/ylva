@@ -32,6 +32,7 @@ use tracing::Instrument;
 
 use super::validate_args_with_schema;
 
+use super::approved_target::ApprovedTarget;
 use super::{
     DiffSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
@@ -184,6 +185,7 @@ pub struct EditCall {
     patched_content: String,
     outcome: Option<EditApplied>,
     error: Option<ToolError>,
+    approved_target: ApprovedTarget,
 }
 
 impl EditCall {
@@ -201,6 +203,7 @@ impl EditCall {
             .context_radius(DIFF_CONTEXT_LINES)
             .header(&format!("a/{path}"), &format!("b/{path}"))
             .to_string();
+        let approved_target = ApprovedTarget::capture(&path);
         EditCall {
             id,
             raw_arguments,
@@ -210,6 +213,7 @@ impl EditCall {
             patched_content,
             outcome: Some(outcome),
             error: None,
+            approved_target,
         }
     }
 
@@ -220,6 +224,7 @@ impl EditCall {
         path: String,
         error: ToolError,
     ) -> Self {
+        let approved_target = ApprovedTarget::capture(&path);
         EditCall {
             id,
             raw_arguments,
@@ -229,6 +234,7 @@ impl EditCall {
             patched_content: String::new(),
             outcome: None,
             error: Some(error),
+            approved_target,
         }
     }
 }
@@ -294,17 +300,16 @@ impl ToolCall for EditCall {
         let path = self.path.clone();
         let diff = self.diff.clone();
         let patched_content = self.patched_content.clone();
+        let approved_target = self.approved_target.clone();
         let outcome = self
             .outcome
             .clone()
             .expect("outcome is set when error is None");
         Box::pin(
             async move {
-                tokio::fs::write(&path, patched_content.as_bytes())
-                    .await
-                    .map_err(|error| {
-                        ToolError::failed("edit", format!("failed to write '{path}': {error}"))
-                    })?;
+                approved_target
+                    .write("edit", &path, patched_content.into_bytes())
+                    .await?;
                 Ok(Box::new(EditResult {
                     path,
                     outcome,
@@ -899,6 +904,28 @@ mod tests {
         Box::new(call).run().await.unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert_eq!(written, "alpha\ngamma\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_refuses_symlink_swapped_after_approval() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("target.txt");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+        std::fs::write(&victim, "alpha\nbeta\n").unwrap();
+        let path_str = path.to_str().unwrap().to_string();
+        let args = make_args_search_replace(&path_str, "beta", "gamma");
+        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TOOL_TIMEOUT_SECS);
+
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        let Err(error) = Box::new(call).run().await else {
+            panic!("swap must be refused");
+        };
+        assert!(error.to_string().contains("now resolves"), "{error}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "alpha\nbeta\n");
     }
 
     // ── EditResult ─────────────────────────────────────────────────────────

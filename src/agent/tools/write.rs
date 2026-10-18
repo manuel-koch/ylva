@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::Instrument;
 
+use super::approved_target::ApprovedTarget;
 use super::{
     utf8_text_preview, ContentSection, FileEncoding, Section, Tool, ToolCall, ToolCallResult,
     ToolError, DEFAULT_TOOL_TIMEOUT_SECS, STANDARD_BASE64,
@@ -154,6 +155,7 @@ pub struct WriteCall {
     id: uuid::Uuid,
     raw_arguments: serde_json::Value,
     timeout_secs: u64,
+    approved_target: ApprovedTarget,
 }
 
 impl ToolCall for WriteCall {
@@ -223,7 +225,7 @@ impl ToolCall for WriteCall {
                 let args = serde_json::from_value::<WriteFileArgs>(self.raw_arguments).map_err(
                     |error| ToolError::failed("write", format!("invalid arguments: {error}")),
                 )?;
-                write_file(args)
+                write_file(args, &self.approved_target)
                     .await
                     .map(|o| -> Box<dyn ToolCallResult> { Box::new(o) })
             }
@@ -340,15 +342,25 @@ impl Tool for WriteTool {
     }
 
     fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall> {
+        let approved_target = ApprovedTarget::capture(
+            arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
         Box::new(WriteCall {
             id,
             raw_arguments: arguments,
             timeout_secs: self.timeout_secs(),
+            approved_target,
         })
     }
 }
 
-async fn write_file(args: WriteFileArgs) -> Result<WriteResult, ToolError> {
+async fn write_file(
+    args: WriteFileArgs,
+    approved_target: &ApprovedTarget,
+) -> Result<WriteResult, ToolError> {
     let encoding = args.encoding;
     let bytes = match encoding {
         FileEncoding::Utf8 => args.content.as_bytes().to_vec(),
@@ -392,10 +404,7 @@ async fn write_file(args: WriteFileArgs) -> Result<WriteResult, ToolError> {
         }
     }
     let bytes_written = bytes.len();
-    tokio::fs::write(&path, bytes).await.map_err(|error| {
-        tracing::error!(error = %error, "failed to write");
-        ToolError::failed("write", format!("failed to write '{}': {error}", path))
-    })?;
+    approved_target.write("write", &path, bytes).await?;
     tracing::debug!("wrote file");
     Ok(WriteResult::new(
         path,
@@ -428,6 +437,11 @@ mod tests {
     use super::*;
     use crate::test_support::capture_logs;
     use tempfile::TempDir;
+
+    async fn write_file(args: WriteFileArgs) -> Result<WriteResult, ToolError> {
+        let approved_target = ApprovedTarget::capture(&args.path);
+        super::write_file(args, &approved_target).await
+    }
 
     #[test]
     fn write_tool_orders_path_first_and_marks_content_as_non_default() {
@@ -467,6 +481,27 @@ mod tests {
             tool.needs_approval(&args),
             crate::sandbox::ApprovalCheck::UserApprovalRequired
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_refuses_symlink_swapped_after_approval() {
+        let dir = TempDir::new().expect("tempdir");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, "original").expect("seed victim");
+        let path = dir.path().join("out.txt");
+        let call = WriteTool::default().create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({ "path": path.display().to_string(), "content": "evil" }),
+        );
+
+        std::os::unix::fs::symlink(&victim, &path).expect("plant symlink");
+
+        let Err(error) = call.run().await else {
+            panic!("swap must be refused");
+        };
+        assert!(error.to_string().contains("now resolves"), "{error}");
+        assert_eq!(std::fs::read_to_string(&victim).expect("read"), "original");
     }
 
     #[test]

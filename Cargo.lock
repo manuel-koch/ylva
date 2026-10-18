@@ -4322,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "ylva"
-version = "0.26.2"
+version = "0.26.3"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4341,6 +4341,7 @@ dependencies = [
  "ignore",
  "infer",
  "jsonschema",
+ "libc",
  "log",
  "nix",
  "pulldown-cmark",

@@ -156,7 +156,7 @@ debt. Findings that touch the same file are kept adjacent.
    5. [x] Docs: `docs/features.md`, `docs/configuration.md` (replace the
       redirect caveat, document the flag), `docs/implementation-notes.md`.
    6. [x] Gate.
-8. [ ] **M-H03 (Medium, downgraded from High)** - Write/edit approval and
+8. [x] **M-H03 (Medium, downgraded from High)** - Write/edit approval and
    mutation separated (TOCTOU).
    Where: `src/agent/tools/write.rs:290-302,380-395`,
    `src/agent/tools/edit.rs:411-427,503-526`.
@@ -174,16 +174,19 @@ debt. Findings that touch the same file are kept adjacent.
      process user may write, and a symlink escaping the workspace is the
      case the sandbox rules are meant to gate.
    - Result: Medium. Do the cheap hardening; skip an exhaustive test matrix.
-   1. [ ] Tests: symlink or parent swapped between approval and write is
+   1. [x] Tests: symlink or parent swapped between approval and write is
       detected and the write refused (Unix-gated); one deterministic test
       per tool using a hook/seam between check and mutation.
-   2. [ ] Re-resolve the canonical path right before the write and re-run the
+   2. [x] Re-resolve the canonical path right before the write and re-run the
       sandbox path check on it (refuse on mismatch); use no-follow open flags
       (`O_NOFOLLOW`) on Unix for the final component.
-   3. [ ] Docs: `docs/implementation-notes.md` (approval/mutation flow, the
+   3. [x] Docs: `docs/implementation-notes.md` (approval/mutation flow, the
       residual parent-directory race that remains without `openat`-style
       handling).
-   4. [ ] Gate.
+   4. [x] Gate.
+   5. [x] Addendum: `read` had the same approval-to-open gap (`ReadCall` now
+      uses `ApprovedTarget::open_for_read`); `search` and `glob` are
+      deliberately left out of scope.
 
 ### Phase 3: bounds and timeouts
 

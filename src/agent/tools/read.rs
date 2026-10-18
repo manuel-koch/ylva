@@ -69,6 +69,7 @@ use std::sync::LazyLock;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tracing::Instrument;
 
+use super::approved_target::ApprovedTarget;
 use super::{
     validate_args_with_schema, ContentSection, FileEncoding, Section, Tool, ToolAttachment,
     ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
@@ -364,6 +365,7 @@ pub struct ReadCall {
     raw_arguments: serde_json::Value,
     timeout_secs: u64,
     runtime_output_token_limit: Option<usize>,
+    approved_target: ApprovedTarget,
 }
 
 impl ToolCall for ReadCall {
@@ -395,6 +397,7 @@ impl ToolCall for ReadCall {
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
         let raw_arguments = self.raw_arguments;
         let runtime_output_token_limit = self.runtime_output_token_limit;
+        let approved_target = self.approved_target;
         let serialized = serde_json::to_string(&raw_arguments).unwrap_or_default();
         let span = tracing::info_span!("tool_args", args = %serialized);
         Box::pin(
@@ -408,7 +411,12 @@ impl ToolCall for ReadCall {
                     serde_json::from_value::<ReadFileArgs>(raw_arguments).map_err(|error| {
                         ToolError::failed("read", format!("invalid arguments: {error}"))
                     })?;
-                let mut result = read_file(args).await?;
+                approved_target.verify_unchanged("read", &args.path)?;
+                let file = approved_target
+                    .open_for_read()
+                    .await
+                    .map_err(|error| read_io_error(&args.path, error))?;
+                let mut result = read_opened_file(args, file, STREAM_CHUNK_BYTES).await?;
                 if let Some(max_output_tokens) = runtime_output_token_limit {
                     if result.encoding == FileEncoding::Base64
                         && crate::llm::TokenEstimator::Tiktoken
@@ -577,42 +585,37 @@ impl Tool for ReadTool {
     }
 
     fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall> {
+        let approved_target = ApprovedTarget::capture(
+            arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
         Box::new(ReadCall {
             id,
             raw_arguments: arguments,
             timeout_secs: self.timeout_secs(),
             runtime_output_token_limit: None,
+            approved_target,
         })
     }
 }
 
-async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
-    read_file_streaming(args, STREAM_CHUNK_BYTES).await
-}
-
-/// Resolve a read by streaming the file instead of loading it whole.
+/// Read from an already opened `file`. `chunk_size` is a parameter so
+/// chunk-boundary tests can pin the behavior.
 ///
 /// `bytes` mode seeks to `offset` and reads at most `limit` bytes, so
 /// unselected bytes are never materialized. `lines`, `chars` and autodetect
 /// read fixed-size chunks and retain only the selected window while still
-/// validating UTF-8 to EOF. `chunk_size` is a parameter so chunk-boundary
-/// tests can pin the behavior.
-async fn read_file_streaming(
+/// validating UTF-8 to EOF.
+async fn read_opened_file(
     args: ReadFileArgs,
+    file: tokio::fs::File,
     chunk_size: usize,
 ) -> Result<ReadResult, ToolError> {
-    if args.encoding == FileEncoding::Base64 && args.mode != Some(ReadMode::Bytes) {
-        return Err(ToolError::failed(
-            "read",
-            "`encoding: \"base64\"` requires explicit `mode: \"bytes\"`",
-        ));
-    }
     tracing::debug!("reading file");
     let chunk_size = chunk_size.max(1);
     let path = args.path;
-    let file = tokio::fs::File::open(&path)
-        .await
-        .map_err(|error| read_io_error(&path, error))?;
     let file_length = file
         .metadata()
         .await

@@ -19,6 +19,28 @@ use base64::Engine as _;
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// Open `args.path` directly (bypassing the approval binding) and read it.
+async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
+    read_file_streaming(args, STREAM_CHUNK_BYTES).await
+}
+
+/// As [`read_file`] with an explicit chunk size for chunk-boundary tests.
+async fn read_file_streaming(
+    args: ReadFileArgs,
+    chunk_size: usize,
+) -> Result<ReadResult, ToolError> {
+    if args.encoding == FileEncoding::Base64 && args.mode != Some(ReadMode::Bytes) {
+        return Err(ToolError::failed(
+            "read",
+            "`encoding: \"base64\"` requires explicit `mode: \"bytes\"`",
+        ));
+    }
+    let file = tokio::fs::File::open(&args.path)
+        .await
+        .map_err(|error| read_io_error(&args.path, error))?;
+    read_opened_file(args, file, chunk_size).await
+}
+
 #[test]
 fn read_tool_with_timeout_constructor() {
     let tool = ReadTool::with_timeout(
@@ -267,6 +289,28 @@ fn read_rejects_base64_without_explicit_bytes_mode() {
     let lines_mode_error = tool.validate_args(&lines_mode).expect_err("must reject");
     assert!(lines_mode_error.contains("requires explicit `mode: \"bytes\"`"));
     assert!(tool.validate_args(&bytes_mode).is_ok());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn run_refuses_symlink_swapped_after_approval() {
+    let dir = TempDir::new().expect("tempdir");
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(&secret, "secret").expect("seed secret");
+    let path = dir.path().join("note.txt");
+    std::fs::write(&path, "harmless").expect("seed note");
+    let call = ReadTool::default().create_call(
+        uuid::Uuid::new_v4(),
+        serde_json::json!({ "path": path.display().to_string() }),
+    );
+
+    std::fs::remove_file(&path).expect("remove note");
+    std::os::unix::fs::symlink(&secret, &path).expect("plant symlink");
+
+    let Err(error) = call.run().await else {
+        panic!("swap must be refused");
+    };
+    assert!(error.to_string().contains("now resolves"), "{error}");
 }
 
 #[test]
