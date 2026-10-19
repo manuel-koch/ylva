@@ -547,3 +547,53 @@ async fn subagent_records_link_to_the_parent_session() {
     assert_eq!(sources, &["src/agent.rs".to_string()]);
     assert_eq!(*origin, FinishResultOrigin::Agent);
 }
+
+#[tokio::test]
+async fn a_failed_reopen_after_title_rewrite_fails_the_writer_closed() {
+    use crate::store::session_file::{open_locked_session_file, write_meta_line};
+    use crate::store::writer::SessionWriter;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let template = Store::create(
+        &temp.path().join("chats"),
+        temp.path(),
+        Uuid::new_v4(),
+        "mock",
+        "mock",
+        None,
+    )
+    .expect("template store");
+    template.flush().await;
+    let StoreEvent::Meta(meta) = read_events(template.path()).remove(0) else {
+        panic!("first line must be the meta header")
+    };
+
+    let session_id = Uuid::new_v4();
+    let path = temp.path().join(format!("{session_id}.jsonl"));
+    let mut file = open_locked_session_file(&path, session_id, false).expect("open");
+    let meta = SessionMeta { session_id, ..meta };
+    let meta_line_len = write_meta_line(&mut file, &path, &meta).expect("meta written");
+    let (_command_tx, command_rx) = tokio::sync::mpsc::channel(1);
+    let mut writer = SessionWriter {
+        file,
+        path: path.clone(),
+        session_id,
+        meta_awaiting_title: Some((meta, meta_line_len)),
+        command_rx,
+        reopen_file: |_, _| Err(std::io::Error::other("simulated reopen failure")),
+        failure: None,
+    };
+
+    assert!(writer.set_title("Generated title").is_err());
+    let published = std::fs::read(&path).expect("published file readable");
+
+    writer.append(StoreEvent::ModelChanged {
+        version: 1,
+        changed_at: "2026-01-01T00:00:00Z".into(),
+        provider_connection: "mock".into(),
+        model: "other".into(),
+    });
+    assert_eq!(std::fs::read(&path).unwrap(), published);
+    let error = writer.set_title("Another title").unwrap_err().to_string();
+    assert!(error.contains("could not be reopened"), "{error}");
+}

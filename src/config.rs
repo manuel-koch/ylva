@@ -28,6 +28,7 @@ pub mod layered;
 mod profile;
 mod provider;
 pub mod soul;
+mod unknown_keys;
 mod web_fetch;
 mod web_search;
 
@@ -37,7 +38,9 @@ pub use profile::{
     is_valid_profile_name, profile_config_source_path, AgentCompactionConfig, CompactionConfig,
     ProfileConfig, ToolSandboxConfig, MAX_PROFILE_NAME_LENGTH,
 };
-pub use provider::{ProviderConfig, ProviderConnectionConfig};
+pub use provider::{ProviderConfig, ProviderConnectionConfig, ProviderKind};
+pub(crate) use unknown_keys::deserialize_reporting_unknown_keys;
+pub use unknown_keys::ConfigWarning;
 pub use web_fetch::WebFetchConfig;
 pub use web_search::{
     BraveBackendConfig, SearXngBackendConfig, WebSearchBackendsConfig, WebSearchConfig,

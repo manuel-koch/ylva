@@ -15,7 +15,7 @@
 //! Pure mouse event handling.
 
 use super::TextareaContext;
-use crate::markdown::render_markdown;
+use crate::markdown::{render_markdown, slice_by_display_columns};
 use crate::tui_reducer_state::{
     model_picker_row_entries, slash_overlay_text_rows, AppState, ChatEntry, ChatSelection, Effect,
     Focus, SlashOverlay, TuiMode,
@@ -85,22 +85,20 @@ fn extract_clarify_banner_text(
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            let chars: Vec<char> = line.chars().collect();
-            let line_len = chars.len();
             let (col_start, col_end) = if min_row == max_row {
                 // Single-row drag: apply both column offsets.
-                (start_col_offset.min(line_len), end_col_offset.min(line_len))
+                (start_col_offset, end_col_offset)
             } else if index == 0 {
                 // First line of a multi-row drag: trim from start column.
-                (start_col_offset.min(line_len), line_len)
+                (start_col_offset, usize::MAX)
             } else if index == max_row - min_row {
                 // Last line of a multi-row drag: trim to end column.
-                (0, end_col_offset.min(line_len))
+                (0, end_col_offset)
             } else {
                 // Middle lines: include in full.
-                (0, line_len)
+                (0, usize::MAX)
             };
-            chars[col_start..col_end].iter().collect()
+            slice_by_display_columns(line, col_start, col_end)
         })
         .collect();
 
@@ -150,18 +148,16 @@ fn extract_overlay_region_text(
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            let characters: Vec<char> = line.chars().collect();
-            let line_length = characters.len();
             let (column_start, column_end) = if start.0 == end_row {
-                (start.1.min(line_length), end.1.min(line_length))
+                (start.1, end.1)
             } else if index == 0 {
-                (start.1.min(line_length), line_length)
+                (start.1, usize::MAX)
             } else if index == end_row - start.0 {
-                (0, end.1.min(line_length))
+                (0, end.1)
             } else {
-                (0, line_length)
+                (0, usize::MAX)
             };
-            characters[column_start..column_end].iter().collect()
+            slice_by_display_columns(line, column_start, column_end)
         })
         .collect::<Vec<String>>()
         .join("\n")

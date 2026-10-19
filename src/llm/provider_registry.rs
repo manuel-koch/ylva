@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::ProviderConnectionConfig;
+use crate::config::{ProviderConnectionConfig, ProviderKind};
 use crate::llm::engine::EngineConfig;
 
 use super::{MockProvider, OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider, Provider};
@@ -94,10 +94,10 @@ impl ProviderEnv {
         if provider_config.api_key.is_some() {
             return;
         }
-        let api_key = match provider_config.provider.as_str() {
-            "ollama" => self.ollama_api_key.as_ref(),
-            "openrouter" => self.openrouter_api_key.as_ref(),
-            _ => None,
+        let api_key = match provider_config.provider {
+            ProviderKind::Ollama => self.ollama_api_key.as_ref(),
+            ProviderKind::Openrouter => self.openrouter_api_key.as_ref(),
+            ProviderKind::Mock => None,
         };
         if let Some(api_key) = api_key.filter(|api_key| !api_key.is_empty()) {
             provider_config.api_key = Some(api_key.clone());
@@ -169,6 +169,7 @@ pub enum ProviderSelection {
     Mock,
     /// A provider connection name backed by the OpenAI-compatible implementation.
     OpenAiCompatible {
+        provider_kind: ProviderKind,
         provider_connection: String,
         base_url: String,
         model: String,
@@ -189,7 +190,7 @@ impl ProviderSelection {
     /// labels.
     pub fn provider_connection(&self) -> &str {
         match self {
-            ProviderSelection::Mock => "mock",
+            ProviderSelection::Mock => ProviderKind::Mock.as_str(),
             ProviderSelection::OpenAiCompatible {
                 provider_connection,
                 ..
@@ -202,7 +203,7 @@ impl ProviderSelection {
     pub fn engine_config(&self, default_model: Option<&str>) -> EngineConfig {
         match self {
             ProviderSelection::Mock => EngineConfig {
-                provider_connection: "mock".to_string(),
+                provider_connection: ProviderKind::Mock.as_str().to_string(),
                 model: default_model.unwrap_or_default().to_string(),
                 temperature: None,
                 context_length: None,
@@ -219,6 +220,7 @@ impl ProviderSelection {
                 base_url,
                 model,
                 api_key,
+                ..
             } => EngineConfig {
                 provider_connection: provider_connection.clone(),
                 model: if model.is_empty() {
@@ -253,7 +255,12 @@ impl ProviderRegistry {
     pub fn from_engine_config(engine_config: &EngineConfig) -> anyhow::Result<ProviderSelection> {
         match engine_config.provider_connection.as_str() {
             "mock" => Ok(ProviderSelection::Mock),
-            "ollama" | "openrouter" => {
+            name @ ("ollama" | "openrouter") => {
+                let provider_kind = if name == "ollama" {
+                    ProviderKind::Ollama
+                } else {
+                    ProviderKind::Openrouter
+                };
                 let base_url = engine_config
                     .api_base_url
                     .as_deref()
@@ -265,6 +272,7 @@ impl ProviderRegistry {
                         )
                     })?;
                 Ok(ProviderSelection::OpenAiCompatible {
+                    provider_kind,
                     provider_connection: engine_config.provider_connection.clone(),
                     base_url: base_url.to_string(),
                     model: engine_config.model.clone(),
@@ -289,9 +297,9 @@ impl ProviderRegistry {
         provider_config: &ProviderConnectionConfig,
         engine_config: &EngineConfig,
     ) -> anyhow::Result<ProviderSelection> {
-        match provider_config.provider.as_str() {
-            "mock" => Ok(ProviderSelection::Mock),
-            "ollama" | "openrouter" => {
+        match provider_config.provider {
+            ProviderKind::Mock => Ok(ProviderSelection::Mock),
+            ProviderKind::Ollama | ProviderKind::Openrouter => {
                 let base_url = engine_config
                     .api_base_url
                     .as_ref()
@@ -301,10 +309,11 @@ impl ProviderRegistry {
                         anyhow::anyhow!(
                             "provider connection '{}' using provider '{}' requires an api_base_url",
                             provider_connection,
-                            provider_config.provider
+                            provider_config.provider.as_str()
                         )
                     })?;
                 Ok(ProviderSelection::OpenAiCompatible {
+                    provider_kind: provider_config.provider,
                     provider_connection: provider_connection.to_string(),
                     base_url: base_url.clone(),
                     model: engine_config.model.clone(),
@@ -314,11 +323,6 @@ impl ProviderRegistry {
                         .or_else(|| provider_config.api_key.clone()),
                 })
             }
-            implementation => anyhow::bail!(
-                "unsupported provider '{}' for connection '{}'",
-                implementation,
-                provider_connection
-            ),
         }
     }
 
@@ -344,7 +348,8 @@ impl ProviderRegistry {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_OLLAMA_MODEL.to_string());
             selections.push(ProviderSelection::OpenAiCompatible {
-                provider_connection: "ollama".to_string(),
+                provider_kind: ProviderKind::Ollama,
+                provider_connection: ProviderKind::Ollama.as_str().to_string(),
                 base_url: base_url.clone(),
                 model,
                 api_key: env.ollama_api_key.clone(),
@@ -369,7 +374,8 @@ impl ProviderRegistry {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string());
             selections.push(ProviderSelection::OpenAiCompatible {
-                provider_connection: "openrouter".to_string(),
+                provider_kind: ProviderKind::Openrouter,
+                provider_connection: ProviderKind::Openrouter.as_str().to_string(),
                 base_url,
                 model,
                 api_key: env.openrouter_api_key.clone(),
@@ -386,10 +392,7 @@ impl ProviderRegistry {
     pub fn provider_from_engine_config(
         engine_config: &EngineConfig,
     ) -> anyhow::Result<Arc<dyn Provider>> {
-        Self::build_for_implementation(
-            Some(engine_config.provider_connection.as_str()),
-            Self::from_engine_config(engine_config)?,
-        )
+        Self::build(Self::from_engine_config(engine_config)?)
     }
 
     /// Build a provider from a named connection and an engine's Engine runtime
@@ -399,46 +402,40 @@ impl ProviderRegistry {
         provider_config: &ProviderConnectionConfig,
         engine_config: &EngineConfig,
     ) -> anyhow::Result<Arc<dyn Provider>> {
-        Self::build_for_implementation(
-            Some(provider_config.provider.as_str()),
-            Self::from_provider_config(provider_connection, provider_config, engine_config)?,
-        )
+        Self::build(Self::from_provider_config(
+            provider_connection,
+            provider_config,
+            engine_config,
+        )?)
     }
 
     /// Build the provider represented by a resolved selection.
     pub fn build(selection: ProviderSelection) -> anyhow::Result<Arc<dyn Provider>> {
-        let implementation = selection.provider_connection().to_string();
-        Self::build_for_implementation(Some(implementation.as_str()), selection)
-    }
-
-    fn build_for_implementation(
-        implementation: Option<&str>,
-        selection: ProviderSelection,
-    ) -> anyhow::Result<Arc<dyn Provider>> {
         match selection {
             ProviderSelection::Mock => Ok(Arc::new(MockProvider::new(
                 vec!["mock response".to_string()],
                 Duration::from_millis(0),
             ))),
             ProviderSelection::OpenAiCompatible {
+                provider_kind,
                 provider_connection,
                 base_url,
                 model,
                 api_key,
-            } => match implementation {
-                Some("ollama") => Ok(Arc::new(OllamaProvider::new(
+            } => match provider_kind {
+                ProviderKind::Ollama => Ok(Arc::new(OllamaProvider::new(
                     provider_connection,
                     base_url,
                     model,
                     api_key,
                 ))),
-                Some("openrouter") => Ok(Arc::new(OpenRouterProvider::new(
+                ProviderKind::Openrouter => Ok(Arc::new(OpenRouterProvider::new(
                     provider_connection,
                     base_url,
                     model,
                     api_key,
                 ))),
-                _ => Ok(Arc::new(OpenAiCompatibleProvider::new(
+                ProviderKind::Mock => Ok(Arc::new(OpenAiCompatibleProvider::new(
                     provider_connection,
                     base_url,
                     model,
@@ -492,7 +489,8 @@ mod tests {
         assert_eq!(
             ProviderRegistry::from_environment(&env),
             ProviderSelection::OpenAiCompatible {
-                provider_connection: "ollama".to_string(),
+                provider_kind: ProviderKind::Ollama,
+                provider_connection: ProviderKind::Ollama.as_str().to_string(),
                 base_url: "http://localhost:11434".to_string(),
                 model: DEFAULT_OLLAMA_MODEL.to_string(),
                 api_key: None,
@@ -510,7 +508,8 @@ mod tests {
         assert_eq!(
             ProviderRegistry::from_environment(&env),
             ProviderSelection::OpenAiCompatible {
-                provider_connection: "openrouter".to_string(),
+                provider_kind: ProviderKind::Openrouter,
+                provider_connection: ProviderKind::Openrouter.as_str().to_string(),
                 base_url: DEFAULT_OPENROUTER_BASE_URL.to_string(),
                 model: DEFAULT_OPENROUTER_MODEL.to_string(),
                 api_key: Some("sk-or-key".to_string()),
@@ -686,7 +685,7 @@ mod tests {
     #[test]
     fn named_provider_connection_preserves_its_alias_for_runtime_identity() {
         let provider_config = ProviderConnectionConfig {
-            provider: "ollama".to_string(),
+            provider: ProviderKind::Ollama,
             api_base_url: Some("http://localhost:11434".to_string()),
             api_key: None,
         };

@@ -250,6 +250,7 @@ async fn tui_triggers_title_generation_when_stream_done_is_drained() {
             input_history_limit: ProfileConfig::default().input_history_limit,
             exit_snapshot: None,
             unactivated_clones: Arc::default(),
+            startup_notice: None,
         },
     )
     .await;
@@ -344,6 +345,7 @@ async fn tui_loads_prior_session_user_messages_into_input_history() {
             input_history_limit: 1,
             exit_snapshot: None,
             unactivated_clones: Arc::default(),
+            startup_notice: None,
         },
     )
     .await
@@ -357,6 +359,63 @@ async fn tui_loads_prior_session_user_messages_into_input_history() {
             "current prompt".to_string()
         ]
     );
+}
+
+#[tokio::test]
+async fn startup_notice_is_shown_once_in_the_conversation() {
+    use ratatui::backend::TestBackend;
+
+    let provider = Arc::new(crate::llm::MockProvider::new(Vec::new(), Duration::ZERO));
+    let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+        provider,
+        EngineConfig {
+            provider_connection: "mock".to_string(),
+            model: "conversation".to_string(),
+            temperature: None,
+            context_length: None,
+            api_base_url: None,
+            api_key: None,
+            reasoning: None,
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
+        },
+    ));
+    let factory =
+        AgentFactory::new(HashMap::from([("default".to_string(), engine)])).with_allowed_tools(&[]);
+    let (agent, ui_rx) = factory
+        .create(&ProfileConfig::default(), "default", Role::Root)
+        .expect("root agent created");
+    let (action_tx, action_rx) = mpsc::channel(1);
+    drop(action_tx);
+    let (_title_update_tx, title_update_rx) = mpsc::unbounded_channel();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal created");
+
+    let (tui_state, _outcome) = run_tui_with_title(
+        &mut terminal,
+        agent,
+        ui_rx,
+        None,
+        action_rx,
+        &mut NoopClipboard,
+        TuiRuntime {
+            startup_notice: Some("Configuration warnings:\n- unknown key".to_string()),
+            update_rx: title_update_rx,
+            ..TuiRuntime::disabled()
+        },
+    )
+    .await
+    .expect("TUI exits cleanly");
+
+    let notices: Vec<&str> = tui_state
+        .chat_entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ChatEntry::Notice { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices, vec!["Configuration warnings:\n- unknown key"]);
 }
 
 fn setup() -> (

@@ -30,6 +30,7 @@ surface.
 | `--auto-approve-web-search` | none | — | — | Skip the human-approval prompt for `web_search` tool calls. |
 | `--auto-approve-web-fetch` | none | — | — | Skip the human-approval prompt for `web_fetch` tool calls. |
 | `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Subagent delegation" in `docs/features.md`. |
+| `--strict-config` | none | — | — | Treat unknown configuration keys as a startup error (exit code 2) instead of a warning. |
 | `--max-concurrent-subagents <N>` | signed integer | any integer | profile setting | Override the profile's maximum number of simultaneously running subagents for this run. A value `<= 0` means unlimited. |
 
 An invalid `--color`, `--log-level`, `--log-format`, or `--conversation-id`
@@ -295,7 +296,9 @@ ylva profile shims --workspace
 - `edit <name>` opens `profiles/<name>/config.toml` in `$VISUAL`, then
   `$EDITOR`; blank values count as unset. It exits `2` when the profile or its
   `config.toml` is missing (run `create` first) and when neither variable is
-  set. The editor runs through `sh -c`, so a value such as `code --wait` works.
+  set. The editor value is evaluated by `sh -c` (shell quoting, arguments and
+  expansions apply, as for `git`), so `code --wait` works; the profile file path
+  is passed as a separate argument and never re-parsed.
   A non-zero editor exit returns `1`. After a successful edit, the scope's
   shims are reconciled. Scope-wide configuration validation for reconciliation
   happens after the editor runs. Editor changes persist even if subsequent

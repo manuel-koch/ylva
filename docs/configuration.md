@@ -199,7 +199,15 @@ environment file.
 - Profile validation errors (for example, an engine reference that has no
   corresponding `[engines.*]` table) name the selected profile and the full
   path of the resolved `config.toml` together with the validation detail.
-- Unknown keys are ignored, so a file written for a newer Ylva still loads.
+- Unknown keys do not stop loading. Each one is reported as a warning naming
+  the file, the full key path and, when a known key is close, a suggestion
+  (for example _unknown key `agents.coder.descrption`; did you mean `description`?_).
+  Warnings appear once at startup: as a notice in the TUI conversation, on
+  stderr in console mode, and in the log. Pass `--strict-config` to turn any
+  warning into a startup error (exit code 2).
+- Sandbox rule tables are strict: an unknown key, or a rule that does not set
+  exactly one of `rule`, `pattern` or `command`, is a load error naming the
+  key.
 
 Example:
 
@@ -251,7 +259,7 @@ engine = "ollama/local"
 | `input_history_limit` | number | Maximum number of explicit messages from prior root sessions loaded into TUI input history. Defaults to `50`; `0` disables prior-session history. |
 | `max_concurrent_subagents` | integer or integer string | Profile-level cap on simultaneously running subagents across the delegation tree. Defaults to `4`; values `<= 0` mean unlimited. `--max-concurrent-subagents <N>` overrides this for one run. The cap limits subagent runs, not the root request. Provider request concurrency is separately limited per connection. |
 | `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
-| `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind; its endpoint and credentials belong to this connection. |
+| `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind (`mock`, `ollama` or `openrouter`; any other value fails at load); its endpoint and credentials belong to this connection. |
 | `[engines.<name>]` | table | A named engine — see [Engine configuration](#engine-configuration) below. |
 | `[agents.<type>]` | table | Per-agent-type settings — see [Per-agent configuration](#per-agent-configuration) below. |
 

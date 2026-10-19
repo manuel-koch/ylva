@@ -190,6 +190,8 @@ struct TuiRuntime {
     input_history_limit: usize,
     exit_snapshot: Option<crate::app::SessionExitHandle>,
     unactivated_clones: Arc<std::sync::Mutex<Vec<uuid::Uuid>>>,
+    /// Shown once as a conversation notice when the TUI starts.
+    startup_notice: Option<String>,
 }
 
 impl TuiRuntime {
@@ -202,6 +204,7 @@ impl TuiRuntime {
             input_history_limit: ProfileConfig::default().input_history_limit,
             exit_snapshot: None,
             unactivated_clones: Arc::default(),
+            startup_notice: None,
         }
     }
 }
@@ -243,6 +246,7 @@ where
         input_history_limit,
         exit_snapshot,
         unactivated_clones,
+        startup_notice,
     } = tui_runtime;
     let mut exit_guard = agent.exit_guard(exit_snapshot);
     let mut state = AppState::new();
@@ -291,6 +295,9 @@ where
                 );
             }
         }
+    }
+    if let Some(notice) = startup_notice {
+        state.push_notice_to(None, notice);
     }
     let mut cmd_tx = agent.command_sender();
     let mut engine = agent.engine();
@@ -907,6 +914,7 @@ impl App for TuiApp {
                 input_history_limit: self.profile.input_history_limit,
                 exit_snapshot: self.exit_snapshot,
                 unactivated_clones: unactivated_clones.clone(),
+                startup_notice: self.profile.config_warnings_notice(),
             },
         )
         .await;

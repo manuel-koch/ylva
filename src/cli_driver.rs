@@ -339,6 +339,9 @@ fn display_registry_config(profile: &ProfileConfig) -> ToolRegistryConfig {
 
 impl App for ConsoleApp {
     async fn run(mut self) -> anyhow::Result<u8> {
+        if let Some(notice) = self.profile.config_warnings_notice() {
+            eprintln!("warning: {notice}");
+        }
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;

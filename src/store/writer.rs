@@ -40,19 +40,27 @@ pub(super) enum WriterCommand {
     Flush(oneshot::Sender<()>),
 }
 
+/// Reopens the raw handle after a published title rewrite; a seam so tests can
+/// simulate failure.
+pub(super) type ReopenFile = fn(&mut LockedSessionFile, &std::path::Path) -> std::io::Result<()>;
+
 /// State owned by the writer task: the locked file and command receiver.
-struct SessionWriter {
-    file: LockedSessionFile,
-    path: PathBuf,
-    session_id: Uuid,
+pub(super) struct SessionWriter {
+    pub(super) file: LockedSessionFile,
+    pub(super) path: PathBuf,
+    pub(super) session_id: Uuid,
     /// `Some((meta, meta_line_len))` until a generated title is persisted:
     /// `meta` is the header as currently written to disk (title still
     /// empty), and `meta_line_len` is the byte length of that first line
     /// (JSON plus newline), i.e. where the second line begins — needed to
     /// rewrite just the first line once the title is known. `None` once
     /// finalized (or if this session's header already carried a title).
-    meta_awaiting_title: Option<(SessionMeta, u64)>,
-    command_rx: mpsc::Receiver<WriterCommand>,
+    pub(super) meta_awaiting_title: Option<(SessionMeta, u64)>,
+    pub(super) command_rx: mpsc::Receiver<WriterCommand>,
+    pub(super) reopen_file: ReopenFile,
+    /// Set when the raw handle may point at a replaced inode; every later
+    /// write is refused instead of appending to an unpublished file.
+    pub(super) failure: Option<String>,
 }
 
 /// The dedicated writer task: appends one JSON line per event and flushes it,
@@ -103,13 +111,16 @@ async fn run_writer(mut writer: SessionWriter) {
 
 impl SessionWriter {
     /// Every event is written and flushed immediately, in commit order.
-    fn append(&mut self, event: StoreEvent) {
+    pub(super) fn append(&mut self, event: StoreEvent) {
         self.write_line(&event);
     }
 
     /// Rewrite the `meta` line in place (temp file + atomic `rename()`) so it
     /// carries the supplied generated title. A no-op once already finalized.
-    fn set_title(&mut self, title: &str) -> Result<(), StoreError> {
+    pub(super) fn set_title(&mut self, title: &str) -> Result<(), StoreError> {
+        if let Some(failure) = &self.failure {
+            return Err(self.failed_error(failure));
+        }
         let Some((mut meta, meta_line_len)) = self.meta_awaiting_title.take() else {
             return Ok(());
         };
@@ -168,11 +179,27 @@ impl SessionWriter {
         contents.extend_from_slice(&remainder);
         crate::private_fs::replace_file(&self.path, &contents, 0o600)?;
 
-        self.file.reopen(&self.path)?;
+        if let Err(error) = (self.reopen_file)(&mut self.file, &self.path) {
+            self.failure = Some(format!(
+                "session file was replaced but could not be reopened: {error}"
+            ));
+            return Err(error);
+        }
         Ok(())
     }
 
+    fn failed_error(&self, failure: &str) -> StoreError {
+        StoreError::Io {
+            path: self.path.clone(),
+            source: std::io::Error::other(failure.to_owned()),
+        }
+    }
+
     fn write_line(&mut self, event: &StoreEvent) {
+        if let Some(failure) = &self.failure {
+            tracing::error!(path = %self.path.display(), %failure, "writer failed; dropping store event");
+            return;
+        }
         let _coordination = if matches!(
             event,
             StoreEvent::SubagentStart { .. } | StoreEvent::SubagentResult { .. }
@@ -235,6 +262,8 @@ impl Store {
                 session_id,
                 meta_awaiting_title: title_state.meta_awaiting_title,
                 command_rx,
+                reopen_file: LockedSessionFile::reopen,
+                failure: None,
             })
             .instrument(writer_span),
         );

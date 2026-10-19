@@ -162,6 +162,10 @@ pub struct Cli {
     #[arg(long, value_name = "N", allow_negative_numbers = true)]
     pub max_concurrent_subagents: Option<i64>,
 
+    /// Treat unknown configuration keys as errors instead of warnings
+    #[arg(long)]
+    pub strict_config: bool,
+
     /// Hidden alias for the removed `--no-color` flag, rejected after parsing
     /// with a migration hint (see [`Cli::resolved_color_mode`]).
     #[arg(long, hide = true)]
@@ -461,6 +465,12 @@ mod tests {
     fn profile_without_a_value_is_an_error() {
         let error = parse(["--profile"]).expect_err("a missing value must not be silently ignored");
         assert!(error.to_string().contains("--profile"), "{error}");
+    }
+
+    #[test]
+    fn strict_config_is_off_unless_requested() {
+        assert!(!parse([]).expect("parses").strict_config);
+        assert!(parse(["--strict-config"]).expect("parses").strict_config);
     }
 
     #[test]

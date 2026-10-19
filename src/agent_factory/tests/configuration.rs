@@ -616,7 +616,7 @@ fn from_profile_resolves_multiple_connections_using_one_provider_kind() {
             (
                 "ollama-local".to_string(),
                 crate::ProviderConnectionConfig {
-                    provider: "ollama".to_string(),
+                    provider: crate::config::ProviderKind::Ollama,
                     api_base_url: Some("http://localhost:11434".to_string()),
                     api_key: None,
                 },
@@ -624,7 +624,7 @@ fn from_profile_resolves_multiple_connections_using_one_provider_kind() {
             (
                 "ollama-cloud".to_string(),
                 crate::ProviderConnectionConfig {
-                    provider: "ollama".to_string(),
+                    provider: crate::config::ProviderKind::Ollama,
                     api_base_url: Some("https://ollama.com".to_string()),
                     api_key: Some("cloud-secret".to_string()),
                 },

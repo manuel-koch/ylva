@@ -38,6 +38,7 @@ pub(crate) mod prompt;
 pub mod render;
 pub mod run_outcome;
 pub mod sandbox;
+pub mod saturating_cast;
 pub mod session_command;
 pub(crate) mod session_title;
 pub mod skill_command;

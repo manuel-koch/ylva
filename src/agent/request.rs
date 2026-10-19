@@ -24,6 +24,25 @@ fn is_context_window_rejection(message: &str) -> bool {
         || message.contains("prompt is too long")
 }
 
+/// Spawn `future` and observe its outcome. A panic is logged and followed by
+/// `on_panic`, so the owner of the request is told instead of waiting for a
+/// stream that will never finish.
+fn spawn_supervised<F, P>(task_name: &'static str, future: F, on_panic: P)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+    P: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = tokio::spawn(future);
+    tokio::spawn(async move {
+        if let Err(join_error) = handle.await {
+            if join_error.is_panic() {
+                tracing::error!(task = task_name, "background request task panicked");
+                on_panic.await;
+            }
+        }
+    });
+}
+
 async fn send_preflight_notice(
     sender: &mpsc::Sender<(u64, AgentEvent)>,
     generation: u64,
@@ -75,7 +94,8 @@ pub(super) fn start_request(
         .map(|compaction_state| compaction_state.capacity_warning(engine.clone()));
     let send_notices = |notices: Vec<String>| {
         let sender = agent_tx.clone();
-        tokio::spawn(
+        spawn_supervised(
+            "preflight_notices",
             async move {
                 for notice in notices {
                     if !send_preflight_notice(&sender, generation, notice).await {
@@ -84,6 +104,7 @@ pub(super) fn start_request(
                 }
             }
             .in_current_span(),
+            async {},
         );
     };
     if let Some(compaction) = compaction {
@@ -126,7 +147,7 @@ pub(super) fn start_request(
                 ceiling,
                 "no bounded continuation can fit"
             );
-            tokio::spawn(async move {
+            spawn_supervised("context_overflow_notice", async move {
                 for notice in notices {
                     if !send_preflight_notice(&sender, generation, notice).await {
                         return;
@@ -135,7 +156,7 @@ pub(super) fn start_request(
                 let _ = sender.send((generation, AgentEvent::StreamError(
                     "The context window cannot hold the system instructions, tool definitions and a valid task continuation. Select a model with a larger context window or start a new conversation with a shorter task.".to_string()
                 ))).await;
-            }.in_current_span());
+            }.in_current_span(), async {});
             return cancel;
         }
         notices.push("Reduced the model view lossily to fit the context window. The task anchor remains; omitted output and the full transcript are preserved.".to_string());
@@ -166,7 +187,9 @@ pub(super) fn start_request(
     // lines in `llm::openai_compatible_provider` — identify which agent loop it
     // belongs to, without threading `run_id` through the provider itself.
     let span = tracing::info_span!("agent_stream", run_id = ?own_run_id);
-    tokio::spawn(
+    let panic_sender = agent_tx.clone();
+    spawn_supervised(
+        "agent_stream",
         async move {
             if let Some(capacity_warning) = capacity_warning {
                 if let Some(notice) = capacity_warning.await {
@@ -366,6 +389,16 @@ pub(super) fn start_request(
             }
         }
         .instrument(span),
+        async move {
+            let _ = panic_sender
+                .send((
+                    generation,
+                    AgentEvent::StreamError(
+                        "The model request stopped unexpectedly (internal error).".to_string(),
+                    ),
+                ))
+                .await;
+        },
     );
     cancel
 }
@@ -465,5 +498,27 @@ mod tests {
         };
         let call = acc.into_tool_call_checked().expect("empty is valid");
         assert_eq!(call.arguments, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_request_task_reports_through_the_panic_handler() {
+        let (sender, mut receiver) = mpsc::channel::<&'static str>(1);
+        spawn_supervised(
+            "panicking_test_task",
+            async { panic!("simulated task failure") },
+            async move {
+                let _ = sender.send("panicked").await;
+            },
+        );
+        assert_eq!(receiver.recv().await, Some("panicked"));
+    }
+
+    #[tokio::test]
+    async fn a_task_that_finishes_normally_does_not_trigger_the_panic_handler() {
+        let (sender, mut receiver) = mpsc::channel::<&'static str>(1);
+        spawn_supervised("quiet_test_task", async {}, async move {
+            let _ = sender.send("panicked").await;
+        });
+        assert_eq!(receiver.recv().await, None);
     }
 }

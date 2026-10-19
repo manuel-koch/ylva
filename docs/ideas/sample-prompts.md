@@ -264,13 +264,14 @@ type ) and let them report their findings back:
 ---
 
 Discover the project structure related to agent tool implementations.
-Provide a 2-3 sentence summary for every source file.
-Run the summary task on each file in separate subagent and let it report its findings back.
+Provide a 3-5 sentence summary for every source file.
+Run the summary task on each file in separate subagent and let it report
+its findings back.
 
 Format the result using markdown headers (per file) and the
 related file summary paragraph.
-Save the complete summary to `logs/summary.md`, don't edit an existing file nor use
-its current content. If file exists, override it.
+Save the complete summary to `.ylva/logs/summary.md`, don't edit an existing file
+nor use its current content. If file exists, override it.
 
 ---
 

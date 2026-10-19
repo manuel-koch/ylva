@@ -240,6 +240,14 @@ fn main() {
             exit_with_error(&mut log_guard, message);
         }
     };
+    for warning in &profile.config_warnings {
+        tracing::warn!(%warning, "unknown configuration key");
+    }
+    if cli.strict_config {
+        if let Some(notice) = profile.config_warnings_notice() {
+            exit_with_error(&mut log_guard, format!("{notice}\n(--strict-config)"));
+        }
+    }
     apply_cli_profile_overrides(&cli, &mut profile);
     let profile_path = match selected_profile_path(explicit_profile_name, workspace_root.as_deref())
     {
@@ -838,6 +846,7 @@ fn log_provider_selection(selection: &ProviderSelection) {
             base_url,
             model,
             api_key,
+            ..
         } => {
             tracing::debug!(
                 provider_connection,

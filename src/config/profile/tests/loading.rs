@@ -208,7 +208,7 @@ model = "cloud-model"
     assert_eq!(profile.provider_connections.len(), 2);
     assert_eq!(
         profile.provider_connections["ollama-local"].provider,
-        "ollama"
+        crate::config::ProviderKind::Ollama
     );
     assert_eq!(
         profile.provider_connections["ollama-local"]

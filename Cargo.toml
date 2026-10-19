@@ -1,6 +1,6 @@
 [package]
 name = "ylva"
-version = "0.26.10"
+version = "0.26.12"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Manuel Koch"]
@@ -61,6 +61,7 @@ htmd = "0.5"
 httpdate = "1"
 flate2 = "1"
 libc = "0.2"
+serde_ignored = "0.1.14"
 
 [build-dependencies]
 time = { version = "0.3", features = ["formatting", "macros"] }

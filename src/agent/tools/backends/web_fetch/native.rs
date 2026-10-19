@@ -28,6 +28,7 @@ use super::{
 use crate::agent::tools::read::{supported_media_type, READ_MEDIA_MAX_BYTES};
 use crate::bounded_buffer::BoundedBuffer;
 use crate::http::OUTBOUND_USER_AGENT;
+use crate::saturating_cast::saturating_usize;
 
 const SNIFF_PREFIX_BYTES: usize = 32;
 
@@ -341,7 +342,7 @@ impl WebFetchBackend for HttpFetchBackend {
             }
             if sniffed_media && (content_length_over_limit || raw_body.overflowed()) {
                 return Err(WebFetchError::TooLarge {
-                    size: content_length.unwrap_or_default() as usize,
+                    size: saturating_usize(content_length.unwrap_or_default()),
                     limit,
                 });
             }
@@ -360,7 +361,7 @@ impl WebFetchBackend for HttpFetchBackend {
                     let received = raw_body.len() + chunk.len();
                     if !raw_body.push(&chunk) {
                         return Err(WebFetchError::TooLarge {
-                            size: content_length.unwrap_or(received as u64) as usize,
+                            size: saturating_usize(content_length.unwrap_or(received as u64)),
                             limit,
                         });
                     }
@@ -396,7 +397,7 @@ impl WebFetchBackend for HttpFetchBackend {
             let (body, truncated) = match body {
                 WebFetchBody::Media { .. } if truncated_raw => {
                     return Err(WebFetchError::TooLarge {
-                        size: content_length.unwrap_or(raw_body.len() as u64) as usize,
+                        size: saturating_usize(content_length.unwrap_or(raw_body.len() as u64)),
                         limit,
                     });
                 }

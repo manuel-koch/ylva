@@ -14,6 +14,25 @@
 
 use serde::Deserialize;
 
+/// Provider implementation kinds accepted in `provider = "..."`.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    Mock,
+    Ollama,
+    Openrouter,
+}
+
+impl ProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mock => "mock",
+            Self::Ollama => "ollama",
+            Self::Openrouter => "openrouter",
+        }
+    }
+}
+
 /// A named provider connection.
 ///
 /// The map key in `ProfileConfig::provider_connections` is the connection name shown to
@@ -23,7 +42,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ProviderConnectionConfig {
     /// Provider implementation kind, such as `"ollama"` or `"openrouter"`.
-    pub provider: String,
+    pub provider: ProviderKind,
     /// Provider base URL. Ollama uses the server origin and derives its
     /// OpenAI-compatible `/v1` and native `/api` paths; OpenRouter uses its
     /// origin and derives the OpenAI-compatible `/api/v1` path.

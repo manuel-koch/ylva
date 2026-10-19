@@ -92,6 +92,23 @@ handoffs. Callers own wording and metadata serialization; delimiters do not
 establish trust. Recovery clips block bodies while reserving both tags and
 recognizes legacy handoff prefixes. Existing transcript text is never rewritten.
 
+Unknown keys are found in `config/unknown_keys.rs` via `serde_ignored`; each
+ignored path becomes a `ConfigWarning` with a Levenshtein suggestion from the
+flat `KNOWN_KEYS` list. Warnings travel in `ProfileConfig.config_warnings` to
+`main.rs` (log, `--strict-config`), `cli_driver` (stderr) and
+`TuiRuntime.startup_notice`. `SandboxRuleConfig` parses through a strict
+`deny_unknown_fields` raw struct so errors name the key.
+
+> **Keep `KNOWN_KEYS` in sync.** Update it whenever a config key is added,
+> renamed or removed; otherwise typos still warn, but without a suggestion.
+
+`ProviderKind` is a closed enum (`mock`, `ollama`, `openrouter`), so a typo
+fails at load; `ProviderRegistry::build` matches on it, not on connection names.
+
+Request tasks in `agent/request.rs` use `spawn_supervised`, which logs panics
+and, for the model stream, sends `AgentEvent::StreamError`. Layout code uses
+`saturating_cast::saturating_u16` instead of `as u16`.
+
 Skills separate discovery, per-agent policy, and instruction delivery.
 `AgentFactory` carries one immutable discovery snapshot and the host's approval
 capability across new roots, subagents, `/clear`, and TUI session switches.
@@ -761,6 +778,11 @@ never repaired, rewritten, or appended to; subagent transcript files stay where
 they are and are reused as read-only history. `Cli::clone` requires
 `--conversation-id` (clap `requires`), and `open_store` in `src/main.rs`
 routes the run to the clone instead of a resume.
+
+`Store::set_title` rewrites the first line via temporary file plus `rename()`.
+If the writer cannot reopen the file afterwards, it fails closed: later events
+are dropped (and logged) and later title writes error, rather than appending to
+the replaced inode.
 
 ## Subagent delegation internals
 

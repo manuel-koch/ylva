@@ -263,33 +263,33 @@ debt. Findings that touch the same file are kept adjacent.
 
 ### Phase 4: robustness and correctness
 
-16. [ ] **M09 (Medium)** - Writer state after a failed title rewrite.
+16. [x] **M09 (Medium)** - Writer state after a failed title rewrite.
     Where: `src/store/writer.rs:152-176`. If the reopen after `rename` fails,
     the writer keeps a handle to the replaced inode and may keep appending to
     an unpublished file.
-    1. [ ] Test: simulated reopen failure marks the writer failed and surfaces a
+    1. [x] Test: simulated reopen failure marks the writer failed and surfaces a
        persistent error on later writes.
-    2. [ ] Mark the writer failed (fail closed). Gate.
-17. [ ] **M10 (Medium)** - Editor command runs through `sh -c`.
+    2. [x] Mark the writer failed (fail closed). Gate.
+17. [x] **M10 (Medium)** - Editor command runs through `sh -c`.
     Where: `src/profile_command.rs:112-129`. `VISUAL`/`EDITOR` are
     user-controlled, same trust level as `git`; a quoting robustness issue more
     than a vulnerability.
-    1. [ ] Decide: parse without shell evaluation, or document the behavior
+    1. [x] Decide: parse without shell evaluation, or document the behavior
        (minimum). Implement with a test for quoted/space-containing paths if
        parsed.
-    2. [ ] Docs: `docs/configuration.md` or `docs/cli-options.md`. Gate.
-18. [ ] **M11 (Medium)** - Text selection ignores display width.
+    2. [x] Docs: `docs/configuration.md` or `docs/cli-options.md`. Gate.
+18. [x] **M11 (Medium)** - Text selection ignores display width.
     Where: `src/presenter/mouse.rs:84-107,149-177`. Columns are used as
     `Vec<char>` indices, so wide (CJK) and zero-width graphemes select or copy
     the wrong text.
-    1. [ ] Tests with CJK, combining and emoji lines.
-    2. [ ] Map columns to display-width boundaries using the helpers in
+    1. [x] Tests with CJK, combining and emoji lines.
+    2. [x] Map columns to display-width boundaries using the helpers in
        `src/markdown.rs`. Gate.
-19. [ ] **M12 (Medium)** - Render cache retention is quadratic.
+19. [x] **M12 (Medium)** - Render cache retention is quadratic.
     Where: `src/conversation_render_cache.rs:182-186`.
-    1. [ ] Build a `HashSet<EntrySlot>` once before the `retain` calls; existing
+    1. [x] Build a `HashSet<EntrySlot>` once before the `retain` calls; existing
        tests must pass (add one if retention is uncovered). Gate.
-20. [ ] **S01 (Medium)** - Unknown config keys silently ignored.
+20. [x] **S01 (Medium)** - Unknown config keys silently ignored.
     Where: `src/config/profile.rs:39,119,130,179`, `src/config/provider.rs:23`,
     `src/config/web_search.rs:60,86,99,112`. A typo such as `api_bsae_url` is
     dropped and the default is used silently; in sandbox/approval rule tables
@@ -304,46 +304,52 @@ debt. Findings that touch the same file are kept adjacent.
     startup-notice channel of the summarizer capacity warnings
     (`src/agent_factory.rs`; consolidated notice shown in the TUI without a
     prompt, see `docs/features.md` "Summarizer capacity warnings").
-    1. [ ] Tests: an unknown key produces a warning naming the file, the full
+    1. [x] Tests: an unknown key produces a warning naming the file, the full
        key path and a "did you mean" suggestion (edit distance); known keys
        produce no warning; an unknown key in a sandbox/approval rule table is
        a hard error naming file and key; with strict mode enabled, warnings
        become errors before the TUI starts (plain terminal error, exit code);
        the TUI startup notice contains the warnings; the CLI driver prints
        them to stderr.
-    2. [ ] Detect unknown keys at load time (e.g. via `serde_ignored` or a
+    2. [x] Detect unknown keys at load time (e.g. via `serde_ignored` or a
        comparison against the known key set; check each struct for flattened
        or extension fields) and return them as structured warnings (file, key
        path, suggestion) from config loading; do not print or log at the
        detection site. Use `deny_unknown_fields` only on rule-table structs.
-    3. [ ] Surface the warnings: one consolidated startup notice in the TUI
+    3. [x] Surface the warnings: one consolidated startup notice in the TUI
        conversation view (via the existing capacity-notice channel); stderr in
        the CLI driver; plus a `tracing::warn!` copy in the log. On runtime
        config reload show only new warnings.
-    4. [ ] Add an opt-in strict mode (`--strict-config` or config key) that
+    4. [x] Add an opt-in strict mode (`--strict-config` or config key) that
        turns unknown-key warnings into errors, for CI.
-    5. [ ] Docs: `docs/configuration.md` (replace the "Unknown keys are
+    5. [x] Docs: `docs/configuration.md` (replace the "Unknown keys are
        ignored" bullet; document warnings, rule-table errors and strict
        mode), `docs/features.md` (where warnings appear),
        `docs/cli-options.md` if a flag is added. Gate.
-21. [ ] **S05 (Medium)** - Provider kind is a free string.
+       Deviations: strict mode is the CLI flag only; the TUI notice is a
+       direct startup push, not the capacity-notice channel; no runtime
+       config reload exists, so "only new warnings" has nothing to apply to.
+21. [x] **S05 (Medium)** - Provider kind is a free string.
     Where: `src/config/provider.rs:24`; engine, model and agent-type names in
     `src/config/profile.rs`.
-    1. [ ] Parse `provider` into an enum at load time so typos fail at load;
+    1. [x] Parse `provider` into an enum at load time so typos fail at load;
        newtypes for names only if a YAGNI check justifies them.
-    2. [ ] Tests and `docs/configuration.md`. Gate. (Do after S01: same files.)
-22. [ ] **S03 (Medium)** - Lossy `as usize`/`as u16` casts on runtime values.
+    2. [x] Tests and `docs/configuration.md`. Gate. (Do after S01: same files.)
+22. [x] **S03 (Medium)** - Lossy `as usize`/`as u16` casts on runtime values.
     Where: `web_fetch/native.rs:153,172,220` (`u64` to `usize`, relevant on
     32-bit), `src/tui_widgets.rs:232-286`, `src/tui_widgets/overlays.rs`
     (`usize` to `u16` heights, offsets, widths).
-    1. [ ] Tests for values beyond `u16::MAX`.
-    2. [ ] Use `try_from` with explicit clamping to terminal bounds. Gate.
-23. [ ] **S04 (Medium)** - Detached tasks with unobserved failure.
+    1. [x] Tests for values beyond `u16::MAX`.
+    2. [x] Use `try_from` with explicit clamping to terminal bounds. Gate.
+23. [x] **S04 (Medium)** - Detached tasks with unobserved failure.
     Where: `src/agent/request.rs:78,129`, `src/agent/runtime.rs:204` (uncertain:
     shutdown may rely on channel closure), `src/tui_driver/terminal.rs:150`
     (low).
-    1. [ ] Confirm each site; skip those that rely on channel closure by design.
-    2. [ ] Keep handles (or a `JoinSet`) in the owner, log join errors, await on
+    1. [x] Confirm each site; skip those that rely on channel closure by design.
+       Supervised: the three `request.rs` tasks. Skipped: `runtime.rs:204`
+       (handle already returned to the owner) and `terminal.rs` (ends on
+       channel closure).
+    2. [x] Keep handles (or a `JoinSet`) in the owner, log join errors, await on
        teardown; add a test where a task panics. Gate.
 24. [x] **S06 (Low-Medium)** - Shim pruning deletes any unclaimed regular
     file. **Closed: intended behavior, no change.**

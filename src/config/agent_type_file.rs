@@ -21,13 +21,15 @@ use serde::Deserialize;
 
 use super::profile::AgentCompactionConfig;
 use super::profile::ToolSandboxConfig;
-use super::{AgentConfig, ConfigError};
+use super::{deserialize_reporting_unknown_keys, AgentConfig, ConfigError, ConfigWarning};
 
 /// The parsed configuration supplied by one agent-type file.
 #[derive(Debug, Clone)]
 pub struct AgentTypeDefinition {
     /// Agent settings deserialized from the file.
     pub config: AgentConfig,
+    /// Unknown keys found in the file.
+    pub warnings: Vec<ConfigWarning>,
 }
 
 /// Parse one agent-type file from disk.
@@ -125,9 +127,12 @@ pub(crate) fn discover_agent_type_files(
 }
 
 fn parse_toml(path: &Path, contents: &str) -> Result<AgentTypeDefinition, ConfigError> {
-    let config = toml::from_str::<AgentConfig>(contents)
+    let mut warnings = Vec::new();
+    let deserializer = toml::Deserializer::parse(contents)
         .map_err(|source| malformed(path, format!("invalid TOML: {source}")))?;
-    Ok(AgentTypeDefinition { config })
+    let config = deserialize_reporting_unknown_keys(deserializer, path, "", &mut warnings)
+        .map_err(|source| malformed(path, format!("invalid TOML: {source}")))?;
+    Ok(AgentTypeDefinition { config, warnings })
 }
 
 fn parse_markdown(path: &Path, contents: &str) -> Result<AgentTypeDefinition, ConfigError> {
@@ -162,11 +167,21 @@ fn parse_markdown(path: &Path, contents: &str) -> Result<AgentTypeDefinition, Co
         ));
     };
 
-    let mut config = match format {
-        AgentFrontmatterFormat::Toml => toml::from_str::<AgentConfig>(&frontmatter)
-            .map_err(|source| malformed(path, format!("invalid frontmatter TOML: {source}")))?,
-        AgentFrontmatterFormat::Yaml => serde_yaml::from_str::<AgentConfig>(&frontmatter)
-            .map_err(|source| malformed(path, format!("invalid frontmatter YAML: {source}")))?,
+    let mut warnings = Vec::new();
+    let mut config: AgentConfig = match format {
+        AgentFrontmatterFormat::Toml => {
+            let deserializer = toml::Deserializer::parse(&frontmatter)
+                .map_err(|source| malformed(path, format!("invalid frontmatter TOML: {source}")))?;
+            deserialize_reporting_unknown_keys(deserializer, path, "", &mut warnings)
+                .map_err(|source| malformed(path, format!("invalid frontmatter TOML: {source}")))?
+        }
+        AgentFrontmatterFormat::Yaml => deserialize_reporting_unknown_keys(
+            serde_yaml::Deserializer::from_str(&frontmatter),
+            path,
+            "",
+            &mut warnings,
+        )
+        .map_err(|source| malformed(path, format!("invalid frontmatter YAML: {source}")))?,
     };
     // The body *is* the persona: it overrides whatever `persona` value the
     // frontmatter carried (both deserialize through the same standard
@@ -182,7 +197,7 @@ fn parse_markdown(path: &Path, contents: &str) -> Result<AgentTypeDefinition, Co
         ));
     }
     config.persona = Some(persona.to_string());
-    Ok(AgentTypeDefinition { config })
+    Ok(AgentTypeDefinition { config, warnings })
 }
 
 #[derive(Debug, Clone, Copy)]

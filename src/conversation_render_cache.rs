@@ -14,7 +14,7 @@
 
 //! Derived rows for one active conversation and its independently sized header.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -180,9 +180,10 @@ impl ConversationRenderCache {
     }
 
     pub fn retain_slots(&mut self, slots: &[EntrySlot]) {
-        self.current.retain(|slot, _| slots.contains(slot));
+        let retained: HashSet<EntrySlot> = slots.iter().copied().collect();
+        self.current.retain(|slot, _| retained.contains(slot));
         self.optional.retain(|entry| {
-            let keep = slots.contains(&entry.key.slot);
+            let keep = retained.contains(&entry.key.slot);
             if !keep {
                 self.retained_bytes -= entry.bytes;
             }

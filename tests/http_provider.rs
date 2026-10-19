@@ -647,7 +647,7 @@ async fn named_ollama_connection_uses_native_model_discovery() {
     let server = MockLlmServer::start(config).await.expect("bind failed");
 
     let provider_config = ProviderConnectionConfig {
-        provider: "ollama".to_string(),
+        provider: ylva::config::ProviderKind::Ollama,
         api_base_url: Some(server.base_url()),
         api_key: None,
     };

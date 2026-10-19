@@ -755,6 +755,7 @@ fn cancelling_after_clone_creation_keeps_clone_visible_and_old_root_usable() {
                 input_history_limit: 50,
                 exit_snapshot: Some(exit_snapshot.clone()),
                 unactivated_clones: notices.clone(),
+                startup_notice: None,
             },
         );
         let (state, ()) = tokio::join!(run, controller);
@@ -875,6 +876,7 @@ fn assembled_session_picker_switches_resume_and_clone_and_exit_identity() {
                     input_history_limit: 50,
                     exit_snapshot: Some(exit_snapshot.clone()),
                     unactivated_clones: Arc::default(),
+                    startup_notice: None,
                 },
             );
             let (state, ()) = tokio::join!(run, controller);

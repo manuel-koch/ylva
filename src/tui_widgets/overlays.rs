@@ -21,6 +21,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::markdown::render_markdown;
+use crate::saturating_cast::saturating_u16;
 use crate::theme::{
     ACTIVE_MODEL_COLOR, CHAT_SCROLLBAR_COLOR, CLARIFY_BANNER_FG_COLOR,
     CLARIFY_BANNER_SCROLL_INDICATOR_COLOR, CLARIFY_BANNER_SELECTION_FG_COLOR,
@@ -196,13 +197,13 @@ pub(super) fn draw_slash_overlay(
             max_content_height,
         )
     };
-    let detail_height = detail_lines.len() as u16;
+    let detail_height = saturating_u16(detail_lines.len());
     let detail_separator_height =
         u16::from(detail_height > 0 && !matches!(overlay, SlashOverlay::SessionPicker(_)));
     let list_max_height = max_content_height
         .saturating_sub(detail_height + detail_separator_height)
         .max(1);
-    let mut content_height = (rows.len() as u16).min(list_max_height);
+    let mut content_height = saturating_u16(rows.len()).min(list_max_height);
     if matches!(overlay, SlashOverlay::SessionPicker(_)) {
         content_height = content_height.min(
             input_area
@@ -441,7 +442,7 @@ fn apply_overlay_drag_highlight(
     selection: BannerDragSelection,
 ) {
     for (visible_index, line) in lines.iter_mut().enumerate() {
-        let screen_row = area.y.saturating_add(visible_index as u16);
+        let screen_row = area.y.saturating_add(saturating_u16(visible_index));
         if screen_row < selection.start_row || screen_row > selection.end_row {
             continue;
         }
@@ -572,7 +573,7 @@ pub(super) fn draw_clarify_banner(
     // (which is off-screen for drag purposes since the user can't click there).
     let abs_row_for = |cr: usize| -> u16 {
         area.y
-            .saturating_add(cr.saturating_sub(effective_scroll) as u16)
+            .saturating_add(saturating_u16(cr.saturating_sub(effective_scroll)))
     };
 
     // Context block (dim) — rendered before the question when present.
@@ -625,7 +626,7 @@ pub(super) fn draw_clarify_banner(
     let _ = content_row;
 
     frame.render_widget(
-        Paragraph::new(lines).scroll((effective_scroll as u16, 0)),
+        Paragraph::new(lines).scroll((saturating_u16(effective_scroll), 0)),
         area,
     );
 
@@ -754,7 +755,7 @@ fn banner_line_with_selection(
 /// horizontal padding around the message.
 pub(super) fn draw_toast(frame: &mut Frame, area: Rect, message: &str) {
     let content = format!(" ✓ {message} ");
-    let popup_width = (content.chars().count() as u16 + 2).min(area.width);
+    let popup_width = saturating_u16(content.chars().count().saturating_add(2)).min(area.width);
     let popup_height = 3u16;
     let x = area.x + area.width.saturating_sub(popup_width + 1);
     let y = area.y + area.height.saturating_sub(popup_height + 1);

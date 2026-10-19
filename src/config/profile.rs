@@ -26,10 +26,11 @@ use super::{
     agent_type_file::{
         discover_agent_type_files, AgentConfigOverrides, AgentTypeFile, AgentTypeScope,
     },
+    deserialize_reporting_unknown_keys,
     layered::{current_workspace_root, resolve_file_at_paths, ConfigLayer, ResolvedFile},
-    load_profile_environment_at_workspace_root, AgentConfig, ConfigError, ProviderConnectionConfig,
-    WebFetchConfig, WebSearchConfig, DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME,
-    PROFILE_CONFIG_FILE_NAME,
+    load_profile_environment_at_workspace_root, AgentConfig, ConfigError, ConfigWarning,
+    ProviderConnectionConfig, WebFetchConfig, WebSearchConfig, DEFAULT_PROFILE_NAME,
+    PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
 };
 
 /// Top-level Ylva profile that groups engine selection and per-agent settings.
@@ -112,6 +113,10 @@ pub struct ProfileConfig {
     /// when the profile loads.
     #[serde(default)]
     pub web_fetch: WebFetchConfig,
+    /// Unknown keys found while loading this profile (its `config.toml` and
+    /// agent-type files). Never read from a file; callers surface them.
+    #[serde(skip)]
+    pub config_warnings: Vec<ConfigWarning>,
 }
 
 /// Settings for background conversation-summary compaction.
@@ -176,6 +181,7 @@ fn default_compaction_timeout_secs() -> u64 {
 /// `rules` list evaluated by [`crate::sandbox::SandboxContext`] for that
 /// tool (last match wins). See [`crate::sandbox::SandboxRuleConfig`].
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ToolSandboxConfig {
     /// Ordered sandbox rules for this tool; last match wins.
     #[serde(default)]
@@ -496,6 +502,7 @@ impl Default for ProfileConfig {
             tools: HashMap::new(),
             web_search: WebSearchConfig::default(),
             web_fetch: WebFetchConfig::default(),
+            config_warnings: Vec::new(),
         }
     }
 }
@@ -639,18 +646,19 @@ impl ProfileConfig {
                 source,
             })?;
         interpolate_toml_strings(&mut document, environment, &path)?;
-        let inline_agents = extract_agent_config_overrides(&document, &path)?;
+        let mut warnings = Vec::new();
+        let inline_agents = extract_agent_config_overrides(&document, &path, &mut warnings)?;
         document
             .as_table_mut()
             .expect("a parsed TOML document is always a table")
             .remove("agents");
         let mut profile: ProfileConfig =
-            document
-                .try_into()
-                .map_err(|source| ConfigError::Malformed {
+            deserialize_reporting_unknown_keys(document, &path, "", &mut warnings).map_err(
+                |source| ConfigError::Malformed {
                     path: path.clone(),
                     source,
-                })?;
+                },
+            )?;
         profile.apply_default_model();
         profile.agents = load_agent_types(
             profiles_root,
@@ -659,7 +667,9 @@ impl ProfileConfig {
             layer,
             &path,
             inline_agents,
+            &mut warnings,
         )?;
+        profile.config_warnings = warnings;
         validate_tool_sandbox_rules(&profile.tools, &path)?;
         profile.web_search.validate(&path)?;
         profile.web_fetch.validate(&path)?;
@@ -687,6 +697,7 @@ impl ProfileConfig {
         profile_name: &str,
         workspace_root: Option<&Path>,
     ) -> Result<ProfileConfig, ConfigError> {
+        let mut warnings = Vec::new();
         profile.agents = load_agent_types(
             profiles_root,
             profile_name,
@@ -694,7 +705,9 @@ impl ProfileConfig {
             ConfigLayer::BuiltIn,
             Path::new("<built-in>"),
             HashMap::new(),
+            &mut warnings,
         )?;
+        profile.config_warnings = warnings;
         let built_in_path = Path::new("<built-in>");
         validate_tool_sandbox_rules(&profile.tools, built_in_path)?;
         for agent in profile.agents.values() {
@@ -719,6 +732,20 @@ impl ProfileConfig {
                 engine_config.model = default_model.clone();
             }
         }
+    }
+
+    /// One consolidated, human-readable text listing every configuration
+    /// warning found while loading, or `None` when there are none.
+    pub fn config_warnings_notice(&self) -> Option<String> {
+        if self.config_warnings.is_empty() {
+            return None;
+        }
+        let lines: Vec<String> = self
+            .config_warnings
+            .iter()
+            .map(|warning| format!("- {warning}"))
+            .collect();
+        Some(format!("Configuration warnings:\n{}", lines.join("\n")))
     }
 
     /// Effective cap on concurrently running subagents across the whole
@@ -808,17 +835,17 @@ impl ProfileConfig {
 fn extract_agent_config_overrides(
     document: &toml::Value,
     path: &Path,
+    warnings: &mut Vec<ConfigWarning>,
 ) -> Result<HashMap<String, AgentConfigOverrides>, ConfigError> {
     let Some(agent_table) = document.get("agents") else {
         return Ok(HashMap::new());
     };
-    agent_table
-        .clone()
-        .try_into()
-        .map_err(|source| ConfigError::Malformed {
+    deserialize_reporting_unknown_keys(agent_table.clone(), path, "agents", warnings).map_err(
+        |source| ConfigError::Malformed {
             path: path.to_path_buf(),
             source,
-        })
+        },
+    )
 }
 
 fn load_agent_types(
@@ -828,6 +855,7 @@ fn load_agent_types(
     config_layer: ConfigLayer,
     config_path: &Path,
     inline_agents: HashMap<String, AgentConfigOverrides>,
+    warnings: &mut Vec<ConfigWarning>,
 ) -> Result<HashMap<String, AgentConfig>, ConfigError> {
     let global_agents_root = profiles_root
         .parent()
@@ -875,6 +903,7 @@ fn load_agent_types(
         .into_iter()
         .map(|(agent_type, file)| {
             debug_assert_eq!(agent_type, file.agent_type);
+            warnings.extend(file.definition.warnings);
             (agent_type, file.definition.config)
         })
         .collect::<HashMap<_, _>>();

@@ -294,7 +294,7 @@ impl CommandGlobPattern {
 /// defaults to the same message the built-in floor uses for that rule (or a
 /// generic message for a custom rule) when omitted.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+#[serde(try_from = "RawSandboxRuleConfig")]
 pub enum SandboxRuleConfig {
     /// `{ rule = "<named_rule>", verdict = "...", reason = "...", target = "..." }`.
     Named {
@@ -325,6 +325,58 @@ pub enum SandboxRuleConfig {
         #[serde(default)]
         reason: Option<String>,
     },
+}
+
+/// The keys of any rule table before its kind is decided. Unknown keys are a
+/// hard error: a misspelled key must never silently weaken a restriction.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSandboxRuleConfig {
+    rule: Option<NamedSandboxRule>,
+    pattern: Option<String>,
+    command: Option<Vec<String>>,
+    verdict: ApprovalVerdictConfig,
+    reason: Option<String>,
+    target: Option<String>,
+}
+
+impl TryFrom<RawSandboxRuleConfig> for SandboxRuleConfig {
+    type Error = String;
+
+    fn try_from(raw: RawSandboxRuleConfig) -> Result<Self, Self::Error> {
+        let RawSandboxRuleConfig {
+            rule,
+            pattern,
+            command,
+            verdict,
+            reason,
+            target,
+        } = raw;
+        match (rule, pattern, command) {
+            (Some(rule), None, None) => Ok(Self::Named {
+                rule,
+                verdict,
+                reason,
+                target,
+            }),
+            (None, Some(pattern), None) if target.is_none() => Ok(Self::PathGlob {
+                pattern,
+                verdict,
+                reason,
+            }),
+            (None, None, Some(command)) if target.is_none() => Ok(Self::CommandGlob {
+                command,
+                verdict,
+                reason,
+            }),
+            (None, Some(_), None) | (None, None, Some(_)) => {
+                Err("`target` is only valid on a named `rule` entry".to_string())
+            }
+            _ => Err(
+                "a sandbox rule must set exactly one of `rule`, `pattern` or `command`".to_string(),
+            ),
+        }
+    }
 }
 
 impl SandboxRuleConfig {

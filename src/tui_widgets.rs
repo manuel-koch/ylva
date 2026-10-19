@@ -34,6 +34,7 @@ use ratatui_textarea::TextArea;
 use crate::agent::tools::ToolRegistry;
 use crate::conversation_render_cache::ConversationRenderCache;
 use crate::markdown::render_markdown;
+use crate::saturating_cast::saturating_u16;
 use crate::theme::{
     CHAT_SELECTION_BG, INPUT_BORDER_COLOR, MUTED_TEXT_COLOR, SEPARATOR_LINE_COLOR,
     SUBAGENT_VIEW_SEPARATOR_COLOR, USER_MESSAGE_BG_COLOR,
@@ -229,8 +230,8 @@ fn draw_internal(
         // Cap the header at 40 % of the terminal, matching the clarify-banner
         // convention, so an expanded bubble with a long result never crowds
         // out the chat area entirely.
-        let max_header_height = (full_area.height as usize * 40 / 100).max(1) as u16;
-        let header_height = header_total.min(max_header_height as usize) as u16;
+        let max_header_height = saturating_u16((full_area.height as usize * 40 / 100).max(1));
+        let header_height = saturating_u16(header_total.min(max_header_height as usize));
         let [header_area, header_separator_area, rest] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -260,7 +261,7 @@ fn draw_internal(
         measurement.move_cursor(ratatui_textarea::CursorMove::End);
         measurement.screen_cursor().row + 1
     };
-    let input_height = wrapped_rows.min(max_input as usize).max(1) as u16;
+    let input_height = saturating_u16(wrapped_rows.min(max_input as usize).max(1));
 
     // When a tool approval is pending the approval title and buttons appear
     // ABOVE the input field so the approve/deny controls sit immediately
@@ -276,14 +277,15 @@ fn draw_internal(
         .as_ref()
         .map(|(question, choices, context)| {
             let context_rows = context.as_deref().map_or(0, |ctx| {
-                render_markdown(ctx, area.width as usize).len() as u16
+                saturating_u16(render_markdown(ctx, area.width as usize).len())
             });
             let context_spacer = u16::from(context.is_some());
-            let question_rows = render_markdown(question, area.width as usize).len().max(1) as u16;
+            let question_rows =
+                saturating_u16(render_markdown(question, area.width as usize).len().max(1));
             context_rows
-                + context_spacer
-                + question_rows
-                + choices.as_ref().map_or(0, Vec::len) as u16
+                .saturating_add(context_spacer)
+                .saturating_add(question_rows)
+                .saturating_add(saturating_u16(choices.as_ref().map_or(0, Vec::len)))
         })
         .unwrap_or(0);
     // Cap the visible height so the banner never consumes more than 40 % of
