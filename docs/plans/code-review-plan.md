@@ -361,31 +361,32 @@ debt. Findings that touch the same file are kept adjacent.
 
 ### Phase 5: maintainability debt
 
-25. [ ] **L01 (Low)** - Panics on runtime state.
+25. [x] **L01 (Low)** - Panics on runtime state.
     Where: `bash.rs:456-463,550-556` (stdout/stderr take, exit status),
     `web_fetch/native.rs:51-53` (client build), `store.rs:228,331,531,587,673,899`
     and `store/archive.rs:167` (missing parent, poisoned mutex),
     `markdown.rs:448-455` (non-empty precondition).
-    1. [ ] Replace each runtime-reachable `expect`/`unwrap` with `ToolError` or
+    1. [x] Replace each runtime-reachable `expect`/`unwrap` with `ToolError` or
        `StoreError`, or recover from poisoned mutexes; tests where reachable.
-       Gate.
-26. [ ] **S08 (Low)** - Abbreviated identifier `buf` in `src/markdown.rs:242-243`.
-    1. [ ] Rename to `code_block_content`. Gate.
-27. [ ] **S09 (Low)** - Fixed 10 ms sleep in `tests/cli_skills.rs:93`.
-    1. [ ] Replace with an event-driven wait, or document why polling is
-       required. Gate.
-28. [ ] **M13 (Medium)** - `main.rs` is not thin.
+       Gate. (`web_fetch` client build already returned an error: not
+       reproducible.)
+26. [x] **S08 (Low)** - Abbreviated identifier `buf` in `src/markdown.rs:242-243`.
+    1. [x] Rename to `code_block_content`. Gate.
+27. [x] **S09 (Low)** - Fixed 10 ms sleep in `tests/cli_skills.rs:93`.
+    1. [x] Replace with an event-driven wait, or document why polling is
+       required. Gate. (Documented: `std::process::Child` has no timed wait.)
+28. [x] **M13 (Medium)** - `main.rs` is not thin.
     Where: `src/main.rs:77-469` violates the project rule; profile loading,
     store opening, engine construction and prompt handling live there.
-    1. [ ] Move startup orchestration into library modules re-exported via
+    1. [x] Move startup orchestration into library modules re-exported via
        `src/lib.rs`; keep argument parsing, event loop and key handling in
        `main.rs`.
-    2. [ ] Add integration tests for the moved logic.
-    3. [ ] Docs: `docs/implementation-notes.md`. Gate.
+    2. [x] Add integration tests for the moved logic.
+    3. [x] Docs: `docs/implementation-notes.md`. Gate.
     4. [ ] Commit boundary: pure refactor, nothing else in the change set;
        ask the user before committing (no behavior change, separately
-       revertable).
-29. [ ] **L02 (Low)** - Oversized production modules.
+       revertable). Pending user consent.
+29. [x] **L02 (Low)** - Oversized production modules.
     Where (approximate non-test size): `cli_driver.rs` (1668 total),
     `tui_driver.rs` (~935), `store.rs` (987), `markdown.rs` (~830),
     `tui_reducer_state.rs` (~685), tool files `bash.rs`, `edit.rs`, `glob.rs`,
@@ -393,26 +394,27 @@ debt. Findings that touch the same file are kept adjacent.
     inline tests).
     Split one module per sub-step, behavior-preserving, tests green after each;
     gate after each sub-step.
-    1. [ ] `cli_driver.rs`
-    2. [ ] `tui_driver.rs` (event loop, session switching, title handling)
-    3. [ ] `store.rs`
-    4. [ ] `markdown.rs`
-    5. [ ] `tui_reducer_state.rs`
-    6. [ ] Tool files (argument validation, execution, result formatting,
+    1. [x] `cli_driver.rs`
+    2. [x] `tui_driver.rs` (event loop, session switching, title handling)
+    3. [x] `store.rs`
+    4. [x] `markdown.rs`
+    5. [x] `tui_reducer_state.rs`
+    6. [x] Tool files (argument validation, execution, result formatting,
        backends): `bash.rs`, `edit.rs`, `glob.rs`, `search.rs`, `web_fetch.rs`,
        `web_search.rs`.
-    7. [ ] Docs: `docs/implementation-notes.md` module map.
+    7. [x] Docs: `docs/implementation-notes.md` module map.
     8. [ ] Commit boundary: pure refactor only; ask the user before
        committing, ideally one commit per module split (sub-steps 1-6).
-30. [ ] **L03 (Low)** - Wide public library surface.
+       Pending user consent.
+30. [x] **L03 (Low)** - Wide public library surface.
     Where: `src/lib.rs:16-105`; internal modules (`tui_*`, `cli_driver`,
     `agent_factory`) are public.
-    1. [ ] Rule: re-export only what `tests/` uses. Make unused modules
+    1. [x] Rule: re-export only what `tests/` uses. Make unused modules
        `pub(crate)`; consider a `#[doc(hidden)]` test-support module. Do after
        M13 and L02 (they move code). Gate.
     2. [ ] Commit boundary: visibility/re-export change only; ask the user
-       before committing.
-31. [ ] **D4 (Low)** - Replace deprecated `serde_yaml` (depends on
+       before committing. Pending user consent.
+31. [x] **D4 (Low)** - Replace deprecated `serde_yaml` (depends on
     `unsafe-libyaml`, RUSTSEC-2024-0449) with `serde-saphyr` 2.x. Not urgent.
     Spike (2026-10-17) verified: typed structs incl. untagged enums, `Option`,
     `Vec`, `HashMap` and block scalars work; duplicate keys (also unknown ones)
@@ -423,27 +425,27 @@ debt. Findings that touch the same file are kept adjacent.
     `src/skills.rs:350-374` (untyped `serde_yaml::Value`).
     Use `Options { no_schema: true, with_snippet: false, ..Default::default() }`
     for both.
-    1. [ ] Tests first (both paths): duplicate key (incl. unknown key) is
+    1. [x] Tests first (both paths): duplicate key (incl. unknown key) is
        rejected; unquoted numeric/bool `name`/`description` rejected
        ("must be quoted") while quoted values pass; `name: ~` rejected; empty
        and non-mapping documents rejected; unknown fields ignored; malformed
        YAML names the file and line; agent `can_spawn`/`timeout_secs`
        accept their bool/number-or-string forms.
-    2. [ ] `skills.rs`: replace the `Value` extraction with a typed struct
+    2. [x] `skills.rs`: replace the `Value` extraction with a typed struct
        (`name: String`, `description: String`, unknown fields ignored) and keep
        the existing name/description validation and error messages.
        `agent_type_file.rs`: swap the `from_str` call.
-    3. [ ] Update tests that assert `serde_yaml` error wording (messages are
+    3. [x] Update tests that assert `serde_yaml` error wording (messages are
        now single-line "… at line N, column M"; empty input reports
        "unexpected end of input" instead of "missing field").
-    4. [ ] Note behavior differences in the docs where user-visible: `yes`/`no`
+    4. [x] Note behavior differences in the docs where user-visible: `yes`/`no`
        parse as booleans for `can_spawn`; `strict_booleans` stays off because
        `bool_or_string` already accepts string forms.
-    5. [ ] Remove `serde_yaml` from `Cargo.toml`; drop the temporary
+    5. [x] Remove `serde_yaml` from `Cargo.toml`; drop the temporary
        RUSTSEC-2024-0449 entry from `audit.toml` (D3); `make audit` clean for
        it. Docs: `docs/implementation-notes.md` (YAML parsing policy and
        options). Gate.
-32. [ ] **S10 (Low)** - Remaining dependency advisories.
+32. [x] **S10 (Low)** - Remaining dependency advisories.
     Verified 2026-10-17 (`cargo audit`, RustSec DB of that day): 6
     vulnerabilities (`h2 0.3.27` and `h2 0.4.15` RUSTSEC-2026-0258; `rustls
     0.23.43` RUSTSEC-2026-0285/-0346/-0348/-0349) and 2 warnings (`bincode`
@@ -457,7 +459,7 @@ debt. Findings that touch the same file are kept adjacent.
       still fails on it, so D2 must update it for a clean audit.
     - `bincode 1.3.3` (via `syntect 5.3`): unmaintained, allow-listed (D3).
     - `unsafe-libyaml 0.2.11` (via `serde_yaml`): cleared by D4.
-    1. [ ] Re-run `make audit` after D1, D2 and D4: expect only the `bincode`
+    1. [x] Re-run `make audit` after D1, D2 and D4: expect only the `bincode`
        warning (allow-listed in `audit.toml`) and exit code 0. If anything else
        remains, add it here or fix it.
 

@@ -175,11 +175,12 @@ fn parse_markdown(path: &Path, contents: &str) -> Result<AgentTypeDefinition, Co
             deserialize_reporting_unknown_keys(deserializer, path, "", &mut warnings)
                 .map_err(|source| malformed(path, format!("invalid frontmatter TOML: {source}")))?
         }
-        AgentFrontmatterFormat::Yaml => deserialize_reporting_unknown_keys(
-            serde_yaml::Deserializer::from_str(&frontmatter),
-            path,
-            "",
-            &mut warnings,
+        AgentFrontmatterFormat::Yaml => serde_saphyr::with_deserializer_from_str_with_options(
+            &frontmatter,
+            crate::yaml_options(),
+            |deserializer| {
+                deserialize_reporting_unknown_keys(deserializer, path, "", &mut warnings)
+            },
         )
         .map_err(|source| malformed(path, format!("invalid frontmatter YAML: {source}")))?,
     };

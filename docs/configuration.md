@@ -201,7 +201,7 @@ environment file.
   path of the resolved `config.toml` together with the validation detail.
 - Unknown keys do not stop loading. Each one is reported as a warning naming
   the file, the full key path and, when a known key is close, a suggestion
-  (for example _unknown key `agents.coder.descrption`; did you mean `description`?_).
+  (for example *unknown key `agents.coder.descrption`; did you mean `description`?*).
   Warnings appear once at startup: as a notice in the TUI conversation, on
   stderr in console mode, and in the log. Pass `--strict-config` to turn any
   warning into a startup error (exit code 2).
@@ -552,7 +552,9 @@ The frontmatter supplies the agent settings and the Markdown body *is* the
 agent's `persona`; a body-less or whitespace-only body is a load error, and a
 `persona` key in the frontmatter is overridden by the body (so a `.md` file
 always has exactly one prompt source). TOML frontmatter must begin with and
-close `+++`; YAML frontmatter must begin with and close `---`. A plain
+close `+++`; YAML frontmatter must begin with and close `---`; duplicate
+keys (including unknown ones) are rejected, and unquoted `yes`/`no` parse as
+booleans (e.g. for `can_spawn`). A plain
 Markdown file is a load error. A profile's inline
 `[agents.<type>]` table is applied afterward as a field-level override
 (`engine`, `allowed_tools`, `timeout_secs`, `persona`, and related settings):

@@ -57,6 +57,39 @@ fn allowed_skills_preserves_omission_empty_and_replacement_across_formats() {
     );
 }
 #[test]
+fn yaml_frontmatter_accepts_boolean_and_number_forms_and_rejects_duplicates() {
+    use crate::config::agent_type_file::parse_agent_type_contents;
+    let config = parse_agent_type_contents(
+        Path::new("worker.md"),
+        "---\ncan_spawn: true\ntimeout_secs: 120\n---\nPersona",
+    )
+    .unwrap()
+    .config;
+    assert!(config.can_spawn);
+    assert_eq!(config.timeout_secs, Some(120));
+    let config = parse_agent_type_contents(
+        Path::new("worker.md"),
+        "---\ncan_spawn: \"false\"\ntimeout_secs: \"120\"\n---\nPersona",
+    )
+    .unwrap()
+    .config;
+    assert!(!config.can_spawn);
+    let duplicate = parse_agent_type_contents(
+        Path::new("worker.md"),
+        "---\nunknown_key: 1\nunknown_key: 2\n---\nPersona",
+    );
+    assert!(duplicate.is_err());
+    let malformed =
+        parse_agent_type_contents(Path::new("worker.md"), "---\ncan_spawn: [\n---\nPersona")
+            .unwrap_err()
+            .to_string();
+    assert!(
+        malformed.contains("worker.md") && malformed.contains("line"),
+        "{malformed}"
+    );
+}
+
+#[test]
 fn a_toml_fixture_loads_into_the_expected_profile() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_profile_config(

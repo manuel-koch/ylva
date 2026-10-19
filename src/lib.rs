@@ -13,37 +13,38 @@
 // limitations under the License.
 
 pub mod agent;
-pub mod agent_factory;
-pub mod app;
-pub mod bounded_buffer;
-pub mod build_info;
-pub mod cli;
+pub(crate) mod agent_factory;
+pub(crate) mod app;
+pub(crate) mod bounded_buffer;
+pub(crate) mod build_info;
+pub(crate) mod cli;
 pub mod cli_driver;
 pub mod config;
-pub mod conversation_render_cache;
-pub mod events;
-pub mod exit_code;
-pub mod highlight;
-pub mod home_relative_path;
-pub mod http;
-pub mod init_command;
+pub(crate) mod conversation_render_cache;
+pub(crate) mod events;
+pub(crate) mod exit_code;
+pub(crate) mod highlight;
+pub(crate) mod home_relative_path;
+pub(crate) mod http;
+pub(crate) mod init_command;
 pub mod llm;
 pub mod logging;
-pub mod markdown;
+pub(crate) mod markdown;
 pub mod presenter;
 pub(crate) mod private_fs;
 pub mod profile_command;
 pub mod profile_shim;
 pub(crate) mod prompt;
 pub mod render;
-pub mod run_outcome;
-pub mod sandbox;
-pub mod saturating_cast;
+pub(crate) mod run_outcome;
+pub(crate) mod sandbox;
+pub(crate) mod saturating_cast;
 pub mod session_command;
 pub(crate) mod session_title;
 pub mod skill_command;
 pub mod skills;
-pub mod slash_command;
+pub(crate) mod slash_command;
+pub mod startup;
 pub(crate) mod stop_signal;
 pub mod store;
 pub(crate) mod theme;
@@ -51,12 +52,22 @@ pub mod tui_driver;
 pub mod tui_reducer_state;
 pub mod tui_render_state;
 pub mod tui_widgets;
-pub mod ylva_home;
+pub(crate) mod ylva_home;
 
 /// Git metadata entry, which may be a directory or a worktree marker file.
 pub const GIT_ENTRY_NAME: &str = ".git";
 /// Finder's per-directory metadata file on macOS.
 pub const DS_STORE_FILE_NAME: &str = ".DS_Store";
+
+/// Shared YAML parsing options: `no_schema` keeps unquoted numbers, booleans
+/// and nulls from being coerced into strings; `with_snippet` off keeps errors
+/// single-line.
+pub(crate) fn yaml_options() -> serde_saphyr::Options {
+    let mut options = serde_saphyr::Options::default();
+    options.no_schema = true;
+    options.with_snippet = false;
+    options
+}
 
 #[cfg(test)]
 mod test_support;

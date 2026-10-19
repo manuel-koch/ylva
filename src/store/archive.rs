@@ -34,6 +34,15 @@ pub(super) fn io_error(path: &Path, source: std::io::Error) -> StoreError {
     }
 }
 
+/// Parent directory of a session file; a path without one is invalid.
+pub(super) fn session_directory(path: &Path) -> Result<&Path, StoreError> {
+    path.parent()
+        .ok_or_else(|| StoreError::InvalidRepresentation {
+            path: path.into(),
+            reason: "session path has no parent directory".to_string(),
+        })
+}
+
 pub(super) fn raw_path(path: &Path) -> PathBuf {
     if path.extension().is_some_and(|extension| extension == "gz") {
         path.with_extension("")
@@ -164,7 +173,7 @@ pub(super) fn require_unix() -> Result<(), StoreError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), StoreError> {
-    let directory = path.parent().expect("session directory");
+    let directory = session_directory(path)?;
     std::fs::File::open(directory)
         .and_then(|file| file.sync_all())
         .map_err(|source| io_error(directory, source))

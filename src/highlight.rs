@@ -175,15 +175,7 @@ pub fn highlighted_lines_cached(
 }
 
 /// Converts a syntect foreground color and text token into a ratatui [`Span`]
-/// with the given `bg` color applied as the background.  Only the foreground
-/// is taken from syntect; the background is always `bg` so the token blends
-/// into the surrounding bubble.
-pub fn syntect_token_to_span(style: SyntectStyle, token: String, bg: Color) -> Span<'static> {
-    let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
-    Span::styled(token, ratatui::style::Style::default().fg(fg).bg(bg))
-}
-
-/// Like [`syntect_token_to_span`] but sets only the foreground color.
+/// with only the foreground color set.
 /// Use this when the background is applied by a parent widget's `patch_style`
 /// (e.g. in the Markdown renderer where the bubble background is not known
 /// at the point of span creation).

@@ -37,6 +37,31 @@ fn parser_preserves_body_and_handles_bom_crlf_and_optional_fields() {
 }
 
 #[test]
+fn parser_requires_quoted_scalars_and_rejects_null_empty_and_malformed_frontmatter() {
+    assert!(parse_skill(
+        "---\nname: example\ndescription: x\nextra: [1]\n---\nbody",
+        "example"
+    )
+    .is_ok());
+    assert!(parse_skill("---\nname: '123'\ndescription: '456'\n---\nbody", "123").is_ok());
+    for contents in [
+        "---\nname: ~\ndescription: x\n---\nbody",
+        "---\nname: example\ndescription: true\n---\nbody",
+        "---\n---\nbody",
+        "---\n\"just a string\"\n---\nbody",
+    ] {
+        assert!(parse_skill(contents, "example").is_err(), "{contents}");
+    }
+    let error = parse_skill("---\nname: example\ndescription: [\n---\nbody", "example")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("invalid YAML") && error.contains("line"),
+        "{error}"
+    );
+}
+
+#[test]
 fn parser_rejects_invalid_documents() {
     for contents in [
         "name: example",

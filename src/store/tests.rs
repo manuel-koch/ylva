@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use super::*;
-use crate::agent::{AssistantStatus, Message, ToolCallRequest};
+use crate::agent::{AssistantStatus, Message, ToolCallRequest, UserMessageKind};
+use crate::subagent_manager::FinishResultOrigin;
 
 mod archive;
 mod event;

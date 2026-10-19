@@ -14,6 +14,32 @@
 
 use super::*;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+
+use ratatui_textarea::TextArea;
+
+use super::effects::{execute_effects, execute_slash_effects, split_slash_effects, PendingRunIds};
+use super::event_loop::report_unactivated_clone;
+use super::input::{app_action_to_tui_event, configure_textarea, MouseDrag};
+use super::models::{
+    abort_pending_model_list, apply_model_list_result, resume_interrupted_model_list,
+    start_model_list, wait_for_model_list, PendingModelList,
+};
+use super::timers::spinner_should_tick;
+use super::title::TitleDriver;
+use super::updates::{prepare_subagent_replay_effects, process_one_update};
+use crate::agent::{AgentCommand, Role};
+use crate::agent_factory::AgentFactory;
+use crate::config::ProfileConfig;
+use crate::presenter::{self, TextareaContext, TuiEvent};
+use crate::render;
+use crate::run_outcome::RunOutcome;
+use crate::session_title::TitleAttempt;
+use crate::tui_reducer_state::{
+    AppState, ConfirmKey, DomainEvent, Effect, SlashOverlay, TuiDisplayMetadata, TuiMode,
+    UserMessageState,
+};
 
 use crate::llm::engine::{Engine, EngineConfig, EngineImpl, ModelSelection};
 use crate::tui_reducer_state::{

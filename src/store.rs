@@ -41,20 +41,22 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::agent::tools::agent_finish::{AgentFinishArgs, AgentFinishStatus, AgentFinishTool};
-use crate::agent::{Message, UserMessageKind};
-use crate::home_relative_path::display_path;
+use crate::agent::Message;
 use crate::sandbox::SandboxContext;
-use crate::subagent_manager::FinishResultOrigin;
 use crate::ylva_home::ylva_home;
 
 mod archive;
+mod clone;
+mod error;
 mod event;
 mod maintenance;
 mod replay;
 mod session_file;
+mod subagent;
+mod title;
 mod writer;
 
+pub use error::StoreError;
 pub use event::{
     now_timestamp, SessionMeta, StoreEvent, SubagentRunRecord, EVENT_VERSION, SCHEMA_VERSION,
     TITLE_MAX_CHARS,
@@ -63,46 +65,11 @@ pub use maintenance::{MaintenanceAction, MaintenanceReport, SessionSelection};
 pub use replay::{SessionState, SessionSummary};
 
 use session_file::{
-    append_event_line, file_length, lock_project, open_locked_session_file,
-    read_meta_line_with_length, repair_trailing_corruption, write_meta_line,
+    file_length, lock_project, open_locked_session_file, read_meta_line_with_length,
+    repair_trailing_corruption, write_meta_line,
 };
+use title::{title_snapshot, TitleSnapshot, TitleState};
 use writer::WriterCommand;
-
-/// Errors surfaced by the store. Distinct variants let callers tell a lock
-/// conflict, a missing session, and a plain I/O failure apart instead of
-/// pattern-matching on an opaque error string.
-#[derive(Debug, thiserror::Error)]
-pub enum StoreError {
-    #[error("invalid session representation at {}: {reason}", display_path(path))]
-    InvalidRepresentation { path: PathBuf, reason: String },
-    #[error("session maintenance and archive restoration require Unix")]
-    UnsupportedMaintenance,
-    #[error("session '{session_id}' not found at {}", display_path(path))]
-    SessionNotFound { session_id: Uuid, path: PathBuf },
-    #[error("session '{session_id}' is open in another Ylva process")]
-    SessionLocked { session_id: Uuid },
-    #[error("cannot resolve the home directory for ~/.ylva")]
-    HomeDirectoryNotFound,
-    #[error("store I/O error at {}: {source}", display_path(path))]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("session '{session_id}' writer is no longer available")]
-    WriterClosed { session_id: Uuid },
-    #[error(
-        "session '{session_id}' is a subagent transcript at {}; only top-level sessions can be \
-         cloned",
-        display_path(path)
-    )]
-    SessionIsSubagent { session_id: Uuid, path: PathBuf },
-    #[error(
-        "session '{session_id}' at {} has no readable metadata header; it cannot be cloned",
-        display_path(path)
-    )]
-    MissingSessionMeta { session_id: Uuid, path: PathBuf },
-}
 
 /// `~/.ylva/chats`, the production root of all persisted sessions.
 ///
@@ -139,41 +106,6 @@ pub fn project_directory(chats_root: &Path, project_key: &str) -> PathBuf {
 /// Path of one session's JSONL file.
 pub fn session_path(chats_root: &Path, project_key: &str, session_id: Uuid) -> PathBuf {
     project_directory(chats_root, project_key).join(format!("{session_id}.jsonl"))
-}
-
-/// Rebuild the title inputs from committed transcript messages.
-fn title_snapshot(meta: &SessionMeta, messages: &[Message]) -> TitleSnapshot {
-    let mut snapshot = TitleSnapshot {
-        title: meta.title.clone(),
-        completed_subagent_outcome: if meta.parent_session.is_some() {
-            subagent_title_outcome(messages)
-        } else {
-            None
-        },
-        ..TitleSnapshot::default()
-    };
-    for message in messages {
-        match message {
-            Message::User {
-                content,
-                kind: UserMessageKind::Explicit,
-            } if snapshot.first_user_message.is_none() => {
-                snapshot.first_user_message = Some(content.clone());
-            }
-            Message::Assistant {
-                content,
-                status: crate::agent::AssistantStatus::Complete,
-                ..
-            } if snapshot.first_user_message.is_some()
-                && snapshot.first_complete_assistant_message.is_none()
-                && !content.trim().is_empty() =>
-            {
-                snapshot.first_complete_assistant_message = Some(content.clone());
-            }
-            _ => {}
-        }
-    }
-    snapshot
 }
 
 /// A handle onto one open session file.
@@ -225,7 +157,7 @@ impl Store {
     ) -> Result<Store, StoreError> {
         let project_key = project_key(cwd);
         let path = session_path(chats_root, &project_key, session_id);
-        let _coordination = lock_project(path.parent().expect("session directory"))?;
+        let _coordination = lock_project(archive::session_directory(&path)?)?;
         let mut file = open_locked_session_file(&path, session_id, false)?;
         let meta_awaiting_title = if file_length(&path)? == 0 {
             let meta = SessionMeta {
@@ -304,160 +236,6 @@ impl Store {
         ))
     }
 
-    /// Create a brand-new top-level session that replays `source_id`'s
-    /// logical event stream — the `--clone` path.
-    ///
-    /// The source is read under a nonblocking exclusive lock held only for
-    /// the read: another Ylva process holding the source (or a source that is
-    /// a subagent transcript) fails before anything is created. The source file
-    /// itself is never repaired, rewritten, or appended to. The clone gets a
-    /// fresh session id, its own `meta` header naming the source in
-    /// `cloned_from` with `parent_session` unset, and every copied event
-    /// except the old header — with `subagent_start`/`subagent_result` records
-    /// rebased onto the new id. Subagent transcript files stay where they are
-    /// and are reused as read-only history.
-    ///
-    /// `agent_type` is the effective root type for the clone (an explicit
-    /// `--agent`, else the source's stored type, else `None` for a source
-    /// written before either field existed).
-    pub fn clone_session(
-        chats_root: &Path,
-        cwd: &Path,
-        source_id: Uuid,
-        agent_type: Option<&str>,
-    ) -> Result<Store, StoreError> {
-        let project_key = project_key(cwd);
-        let source_path = session_path(chats_root, &project_key, source_id);
-        let _coordination = lock_project(source_path.parent().expect("session directory"))?;
-        if !archive::transcript_exists(&source_path) {
-            return Err(StoreError::SessionNotFound {
-                session_id: source_id,
-                path: source_path,
-            });
-        }
-
-        let (source_meta, events) = {
-            // Exclusive nonblock: a live resume of the source — or a
-            // concurrent clone of it — makes this fail without touching it.
-            let _source_lock = session_file::lock_identity(&source_path, source_id)?;
-            let events = Store::read_events(&source_path)?;
-            let source_meta = events.iter().find_map(|event| match event {
-                StoreEvent::Meta(meta) => Some(meta.clone()),
-                _ => None,
-            });
-            let source_meta = source_meta.ok_or_else(|| StoreError::MissingSessionMeta {
-                session_id: source_id,
-                path: source_path.clone(),
-            })?;
-            if source_meta.parent_session.is_some() {
-                return Err(StoreError::SessionIsSubagent {
-                    session_id: source_id,
-                    path: source_path,
-                });
-            }
-            (source_meta, events)
-        };
-
-        let clone_id = Uuid::new_v4();
-        let clone_path = session_path(chats_root, &project_key, clone_id);
-        let mut file = open_locked_session_file(&clone_path, clone_id, false)?;
-        let clone_meta = SessionMeta {
-            version: EVENT_VERSION,
-            created_at: now_timestamp(),
-            schema_version: SCHEMA_VERSION,
-            app_version: crate::build_info::BUILD_INFO.version.to_string(),
-            project_key: project_key.clone(),
-            provider_connection: source_meta.provider_connection.clone(),
-            model: source_meta.model.clone(),
-            session_id: clone_id,
-            title: source_meta.title.clone(),
-            parent_session: None,
-            agent_type: agent_type
-                .map(str::to_string)
-                .or_else(|| source_meta.agent_type.clone()),
-            cloned_from: Some(source_id),
-        };
-        let meta_line_len = write_meta_line(&mut file, &clone_path, &clone_meta)?;
-
-        let messages: Vec<Message> = events
-            .iter()
-            .filter_map(|event| match event {
-                StoreEvent::Message { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect();
-        for event in events {
-            let event = match event {
-                // The source's header is replaced by `clone_meta` above.
-                StoreEvent::Meta(_) => continue,
-                // Parent lifecycle records now name the clone, so a later
-                // resume of the clone resolves its subagent runs from its own
-                // session id. The subagent transcript files themselves are
-                // untouched and stay shared read-only history.
-                StoreEvent::SubagentStart {
-                    version,
-                    created_at,
-                    id,
-                    parent_session,
-                    call_id,
-                    agent_type,
-                    task,
-                    label,
-                } if parent_session == source_id => StoreEvent::SubagentStart {
-                    version,
-                    created_at,
-                    id,
-                    parent_session: clone_id,
-                    call_id,
-                    agent_type,
-                    task,
-                    label,
-                },
-                StoreEvent::SubagentResult {
-                    version,
-                    completed_at,
-                    id,
-                    parent_session,
-                    call_id,
-                    status,
-                    result,
-                    sources,
-                    origin,
-                } if parent_session == source_id => StoreEvent::SubagentResult {
-                    version,
-                    completed_at,
-                    id,
-                    parent_session: clone_id,
-                    call_id,
-                    status,
-                    result,
-                    sources,
-                    origin,
-                },
-                other => other,
-            };
-            append_event_line(&mut file, &clone_path, &event)?;
-        }
-
-        let title_state = if clone_meta.title.is_empty() {
-            Some((clone_meta.clone(), meta_line_len))
-        } else {
-            None
-        };
-        let title_snapshot = title_snapshot(&clone_meta, &messages);
-        Ok(Store::spawn_writer(
-            clone_id,
-            project_key,
-            chats_root.to_path_buf(),
-            clone_path,
-            file,
-            TitleState {
-                meta_awaiting_title: title_state,
-            },
-            title_snapshot,
-        ))
-    }
-
     /// Start a brand-new session in the same project directory: used both by
     /// the `/clear` slash command (resets the conversation mid-run, no
     /// parent) and by [`Store::write_subagent_transcript`] (a subagent run,
@@ -522,17 +300,6 @@ impl Store {
         self.inner.session_id
     }
 
-    /// Return the currently persisted session title, or an empty string while
-    /// title generation is still pending.
-    pub fn title(&self) -> String {
-        self.inner
-            .title_snapshot
-            .lock()
-            .expect("title snapshot mutex is not poisoned")
-            .title
-            .clone()
-    }
-
     pub(crate) fn span(&self) -> tracing::Span {
         self.inner.span.clone()
     }
@@ -575,131 +342,6 @@ impl Store {
             timestamp: now_timestamp(),
             message: message.clone(),
         });
-    }
-
-    /// Return the utility-engine prompt from the first explicit user message
-    /// and a completed reply or a subagent's structured terminal outcome.
-    pub fn title_prompt(&self) -> Option<String> {
-        let snapshot = self
-            .inner
-            .title_snapshot
-            .lock()
-            .expect("title snapshot mutex is not poisoned");
-        if !snapshot.title.is_empty() {
-            tracing::debug!(
-                session_id = %self.inner.session_id,
-                stage = "skipped",
-                reason = "title_already_set",
-                "session title generation skipped"
-            );
-            return None;
-        }
-        let Some(user_message) = snapshot.first_user_message.as_deref() else {
-            tracing::debug!(
-                session_id = %self.inner.session_id,
-                stage = "skipped",
-                reason = "awaiting_explicit_user_message",
-                "session title generation is not ready"
-            );
-            return None;
-        };
-        let (response_kind, response_message) =
-            if let Some(outcome) = &snapshot.completed_subagent_outcome {
-                let response_kind = match outcome.status {
-                    AgentFinishStatus::Success => "subagent_result",
-                    AgentFinishStatus::Failure => "subagent_error",
-                };
-                (response_kind, outcome.content.as_str())
-            } else {
-                let Some(assistant_message) = snapshot.first_complete_assistant_message.as_deref()
-                else {
-                    tracing::debug!(
-                        session_id = %self.inner.session_id,
-                        stage = "skipped",
-                        reason = "awaiting_complete_assistant_reply",
-                        "session title generation is not ready"
-                    );
-                    return None;
-                };
-                ("assistant_message", assistant_message)
-            };
-        let prompt = format!(
-            "Generate a concise title for this conversation.\n\
-             Return only one bare title, with no markdown, quotation marks, or explanation.\
-             \n\n<user_message>\n{user_message}\n</user_message>\n\
-             <{response_kind}>\n{response_message}\n</{response_kind}>",
-        );
-        tracing::debug!(
-            session_id = %self.inner.session_id,
-            stage = "prompt_ready",
-            user_message_chars = user_message.chars().count(),
-            response_kind,
-            response_message_chars = response_message.chars().count(),
-            prompt_chars = prompt.chars().count(),
-            "session title prompt is ready"
-        );
-        Some(prompt)
-    }
-
-    /// Enqueue a metadata-only title rewrite on the session writer.
-    pub async fn set_title(&self, title: String) -> Result<(), StoreError> {
-        if !self
-            .inner
-            .title_snapshot
-            .lock()
-            .expect("title snapshot mutex is not poisoned")
-            .title
-            .is_empty()
-        {
-            return Ok(());
-        }
-        let (result_tx, result_rx) = oneshot::channel();
-        let title_for_snapshot = title.clone();
-        self.inner
-            .command_tx
-            .send(WriterCommand::SetTitle { title, result_tx })
-            .await
-            .map_err(|_| StoreError::WriterClosed {
-                session_id: self.inner.session_id,
-            })?;
-        let result = result_rx.await.map_err(|_| StoreError::WriterClosed {
-            session_id: self.inner.session_id,
-        })?;
-        result?;
-        let mut snapshot = self
-            .inner
-            .title_snapshot
-            .lock()
-            .expect("title snapshot mutex is not poisoned");
-        snapshot.title = title_for_snapshot;
-        Ok(())
-    }
-
-    fn update_title_snapshot(&self, message: &Message) {
-        let mut snapshot = self
-            .inner
-            .title_snapshot
-            .lock()
-            .expect("title snapshot mutex is not poisoned");
-        match message {
-            Message::User {
-                content,
-                kind: UserMessageKind::Explicit,
-            } if snapshot.first_user_message.is_none() => {
-                snapshot.first_user_message = Some(content.clone());
-            }
-            Message::Assistant {
-                content,
-                status: crate::agent::AssistantStatus::Complete,
-                ..
-            } if snapshot.first_user_message.is_some()
-                && snapshot.first_complete_assistant_message.is_none()
-                && !content.trim().is_empty() =>
-            {
-                snapshot.first_complete_assistant_message = Some(content.clone());
-            }
-            _ => {}
-        }
     }
 
     /// Enqueue a `model_changed` record: written on every process start
@@ -753,153 +395,6 @@ impl Store {
         });
     }
 
-    /// Enqueue the `subagent_start` record written to the **parent** session
-    /// before a subagent run begins.
-    pub fn record_subagent_start(
-        &self,
-        run_id: Uuid,
-        call_id: Uuid,
-        agent_type: &str,
-        task: &str,
-        label: &str,
-    ) {
-        self.record_event(StoreEvent::SubagentStart {
-            version: EVENT_VERSION,
-            created_at: now_timestamp(),
-            id: run_id,
-            parent_session: self.inner.session_id,
-            call_id,
-            agent_type: agent_type.to_string(),
-            task: task.to_string(),
-            label: label.to_string(),
-        });
-    }
-
-    /// Enqueue the `subagent_result` record written to the **parent** session
-    /// when a subagent run completes.
-    pub fn record_subagent_result(
-        &self,
-        run_id: Uuid,
-        call_id: Uuid,
-        status: &str,
-        result: Option<String>,
-        sources: Vec<String>,
-        origin: FinishResultOrigin,
-    ) {
-        self.record_event(StoreEvent::SubagentResult {
-            version: EVENT_VERSION,
-            completed_at: now_timestamp(),
-            id: run_id,
-            parent_session: self.inner.session_id,
-            call_id,
-            status: status.to_string(),
-            result,
-            sources,
-            origin,
-        });
-    }
-
-    /// Write a completed subagent transcript **once**, into its own
-    /// sub-session file under the same `project_key`, with its own `meta`
-    /// header titled asynchronously from the first explicit user message and
-    /// structured `agent_finish` outcome, or a complete assistant reply. Subagent
-    /// transcripts are never streamed live.
-    ///
-    /// `provider_connection_and_model` is the subagent's own resolved engine —
-    /// which can differ from the parent's. `None` (the subagent's engine
-    /// configuration could not be resolved) falls back to an empty
-    /// `meta.provider_connection`/`model`
-    /// pair and skips the initial [`StoreEvent::ModelChanged`] record rather
-    /// than persisting a misleading empty one. The supplied messages retain
-    /// their order and are persisted as given.
-    pub async fn write_subagent_transcript(
-        &self,
-        provider_connection_and_model: Option<(&str, &str)>,
-        messages: &[Message],
-    ) -> Result<Uuid, StoreError> {
-        Ok(self
-            .write_subagent_transcript_store(provider_connection_and_model, messages)
-            .await?
-            .session_id())
-    }
-
-    /// Write a subagent transcript and retain its store handle for follow-up
-    /// metadata operations such as utility-engine title generation.
-    pub async fn write_subagent_transcript_store(
-        &self,
-        provider_connection_and_model: Option<(&str, &str)>,
-        messages: &[Message],
-    ) -> Result<Store, StoreError> {
-        let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
-        let subagent_store = self.start_new_session(
-            provider_connection,
-            model,
-            Some(self.inner.session_id),
-            None,
-        )?;
-        if provider_connection_and_model.is_some() {
-            subagent_store.record_model_changed(provider_connection, model);
-        }
-        subagent_store.record_subagent_transcript_messages(messages);
-        subagent_store.flush().await;
-        Ok(subagent_store)
-    }
-
-    /// Write a subagent transcript using the subagent run id as its session id.
-    /// Parent `subagent_start` records already persist that run id, so this stable
-    /// path lets replay locate the transcript without adding another
-    /// cross-file identifier to the parent event schema.
-    pub async fn write_subagent_transcript_for_run(
-        &self,
-        run_id: Uuid,
-        provider_connection_and_model: Option<(&str, &str)>,
-        messages: &[Message],
-    ) -> Result<Uuid, StoreError> {
-        Ok(self
-            .write_subagent_transcript_for_run_store(
-                run_id,
-                provider_connection_and_model,
-                messages,
-            )
-            .await?
-            .session_id())
-    }
-
-    /// Write a subagent transcript using the run id and retain its store handle
-    /// for follow-up metadata operations.
-    pub async fn write_subagent_transcript_for_run_store(
-        &self,
-        run_id: Uuid,
-        provider_connection_and_model: Option<(&str, &str)>,
-        messages: &[Message],
-    ) -> Result<Store, StoreError> {
-        let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
-        let subagent_store = self.start_new_session_with_id(
-            run_id,
-            provider_connection,
-            model,
-            Some(self.inner.session_id),
-            None,
-        )?;
-        if provider_connection_and_model.is_some() {
-            subagent_store.record_model_changed(provider_connection, model);
-        }
-        subagent_store.record_subagent_transcript_messages(messages);
-        subagent_store.flush().await;
-        Ok(subagent_store)
-    }
-
-    fn record_subagent_transcript_messages(&self, messages: &[Message]) {
-        for message in messages {
-            self.record_message(message);
-        }
-        self.inner
-            .title_snapshot
-            .lock()
-            .expect("title snapshot mutex is not poisoned")
-            .completed_subagent_outcome = subagent_title_outcome(messages);
-    }
-
     /// Barrier: resolves once every event enqueued before this call has been
     /// written and flushed to the OS. Per-line `flush()` already happens in
     /// the writer; this only lets a caller (a test, or a shutdown path) wait
@@ -917,70 +412,6 @@ impl Store {
         }
         let _ = ack_rx.await;
     }
-}
-
-/// The title rewrite state carried into the spawned writer task.
-struct TitleState {
-    /// `Some((meta, meta_line_len))` until a generated title is persisted:
-    /// `meta` is the header as currently written to disk (title still
-    /// empty), and `meta_line_len` is the byte length of that first line
-    /// (JSON plus newline), i.e. where the second line begins — needed to
-    /// rewrite just the first line once the title is known. `None` if this
-    /// session's header already carried a title.
-    meta_awaiting_title: Option<(SessionMeta, u64)>,
-}
-
-struct SubagentTitleOutcome {
-    status: AgentFinishStatus,
-    content: String,
-}
-
-fn subagent_title_outcome(messages: &[Message]) -> Option<SubagentTitleOutcome> {
-    let completed_calls: std::collections::BTreeSet<_> = messages
-        .iter()
-        .filter_map(|message| match message {
-            Message::ToolResult { value } if value.name == AgentFinishTool::NAME => Some(value.id),
-            _ => None,
-        })
-        .collect();
-    for message in messages.iter().rev() {
-        let Message::Assistant { tool_calls, .. } = message else {
-            continue;
-        };
-        for call in tool_calls.iter().rev() {
-            if call.name != AgentFinishTool::NAME || !completed_calls.contains(&call.id) {
-                continue;
-            }
-            let arguments: AgentFinishArgs = match serde_json::from_value(call.arguments.clone()) {
-                Ok(arguments) => arguments,
-                Err(_) => {
-                    // Deserialization errors can quote private outcome content.
-                    tracing::warn!(tool_call_id = %call.id, reason = "invalid_agent_finish_arguments",
-                        "completed subagent outcome could not be decoded for session title");
-                    continue;
-                }
-            };
-            let status = arguments.resolved_status();
-            let content = match status {
-                AgentFinishStatus::Success => arguments.result,
-                AgentFinishStatus::Failure => arguments.error,
-            };
-            if let Some(content) = content.filter(|content| !content.trim().is_empty()) {
-                return Some(SubagentTitleOutcome { status, content });
-            }
-            tracing::debug!(tool_call_id = %call.id, reason = "empty_subagent_outcome",
-                "completed subagent outcome contains no title input");
-        }
-    }
-    None
-}
-
-#[derive(Default)]
-struct TitleSnapshot {
-    title: String,
-    first_user_message: Option<String>,
-    first_complete_assistant_message: Option<String>,
-    completed_subagent_outcome: Option<SubagentTitleOutcome>,
 }
 
 #[cfg(test)]

@@ -14,6 +14,9 @@
 
 use super::conversation::project_messages_with_subagent_runs;
 use super::*;
+use crate::agent::AgentMode;
+use std::time::Instant;
+use uuid::Uuid;
 
 mod conversation;
 mod input_history;

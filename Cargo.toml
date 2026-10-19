@@ -1,6 +1,6 @@
 [package]
 name = "ylva"
-version = "0.26.12"
+version = "0.27.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Manuel Koch"]
@@ -51,7 +51,6 @@ dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 toml = "1.1.5"
 dotenvy = "0.15"
-serde_yaml = "0.9"
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 clap = { version = "4", features = ["derive"] }
@@ -62,6 +61,7 @@ httpdate = "1"
 flate2 = "1"
 libc = "0.2"
 serde_ignored = "0.1.14"
+serde-saphyr = "2"
 
 [build-dependencies]
 time = { version = "0.3", features = ["formatting", "macros"] }

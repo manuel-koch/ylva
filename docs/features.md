@@ -5,7 +5,7 @@
 - Rust-based terminal AI agent, runnable as a CLI or TUI
 - Implements agent-harness functionality
 - Unknown configuration keys are reported once at startup with file, key path
-  and a _did you mean_ suggestion: as a notice in the TUI conversation, on
+  and a *did you mean* suggestion: as a notice in the TUI conversation, on
   stderr in CLI mode, and in the log. `--strict-config` makes them fatal.
 
 ## Agent Skills

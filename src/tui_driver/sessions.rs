@@ -119,7 +119,7 @@ impl SessionTasks {
         source_id: Uuid,
         action: SessionAction,
         agent: &AgentLoop,
-        driver: Option<&super::TitleDriver>,
+        driver: Option<&super::title::TitleDriver>,
     ) {
         let SlashOverlay::SessionPicker(picker) = &state.slash_overlay else {
             return;

@@ -345,18 +345,13 @@ fn parse_skill(contents: &str, directory_name: &str) -> Result<(String, String, 
         frontmatter.push_str(line);
     }
     let body = body.ok_or("skill frontmatter is missing its closing '---'")?;
-    // Value parsing rejects duplicate keys, including unknown fields. Typed field
-    // extraction avoids YAML's permissive string coercion for numeric scalars.
-    let metadata: serde_yaml::Value =
-        serde_yaml::Value::deserialize(serde_yaml::Deserializer::from_str(&frontmatter))
+    // The YAML parser rejects duplicate keys, including unknown fields, and (with
+    // `no_schema`) refuses to coerce unquoted numbers, booleans and nulls into
+    // strings, so `name`/`description` must be real strings.
+    let metadata: SkillFrontmatter =
+        serde_saphyr::from_str_with_options(&frontmatter, crate::yaml_options())
             .map_err(|error| format!("invalid YAML: {error}"))?;
-    let mapping = metadata
-        .as_mapping()
-        .ok_or("frontmatter must be a mapping")?;
-    let name = mapping
-        .get(serde_yaml::Value::String("name".into()))
-        .and_then(serde_yaml::Value::as_str)
-        .ok_or("name must be a string")?;
+    let name = metadata.name.as_str();
     if name.is_empty()
         || name.len() > 64
         || !name
@@ -369,10 +364,7 @@ fn parse_skill(contents: &str, directory_name: &str) -> Result<(String, String, 
     {
         return Err("name must match its directory and contain 1-64 lowercase ASCII letters/digits/hyphens, without edge or consecutive hyphens".into());
     }
-    let description = mapping
-        .get(serde_yaml::Value::String("description".into()))
-        .and_then(serde_yaml::Value::as_str)
-        .ok_or("description must be a string")?;
+    let description = metadata.description.as_str();
     if description.trim().is_empty() || description.chars().count() > 1024 {
         return Err("description must be nonblank and at most 1024 characters".into());
     }
@@ -380,6 +372,13 @@ fn parse_skill(contents: &str, directory_name: &str) -> Result<(String, String, 
         return Err("skill must have a nonblank body".into());
     }
     Ok((name.into(), description.into(), body))
+}
+
+/// Required frontmatter fields; unknown fields are ignored.
+#[derive(Deserialize)]
+struct SkillFrontmatter {
+    name: String,
+    description: String,
 }
 
 /// Safe single-line presentation for untrusted metadata and diagnostic paths.

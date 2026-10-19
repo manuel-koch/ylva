@@ -81,6 +81,7 @@ fn empty_listing_warnings_help_and_unread_stdin() {
         .unwrap();
     // Keep stdin open: listing must return without waiting for EOF.
     let stdin = subagent.stdin.take().unwrap();
+    // std::process::Child has no timed wait, so poll try_wait against a deadline.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         if subagent.try_wait().unwrap().is_some() {

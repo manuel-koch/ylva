@@ -192,3 +192,26 @@ async fn corrupt_archives_sidecars_and_orphans_are_explicit_errors() {
     assert!(!diagnostics.is_empty());
     assert!(Store::resume(&chats_root, directory.path(), identity).is_err());
 }
+
+#[test]
+fn session_directory_rejects_a_path_without_parent() {
+    let error = archive::session_directory(Path::new("/")).unwrap_err();
+    assert!(matches!(error, StoreError::InvalidRepresentation { .. }));
+    assert_eq!(
+        archive::session_directory(Path::new("/a/b.jsonl")).unwrap(),
+        Path::new("/a")
+    );
+}
+
+#[tokio::test]
+async fn title_survives_a_poisoned_snapshot_mutex() {
+    let (directory, chats_root, identity, ..) = fixture().await;
+    let store = Store::resume(&chats_root, directory.path(), identity).unwrap();
+    let inner = std::sync::Arc::clone(&store.inner);
+    let _ = std::thread::spawn(move || {
+        let _guard = inner.title_snapshot.lock().unwrap();
+        panic!("poison the snapshot mutex");
+    })
+    .join();
+    assert_eq!(store.title(), "Archive title");
+}

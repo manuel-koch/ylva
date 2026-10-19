@@ -40,10 +40,10 @@ mod path;
 mod rules;
 
 pub use path::{expand_path_tokens, to_relative_path};
+#[cfg(test)]
+pub(crate) use rules::ApprovalVerdictConfig;
 use rules::ResolvedRule;
-pub use rules::{
-    ApprovalCheck, ApprovalVerdictConfig, NamedSandboxRule, SandboxRule, SandboxRuleConfig,
-};
+pub use rules::{ApprovalCheck, NamedSandboxRule, SandboxRule, SandboxRuleConfig};
 
 /// Shared sandbox. Holds the launch-directory anchor used to resolve relative
 /// paths and discover the workspace boundary.
