@@ -61,14 +61,14 @@ An implementing agent must flip `[ ]` to `[x]` immediately after completing
 each step and rewrite this file in place, so progress is resumable across
 sessions.
 
-1. [ ] Add a cost domain type module (e.g. `src/llm/usage_cost.rs`, re-exported
+1. [x] Add a cost domain type module (e.g. `src/llm/usage_cost.rs`, re-exported
    via `src/lib.rs` if integration tests need it): `RequestCost` (`f64`
    amount, currency code) and `CostLedger` (`Arc`-shareable, internally
    synchronized; `record(RequestCost)`, `totals()` returning one total per
    currency, ordered deterministically, empty until a request is
    recorded). Write unit tests first (TDD): empty ledger, accumulation,
    separate per-currency totals, concurrent recording.
-2. [ ] Parse provider-reported `usage.cost` in the SSE stream of
+2. [x] Parse provider-reported `usage.cost` in the SSE stream of
    `src/llm/openai_compatible_provider.rs` next to
    `parse_reported_input_tokens` (usage-only frames have no choices, so parse
    independently of `parse_sse_payload`). Add a pure
@@ -76,15 +76,17 @@ sessions.
    present, absent, non-numeric and zero cost frames. The currency comes from
    the provider kind, not the payload: only OpenRouter (`USD`) reports cost;
    the plain OpenAI-compatible and Ollama providers record nothing.
-3. [ ] Record the parsed cost into the ledger once per request at the point
+3. [x] Record the parsed cost into the ledger once per request at the point
    where the stream completes (where `token_usage_record(reported_input_tokens)`
    is appended today). Record any request, including failed or cancelled ones, only if the provider
    reported a cost for it.
-4. [ ] Log each recorded cost at `debug` level via `tracing` (provider
+4. [x] Log each recorded cost at `debug` level via `tracing` (provider
    connection, model, amount, currency; no prompt or response content) at the
    recording point from step 3, to help diagnose mismatches against provider
    billing. Read `docs/known-test-issues.md` before testing `tracing` output.
-5. [ ] Inject the shared `CostLedger` into providers: thread it through the
+5. [x] Share one `CostLedger` between providers. Done as: providers default to
+   the process-wide `CostLedger::process()` (test-only overrides), so no
+   constructor plumbing was needed. Original plan: thread it through the
    provider construction path (`src/llm/provider_registry.rs`,
    `src/llm/engine/runtime.rs` / `with_runtime_config`,
    `src/startup/engines.rs`, `src/agent_factory.rs`) so every engine used for
@@ -92,7 +94,7 @@ sessions.
    process. Because recording happens inside the provider, utility and
    compaction calls (`src/session_title.rs`, `src/agent/compaction.rs`) are
    covered without per-caller plumbing.
-6. [ ] Expose the totals to the TUI: add a `cost_total_text: Option<String>`
+6. [x] Expose the totals to the TUI: add a `cost_total_text: Option<String>`
    field to the render state in `src/tui_render_state.rs`, populated in
    `src/tui_driver/updates.rs` (next to `context_usage_text`) by reading the
    ledger on every redraw (no new event). Verify a redraw happens after a
@@ -103,11 +105,11 @@ sessions.
    `0.00 <CUR>` once any request reported a cost (including zero); `None`
    when the ledger is empty. The footer shows the process-wide total in every
    view, including subagent views.
-7. [ ] Render the cost text in the footer (`src/tui_widgets/footer.rs`, wide
+7. [x] Render the cost text in the footer (`src/tui_widgets/footer.rs`, wide
    and narrow layouts), placed left of the context usage text. The context
    usage keeps priority: the cost text is truncated/dropped first on narrow
    widths. Cover with footer tests in `src/tui_widgets/footer/tests.rs`.
-8. [ ] Print the cost on exit: extend `resume_hint_text` in
+8. [x] Print the cost on exit: extend `resume_hint_text` in
    `src/startup/session.rs` with an optional cost argument producing the
    `Costs:   <value> <currency>` line (aligned with `Session:`/`Title:`) using
    the same formatting as the footer, joined with ` + ` for several
@@ -116,11 +118,11 @@ sessions.
    ~line 318). Update the existing unit tests in `session.rs` and add cases
    with and without cost. This covers both the TUI and headless CLI paths
    because both flow through `startup.rs`.
-9. [ ] Add an integration test using the mock provider (`src/llm/mock_provider.rs`
+9. [x] Add an integration test using the mock provider (`src/llm/mock_provider.rs`
    extended to optionally script a cost) asserting: total accumulates across
    root plus title/compaction requests, and absent cost leaves the total
    `None`.
-10. [ ] Update docs in the same commit:
+10. [x] Update docs in the same commit:
     - `docs/features.md`: new section on cost tracking (what is counted, not
       persisted, footer, exit output); also adjust the "Context management"
       wording if the footer description changes.
@@ -135,7 +137,7 @@ sessions.
     - `docs/ideas/costs.md`: mark the "Model usage costs" half as implemented
       or remove per repository convention.
     - Run `rumdl fmt` / `rumdl check` on changed markdown.
-11. [ ] Run `make format lint` and `make test-coverage`; fix failures. If
+11. [x] Run `make format lint` and `make test-coverage`; fix failures. If
     dependencies changed, also run `make audit`.
 
 ## Implementation Hints

@@ -120,8 +120,8 @@ pub use llm::engine::{
     DEFAULT_CONTEXT_LENGTH,
 };
 pub use llm::{
-    InputModality, MockEvent, MockProvider, ModelInfo, OllamaProvider, OpenAiCompatibleProvider,
-    OpenRouterProvider, Provider, ToolSchema,
+    CostLedger, InputModality, MockEvent, MockProvider, ModelInfo, OllamaProvider,
+    OpenAiCompatibleProvider, OpenRouterProvider, Provider, RequestCost, ToolSchema,
 };
 pub use presenter::{TextareaContext, TuiEvent};
 pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext};

@@ -376,6 +376,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         context_usage_text: state
             .active_context_usage()
             .map(crate::tui_reducer_state::format_context_usage_readout),
+        cost_total_text: crate::llm::CostLedger::process().totals_text(),
         draft: state.draft.clone(),
         input_area: state.layout.input_area.rect,
         toast: state.toast.clone(),

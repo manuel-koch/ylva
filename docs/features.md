@@ -335,6 +335,32 @@ without losing anything the user can still read.
   model view; the next request replaces it with that serialized request's
   estimate.
 
+## Model usage costs
+
+Ylva totals the cost that the provider itself reports for completed model
+requests during one run.
+
+- **What counts.** Only provider-reported costs; there are no price tables and
+  no token-based estimates. Currently only OpenRouter reports a cost (USD,
+  `usage.cost`); Ollama (local and Cloud) and plain OpenAI-compatible
+  providers report none and contribute nothing; see
+  [provider notes](./provider-notes.md#usage-and-cost-reporting). Root, subagent, session-title and compaction requests all
+  count, including requests that failed or were cancelled after the provider
+  reported a cost.
+- **Scope.** The total spans the whole process, is kept separately per
+  currency, and is not reset by `/clear` or a session switch. It is never
+  persisted or stored in session data. Tracking is best-effort; the
+  provider's own billing is authoritative.
+- **Footer.** The TUI footer shows the total left of the context usage
+  readout (`0.12 USD · 64.2K (45%)`) in every view, including subagent views.
+  Amounts use two decimals, currencies are joined with ` + `, a non-zero total
+  below 0.01 shows as `<0.01 USD`, and nothing is shown until a request
+  reported a cost. On narrow widths the cost is dropped before the context
+  usage readout.
+- **Exit.** When at least one cost was recorded, the exit output (TUI and
+  headless CLI) adds a `Costs:   <value> <currency>` line between `Title:` and
+  `Resume with:`.
+
 ## TUI mode
 
 Interactive terminal UI launched automatically when stdout is a terminal

@@ -80,3 +80,58 @@ fn elide_balanced_tokens_with_budget_of_one_is_just_the_ellipsis() {
 fn elide_balanced_tokens_falls_back_to_truncation_when_separators_do_not_fit() {
     assert_eq!(elide_balanced_tokens("a → b → c", 3), "a …");
 }
+
+fn render_row(width: u16, draw: impl FnOnce(&mut Frame, Rect)) -> String {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+    terminal
+        .draw(|frame| draw(frame, Rect::new(0, 0, width, 1)))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    (0..width)
+        .map(|column| buffer.cell((column, 0)).unwrap().symbol())
+        .collect()
+}
+
+#[test]
+fn context_usage_row_puts_cost_left_of_usage_and_drops_it_first() {
+    let render = |width| {
+        render_row(width, |frame, area| {
+            draw_footer_context_usage(frame, area, Some("0.12 USD"), Some("64.2K (45%)"), 9);
+        })
+    };
+    assert_eq!(render(60).trim(), "0.12 USD · 64.2K (45%)");
+    // 9 controls columns + 12 usage columns fit; the cost does not.
+    assert_eq!(render(22).trim(), "64.2K (45%)");
+    assert_eq!(render(15).trim(), "");
+}
+
+#[test]
+fn context_usage_row_shows_cost_without_context_usage() {
+    let line = render_row(40, |frame, area| {
+        draw_footer_context_usage(frame, area, Some("<0.01 USD"), None, 9);
+    });
+    assert_eq!(line.trim(), "<0.01 USD");
+    let hidden = render_row(40, |frame, area| {
+        draw_footer_context_usage(frame, area, None, None, 9);
+    });
+    assert_eq!(hidden.trim(), "");
+}
+
+#[test]
+fn narrow_meta_row_shows_cost_before_usage_and_drops_cost_when_too_narrow() {
+    let state = TuiState {
+        cost_total_text: Some("0.12 USD".to_string()),
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        ..TuiState::new()
+    };
+    let wide = render_row(40, |frame, area| draw_footer_meta(frame, area, &state));
+    assert!(wide.contains("0.12 USD · 64.2K (45%)"), "{wide:?}");
+    let tight = render_row(14, |frame, area| draw_footer_meta(frame, area, &state));
+    assert!(
+        !tight.contains("USD") && tight.contains("64.2K (45%)"),
+        "{tight:?}"
+    );
+}

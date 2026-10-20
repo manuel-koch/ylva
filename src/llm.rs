@@ -30,6 +30,7 @@ pub mod openrouter_provider;
 pub mod provider_registry;
 pub mod token_estimate;
 pub(crate) mod token_usage;
+pub mod usage_cost;
 
 /// Maximum number of simultaneous HTTP requests per provider connection.
 pub const MAX_CONCURRENT_PROVIDER_REQUESTS: usize = 4;
@@ -64,6 +65,7 @@ pub use openai_compatible_provider::OpenAiCompatibleProvider;
 pub use openrouter_provider::OpenRouterProvider;
 pub use provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
 pub use token_estimate::TokenEstimator;
+pub use usage_cost::{CostLedger, RequestCost};
 pub use MAX_CONCURRENT_PROVIDER_REQUESTS as DEFAULT_MAX_CONCURRENT_PROVIDER_REQUESTS;
 
 /// A single tool definition in the OpenAI chat-completions wire shape.

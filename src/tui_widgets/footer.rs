@@ -435,18 +435,37 @@ fn draw_footer_row(
     );
 }
 
+/// Join the cost total and the context usage readout (`0.12 USD · 64.2K (45%)`).
+fn join_cost_and_usage(cost: Option<&str>, usage: Option<&str>) -> Option<String> {
+    match (cost, usage) {
+        (Some(cost), Some(usage)) => Some(format!("{cost} · {usage}")),
+        (Some(text), None) | (None, Some(text)) => Some(text.to_string()),
+        (None, None) => None,
+    }
+}
+
 /// Narrow-layout meta row: the engine label followed by the context
 /// usage, left-aligned. Renders nothing when neither is available.
 fn draw_footer_meta(frame: &mut Frame, area: Rect, state: &TuiState) {
     let engine_label = engine_label_text(state);
     let usage = state.context_usage_text.as_deref();
-    // One leading column precedes everything; the usage (plus its separator)
-    // is reserved at the end. The label is elided to the remaining width.
-    let usage_suffix_width = usage.map_or(0, |usage| usage.chars().count() + 1);
-    let label_budget = (area.width as usize).saturating_sub(1 + usage_suffix_width);
+    // One leading column precedes everything; the readout (plus its
+    // separator) is reserved at the end. The label is elided to the remaining
+    // width. The cost is dropped first when it does not fit.
+    let suffix_width = |cost: Option<&str>| {
+        join_cost_and_usage(cost, usage).map_or(0, |readout| readout.chars().count() + 1)
+    };
+    let cost = state
+        .cost_total_text
+        .as_deref()
+        .filter(|cost| (area.width as usize) > 1 + suffix_width(Some(cost)));
+    let label_budget = (area.width as usize).saturating_sub(1 + suffix_width(cost));
     let label = (!engine_label.is_empty() && label_budget > 0)
         .then(|| elide_balanced_tokens(&engine_label, label_budget));
-    let parts: Vec<String> = label.into_iter().chain(usage.map(str::to_string)).collect();
+    let parts: Vec<String> = label
+        .into_iter()
+        .chain(join_cost_and_usage(cost, usage))
+        .collect();
     if parts.is_empty() {
         return;
     }
@@ -609,6 +628,7 @@ pub(super) fn draw_normal_footer(
                 frame,
                 controls,
                 footer_hints,
+                state.cost_total_text.as_deref(),
                 state.context_usage_text.as_deref(),
             );
         }
@@ -619,7 +639,7 @@ pub(super) fn draw_normal_footer(
         } => {
             draw_footer_status(frame, status, &row_1_text, FOOTER_STATUS_COLOR);
             draw_footer_meta(frame, meta, state);
-            draw_footer_hints(frame, controls, footer_hints, None);
+            draw_footer_hints(frame, controls, footer_hints, None, None);
         }
     }
 }
@@ -649,16 +669,18 @@ pub(super) fn plural_noun<'a>(
 }
 
 /// Draw the keybinding hints on the footer's second row, with the model-view
-/// readout (`64.2K (45%)`) pinned to the right end of the same row when one
-/// has been reported. On a row too narrow to hold both without colliding,
-/// the readout is dropped rather than allowed to overwrite the hints.
+/// readout (`64.2K (45%)`), preceded by the cost total, pinned to the right
+/// end of the same row when reported. On a row too narrow to hold everything
+/// without colliding, the cost is dropped first, then the readout, rather
+/// than allowed to overwrite the hints.
 fn draw_footer_hints(
     frame: &mut Frame,
     area: Rect,
     hints: &[FooterHint],
+    cost_total_text: Option<&str>,
     context_usage_text: Option<&str>,
 ) {
-    let hints_area = draw_footer_context_usage(frame, area, context_usage_text, 9);
+    let hints_area = draw_footer_context_usage(frame, area, cost_total_text, context_usage_text, 9);
 
     let normal_style = Style::default().fg(MUTED_TEXT_COLOR);
     let key_style = normal_style.add_modifier(Modifier::BOLD);
@@ -684,14 +706,22 @@ fn draw_footer_hints(
 fn draw_footer_context_usage(
     frame: &mut Frame,
     area: Rect,
+    cost_total_text: Option<&str>,
     context_usage_text: Option<&str>,
     minimum_controls_width: u16,
 ) -> Rect {
-    if let Some(usage) = context_usage_text {
+    let combined_text =
+        cost_total_text.and_then(|cost| join_cost_and_usage(Some(cost), context_usage_text));
+    let fits = |text: &str| {
+        let width = text.chars().count() as u16 + 1;
+        area.width >= width.saturating_add(minimum_controls_width)
+    };
+    let readout = combined_text
+        .as_deref()
+        .filter(|text| fits(text))
+        .or(context_usage_text.filter(|text| fits(text)));
+    if let Some(usage) = readout {
         let usage_width = usage.chars().count() as u16 + 1;
-        if area.width < usage_width.saturating_add(minimum_controls_width) {
-            return area;
-        }
         let [controls_area, usage_area] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(usage_width)]).areas(area);
         frame.render_widget(
@@ -750,6 +780,7 @@ pub(super) fn draw_approval_footer(
             draw_footer_context_usage(
                 frame,
                 controls,
+                state.cost_total_text.as_deref(),
                 state.context_usage_text.as_deref(),
                 1 + approve_width + 2 + deny_width,
             )

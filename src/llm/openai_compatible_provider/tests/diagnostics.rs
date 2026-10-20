@@ -516,3 +516,62 @@ fn interrupted_stream_is_recorded_without_inventing_usage() {
         assert!(!contents.contains("interrupted request sentinel"));
     });
 }
+
+/// Serve one streaming response with a usage frame carrying `cost`, drain the
+/// provider stream and return the ledger totals text.
+async fn totals_after_request_with_cost(with_parser: bool) -> Option<String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local test server");
+    let address = listener.local_addr().expect("local test server address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let mut request = [0_u8; 8192];
+        let _ = stream.read(&mut request).await.expect("read request");
+        let frames = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"cost\":0.1234}}\n\ndata: [DONE]\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            frames.len(),
+            frames
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write streaming response");
+    });
+    let ledger = CostLedger::new();
+    let mut provider = OpenAiCompatibleProvider::new(
+        "cost-test-connection".to_string(),
+        format!("http://{address}"),
+        "test-model".to_string(),
+        None,
+    )
+    .with_cost_ledger(ledger.clone());
+    if with_parser {
+        provider = provider.with_usage_cost_parser(|data| {
+            let value: serde_json::Value = serde_json::from_str(data).ok()?;
+            Some(RequestCost::new(
+                value.pointer("/usage/cost")?.as_f64()?,
+                "USD",
+            ))
+        });
+    }
+    let mut events = provider
+        .chat(Vec::new(), Vec::new(), CancellationToken::new())
+        .await
+        .expect("provider stream");
+    while events.recv().await.is_some() {}
+    server.await.expect("server task");
+    ledger.totals_text()
+}
+
+#[test]
+fn reported_cost_is_recorded_only_with_a_usage_cost_parser() {
+    crate::test_support::run_locked(async {
+        assert_eq!(
+            totals_after_request_with_cost(true).await.as_deref(),
+            Some("0.12 USD")
+        );
+        assert_eq!(totals_after_request_with_cost(false).await, None);
+    });
+}

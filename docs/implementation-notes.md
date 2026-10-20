@@ -314,6 +314,30 @@ See [features](./features.md#cli-mode).
   credentials or bodies and is not session data or billed usage
   ([CLI options](./cli-options.md#debug)).
 
+### Model usage cost ledger
+
+- `llm/usage_cost.rs` defines `RequestCost` and `CostLedger`, a cloneable,
+  mutex-guarded per-currency total. `CostLedger::process()` is the
+  process-wide ledger that providers use by default, so every engine (root,
+  subagent, utility, compaction) shares one total without per-caller plumbing;
+  providers accept an own ledger only for tests.
+- Reported costs are not part of the OpenAI Chat Completions protocol, so the
+  shared `OpenAiCompatibleProvider` transport only offers a `UsageCostParser`
+  hook (default: none) applied to every SSE payload, independent of
+  `parse_sse_payload` because usage-only frames have no choices.
+  `OpenRouterProvider` supplies the parser for its `usage.cost` field (USD);
+  Ollama and plain OpenAI-compatible providers report none. The first cost frame of a request is recorded
+  immediately, before the terminal stream event is sent, so the redraw that
+  follows completion already sees it, and so failed or cancelled streams keep
+  a cost already reported. Each record is logged at `debug` level (connection,
+  model, amount, currency).
+- The TUI render state carries `cost_total_text`, read from the ledger on every
+  redraw (no event of its own); the footer places it left of the context
+  usage and drops it first when the row is narrow. `resume_hint_text` appends
+  the `Costs:` line from the same ledger at exit. Costs never enter
+  `SessionExitSnapshot` or the store.
+- `MockProvider::with_reported_cost` scripts a cost for tests.
+
 ### Policy and scheduling
 
 - `CompactionRuntime::sweep` runs only from the outer loop at safe boundaries

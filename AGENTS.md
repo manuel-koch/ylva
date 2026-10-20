@@ -13,6 +13,7 @@ A Rust-based terminal UI that implements an agent-harness.
    - [architecture-design-records](./docs/architecture-design-records/) (recorded architecture decisions)
    - [configuration](./docs/configuration.md) (how to configure Ylva profiles and engines)
    - [keybindings](./docs/keybindings.md) (keybindings implemented in the TUI)
+   - [provider-notes](./docs/provider-notes.md) (what each model provider reports or lacks, e.g. usage and costs)
    - [plans](./docs/plans/) (planned implementations, one file per subject/feature)
    - [known-test-issues](./docs/known-test-issues.md) (persistent quirks and required workarounds for testing)
 2. **Testing:** While implementing code changes (consent given), write tests according to

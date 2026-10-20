@@ -18,9 +18,21 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Message, StreamEvent};
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle};
-use crate::llm::{ModelInfo, Provider, ToolSchema};
+use crate::llm::{ModelInfo, Provider, RequestCost, ToolSchema};
 
 use super::OpenAiCompatibleProvider;
+
+/// Parse the request cost OpenRouter reports as `usage.cost` (credits, USD)
+/// in a stream frame. Usage-only frames carry no choices, so this is
+/// independent of the user-visible stream event parser.
+fn parse_reported_cost(data: &str) -> Option<RequestCost> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    let amount = value
+        .pointer("/usage/cost")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|amount| amount.is_finite() && *amount >= 0.0)?;
+    Some(RequestCost::new(amount, "USD"))
+}
 
 /// OpenRouter provider.
 ///
@@ -47,7 +59,8 @@ impl OpenRouterProvider {
                 Self::customize_request_body,
                 super::openai_compatible_provider::redact_chat_completion_request_body,
             )
-            .with_provider_kind("openrouter"),
+            .with_provider_kind("openrouter")
+            .with_usage_cost_parser(parse_reported_cost),
         }
     }
 
@@ -157,6 +170,25 @@ impl Provider for OpenRouterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_reported_cost_from_usage_frames() {
+        assert_eq!(
+            parse_reported_cost(r#"{"choices":[],"usage":{"prompt_tokens":1,"cost":0.00123}}"#),
+            Some(RequestCost::new(0.00123, "USD"))
+        );
+        assert_eq!(
+            parse_reported_cost(r#"{"usage":{"cost":0}}"#),
+            Some(RequestCost::new(0.0, "USD"))
+        );
+        assert_eq!(
+            parse_reported_cost(r#"{"usage":{"prompt_tokens":1}}"#),
+            None
+        );
+        assert_eq!(parse_reported_cost(r#"{"usage":{"cost":"1.5"}}"#), None);
+        assert_eq!(parse_reported_cost(r#"{"usage":{"cost":null}}"#), None);
+        assert_eq!(parse_reported_cost("not json"), None);
+    }
 
     #[test]
     fn delegates_identity_runtime_settings_and_chat() {

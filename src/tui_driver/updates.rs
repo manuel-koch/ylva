@@ -361,6 +361,7 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
         queued_steer_texts: app.queued_steer_texts,
         steer_indicator: app.steer_indicator,
         context_usage_text,
+        cost_total_text: crate::llm::CostLedger::process().totals_text(),
         pending_approval: None,
         pending_approval_is_subagent: false,
         input_history: app.input_history,

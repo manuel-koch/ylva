@@ -25,7 +25,13 @@ use crate::http::RequestConcurrencyLimiter;
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::openai_compatible_messages::{serialize_messages_with_policy, ContentPartFormat};
 use crate::llm::token_usage::{TokenUsageDumpSource, TokenUsageRecord};
+use crate::llm::usage_cost::{CostLedger, RequestCost};
 use crate::llm::{order_reasoning_efforts, InputModality, Provider, ToolSchema};
+
+/// Extracts the request cost a backend reports in one SSE payload. Reported
+/// costs are not part of the OpenAI Chat Completions protocol, so each backend
+/// that reports them supplies its own parser.
+pub(crate) type UsageCostParser = fn(&str) -> Option<RequestCost>;
 
 type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig);
 pub(crate) type RequestBodyRedactor = fn(&serde_json::Value) -> serde_json::Value;
@@ -203,6 +209,9 @@ pub struct OpenAiCompatibleProvider {
     request_dump_source: crate::http::RequestDumpSource,
     request_limiter: RequestConcurrencyLimiter,
     provider_kind: &'static str,
+    cost_ledger: CostLedger,
+    /// `None` when the backend does not report request costs.
+    usage_cost_parser: Option<UsageCostParser>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -288,11 +297,26 @@ impl OpenAiCompatibleProvider {
             request_dump_source: crate::http::RequestDumpSource::default(),
             request_limiter,
             provider_kind: "openai_compatible",
+            cost_ledger: CostLedger::process(),
+            usage_cost_parser: None,
         }
     }
 
     pub(crate) fn with_provider_kind(mut self, provider_kind: &'static str) -> Self {
         self.provider_kind = provider_kind;
+        self
+    }
+
+    /// Record the costs this backend reports in its stream frames. Without a
+    /// parser, reported costs are ignored.
+    pub(crate) fn with_usage_cost_parser(mut self, usage_cost_parser: UsageCostParser) -> Self {
+        self.usage_cost_parser = Some(usage_cost_parser);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_cost_ledger(mut self, cost_ledger: CostLedger) -> Self {
+        self.cost_ledger = cost_ledger;
         self
     }
 
@@ -457,6 +481,8 @@ impl Provider for OpenAiCompatibleProvider {
         let request_body_redactor = self.request_body_redactor;
         let content_part_format = self.content_part_format;
         let provider_kind = self.provider_kind;
+        let cost_ledger = self.cost_ledger.clone();
+        let usage_cost_parser = self.usage_cost_parser;
         let request_limiter = self.request_limiter.clone();
         let token_usage_dump_source = self.token_usage_dump_source.clone();
         let request_dump_source = self.request_dump_source.clone();
@@ -597,9 +623,12 @@ impl Provider for OpenAiCompatibleProvider {
 
             let (tx, rx) = mpsc::channel(16);
             let stream_dump_id = dump_id.clone();
+            let provider_connection_for_cost = provider_connection.clone();
+            let model_for_cost = runtime_config.model.clone();
             tokio::spawn(async move {
                 let _request_permit = request_permit;
                 let mut reported_input_tokens = None;
+                let mut cost_recorded = false;
                 let mut first_token_received = false;
                 // Own the byte stream (and the `Response`) inside this task so
                 // dropping it on cancel closes the underlying TCP socket.
@@ -647,6 +676,23 @@ impl Provider for OpenAiCompatibleProvider {
                                     }
                                     if let Some(usage) = parse_reported_input_tokens(&event.data) {
                                         reported_input_tokens = Some(usage);
+                                    }
+                                    // Recorded as soon as the usage frame arrives, before the
+                                    // terminal event reaches the consumer, so a redraw triggered
+                                    // by completion already sees the cost.
+                                    if let (false, Some(cost)) = (
+                                        cost_recorded,
+                                        usage_cost_parser.and_then(|parse| parse(&event.data)),
+                                    ) {
+                                        cost_recorded = true;
+                                        tracing::debug!(
+                                            provider_connection = %provider_connection_for_cost,
+                                            model = %model_for_cost,
+                                            amount = cost.amount,
+                                            currency = %cost.currency,
+                                            "request cost reported"
+                                        );
+                                        cost_ledger.record(cost);
                                     }
                                     match parse_sse_payload(&event.data) {
                                         Some(StreamEvent::Done) => {

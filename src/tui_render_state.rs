@@ -226,6 +226,9 @@ pub struct TuiState {
     /// (`64.2K (45%)`).
     /// `None` until the first report arrives.
     pub context_usage_text: Option<String>,
+    /// Pre-formatted process-wide model usage cost (`0.12 USD`). `None` until
+    /// a request reported a cost.
+    pub cost_total_text: Option<String>,
     pub compacting: bool,
     /// Set by `UiUpdate::ToolPending`; cleared by `ToolStart`/`ToolKilled`/
     /// `StreamCancelled`. While `Some`, the TUI is in approval sub-mode.
@@ -300,6 +303,7 @@ impl TuiState {
             queued_steer_texts: Vec::new(),
             steer_indicator: false,
             context_usage_text: None,
+            cost_total_text: None,
             compacting: false,
             pending_approval: None,
             pending_approval_is_subagent: false,

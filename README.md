@@ -32,6 +32,8 @@ not a real model.
 - [Configuration](docs/configuration.md): profiles, engines, provider connections,
   and approval rules.
 - [Keybindings](docs/keybindings.md): TUI controls.
+- [Provider notes](docs/provider-notes.md): what each provider reports, such as
+  usage and costs.
 - [Features](docs/features.md): implemented behavior.
 
 ## Contribution

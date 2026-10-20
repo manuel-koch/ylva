@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{DeltaChunk, Message, StreamEvent};
 
+use super::usage_cost::{CostLedger, RequestCost};
 use super::{ModelInfo, Provider, ToolSchema};
 
 /// One item of a deterministic [`MockProvider`] script.
@@ -46,19 +47,39 @@ pub enum MockEvent {
 pub struct MockProvider {
     script: Vec<MockEvent>,
     interval: Duration,
+    reported_cost: Option<RequestCost>,
+    cost_ledger: CostLedger,
 }
 
 impl MockProvider {
     /// A text-only script from `tokens`.
     pub fn new(tokens: Vec<String>, interval: Duration) -> Self {
         let script = tokens.into_iter().map(MockEvent::Text).collect();
-        MockProvider { script, interval }
+        MockProvider::with_script(script, interval)
     }
 
     /// A fully scripted provider (text + tool-call deltas) for deterministic
     /// tool-use loop tests. `chat()` emits `script` at `interval`, then `Done`.
     pub fn with_script(script: Vec<MockEvent>, interval: Duration) -> Self {
-        MockProvider { script, interval }
+        MockProvider {
+            script,
+            interval,
+            reported_cost: None,
+            cost_ledger: CostLedger::process(),
+        }
+    }
+
+    /// Record `cost` into the cost ledger once per `chat` request, as a
+    /// provider with usage pricing would.
+    pub fn with_reported_cost(mut self, cost: RequestCost) -> Self {
+        self.reported_cost = Some(cost);
+        self
+    }
+
+    /// Record reported costs into `cost_ledger` instead of the process ledger.
+    pub fn with_cost_ledger(mut self, cost_ledger: CostLedger) -> Self {
+        self.cost_ledger = cost_ledger;
+        self
     }
 }
 
@@ -86,6 +107,9 @@ impl Provider for MockProvider {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         let script = self.script.clone();
         let interval = self.interval;
+        if let Some(cost) = self.reported_cost.clone() {
+            self.cost_ledger.record(cost);
+        }
         Box::pin(async move {
             let (tx, rx) = mpsc::channel(16);
             tokio::spawn(async move {

@@ -263,6 +263,14 @@ type ) and let them report their findings back:
 
 ---
 
+Run each the following task(s) in subagent(s)
+and let them report their findings back:
+
+- Analyze the costs tracking functionality implemented in source code
+  and list currently implemented features in a brief markdown descriptions.
+
+---
+
 Discover the project structure related to agent tool implementations.
 Provide a 3-5 sentence summary for every source file.
 Run the summary task on each file in separate subagent and let it report
