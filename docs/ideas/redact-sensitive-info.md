@@ -17,3 +17,10 @@ the sensitive ones!
 How to select sensitive variables remains an unresolved design question.
 Maybe we use a toplevel config property `redact_envvar_pattern` that could
 be a regular expression that identifies envvars that are sensitive ?
+
+## Relation to bash auto-approval
+
+Redaction reduces the risk of auto-approving "readonly" `bash` commands
+(see [bash-approval](bash-approval.md)), but is not sufficient on its own:
+it only knows values from the profile `.env`, cannot see transformed
+values, and does not cover exfiltration that bypasses tool results.
