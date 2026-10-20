@@ -32,14 +32,25 @@ pub(super) struct TitleDriver {
 
 impl TitleDriver {
     pub(super) fn trigger(&self, agent: &AgentLoop) {
-        if let Some(store) = agent.store() {
-            let _ = self.attempt.trigger_with_title_updates(
+        let Some(store) = agent.store() else {
+            return;
+        };
+        let _ = if self.profile.utility_engine.is_none() {
+            // Without an explicit utility engine, titles follow the engine the
+            // conversation currently runs on, including `/models` switches.
+            self.attempt.trigger_with_engine_and_title_updates(
+                store,
+                agent.engine(),
+                self.title_update_tx.clone(),
+            )
+        } else {
+            self.attempt.trigger_with_title_updates(
                 store,
                 Arc::clone(&self.factory),
                 self.profile.clone(),
                 self.title_update_tx.clone(),
-            );
-        }
+            )
+        };
     }
 }
 

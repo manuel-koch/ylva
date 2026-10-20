@@ -1,4 +1,5 @@
 default_engine = "openrouterB"
+#utility_engine = "copilot-medium"
 
 [compaction]
 timeout_sec = 600
@@ -16,6 +17,10 @@ api_key = "${OLLAMA_CLOUD_API_KEY}"
 provider = "openrouter"
 api_base_url = "https://openrouter.ai"
 api_key = "${OPENROUTER_API_KEY}"
+
+[provider_connections.copilot]
+provider = "copilot"
+api_key = "${COPILOT_GITHUB_TOKEN}"
 
 [engines.local]
 provider_connection = "ollama-local"
@@ -35,6 +40,11 @@ reasoning = "max"
 provider_connection = "openrouter"
 model = "openai/gpt-6-luna"
 context_length = "256K"
+reasoning = "medium"
+
+[engines.copilot-medium]
+provider_connection = "copilot"
+model = "claude-haiku-5.5"
 reasoning = "medium"
 
 [tools.read]

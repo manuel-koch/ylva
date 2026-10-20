@@ -227,6 +227,15 @@ provider = "ollama"
 api_base_url = "https://ollama.com"
 api_key = "${OLLAMA_CLOUD_API_KEY}"
 
+[provider_connections.copilot]
+provider = "copilot"
+api_key = "${COPILOT_GITHUB_TOKEN}"
+
+[provider_connections.openrouter]
+provider = "openrouter"
+api_base_url = "https://openrouter.ai"
+api_key = "${OPENROUTER_API_KEY}"
+
 [engines."ollama/local"]
 provider_connection = "ollama-local"
 model = "gemma4:e4b-mlx"
@@ -253,13 +262,13 @@ engine = "ollama/local"
 | `default_engine` | string (optional) | Name of the engine used when an agent type names none. Defaults to `default` when omitted. |
 | `[compaction].engine` | string (optional) | Explicit profile-level compaction engine, overridden by an explicit per-agent compaction engine. When absent at both levels, summaries follow that agent's active conversation engine, including later `/models` switches. |
 | `[compaction].timeout_sec` | number (optional) | Wall-clock seconds allowed for each summary request made by the selected compaction engine (default `60`; must be greater than `0`). This is separate from the active conversation engine's settings. |
-| `utility_engine` | string (optional) | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent and does not follow Engine runtime changes through `/models`. |
+| `utility_engine` | string (optional) | Isolated engine used to generate session titles from the first user message and completed assistant reply. Only when unset do root-session titles in the TUI follow the engine the conversation currently runs on, including `/models` switches. Non-interactive runs and subagent titles use `default_engine` when unset. When set, it is a fixed engine that `/models` never changes. |
 | `default_model` | string (optional) | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Syntax-highlighting theme. Defaults to `dark`. See [features — rendering](./features.md#tui-architecture). |
 | `input_history_limit` | number | Maximum number of explicit messages from prior root sessions loaded into TUI input history. Defaults to `50`; `0` disables prior-session history. |
 | `max_concurrent_subagents` | integer or integer string | Profile-level cap on simultaneously running subagents across the delegation tree. Defaults to `4`; values `<= 0` mean unlimited. `--max-concurrent-subagents <N>` overrides this for one run. The cap limits subagent runs, not the root request. Provider request concurrency is separately limited per connection. |
 | `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
-| `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind (`mock`, `ollama` or `openrouter`; any other value fails at load); its endpoint and credentials belong to this connection. |
+| `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind (`mock`, `ollama`, `openrouter` or `copilot`; any other value fails at load); its endpoint and credentials belong to this connection. |
 | `[engines.<name>]` | table | A named engine — see [Engine configuration](#engine-configuration) below. |
 | `[agents.<type>]` | table | Per-agent-type settings — see [Per-agent configuration](#per-agent-configuration) below. |
 
@@ -270,7 +279,8 @@ otherwise, set it to an engine name that is defined.
 Every named provider connection is also made available
 to `/models`, including connections that are not referenced by an engine. A
 profile with provider connections but no engines gets one implicit engine per
-connection. Only a profile with neither explicit engines nor provider
+connection, which has no `/models` shortcut while the profile sets no
+`default_model`. Only a profile with neither explicit engines nor provider
 connections uses environment-based provider discovery. The selected root
 agent type's configured `engine` is initially active, falling back to the
 profile's `default_engine`. `/models` queries each named provider connection
@@ -320,6 +330,16 @@ hygiene for a file that holds API keys; an existing `.env` keeps its permissions
 Global, profile-scoped, and project-scoped `agents/*.md` and `agents/*.toml` files are discovered while
 resolving profiles; richer examples are documented below rather than shipped as
 repository templates.
+
+### GitHub Copilot connection
+
+`ylva connect copilot` creates this table and stores the token for you (see
+[CLI options — connect commands](./cli-options.md#connect-commands)). The
+token must be a GitHub OAuth device-flow token (`ghu_…`); personal access
+tokens (`github_pat_…`, `ghp_…`) are rejected. Setting `COPILOT_GITHUB_TOKEN`
+alone auto-detects a `copilot` connection without any config. See
+[provider notes — GitHub Copilot](./provider-notes.md#github-copilot) for
+risks and limits.
 
 ### Managing profiles and shims
 
@@ -583,7 +603,7 @@ rebuilding the provider.
 
 | Field | Type | Description |
 |---|---|---|
-| `provider_connection` | string | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"mock"`, `"ollama"`, or `"openrouter"`. Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
+| `provider_connection` | string | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"mock"`, `"ollama"`, `"openrouter"`, or `"copilot"`. `copilot` needs no `api_base_url`: its API base comes from the session-token exchange, and `api_key` holds the long-lived GitHub OAuth token (see [GitHub Copilot connection](#github-copilot-connection)). Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
 | `model` | string | Model identifier passed to the provider. May be omitted, in which case the profile's `default_model` fills it in. |
 | `temperature` | number (optional) | Sampling temperature. Omit to use the model's own default. |
 | `context_length` | number or string (optional) | Maximum token context window for this engine's configured model. Omitted means the profile doesn't limit it explicitly. Accepts a plain integer or a decimal string with a case-insensitive `K`/`M` suffix (e.g. `"128K"` = 128,000 tokens, `"1.2M"` = 1,200,000 tokens). Bare integer strings are also accepted. Fractional suffixed values must resolve to whole tokens without rounding; overflow and byte-unit suffixes (`kb`, `mb`, `KiB`, etc.) are rejected. Configuration and display both use decimal token units. For the configured model, this value takes precedence over the provider catalog. Switching to another model uses that model's catalog window, then the built-in default of `128 000`, without retaining the configured override or the previous model's window. Selecting the configured model again reapplies its override. Compaction budgeting uses the resolved window. |

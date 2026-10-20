@@ -96,6 +96,7 @@ classDiagram
         class OpenAiCompatibleProvider {}
         class OllamaProvider {}
         class OpenRouterProvider {}
+        class CopilotProvider {}
     }
 
     namespace Config {
@@ -190,8 +191,10 @@ classDiagram
     OpenAiCompatibleProvider ..|> Provider
     OllamaProvider ..|> Provider
     OpenRouterProvider ..|> Provider
+    CopilotProvider ..|> Provider
     OllamaProvider *-- OpenAiCompatibleProvider : shared transport implementation
     OpenRouterProvider *-- OpenAiCompatibleProvider : shared transport implementation
+    CopilotProvider *-- OpenAiCompatibleProvider : shared transport implementation
     Provider ..> ModelInfo : returns
     ProfileConfig *-- AgentConfig
     ProfileConfig *-- EngineConfig

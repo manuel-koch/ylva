@@ -20,9 +20,13 @@ ylva --help
 ylva
 ```
 
-For real model responses, configure Ollama or OpenRouter using the
+For real model responses, configure Ollama, OpenRouter or GitHub Copilot using
+the
 [provider environment variables](docs/cli-options.md#environment-variables)
 or [profile configuration](docs/configuration.md#profile-file).
+To add a provider interactively instead, run `ylva connect <provider> [--name <name>]`
+(use provider `ollama`, `openrouter` or `copilot`); see
+[connect commands](docs/cli-options.md#connect-commands).
 Without configured engines or providers, Ylva uses a deterministic mock provider,
 not a real model.
 
@@ -59,9 +63,10 @@ Ylva is highly customizable to adapt to user needs.
 - [x] Multiple LLM providers built-in
   - [x] Ollama
   - [x] Openrouter
-  - [ ] Copilot
+  - [x] Copilot
   - [ ] Anthropic
 - [x] Configurable `engines` ( combination of provider + model + config )
+- [x] Tracking billed token usage and cost totals
 - [x] Session / context compaction
 - [x] Concurrent subagent execution with a profile-configurable limit
 - [x] Support LLM calling tools:
@@ -94,5 +99,3 @@ Ylva is highly customizable to adapt to user needs.
   - [x] `/clear` to clear/reset current session
   - [x] `/session` to resume or clone a recent root session without exiting
   - [x] `/compact` to manually summarize the root model view, retaining the transcript
-- [ ] Tracking billed token usage and cost totals in current context (an
-      approximate context-size readout is already shown in the TUI footer)

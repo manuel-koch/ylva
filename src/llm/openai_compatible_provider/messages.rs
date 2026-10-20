@@ -16,7 +16,7 @@
 
 use crate::agent::Message;
 
-use super::{InputModality, ToolEnvelope};
+use crate::llm::{InputModality, ToolEnvelope};
 
 /// Provider-specific content-part formatting for the shared Chat Completions
 /// transport.

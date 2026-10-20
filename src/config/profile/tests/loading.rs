@@ -262,6 +262,35 @@ model = "cloud-model"
 }
 
 #[test]
+fn copilot_connection_loads_without_base_url_and_interpolates_token() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "copilot",
+        r#"
+default_engine = "gpt"
+
+[provider_connections.copilot]
+provider = "copilot"
+api_key = "${COPILOT_GITHUB_TOKEN}"
+
+[engines.gpt]
+provider_connection = "copilot"
+model = "gpt-4o"
+"#,
+    );
+    let environment = HashMap::from([("COPILOT_GITHUB_TOKEN".to_string(), "ghu_x".to_string())]);
+
+    let profile = ProfileConfig::load_with_environment(temp.path(), "copilot", &environment)
+        .expect("the copilot profile loads");
+
+    let connection = &profile.provider_connections["copilot"];
+    assert_eq!(connection.provider, crate::config::ProviderKind::Copilot);
+    assert_eq!(connection.api_base_url, None);
+    assert_eq!(connection.api_key.as_deref(), Some("ghu_x"));
+}
+
+#[test]
 fn numeric_and_boolean_environment_interpolation_loads() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_profile_config(

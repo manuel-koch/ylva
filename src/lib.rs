@@ -20,6 +20,7 @@ pub(crate) mod build_info;
 pub(crate) mod cli;
 pub mod cli_driver;
 pub mod config;
+pub mod connect_command;
 pub(crate) mod conversation_render_cache;
 pub(crate) mod events;
 pub(crate) mod exit_code;
@@ -52,6 +53,7 @@ pub mod tui_driver;
 pub mod tui_reducer_state;
 pub mod tui_render_state;
 pub mod tui_widgets;
+pub(crate) mod unix_time;
 pub(crate) mod ylva_home;
 
 /// Git metadata entry, which may be a directory or a worktree marker file.
@@ -91,7 +93,7 @@ pub use agent::{
 pub use agent_factory::AgentFactory;
 pub use app::App;
 pub use build_info::{BuildInfo, BUILD_INFO};
-pub use cli::{Cli, CliColorMode, CliCommand, SkillCommand};
+pub use cli::{Cli, CliColorMode, CliCommand, ConnectCommand, SkillCommand};
 pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
 pub use config::compaction_prompt::{load_compaction_prompt, DEFAULT_COMPACTION_PROMPT};
 pub use config::instructions::{
@@ -120,7 +122,7 @@ pub use llm::engine::{
     DEFAULT_CONTEXT_LENGTH,
 };
 pub use llm::{
-    CostLedger, InputModality, MockEvent, MockProvider, ModelInfo, OllamaProvider,
+    CopilotProvider, CostLedger, InputModality, MockEvent, MockProvider, ModelInfo, OllamaProvider,
     OpenAiCompatibleProvider, OpenRouterProvider, Provider, RequestCost, ToolSchema,
 };
 pub use presenter::{TextareaContext, TuiEvent};

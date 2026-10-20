@@ -1,32 +1,5 @@
 # Sample prompts
 
-```shell
-export OLLAMA_BASE_URL=http://localhost:11434
-
-make format lint test-coverage build-debug-and-run-with-logs
-```
-
----
-
-There are magic numbers in docstring/string that should refer to constants, like
-src/agent/tools/web_search.rs:80: "(max 20; omit it for the configured default)"
-src/agent/tools/web_search.rs:92: "(max 20; omit it for the configured default)"
-
-Those get out of sync when constants are changed.
-Search current implementation for similar lines where magic numbers in docstring/string
-should be replaced by constants instead.
-
----
-
-Implement open tasks in section "Phase x.y" of
-docs/plans/phaseX-<topic>.md
-
-Don't stage or commit anything in git!
-Check linter/tests/coverage for issues!
-Checkmark done tasks in the plan section.
-
----
-
 Use subagent(s) to schedule the analysis and/or run it concurrently:
 
 Discover all `docs/ideas/*.md`.
@@ -93,16 +66,16 @@ How many markdown files are in `docs` folder ?
 Please read file `docs/development-workflow.md` and
 count the words in its content.
 
-Create a four line poem about a little lamp and save it to `logs/poem.md`.
+Create a four line poem about a little lamp and save it to `.ylva/logs/poem.md`.
 
 Summarize current conversation and save it to `../logs/summary.md`.
 
 Create a 50 word sentence ( without newline ) and save it too `../logs/long-line.md`.
 
-Create a 50 word sentence ( without newline ) and save it too `logs/long-line.md`.
+Create a 50 word sentence ( without newline ) and save it too `.ylva/logs/long-line.md`.
 
 Create a 50 word sentence ( without newline, use "-" to join words )
-and save it too `logs/long-words-line.md`.
+and save it too `.ylva/logs/long-words-line.md`.
 
 Use search tool to find markdown files that contain the case-insensitive word `tool`.
 
@@ -115,15 +88,15 @@ report only the paths that matched.
 Use search tool to find Rust source files that contain the case-sensitive regexp `\w+Tool`,
 report only the matched regexp without path/line info.
 
-Create a four line poem about a little lamp and save it to `logs/poem.md`.
+Create a four line poem about a little lamp and save it to `.ylva/logs/poem.md`.
 
-Replace all occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` tool!
+Replace all occurance of "lamp" in `.ylva/logs/poem.md` by "frog" using the `edit` tool!
 
-Replace first occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` tool!
+Replace first occurance of "lamp" in `.ylva/logs/poem.md` by "frog" using the `edit` tool!
 
-Replace line 2+3 in `logs/poem.md` by one line "hello world" using the `edit` tool!
+Replace line 2+3 in `.ylva/logs/poem.md` by one line "hello world" using the `edit` tool!
 
-Replace line 1+2 in `logs/poem.md` by
+Replace line 1+2 in `.ylva/logs/poem.md` by
 
 ```text
 lorem ipsum
@@ -132,14 +105,14 @@ this is a nice place to be"
 
 using the `edit` tool!
 
-Read `logs/poem.md` and ask user which other animal ( free text, no constraint
+Read `.ylva/logs/poem.md` and ask user which other animal ( free text, no constraint
 or pre-selected options ) to use to replace existing animal in the poem.
 
-Read `logs/poem.md` and ask user which other animal to use to replace existing animal
+Read `.ylva/logs/poem.md` and ask user which other animal to use to replace existing animal
 in the poem.
 Give user 5 random animal options to choose from.
 
-Read `logs/poem.md` and ask user which other animal to use to replace existing animal
+Read `.ylva/logs/poem.md` and ask user which other animal to use to replace existing animal
 in the poem.
 Provide the current poem as context for the question.
 Give user 3 random animal options to choose from.
@@ -152,13 +125,13 @@ Create an image using a bash command:
 magick -size 200x200 canvas:white \
        -fill red -stroke none \
        -draw "polygon 100,71 75,114 125,114" \
-       logs/sample.png
+       .ylva/logs/sample.png
 ```
 
-Read image `logs/sample.png` ( using the `read` tool only ) and describe
+Read image `.ylva/logs/sample.png` ( using the `read` tool only ) and describe
 the content. Estimate the edge length of the geometrical shape, if any.
 
-Write a binary file with the textual content of "hello world" to `logs/sample.txt`.
+Write a binary file with the textual content of "hello world" to `.ylva/logs/sample.txt`.
 
 ---
 

@@ -391,3 +391,46 @@ async fn engine_router_reports_an_aggregate_error_when_all_providers_fail() {
         "no configured provider connection returned models: ollama: server unavailable; openrouter: unauthorized"
     );
 }
+
+fn router_over(engine: &Arc<CatalogEngine>) -> EngineRouter {
+    let engine: Arc<dyn Engine> = engine.clone();
+    EngineRouter::new(HashMap::from([("default".to_string(), engine)]), "default")
+        .expect("router construction")
+}
+
+#[tokio::test]
+async fn engine_router_reuses_a_provider_catalog_until_it_expires() {
+    let engine = Arc::new(CatalogEngine::new("openrouter", "hosted", &["hosted"]));
+    let router = router_over(&engine);
+
+    router.list_model_options().await.expect("first listing");
+    let options = router.list_model_options().await.expect("cached listing");
+
+    assert_eq!(options.len(), 1);
+    assert_eq!(engine.model_list_calls.load(Ordering::SeqCst), 1);
+
+    let expiring = router_over(&engine).with_catalog_cache_lifetime(Duration::ZERO);
+    expiring.list_model_options().await.expect("first listing");
+    expiring
+        .list_model_options()
+        .await
+        .expect("expired listing");
+    assert_eq!(engine.model_list_calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn engine_router_does_not_cache_a_failed_catalog() {
+    let engine = Arc::new(CatalogEngine::failing("ollama", "server unavailable"));
+    let router = router_over(&engine);
+
+    router
+        .list_model_options()
+        .await
+        .expect_err("first failure");
+    router
+        .list_model_options()
+        .await
+        .expect_err("second failure");
+
+    assert_eq!(engine.model_list_calls.load(Ordering::SeqCst), 2);
+}

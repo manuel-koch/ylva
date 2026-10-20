@@ -23,10 +23,14 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{DeltaChunk, Message, StreamEvent};
 use crate::http::RequestConcurrencyLimiter;
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_CONTEXT_LENGTH};
-use crate::llm::openai_compatible_messages::{serialize_messages_with_policy, ContentPartFormat};
+use crate::llm::openai_compatible_provider::messages::{
+    serialize_messages_with_policy, ContentPartFormat,
+};
 use crate::llm::token_usage::{TokenUsageDumpSource, TokenUsageRecord};
 use crate::llm::usage_cost::{CostLedger, RequestCost};
 use crate::llm::{order_reasoning_efforts, InputModality, Provider, ToolSchema};
+
+pub(crate) mod messages;
 
 /// Extracts the request cost a backend reports in one SSE payload. Reported
 /// costs are not part of the OpenAI Chat Completions protocol, so each backend
@@ -40,6 +44,34 @@ fn no_request_body_customization(
     _request_body: &mut serde_json::Value,
     _runtime_config: &EngineRuntimeConfig,
 ) {
+}
+
+/// Per-request endpoint and credential resolved by a [`RequestAuthorizer`].
+pub(crate) struct RequestAuthorization {
+    pub base_url: String,
+    pub bearer_token: String,
+}
+
+impl std::fmt::Debug for RequestAuthorization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RequestAuthorization")
+            .field("base_url", &self.base_url)
+            .field("bearer_token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Resolves the base URL and bearer token before every request, for backends
+/// whose credential is short-lived and exchanged at runtime.
+pub(crate) trait RequestAuthorizer: Send + Sync + std::fmt::Debug {
+    fn authorize(&self) -> BoxFuture<'_, anyhow::Result<RequestAuthorization>>;
+
+    /// Headers derived from the conversation, added on top of the static
+    /// extra headers.
+    fn chat_request_headers(&self, _messages: &[Message]) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
 }
 
 const REDACTED_BASE64_RESULT: &str = "<REDACTED_BASE64_RESULT>";
@@ -57,7 +89,55 @@ pub(crate) fn redact_chat_completion_request_body(body: &serde_json::Value) -> s
             redact_chat_completion_message(message);
         }
     }
+    if let Some(items) = redacted
+        .get_mut("input")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for item in items {
+            redact_responses_input_item(item);
+        }
+    }
     redacted
+}
+
+fn redact_responses_input_item(item: &mut serde_json::Value) {
+    let Some(object) = item.as_object_mut() else {
+        return;
+    };
+    if object.get("type").and_then(serde_json::Value::as_str) == Some("function_call_output") {
+        if let Some(output) = object.get_mut("output") {
+            if let Some(mut envelope) = output
+                .as_str()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            {
+                redact_tool_envelope(&mut envelope);
+                if let Ok(serialized) = serde_json::to_string(&envelope) {
+                    *output = serde_json::Value::String(serialized);
+                }
+            }
+        }
+        return;
+    }
+    for content_part in object
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        match content_part.get("type").and_then(serde_json::Value::as_str) {
+            Some("input_image") => {
+                if let Some(image_url) = content_part.get_mut("image_url") {
+                    redact_data_uri_in_place(image_url);
+                }
+            }
+            Some("input_file") => {
+                if let Some(file_data) = content_part.get_mut("file_data") {
+                    redact_data_uri_in_place(file_data);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn redact_chat_completion_message(message: &mut serde_json::Value) {
@@ -212,6 +292,64 @@ pub struct OpenAiCompatibleProvider {
     cost_ledger: CostLedger,
     /// `None` when the backend does not report request costs.
     usage_cost_parser: Option<UsageCostParser>,
+    /// Overrides `base_url` and `api_key` on every request when set.
+    request_authorizer: Option<std::sync::Arc<dyn RequestAuthorizer>>,
+    /// Static headers added to every chat and model-listing request.
+    extra_headers: Vec<(&'static str, &'static str)>,
+    /// `Some` when the backend serves some models only through `/responses`.
+    responses_only_models: Option<std::sync::Arc<ResponsesOnlyModels>>,
+}
+
+/// Models that the backend's catalog lists for `/responses` but not for
+/// `/chat/completions`, shared by all clones of a provider.
+#[derive(Debug, Default)]
+pub(crate) struct ResponsesOnlyModels {
+    model_ids: std::sync::RwLock<std::collections::HashSet<String>>,
+    catalog_loaded: std::sync::atomic::AtomicBool,
+}
+
+impl ResponsesOnlyModels {
+    /// Replace the known models from a `/models` body that advertises
+    /// `supported_endpoints` per model.
+    fn replace_from_catalog(&self, body: &serde_json::Value) {
+        let model_ids = body
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let endpoints = entry
+                    .get("supported_endpoints")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>();
+                let responses_only =
+                    endpoints.contains(&"/responses") && !endpoints.contains(&"/chat/completions");
+                responses_only.then(|| entry.get("id")?.as_str().map(str::to_owned))?
+            })
+            .collect();
+        if let Ok(mut known) = self.model_ids.write() {
+            *known = model_ids;
+            self.catalog_loaded
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn is_loaded(&self) -> bool {
+        self.catalog_loaded
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn contains(&self, model: &str) -> bool {
+        self.model_ids
+            .read()
+            .is_ok_and(|known| known.contains(model))
+    }
+}
+
+fn join_endpoint(base_url: &str, endpoint: &str) -> String {
+    format!("{}/{endpoint}", base_url.trim_end_matches('/'))
 }
 
 impl OpenAiCompatibleProvider {
@@ -299,7 +437,29 @@ impl OpenAiCompatibleProvider {
             provider_kind: "openai_compatible",
             cost_ledger: CostLedger::process(),
             usage_cost_parser: None,
+            request_authorizer: None,
+            extra_headers: Vec::new(),
+            responses_only_models: None,
         }
+    }
+
+    /// Resolve the endpoint and bearer token per request and send
+    /// `extra_headers` with every request.
+    pub(crate) fn with_request_authorizer(
+        mut self,
+        request_authorizer: std::sync::Arc<dyn RequestAuthorizer>,
+        extra_headers: Vec<(&'static str, &'static str)>,
+    ) -> Self {
+        self.request_authorizer = Some(request_authorizer);
+        self.extra_headers = extra_headers;
+        self
+    }
+
+    /// Send models that the catalog lists only for `/responses` through the
+    /// Responses API instead of `/chat/completions`.
+    pub(crate) fn with_responses_only_models(mut self) -> Self {
+        self.responses_only_models = Some(std::sync::Arc::default());
+        self
     }
 
     pub(crate) fn with_provider_kind(mut self, provider_kind: &'static str) -> Self {
@@ -332,17 +492,11 @@ impl OpenAiCompatibleProvider {
         self
     }
 
-    /// Compose the chat-completions endpoint from `base_url`. The concrete
+    /// Compose the model-listing endpoint from `base_url`. The concrete
     /// provider owns this path interpretation; the trait and `base_url`'s
     /// meaning never leak the OpenAI path structure.
-    fn completions_url(&self) -> String {
-        format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
-    }
-
-    /// Compose the model-listing endpoint from `base_url`, the same way
-    /// [`Self::completions_url`] composes the chat endpoint.
     fn models_url(&self) -> String {
-        format!("{}/models", self.base_url.trim_end_matches('/'))
+        join_endpoint(&self.base_url, "models")
     }
 
     /// Return a clone of the HTTP client for a provider-specific request.
@@ -399,11 +553,33 @@ impl Provider for OpenAiCompatibleProvider {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let request_limiter = self.request_limiter.clone();
+        let request_authorizer = self.request_authorizer.clone();
+        let extra_headers = self.extra_headers.clone();
+        let responses_only_models = self.responses_only_models.clone();
         Box::pin(async move {
             let _permit = request_limiter.acquire().await?;
-            let body =
-                crate::http::get_json(&client, &models_url, api_key.as_deref(), "model listing")
-                    .await?;
+            let (models_url, api_key) = match &request_authorizer {
+                Some(request_authorizer) => {
+                    let authorization = request_authorizer.authorize().await?;
+                    (
+                        join_endpoint(&authorization.base_url, "models"),
+                        Some(authorization.bearer_token),
+                    )
+                }
+                None => (models_url, api_key),
+            };
+            let body = crate::http::get_json_with_headers(
+                &client,
+                &models_url,
+                api_key.as_deref(),
+                &extra_headers,
+                "model listing",
+                &crate::http::RequestDumpSource::Environment,
+            )
+            .await?;
+            if let Some(responses_only_models) = &responses_only_models {
+                responses_only_models.replace_from_catalog(&body);
+            }
             Ok(parse_model_list(&body))
         })
     }
@@ -474,7 +650,9 @@ impl Provider for OpenAiCompatibleProvider {
             Err(error) => return Box::pin(async move { Err(error) }),
         };
         let provider_connection = self.name.clone();
-        let completions_url = self.completions_url();
+        let base_url = self.base_url.clone();
+        let responses_only_models = self.responses_only_models.clone();
+        let catalog_provider = responses_only_models.as_ref().map(|_| self.clone());
         let api_key = self.api_key.clone();
         let client = self.client.clone();
         let request_body_customizer = self.request_body_customizer;
@@ -484,6 +662,8 @@ impl Provider for OpenAiCompatibleProvider {
         let cost_ledger = self.cost_ledger.clone();
         let usage_cost_parser = self.usage_cost_parser;
         let request_limiter = self.request_limiter.clone();
+        let request_authorizer = self.request_authorizer.clone();
+        let extra_headers = self.extra_headers.clone();
         let token_usage_dump_source = self.token_usage_dump_source.clone();
         let request_dump_source = self.request_dump_source.clone();
         let tools: Vec<serde_json::Value> = if tools.is_empty() {
@@ -492,25 +672,75 @@ impl Provider for OpenAiCompatibleProvider {
             tools.iter().map(ToolSchema::to_request_value).collect()
         };
         Box::pin(async move {
-            let mut request_body = serde_json::json!({
-                "model": runtime_config.model,
-                "messages": serialize_messages_with_policy(
-                    &messages,
-                    runtime_config.input_modalities.as_deref(),
-                    content_part_format,
-                ),
-                "stream": true,
-                "stream_options": { "include_usage": true },
-            });
-            if let Some(temperature) = runtime_config.temperature {
-                request_body["temperature"] = serde_json::json!(temperature);
-            }
-            request_body_customizer(&mut request_body, &runtime_config);
-            if !tools.is_empty() {
-                request_body["tools"] = serde_json::Value::Array(tools);
-                request_body["tool_choice"] = serde_json::json!("auto");
-            }
+            let use_responses = match (&responses_only_models, &catalog_provider) {
+                (Some(responses_only_models), Some(catalog_provider)) => {
+                    if !responses_only_models.is_loaded() {
+                        // The catalog tells which models need `/responses`; a
+                        // failure here falls back to chat completions.
+                        if let Err(error) = catalog_provider.list_models().await {
+                            tracing::debug!(%error, "model catalog unavailable for endpoint selection");
+                        }
+                    }
+                    responses_only_models.contains(&runtime_config.model)
+                }
+                _ => false,
+            };
+            let serialized_messages = serialize_messages_with_policy(
+                &messages,
+                runtime_config.input_modalities.as_deref(),
+                content_part_format,
+            );
+            let request_body = if use_responses {
+                crate::llm::openai_responses::responses_request_body(
+                    &runtime_config.model,
+                    &serialized_messages,
+                    &tools,
+                    runtime_config.temperature,
+                    runtime_config.reasoning_effort.as_deref(),
+                )
+            } else {
+                let mut request_body = serde_json::json!({
+                    "model": runtime_config.model,
+                    "messages": serialized_messages,
+                    "stream": true,
+                    "stream_options": { "include_usage": true },
+                });
+                if let Some(temperature) = runtime_config.temperature {
+                    request_body["temperature"] = serde_json::json!(temperature);
+                }
+                request_body_customizer(&mut request_body, &runtime_config);
+                if !tools.is_empty() {
+                    request_body["tools"] = serde_json::Value::Array(tools);
+                    request_body["tool_choice"] = serde_json::json!("auto");
+                }
+                request_body
+            };
+            let endpoint = if use_responses {
+                "responses"
+            } else {
+                "chat/completions"
+            };
+            let (completions_url, api_key) = match &request_authorizer {
+                Some(request_authorizer) => {
+                    let authorization = request_authorizer.authorize().await?;
+                    (
+                        join_endpoint(&authorization.base_url, endpoint),
+                        Some(authorization.bearer_token),
+                    )
+                }
+                None => (join_endpoint(&base_url, endpoint), api_key),
+            };
+            let derived_headers = request_authorizer
+                .as_ref()
+                .map(|request_authorizer| request_authorizer.chat_request_headers(&messages))
+                .unwrap_or_default();
             let mut headers = HeaderMap::new();
+            for (name, value) in extra_headers.iter().chain(&derived_headers) {
+                headers.insert(
+                    reqwest::header::HeaderName::from_static(name),
+                    reqwest::header::HeaderValue::from_static(value),
+                );
+            }
             if let Some(value) = &api_key {
                 let authorization = format!("{} {}", "Bearer", value);
                 headers.insert(AUTHORIZATION, authorization.parse()?);
@@ -630,11 +860,18 @@ impl Provider for OpenAiCompatibleProvider {
                 let mut reported_input_tokens = None;
                 let mut cost_recorded = false;
                 let mut first_token_received = false;
+                let mut responses_decoder = use_responses
+                    .then(crate::llm::openai_responses::ResponsesStreamDecoder::default);
+                let terminal_marker = if use_responses {
+                    "response.completed"
+                } else {
+                    "[DONE]"
+                };
                 // Own the byte stream (and the `Response`) inside this task so
                 // dropping it on cancel closes the underlying TCP socket.
                 let stream = response.bytes_stream().eventsource();
                 futures::pin_mut!(stream);
-                loop {
+                'stream: loop {
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
@@ -653,18 +890,18 @@ impl Provider for OpenAiCompatibleProvider {
                             let Some(event) = event else {
                                 if let Some(dump_path) = &response_dump_path {
                                     crate::http::append_response_dump_line(
-                                        "[transport] stream ended without [DONE]",
+                                        &format!("[transport] stream ended without {terminal_marker}"),
                                         dump_path,
                                     );
                                 }
                             tracing::debug!(
                                 dump_id = %stream_dump_id,
                                 elapsed_ms = request_started_at.elapsed().as_millis() as u64,
-                                "stream ended without [DONE]"
+                                "stream ended without a terminal event"
                             );
                                 let _ = tx
                                     .send(StreamEvent::Error(anyhow::anyhow!(
-                                        "provider stream ended before [DONE]"
+                                        "provider stream ended before {terminal_marker}"
                                     )))
                                     .await;
                                 break;
@@ -694,36 +931,41 @@ impl Provider for OpenAiCompatibleProvider {
                                         );
                                         cost_ledger.record(cost);
                                     }
-                                    match parse_sse_payload(&event.data) {
-                                        Some(StreamEvent::Done) => {
-                                            tracing::debug!(
-                                                dump_id = %stream_dump_id,
-                                                elapsed_ms = request_started_at.elapsed().as_millis() as u64,
-                                                "stream ended with [DONE]"
-                                            );
-                                            let _ = tx.send(StreamEvent::Done).await;
-                                            break;
-                                        }
-                                        Some(StreamEvent::Error(error)) => {
-                                            let _ = tx.send(StreamEvent::Error(error)).await;
-                                            break;
-                                        }
-                                        Some(stream_event) => {
-                                            // `parse_sse_payload` yields only Text/Thinking/Delta here,
-                                            // so the first such event is the first token.
-                                            if !first_token_received {
-                                                first_token_received = true;
+                                    let stream_events = match responses_decoder.as_mut() {
+                                        Some(decoder) => decoder.decode(&event.data),
+                                        None => parse_sse_payload(&event.data).into_iter().collect(),
+                                    };
+                                    for stream_event in stream_events {
+                                        match stream_event {
+                                            StreamEvent::Done => {
                                                 tracing::debug!(
                                                     dump_id = %stream_dump_id,
                                                     elapsed_ms = request_started_at.elapsed().as_millis() as u64,
-                                                    "first token received"
+                                                    "stream ended with {terminal_marker}"
                                                 );
+                                                let _ = tx.send(StreamEvent::Done).await;
+                                                break 'stream;
                                             }
-                                            if tx.send(stream_event).await.is_err() {
-                                                break;
+                                            StreamEvent::Error(error) => {
+                                                let _ = tx.send(StreamEvent::Error(error)).await;
+                                                break 'stream;
+                                            }
+                                            stream_event => {
+                                                // Only Text/Thinking/Delta remain here, so the
+                                                // first such event is the first token.
+                                                if !first_token_received {
+                                                    first_token_received = true;
+                                                    tracing::debug!(
+                                                        dump_id = %stream_dump_id,
+                                                        elapsed_ms = request_started_at.elapsed().as_millis() as u64,
+                                                        "first token received"
+                                                    );
+                                                }
+                                                if tx.send(stream_event).await.is_err() {
+                                                    break 'stream;
+                                                }
                                             }
                                         }
-                                        None => {}
                                     }
                                 }
                                 Err(error) => {
@@ -767,6 +1009,10 @@ fn parse_reported_input_tokens(data: &str) -> Option<(usize, &'static str)> {
         (
             "/usage/input_tokens",
             "openai_compatible.usage.input_tokens",
+        ),
+        (
+            "/response/usage/input_tokens",
+            "openai_compatible.response.usage.input_tokens",
         ),
     ] {
         if let Some(tokens) = value
@@ -916,12 +1162,12 @@ fn parse_model_list(body: &serde_json::Value) -> Vec<crate::llm::ModelInfo> {
         .iter()
         .filter_map(|entry| {
             let id = entry.get("id").and_then(serde_json::Value::as_str)?;
+            if !serves_a_chat_endpoint(entry) {
+                return None;
+            }
             Some(crate::llm::ModelInfo {
                 id: id.to_string(),
-                context_length: entry
-                    .get("context_length")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|length| length as usize),
+                context_length: parse_context_length(entry),
                 reasoning_efforts: parse_reasoning_efforts(entry),
                 reasoning_default: parse_reasoning_default(entry),
                 input_modalities: parse_input_modalities(entry),
@@ -930,11 +1176,68 @@ fn parse_model_list(body: &serde_json::Value) -> Vec<crate::llm::ModelInfo> {
         .collect()
 }
 
+/// Whether an entry can answer `/chat/completions` or `/responses`. Copilot
+/// lists embedding and completion models (`capabilities.type`) and models
+/// serving neither endpoint (`supported_endpoints`); entries without that
+/// metadata are kept.
+fn serves_a_chat_endpoint(entry: &serde_json::Value) -> bool {
+    let endpoint_allows_chat = entry
+        .get("supported_endpoints")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|endpoints| {
+            endpoints.iter().any(|endpoint| {
+                matches!(endpoint.as_str(), Some("/chat/completions" | "/responses"))
+            })
+        });
+    let type_allows_chat = entry
+        .pointer("/capabilities/type")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|kind| kind == "chat");
+    endpoint_allows_chat && type_allows_chat
+}
+
+/// Read the usable input size: OpenRouter's `context_length`, or Copilot's
+/// `capabilities.limits.max_prompt_tokens` (falling back to
+/// `max_context_window_tokens`, which also counts the output budget).
+fn parse_context_length(entry: &serde_json::Value) -> Option<usize> {
+    entry
+        .get("context_length")
+        .or_else(|| entry.pointer("/capabilities/limits/max_prompt_tokens"))
+        .or_else(|| entry.pointer("/capabilities/limits/max_context_window_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|length| length as usize)
+}
+
+/// Copilot reports `supports.vision` and the document types it accepts
+/// (`limits.vision.supported_media_types`). `None` without `supports`.
+fn parse_copilot_input_modalities(entry: &serde_json::Value) -> Option<Vec<InputModality>> {
+    let supports = entry.pointer("/capabilities/supports")?;
+    let mut modalities = Vec::new();
+    if supports.get("vision").and_then(serde_json::Value::as_bool) == Some(true) {
+        modalities.push(InputModality::Image);
+        let accepts_documents = entry
+            .pointer("/capabilities/limits/vision/supported_media_types")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|types| {
+                types
+                    .iter()
+                    .any(|kind| kind.as_str() == Some("application/pdf"))
+            });
+        if accepts_documents {
+            modalities.push(InputModality::File);
+        }
+    }
+    Some(modalities)
+}
+
 fn parse_input_modalities(entry: &serde_json::Value) -> Option<Vec<InputModality>> {
-    let values = entry
+    let Some(values) = entry
         .pointer("/architecture/input_modalities")
-        .or_else(|| entry.get("input_modalities"))?
-        .as_array()?;
+        .or_else(|| entry.get("input_modalities"))
+    else {
+        return parse_copilot_input_modalities(entry);
+    };
+    let values = values.as_array()?;
     Some(
         values
             .iter()
@@ -948,10 +1251,19 @@ fn parse_input_modalities(entry: &serde_json::Value) -> Option<Vec<InputModality
     )
 }
 
+/// Read the selectable efforts: OpenRouter's `reasoning.supported_efforts`, or
+/// Copilot's `capabilities.supports.reasoning_effort` list.
 fn parse_reasoning_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
-    let reasoning = entry.get("reasoning")?;
-    let efforts = reasoning
-        .get("supported_efforts")
+    let copilot_efforts = entry.pointer("/capabilities/supports/reasoning_effort");
+    let (efforts, reasoning_declared) = match (entry.get("reasoning"), copilot_efforts) {
+        (Some(reasoning), _) => (reasoning.get("supported_efforts"), true),
+        (None, Some(efforts)) => (Some(efforts), true),
+        (None, None) => (None, false),
+    };
+    if !reasoning_declared {
+        return None;
+    }
+    let efforts = efforts
         .and_then(serde_json::Value::as_array)
         .map(|efforts| {
             efforts

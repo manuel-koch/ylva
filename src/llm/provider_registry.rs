@@ -20,13 +20,19 @@ use std::time::Duration;
 use crate::config::{ProviderConnectionConfig, ProviderKind};
 use crate::llm::engine::EngineConfig;
 
-use super::{MockProvider, OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider, Provider};
+use super::{
+    CopilotProvider, MockProvider, OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider,
+    Provider,
+};
 
 /// Default Ollama model when `OLLAMA_MODEL` is unset.
 pub const DEFAULT_OLLAMA_MODEL: &str = "gemma4:e4b-mlx";
 
 /// Default OpenRouter model when `OPENROUTER_MODEL` is unset.
 pub const DEFAULT_OPENROUTER_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+
+/// Default Copilot model when `COPILOT_MODEL` is unset.
+pub const DEFAULT_COPILOT_MODEL: &str = "gpt-4o";
 
 /// Default OpenRouter origin when `OPENROUTER_BASE_URL` is unset.
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai";
@@ -44,6 +50,9 @@ pub struct ProviderEnv {
     pub openrouter_base_url: Option<String>,
     pub openrouter_model: Option<String>,
     pub openrouter_api_key: Option<String>,
+    pub copilot_model: Option<String>,
+    /// Long-lived GitHub OAuth token for Copilot. `GH_TOKEN` is never read.
+    pub copilot_github_token: Option<String>,
 }
 
 impl ProviderEnv {
@@ -77,6 +86,7 @@ impl ProviderEnv {
         let api_key = match engine_config.provider_connection.as_str() {
             "ollama" => self.ollama_api_key.as_ref(),
             "openrouter" => self.openrouter_api_key.as_ref(),
+            "copilot" => self.copilot_github_token.as_ref(),
             _ => None,
         };
         if let Some(api_key) = api_key.filter(|api_key| !api_key.is_empty()) {
@@ -97,6 +107,7 @@ impl ProviderEnv {
         let api_key = match provider_config.provider {
             ProviderKind::Ollama => self.ollama_api_key.as_ref(),
             ProviderKind::Openrouter => self.openrouter_api_key.as_ref(),
+            ProviderKind::Copilot => self.copilot_github_token.as_ref(),
             ProviderKind::Mock => None,
         };
         if let Some(api_key) = api_key.filter(|api_key| !api_key.is_empty()) {
@@ -112,6 +123,8 @@ impl ProviderEnv {
             openrouter_base_url: lookup("OPENROUTER_BASE_URL"),
             openrouter_model: lookup("OPENROUTER_MODEL"),
             openrouter_api_key: lookup("OPENROUTER_API_KEY"),
+            copilot_model: lookup("COPILOT_MODEL"),
+            copilot_github_token: lookup("COPILOT_GITHUB_TOKEN"),
         }
     }
 }
@@ -230,7 +243,7 @@ impl ProviderSelection {
                 },
                 temperature: None,
                 context_length: None,
-                api_base_url: Some(base_url.clone()),
+                api_base_url: Some(base_url.clone()).filter(|url| !url.is_empty()),
                 api_key: api_key.clone(),
                 reasoning: None,
 
@@ -255,6 +268,13 @@ impl ProviderRegistry {
     pub fn from_engine_config(engine_config: &EngineConfig) -> anyhow::Result<ProviderSelection> {
         match engine_config.provider_connection.as_str() {
             "mock" => Ok(ProviderSelection::Mock),
+            "copilot" => Ok(ProviderSelection::OpenAiCompatible {
+                provider_kind: ProviderKind::Copilot,
+                provider_connection: engine_config.provider_connection.clone(),
+                base_url: String::new(),
+                model: engine_config.model.clone(),
+                api_key: engine_config.api_key.clone(),
+            }),
             name @ ("ollama" | "openrouter") => {
                 let provider_kind = if name == "ollama" {
                     ProviderKind::Ollama
@@ -299,6 +319,16 @@ impl ProviderRegistry {
     ) -> anyhow::Result<ProviderSelection> {
         match provider_config.provider {
             ProviderKind::Mock => Ok(ProviderSelection::Mock),
+            ProviderKind::Copilot => Ok(ProviderSelection::OpenAiCompatible {
+                provider_kind: ProviderKind::Copilot,
+                provider_connection: provider_connection.to_string(),
+                base_url: String::new(),
+                model: engine_config.model.clone(),
+                api_key: engine_config
+                    .api_key
+                    .clone()
+                    .or_else(|| provider_config.api_key.clone()),
+            }),
             ProviderKind::Ollama | ProviderKind::Openrouter => {
                 let base_url = engine_config
                     .api_base_url
@@ -328,7 +358,8 @@ impl ProviderRegistry {
 
     /// Resolve the backend for a captured environment snapshot.
     ///
-    /// Ollama has precedence over OpenRouter when both are configured.
+    /// Ollama has precedence over OpenRouter, and OpenRouter over Copilot, when
+    /// several are configured.
     pub fn from_environment(env: &ProviderEnv) -> ProviderSelection {
         Self::all_from_environment(env)
             .into_iter()
@@ -379,6 +410,24 @@ impl ProviderRegistry {
                 base_url,
                 model,
                 api_key: env.openrouter_api_key.clone(),
+            });
+        }
+
+        if let Some(github_token) = env
+            .copilot_github_token
+            .as_ref()
+            .filter(|token| !token.is_empty())
+        {
+            selections.push(ProviderSelection::OpenAiCompatible {
+                provider_kind: ProviderKind::Copilot,
+                provider_connection: ProviderKind::Copilot.as_str().to_string(),
+                base_url: String::new(),
+                model: env
+                    .copilot_model
+                    .clone()
+                    .filter(|model| !model.is_empty())
+                    .unwrap_or_else(|| DEFAULT_COPILOT_MODEL.to_string()),
+                api_key: Some(github_token.clone()),
             });
         }
 
@@ -435,6 +484,20 @@ impl ProviderRegistry {
                     model,
                     api_key,
                 ))),
+                ProviderKind::Copilot => {
+                    let github_token =
+                        api_key.filter(|token| !token.is_empty()).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "provider connection '{provider_connection}' requires a Copilot \
+                             GitHub token (COPILOT_GITHUB_TOKEN), run `ylva connect copilot`"
+                            )
+                        })?;
+                    Ok(Arc::new(CopilotProvider::new(
+                        provider_connection,
+                        model,
+                        github_token,
+                    )?))
+                }
                 ProviderKind::Mock => Ok(Arc::new(OpenAiCompatibleProvider::new(
                     provider_connection,
                     base_url,
@@ -534,6 +597,92 @@ mod tests {
         assert_eq!(selections[1].provider_connection(), "openrouter");
         assert_eq!(selections[0].model(), "local-model");
         assert_eq!(selections[1].model(), "hosted/model");
+    }
+
+    #[test]
+    fn environment_resolution_detects_copilot_token_with_default_or_custom_model() {
+        let env = ProviderEnv {
+            copilot_github_token: Some("ghu_token".to_string()),
+            ..Default::default()
+        };
+        let expected = |model: &str| ProviderSelection::OpenAiCompatible {
+            provider_kind: ProviderKind::Copilot,
+            provider_connection: "copilot".to_string(),
+            base_url: String::new(),
+            model: model.to_string(),
+            api_key: Some("ghu_token".to_string()),
+        };
+        assert_eq!(
+            ProviderRegistry::from_environment(&env),
+            expected(DEFAULT_COPILOT_MODEL)
+        );
+        let env = ProviderEnv {
+            copilot_model: Some("claude-sonnet-4".to_string()),
+            ..env
+        };
+        assert_eq!(
+            ProviderRegistry::from_environment(&env),
+            expected("claude-sonnet-4")
+        );
+        assert_eq!(
+            ProviderRegistry::from_environment(&env)
+                .engine_config(None)
+                .api_base_url,
+            None
+        );
+    }
+
+    #[test]
+    fn copilot_connection_needs_no_base_url_and_builds_with_token() {
+        let provider_config = ProviderConnectionConfig {
+            provider: ProviderKind::Copilot,
+            api_base_url: None,
+            api_key: Some("ghu_token".to_string()),
+        };
+        let engine_config = ProviderSelection::Mock.engine_config(Some("gpt-4o"));
+        let selection =
+            ProviderRegistry::from_provider_config("work", &provider_config, &engine_config)
+                .expect("resolves without api_base_url");
+        assert_eq!(selection.provider_connection(), "work");
+        assert!(ProviderRegistry::build(selection).is_ok());
+    }
+
+    #[test]
+    fn copilot_build_rejects_missing_and_pat_tokens() {
+        for api_key in [None, Some("github_pat_abc".to_string())] {
+            let provider_config = ProviderConnectionConfig {
+                provider: ProviderKind::Copilot,
+                api_base_url: None,
+                api_key,
+            };
+            let engine_config = ProviderSelection::Mock.engine_config(Some("gpt-4o"));
+            assert!(ProviderRegistry::provider_from_provider_config(
+                "copilot",
+                &provider_config,
+                &engine_config
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn copilot_token_fills_missing_api_key_but_gh_token_is_ignored() {
+        let env = ProviderEnv::from_values(&HashMap::from([
+            ("GH_TOKEN".to_string(), "ghu_other".to_string()),
+            ("COPILOT_GITHUB_TOKEN".to_string(), "ghu_token".to_string()),
+        ]));
+        let mut provider_config = ProviderConnectionConfig {
+            provider: ProviderKind::Copilot,
+            api_base_url: None,
+            api_key: None,
+        };
+        env.apply_missing_api_key_to_provider(&mut provider_config);
+        assert_eq!(provider_config.api_key.as_deref(), Some("ghu_token"));
+        let only_gh = ProviderEnv::from_values(&HashMap::from([(
+            "GH_TOKEN".to_string(),
+            "ghu_other".to_string(),
+        )]));
+        assert_eq!(only_gh.copilot_github_token, None);
     }
 
     #[test]

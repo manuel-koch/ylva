@@ -290,6 +290,90 @@ async fn tui_triggers_title_generation_when_stream_done_is_drained() {
 }
 
 #[tokio::test]
+async fn title_follows_the_active_engine_unless_a_utility_engine_is_configured() {
+    use crate::agent::Message;
+
+    fn scripted_engine(model: &str, word: &str) -> Arc<dyn Engine> {
+        Arc::new(EngineImpl::new(
+            Arc::new(crate::llm::MockProvider::new(
+                (0..3).map(|_| format!("{word} ")).collect(),
+                Duration::ZERO,
+            )),
+            EngineConfig {
+                provider_connection: "mock".to_string(),
+                model: model.to_string(),
+                temperature: None,
+                context_length: None,
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
+            },
+        ))
+    }
+
+    async fn title_for(utility_engine: Option<&str>) -> String {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = crate::store::Store::create(
+            &temp.path().join("chats"),
+            temp.path(),
+            Uuid::new_v4(),
+            "mock",
+            "active",
+            None,
+        )
+        .expect("store created");
+        store.record_message(&Message::User {
+            content: "question".to_string(),
+            kind: crate::agent::UserMessageKind::Explicit,
+        });
+        store.record_message(&Message::Assistant {
+            content: "reply".to_string(),
+            status: crate::agent::AssistantStatus::Complete,
+            tool_calls: Vec::new(),
+        });
+        store.flush().await;
+        let factory = Arc::new(
+            AgentFactory::new(HashMap::from([
+                ("active".to_string(), scripted_engine("active", "active")),
+                ("default".to_string(), scripted_engine("default", "default")),
+            ]))
+            .with_allowed_tools(&[])
+            .with_store(store.clone()),
+        );
+        let mut profile = ProfileConfig {
+            default_engine: "active".to_string(),
+            ..ProfileConfig::default()
+        };
+        let (agent, _ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("root agent created");
+        // The configured default differs from the engine the agent runs on,
+        // as after a `/models` switch.
+        profile.default_engine = "default".to_string();
+        profile.utility_engine = utility_engine.map(str::to_string);
+        let (title_update_tx, mut title_update_rx) = mpsc::unbounded_channel();
+        TitleDriver {
+            factory,
+            profile,
+            attempt: TitleAttempt::default(),
+            title_update_tx,
+        }
+        .trigger(&agent);
+        tokio::time::timeout(Duration::from_secs(5), title_update_rx.recv())
+            .await
+            .expect("title generated")
+            .expect("title update sent")
+            .title
+    }
+
+    assert!(title_for(None).await.starts_with("active"));
+    assert!(title_for(Some("default")).await.starts_with("default"));
+}
+
+#[tokio::test]
 async fn tui_loads_prior_session_user_messages_into_input_history() {
     use ratatui::backend::TestBackend;
 

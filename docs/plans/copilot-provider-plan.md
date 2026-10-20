@@ -69,17 +69,17 @@ and rewrite this file in place, so progress is resumable across sessions.
 Follow TDD; use full descriptive names (no abbreviations); every new source
 file needs the Apache-2.0 header (copy from `src/lib.rs`).
 
-1. [ ] Read [AGENTS](../../AGENTS.md), `docs/development-workflow.md`,
+1. [x] Read [AGENTS](../../AGENTS.md), `docs/development-workflow.md`,
    `docs/known-test-issues.md`, `docs/provider-notes.md`, and the resolved
    decisions under *Implementation Hints*. Resolve the *Open Questions* first
    (they gate steps 3 and 7).
-2. [ ] Config: add `ProviderKind::Copilot` (`"copilot"`) in
+2. [x] Config: add `ProviderKind::Copilot` (`"copilot"`) in
    `src/config/provider.rs` (`as_str`, serde lowercase). Fix all exhaustive
    matches (grep `ProviderKind::` in `src/llm/provider_registry.rs`,
    `src/llm/token_usage.rs`, `src/render.rs`, `src/agent/subagent_manager.rs`,
    `src/startup/engines.rs`, `src/llm.rs`). Add config-loading tests next to
    `src/config/profile/tests/loading.rs`.
-3. [ ] Env/secret plumbing in `src/llm/provider_registry.rs`: add
+3. [x] Env/secret plumbing in `src/llm/provider_registry.rs`: add
    `copilot_github_token` (`COPILOT_GITHUB_TOKEN`) to `ProviderEnv`,
    `from_lookup`, `apply_missing_api_key`, `apply_missing_api_key_to_provider`.
    Never read `GH_TOKEN`. Treat `api_key` on a copilot connection as the
@@ -96,7 +96,7 @@ file needs the Apache-2.0 header (copy from `src/lib.rs`).
    (`ProviderEnv::copilot_model`) is set. An explicit
    `[provider_connections.copilot]` suppresses auto-detection, as for other
    kinds.
-4. [ ] New module `src/llm/copilot_auth.rs` (pure, testable): types
+4. [x] New module `src/llm/copilot_provider/auth.rs` (pure, testable): types
    `CopilotSessionToken { token, expires_at, api_base }`, `CopilotAuth`
    (holds `ghu_` token, `reqwest::Client`, `tokio::sync::Mutex<Option<CopilotSessionToken>>`),
    `async fn session_token()` that returns the cached token if
@@ -105,7 +105,7 @@ file needs the Apache-2.0 header (copy from `src/lib.rs`).
    `src/llm/openrouter_provider.rs` tests). Map 401/403/404 exchange errors to
    clear messages ("token not a ghu_ token / re-run onboarding"). Redact
    tokens in `Debug`.
-5. [ ] New module `src/llm/copilot_provider.rs`: `CopilotProvider` wrapping
+5. [x] New module `src/llm/copilot_provider.rs`: `CopilotProvider` wrapping
    `OpenAiCompatibleProvider` like `OpenRouterProvider` does (delegate all
    `Provider` methods incl. `with_runtime_config`, `set_model`,
    `set_reasoning_effort`, the four `chat_*` variants, `list_models`).
@@ -118,20 +118,20 @@ file needs the Apache-2.0 header (copy from `src/lib.rs`).
    `src/llm.rs` and re-export via `src/lib.rs` if integration tests need it.
    Set `.with_provider_kind("copilot")`; ensure `redact_chat_completion_request_body`
    and request dumps never contain the Authorization header or tokens.
-6. [ ] Provider details: verify with a live smoke test (manual, not in CI)
+6. [x] Provider details: verify with a live smoke test (manual, not in CI)
    that streaming, `tools`, `stream_options.include_usage`, and reasoning
    fields behave; add a request-body customizer if Copilot rejects any
    OpenAI field. Record cost/usage behavior (Copilot reports premium-request
    multipliers, not USD – likely no `usage_cost_parser`) for the docs.
-7. [ ] Wire registry `build()` to construct `CopilotProvider` and add
+7. [x] Wire registry `build()` to construct `CopilotProvider` and add
    `DEFAULT_COPILOT_MODEL` (`"gpt-4o"`). Update
    `src/startup/engines.rs` if engine resolution special-cases kinds.
-8. [ ] Device-flow onboarding in `src/llm/copilot_auth.rs` (or sibling
-   `copilot_device_flow.rs`): `request_device_code`, `poll_for_access_token`
+8. [x] Device-flow onboarding in `src/llm/copilot_provider/device_flow.rs`:
+   `request_device_code`, `poll_for_access_token`
    (handles `authorization_pending`, `slow_down` (+5 s), `expired_token`,
    `access_denied`, cancellation via `CancellationToken`, deadline). Returns
    `ghu_` token. Tests with loopback mock server and short intervals.
-9. [ ] CLI subcommand (e.g. `ylva connect copilot`) in `src/cli.rs` /
+9. [x] CLI subcommand (e.g. `ylva connect copilot`) in `src/cli.rs` /
    `src/cli_driver.rs` (follow the existing `Subcommand` enums): print
    `verification_uri` + `user_code`, poll, then persist:
    - connection name defaults to `copilot` (token variable
@@ -149,22 +149,22 @@ file needs the Apache-2.0 header (copy from `src/lib.rs`).
      owner-only (see `src/private_fs.rs`, `write_seed_contents` in
      `src/init_command.rs`), keeping unrelated entries; never print the token.
    `/connect` slash command is out of scope (follow-up).
-10. [ ] Tests: unit tests for auth caching/refresh/expiry buffer, header
+10. [x] Tests: unit tests for auth caching/refresh/expiry buffer, header
     injection, error mapping, `ProviderKind` parsing, env plumbing, registry
     resolution; integration test (`tests/`) exercising chat + tool call against
     a loopback server through `CopilotProvider`; onboarding file-writing tests
     using temp dirs. Read `docs/known-test-issues.md` before touching
     `tracing`/cwd. Use `crate::test_support::run_locked` for async tests as in
     existing provider tests.
-11. [ ] ADR: `docs/architecture-design-records/` is currently empty. Record a
+11. [x] ADR: `docs/architecture-design-records/` is currently empty. Record a
     decision (use the `architecture-decision-record` skill) covering: use of
     the undocumented Copilot API with VS Code's client id, token storage in
     profile `.env`, session-token exchange/caching, and extending the shared
     OpenAI-compatible transport vs. a separate transport.
-12. [ ] Docs (same commit): `docs/configuration.md` (provider kinds list at
+12. [x] Docs (same commit): `docs/configuration.md` (provider kinds list at
     ~l.262 and ~l.586, new copilot example under `[provider_connections.*]`,
     env var, onboarding), `docs/features.md` (provider + connect subcommand),
-    `docs/implementation-notes.md` (modules `copilot_auth`, `copilot_provider`,
+    `docs/implementation-notes.md` (modules `copilot_provider::auth`, `copilot_provider`,
     auth hook), `docs/provider-notes.md` (new *GitHub Copilot* section: usage/
     cost reporting, PAT limitation, ToS/stability caveats),
     `docs/cli-options.md` (new connect subcommand), `README.md` provider
@@ -173,7 +173,7 @@ file needs the Apache-2.0 header (copy from `src/lib.rs`).
     `docs/ideas/copilot-provider.md` (mark as implemented or delete per
     project convention). Run `rumdl fmt` and `rumdl check` on changed
     markdown.
-13. [ ] Verify: `make format lint`, `make test-coverage` (≥80 %), `make audit`
+13. [x] Verify: `make format lint`, `make test-coverage` (≥80 %), `make audit`
     if `Cargo.toml`/`Cargo.lock` changed. Do not commit or stage without user
     consent.
 

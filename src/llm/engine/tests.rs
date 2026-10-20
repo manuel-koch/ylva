@@ -45,6 +45,7 @@ struct CatalogEngine {
     config: RwLock<EngineConfig>,
     models: Vec<ModelInfo>,
     model_list_error: Option<String>,
+    model_list_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl CatalogEngine {
@@ -74,6 +75,7 @@ impl CatalogEngine {
                 })
                 .collect(),
             model_list_error: None,
+            model_list_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -102,6 +104,7 @@ impl Engine for CatalogEngine {
     }
 
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        self.model_list_calls.fetch_add(1, Ordering::SeqCst);
         let models = self.models.clone();
         let error = self.model_list_error.clone();
         Box::pin(async move {

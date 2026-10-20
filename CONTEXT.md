@@ -218,6 +218,11 @@ The service integration that communicates with a model.
 A named endpoint and credential configuration for one provider. Multiple
 connections may use the same provider.
 
+**Copilot session token**:
+The short-lived credential (about 25–30 minutes) a Copilot connection exchanges
+from its long-lived GitHub OAuth token before each request; held in memory only
+and refreshed ahead of expiry.
+
 **Provider request concurrency cap**:
 The maximum number of simultaneous requests sent through a provider connection;
 it is shared by engines and agents using that connection.

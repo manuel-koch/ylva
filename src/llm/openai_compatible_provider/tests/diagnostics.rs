@@ -61,6 +61,32 @@ fn request_body_redactor_redacts_only_chat_completion_media_payloads() {
 }
 
 #[test]
+fn request_body_redactor_redacts_responses_input_media_payloads() {
+    let encoded = "QUJDREVGR0g=";
+    let body = serde_json::json!({
+        "model": "m",
+        "input": [
+            {"type": "function_call_output", "call_id": "c", "output": serde_json::json!({
+                "ok": true, "result": encoded, "result_metadata": {"encoding": "base64"}
+            }).to_string()},
+            {"role": "user", "content": [
+                {"type": "input_text", "text": "look"},
+                {"type": "input_image", "image_url": format!("data:image/png;base64,{encoded}")},
+                {"type": "input_file", "filename": "a.pdf", "file_data": format!("data:application/pdf;base64,{encoded}")}
+            ]}
+        ]
+    });
+
+    let redacted_text = redact_chat_completion_request_body(&body).to_string();
+
+    assert!(!redacted_text.contains(encoded));
+    assert!(redacted_text.contains("<REDACTED_BASE64_RESULT>"));
+    assert!(redacted_text.contains("data:image/png;base64,<REDACTED_MEDIA_DATA>"));
+    assert!(redacted_text.contains("data:application/pdf;base64,<REDACTED_MEDIA_DATA>"));
+    assert!(redacted_text.contains("a.pdf"));
+}
+
+#[test]
 fn provider_logs_effective_runtime_snapshot_without_sensitive_request_data() {
     let log = crate::test_support::capture_logs(async {
         let listener = TcpListener::bind("127.0.0.1:0")

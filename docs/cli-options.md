@@ -363,6 +363,50 @@ scope, it prints `No shims in <directory>` and no PATH hint. For per-workspace
 `PATH` setup, see
 [configuration](configuration.md#managing-profiles-and-shims).
 
+## Connect commands
+
+`ylva [--profile <profile>] connect <provider> [--name <name>] [--workspace]`
+adds a provider connection to the selected profile and stores its secret for you.
+`<provider>` is `copilot`, `ollama` or `openrouter`.
+
+Every action
+
+- adds `[provider_connections.<name>]` to the profile's `config.toml`,
+  keeping its other content. The name defaults to the provider name; an
+  existing table of that name is an error.
+- stores the secret in the profile's `.env` (owner-only) and references it as
+  `api_key = "${<variable>}"`. The variable is `COPILOT_GITHUB_TOKEN`,
+  `OLLAMA_API_KEY` or `OPENROUTER_API_KEY` for the default name, which the
+  environment auto-detection also reads, and `<VARIABLE>_<NAME>`
+  (upper-cased, other characters replaced by `_`) when `--name` is given. The
+  default variable is refreshed on re-run; a named variable that already
+  exists is an error.
+
+The profile comes from the top-level `--profile` flag, which must precede the
+subcommand (`ylva --profile work connect copilot`); the default profile is
+used otherwise. It must already exist (`ylva init` or `ylva profile create`).
+`--workspace` selects that profile in the current workspace
+(`<workspace>/.ylva/profiles`, found as for `ylva profile --workspace`)
+instead of the Ylva home's, e.g. `ylva --profile work connect copilot
+--workspace`; it must have been created with `ylva profile create --workspace`.
+When a secret is stored there, the workspace `.gitignore` is seeded so `.env`
+stays out of version control. Secrets are never printed.
+
+- `ylva connect copilot` logs in with the OAuth device flow: it prints a
+  verification URL and a user code and waits for authorization (Ctrl-C
+  cancels). The stored secret is the GitHub token; no `api_base_url` is
+  written.
+- `ylva connect ollama` and `ylva connect openrouter` ask for the base URL
+  (default `http://localhost:11434` and `https://openrouter.ai`, written as
+  `api_base_url`) and the API key (input hidden; piped stdin is read as one
+  line per answer). The key is optional for Ollama and required for
+  OpenRouter. Without a key no `.env` entry and no `api_key` are written.
+- Re-running for an existing connection name is refused (also before the
+  login) when `config.toml` already defines it or, for a named connection,
+  `.env` already defines its variable. `--force` replaces the connection and
+  overwrites its variables, e.g. to refresh an expired Copilot token with
+  `ylva connect copilot --force`.
+
 ## Resuming a session
 
 Launches start a fresh session unless `--conversation-id` or `--clone` is supplied.
@@ -430,11 +474,13 @@ selection affects the conversation's summarizer.
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai` | OpenRouter origin. The provider derives `/api/v1` for chat and model discovery. Unlike Ollama, OpenRouter is a single hosted service, so this has a working default and never has to be set manually. |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | OpenRouter model. |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key. Setting `OPENROUTER_API_KEY` (or `OPENROUTER_MODEL`) alone is enough to configure OpenRouter — `OPENROUTER_BASE_URL` does not need to be exported. |
+| `COPILOT_GITHUB_TOKEN` | — | Long-lived GitHub OAuth (`ghu_…`) token for Copilot. A non-empty value auto-detects a `copilot` connection. `GH_TOKEN` is never read. |
+| `COPILOT_MODEL` | `gpt-4o` | Model for the auto-detected Copilot connection. |
 
 For explicit provider connections, `api_key` values in `config.toml` remain
-authoritative. When omitted, `OLLAMA_API_KEY` or `OPENROUTER_API_KEY` fills the
-connection based on its `provider` implementation kind. API keys and expanded
-environment values are never written to logs.
+authoritative. When omitted, `OLLAMA_API_KEY`, `OPENROUTER_API_KEY` or
+`COPILOT_GITHUB_TOKEN` fills the connection based on its `provider`
+implementation kind. API keys and expanded environment values are never written to logs.
 
 ### Paths
 

@@ -105,6 +105,23 @@ fn main() {
         }
     }
 
+    if let Some(CliCommand::Connect { command }) = &cli.command {
+        match ylva::connect_command::run(
+            command,
+            cli.profile.as_deref(),
+            &mut ylva::connect_command::TerminalPrompter,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ) {
+            Ok(0) => return,
+            Ok(code) => {
+                drop(log_guard.take());
+                std::process::exit(i32::from(code));
+            }
+            Err(error) => exit_with_error(&mut log_guard, error),
+        }
+    }
+
     if let Some(CliCommand::Skill { command }) = &cli.command {
         let options = ylva::skill_command::SkillListOptions {
             color: cli_color_enabled(cli_color_mode),

@@ -203,6 +203,51 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    /// Set up a provider connection through a guided login
+    Connect {
+        #[command(subcommand)]
+        command: ConnectCommand,
+    },
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum ConnectCommand {
+    /// Log in to GitHub Copilot with the device flow and add a `copilot` connection to the profile
+    Copilot {
+        /// Connection name (default `copilot`; other names store the token as COPILOT_GITHUB_TOKEN_<NAME>)
+        #[arg(long, value_name = "name", value_parser = parse_profile_name)]
+        name: Option<String>,
+        /// Use the profile in the current workspace instead of the Ylva home's
+        #[arg(long)]
+        workspace: bool,
+        /// Replace an existing connection of that name and overwrite its `.env` variables
+        #[arg(long)]
+        force: bool,
+    },
+    /// Ask for an Ollama server URL and optional API key and add an `ollama` connection to the profile
+    Ollama {
+        /// Connection name (default `ollama`; other names store the key as OLLAMA_API_KEY_<NAME>)
+        #[arg(long, value_name = "name", value_parser = parse_profile_name)]
+        name: Option<String>,
+        /// Use the profile in the current workspace instead of the Ylva home's
+        #[arg(long)]
+        workspace: bool,
+        /// Replace an existing connection of that name and overwrite its `.env` variables
+        #[arg(long)]
+        force: bool,
+    },
+    /// Ask for an OpenRouter URL and API key and add an `openrouter` connection to the profile
+    Openrouter {
+        /// Connection name (default `openrouter`; other names store the key as OPENROUTER_API_KEY_<NAME>)
+        #[arg(long, value_name = "name", value_parser = parse_profile_name)]
+        name: Option<String>,
+        /// Use the profile in the current workspace instead of the Ylva home's
+        #[arg(long)]
+        workspace: bool,
+        /// Replace an existing connection of that name and overwrite its `.env` variables
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
@@ -883,6 +928,59 @@ mod tests {
                     name: "work".to_string(),
                     workspace: false,
                     dry_run: true,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn connect_copilot_parses_with_and_without_name() {
+        let cli = parse(["connect", "copilot"]).expect("parses");
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Connect {
+                command: ConnectCommand::Copilot {
+                    name: None,
+                    workspace: false,
+                    force: false
+                }
+            })
+        );
+        let cli = parse(["connect", "copilot", "--name", "work", "--force"]).expect("parses");
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Connect {
+                command: ConnectCommand::Copilot {
+                    name: Some("work".to_string()),
+                    workspace: false,
+                    force: true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn connect_ollama_and_openrouter_parse_an_optional_name() {
+        let cli = parse(["connect", "ollama"]).expect("parses");
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Connect {
+                command: ConnectCommand::Ollama {
+                    name: None,
+                    workspace: false,
+                    force: false
+                }
+            })
+        );
+        let cli =
+            parse(["connect", "openrouter", "--name", "paid", "--workspace"]).expect("parses");
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Connect {
+                command: ConnectCommand::Openrouter {
+                    name: Some("paid".to_string()),
+                    workspace: true,
+                    force: false
                 }
             })
         );

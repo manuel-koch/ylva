@@ -157,6 +157,8 @@ pub(super) fn apply_model_list_result(
             let engine_choices: Vec<ModelChoice> = engine
                 .named_engine_info()
                 .into_iter()
+                // An implicit engine without a default model names nothing to select.
+                .filter(|named_engine| !named_engine.config.model.is_empty())
                 .map(|named_engine| {
                     let engine_name = named_engine.name;
                     let engine_config = named_engine.config;

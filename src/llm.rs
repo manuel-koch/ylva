@@ -21,11 +21,12 @@ use crate::agent::{Message, StreamEvent};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+pub mod copilot_provider;
 pub mod engine;
 pub mod mock_provider;
 pub mod ollama_provider;
-pub(crate) mod openai_compatible_messages;
 pub mod openai_compatible_provider;
+pub(crate) mod openai_responses;
 pub mod openrouter_provider;
 pub mod provider_registry;
 pub mod token_estimate;
@@ -54,6 +55,7 @@ pub(crate) fn provider_request_limiter(
         .clone()
 }
 
+pub use copilot_provider::CopilotProvider;
 pub use engine::{
     CompactionEngineDisplayInfo, Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter,
     EngineRuntimeConfig, EngineRuntimeConfigHandle, ModelSelectionTarget, ProviderModelOption,

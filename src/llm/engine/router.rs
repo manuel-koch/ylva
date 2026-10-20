@@ -23,7 +23,8 @@ use crate::agent::{Message, StreamEvent};
 use crate::llm::{InputModality, ModelInfo, ToolSchema};
 use futures::future::{join_all, BoxFuture};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -38,7 +39,15 @@ use tracing::Instrument;
 pub struct EngineRouter {
     engines: HashMap<String, Arc<dyn Engine>>,
     active_engine: RwLock<String>,
+    catalog_cache: CatalogCache,
+    catalog_cache_lifetime: Duration,
 }
+
+/// Fetched model catalogs by provider connection name.
+type CatalogCache = Arc<Mutex<HashMap<String, (Instant, Vec<ModelInfo>)>>>;
+
+/// How long a provider connection's model catalog is reused by `/models`.
+const CATALOG_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
 impl EngineRouter {
     pub fn new(
@@ -56,7 +65,15 @@ impl EngineRouter {
         Ok(Self {
             engines,
             active_engine: RwLock::new(active_engine.to_string()),
+            catalog_cache: Arc::new(Mutex::new(HashMap::new())),
+            catalog_cache_lifetime: CATALOG_CACHE_LIFETIME,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_catalog_cache_lifetime(mut self, lifetime: Duration) -> Self {
+        self.catalog_cache_lifetime = lifetime;
+        self
     }
 
     fn active_engine_entry(&self) -> (String, Arc<dyn Engine>) {
@@ -285,14 +302,38 @@ impl Engine for EngineRouter {
 
     fn list_model_options(&self) -> BoxFuture<'_, anyhow::Result<Vec<ProviderModelOption>>> {
         let providers = self.provider_engines();
+        let catalog_cache = Arc::clone(&self.catalog_cache);
+        let lifetime = self.catalog_cache_lifetime;
 
         Box::pin(async move {
-            let requests = providers.into_iter().map(
-                |(provider_connection, _engine_name, engine)| async move {
-                    let result = engine.list_models().await;
-                    (provider_connection, result)
-                },
-            );
+            let requests =
+                providers
+                    .into_iter()
+                    .map(|(provider_connection, _engine_name, engine)| {
+                        let catalog_cache = Arc::clone(&catalog_cache);
+                        async move {
+                            let cached = catalog_cache
+                                .lock()
+                                .expect("the catalog cache lock is poisoned")
+                                .get(&provider_connection)
+                                .filter(|(fetched_at, _)| fetched_at.elapsed() < lifetime)
+                                .map(|(_, models)| models.clone());
+                            if let Some(models) = cached {
+                                return (provider_connection, Ok(models));
+                            }
+                            let result = engine.list_models().await;
+                            if let Ok(models) = &result {
+                                catalog_cache
+                                    .lock()
+                                    .expect("the catalog cache lock is poisoned")
+                                    .insert(
+                                        provider_connection.clone(),
+                                        (Instant::now(), models.clone()),
+                                    );
+                            }
+                            (provider_connection, result)
+                        }
+                    });
             let results = join_all(requests).await;
             let mut options = Vec::new();
             let mut failures = Vec::new();

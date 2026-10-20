@@ -233,7 +233,7 @@ fn hydrate_appends_after_system_prompts_and_synthesizes_orphaned_tool_error() {
     ));
 
     let wire_payload =
-        crate::llm::openai_compatible_messages::serialize_messages(context.messages());
+        crate::llm::openai_compatible_provider::messages::serialize_messages(context.messages());
     assert!(wire_payload
         .as_array()
         .expect("wire payload is an array")

@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Message, StreamEvent};
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle};
-use crate::llm::openai_compatible_messages::ContentPartFormat;
+use crate::llm::openai_compatible_provider::messages::ContentPartFormat;
 use crate::llm::{order_reasoning_efforts, InputModality, ModelInfo, Provider, ToolSchema};
 
 use super::OpenAiCompatibleProvider;

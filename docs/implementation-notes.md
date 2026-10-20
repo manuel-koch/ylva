@@ -325,7 +325,8 @@ See [features](./features.md#cli-mode).
   shared `OpenAiCompatibleProvider` transport only offers a `UsageCostParser`
   hook (default: none) applied to every SSE payload, independent of
   `parse_sse_payload` because usage-only frames have no choices.
-  `OpenRouterProvider` supplies the parser for its `usage.cost` field (USD);
+  `OpenRouterProvider` supplies the parser for its `usage.cost` field (USD) and
+  `CopilotProvider` for `usage.copilot_usage.total_nano_aiu` (AIC);
   Ollama and plain OpenAI-compatible providers report none. The first cost frame of a request is recorded
   immediately, before the terminal stream event is sent, so the redraw that
   follows completion already sees it, and so failed or cancelled streams keep
@@ -613,3 +614,41 @@ While an agent is busy, the presenter shows a new steer as queued and the loop
 keeps it outside `Context`. After `SteerApplied`, the loop commits it after the
 current round's emitted messages, so persisted order matches what the model
 saw. If the round is cancelled first, the steer is not sent.
+
+## GitHub Copilot provider
+
+- Copilot reuses the OpenAI-compatible transport instead of a separate one
+  (see [provider notes](./provider-notes.md#github-copilot)). Its two
+  differences are a per-request base URL and bearer token (the session
+  token's `endpoints.api` and the exchanged token) and a few headers, so the
+  transport has a `RequestAuthorizer` hook rather than a Copilot branch.
+  `ProviderSelection::OpenAiCompatible` carries an empty `base_url` for it.
+- The transport speaks both Chat Completions and the Responses API
+  (`openai_responses`). The Responses body is projected from the serialized
+  Chat Completions messages, keeping one source of truth for attachment and
+  tool-outcome handling. A provider opts in with `with_responses_only_models`;
+  the protocol is then chosen per request from the catalog's
+  `supported_endpoints`, which `list_models` records and a chat loads once if
+  no listing ran yet. If that load fails the request uses Chat Completions.
+  Responses streams end with `response.completed`, not `[DONE]`.
+- The 2 s request spacing and the exchange single-flight both live in
+  `CopilotAuth::authorize()`, so every clone of a connection (subagents,
+  `with_runtime_config`) shares one clock. HTTP retries inside a chat request
+  do not pass through it and are not spaced.
+- `X-Initiator` is derived from the `Message` list, not the serialized body:
+  the body cannot tell an implicit user message (tool note, compaction
+  trigger) from one the user wrote.
+- `ylva connect` is provider-agnostic in `src/connect_command.rs`; each
+  provider kind implements the `ConnectFlow` trait in
+  `src/connect_command/providers.rs` (`kind`, optional `env_variables`,
+  `connect`) and returns a `NewConnection` (the provider-specific
+  `[provider_connections.<name>]` keys plus the `.env` entries they refer
+  to). The core adds `provider`, writes the files, and seeds the workspace
+  `.gitignore` when `.env` entries exist. A new provider only adds a flow
+  and a `ConnectCommand` variant.
+- `ylva connect` validates the config and `.env` before the browser flow or
+  the questions (using the flow's declared `env_variables`), so a refused
+  name fails early; the entries returned by `connect` are checked again
+  before writing. The Ollama/OpenRouter key is
+  read with crossterm raw mode to avoid echo; piped stdin falls back to one
+  line per answer.

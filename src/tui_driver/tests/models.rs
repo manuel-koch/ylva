@@ -419,6 +419,37 @@ async fn models_lists_the_candidates_and_preselects_the_active_model() {
 }
 
 #[tokio::test]
+async fn models_omits_a_named_engine_that_has_no_model() {
+    // A profile with provider connections and no default model yields an
+    // implicit engine with an empty model, which names nothing to switch to.
+    let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+    let engine: Arc<dyn Engine> = StubEngine::with_named_engine(
+        &["small", "large"],
+        "small",
+        "openrouter",
+        "",
+        &[],
+        None,
+        None,
+        None,
+    );
+
+    execute_slash_effects(
+        &mut state,
+        vec![Effect::ListModels { filter: None }],
+        &engine,
+        &cmd_tx,
+    )
+    .await;
+
+    let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+        panic!("expected a model picker, got {:?}", state.slash_overlay);
+    };
+    assert!(choices.iter().all(|choice| choice.engine_name.is_none()));
+    assert_eq!(choices.len(), 2);
+}
+
+#[tokio::test]
 async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_efforts() {
     // Reproduces a profile's `[engines.<name>]` table naming a model the
     // catalog *does* advertise reasoning efforts for — the shortcut must

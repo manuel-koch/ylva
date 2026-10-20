@@ -71,6 +71,17 @@ impl TitleAttempt {
         self.spawn_attempt(store, engine, prompt, None, None)
     }
 
+    /// Like [`Self::trigger_with_engine`], reporting the persisted title.
+    pub(crate) fn trigger_with_engine_and_title_updates(
+        &self,
+        store: Store,
+        engine: Arc<dyn Engine>,
+        title_update_tx: mpsc::UnboundedSender<SessionTitleUpdate>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let prompt = store.title_prompt()?;
+        self.spawn_attempt(store, engine, prompt, None, Some(title_update_tx))
+    }
+
     pub(crate) fn trigger_with_title_updates(
         &self,
         store: Store,

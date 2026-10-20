@@ -226,7 +226,25 @@ pub(crate) async fn get_json_with_dump_source(
     operation: &str,
     dump_source: &RequestDumpSource,
 ) -> anyhow::Result<serde_json::Value> {
-    let headers = bearer_headers(api_key)?;
+    get_json_with_headers(client, url, api_key, &[], operation, dump_source).await
+}
+
+/// Like [`get_json_with_dump_source`], with additional static request headers.
+pub(crate) async fn get_json_with_headers(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    extra_headers: &[(&'static str, &'static str)],
+    operation: &str,
+    dump_source: &RequestDumpSource,
+) -> anyhow::Result<serde_json::Value> {
+    let mut headers = bearer_headers(api_key)?;
+    for (name, value) in extra_headers {
+        headers.insert(
+            reqwest::header::HeaderName::from_static(name),
+            reqwest::header::HeaderValue::from_static(value),
+        );
+    }
     let dump_context = RequestDumpContext::new(dump_source);
     let request_dump_path = dump_context.request_path();
     if let Some(path) = &request_dump_path {
