@@ -218,9 +218,6 @@ pub struct AppState {
     pub slash_overlay_drag_start: Option<(u16, u16)>,
     /// Current screen position of a slash-overlay text drag.
     pub slash_overlay_drag_end: Option<(u16, u16)>,
-    /// Names of the tools the running agent may call, captured once at
-    /// startup from the resolved `ToolRegistry` so `/tools` needs no I/O.
-    pub available_tool_names: Vec<String>,
 }
 
 impl AppState {
@@ -313,7 +310,6 @@ impl AppState {
             slash_overlay: SlashOverlay::default(),
             slash_overlay_drag_start: None,
             slash_overlay_drag_end: None,
-            available_tool_names: Vec::new(),
 
             aborting_exit: false,
 

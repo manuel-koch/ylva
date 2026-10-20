@@ -410,8 +410,6 @@ pub enum Effect {
     FinalizeInputSelection,
     /// `/clear` — drop the transcript and start a new persisted session.
     ClearConversation,
-    /// `/tools` — show the tools the running agent may call.
-    ShowTools,
     ListSessions,
     SelectSession {
         source_id: Uuid,

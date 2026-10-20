@@ -517,12 +517,12 @@ fn reset_is_selectable_from_the_bare_slash_popup_and_clears_the_conversation() {
 fn a_command_is_only_recognized_as_the_first_character_of_the_input() {
     let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
 
-    let mid_message = submit(&mut state, &mut textarea, "please run /tools for me");
+    let mid_message = submit(&mut state, &mut textarea, "please run /clear for me");
     assert!(mid_message.contains(&Effect::SubmitPrompt { steer: false }));
-    assert!(!mid_message.contains(&Effect::ShowTools));
+    assert!(!mid_message.contains(&Effect::ClearConversation));
 
-    let indented = submit(&mut state, &mut textarea, " /tools");
-    assert!(!indented.contains(&Effect::ShowTools));
+    let indented = submit(&mut state, &mut textarea, " /clear");
+    assert!(!indented.contains(&Effect::ClearConversation));
 }
 
 #[test]
@@ -703,7 +703,7 @@ fn command_suggestions_navigate_with_up_and_down_and_tab_completes_the_selection
     );
     assert_eq!(
         state.selected_slash_command().map(|command| command.name),
-        Some("/tools")
+        Some("/compact")
     );
 
     presenter::update(
@@ -759,7 +759,7 @@ fn suggestion_selection_survives_the_driver_per_action_recompute() {
         &textarea,
     );
     state.refresh_slash_overlay(&textarea.text);
-    assert_eq!(highlighted(&state), Some("/tools"));
+    assert_eq!(highlighted(&state), Some("/compact"));
 
     presenter::update(
         &mut state,

@@ -1269,7 +1269,6 @@ and discards the parameter edits. `Esc` in the list cancels and clears the input
 | Command | Effect | Result bubble |
 | --- | --- | --- |
 | `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights); page keys move by a page; `Enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `Esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
-| `/tools` | Lists the tools the running agent may call, as resolved for its agent type. | Transient |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |
 | `/session` | Opens the recent-session picker in either conversation view. Select Resume or Clone, then confirm a root session. | Transient; activation and subsequent work use the selected persisted identity |
 | `/compact` | Requests a useful completed-prefix summary in the root conversation, regardless of automatic thresholds. | Transient outcomes; an applied summary is persisted |

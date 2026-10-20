@@ -1109,26 +1109,6 @@ async fn clear_resets_the_transcript_and_tells_the_agent_to_start_a_new_session(
 }
 
 #[tokio::test]
-async fn tools_reports_the_registry_names_without_touching_the_agent() {
-    let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
-    let engine: Arc<dyn Engine> = StubEngine::with_models(&[], "large");
-    state.available_tool_names = vec!["read_file".to_string(), "run_command".to_string()];
-
-    execute_slash_effects(&mut state, vec![Effect::ShowTools], &engine, &cmd_tx).await;
-
-    let Some(crate::tui_reducer_state::ChatEntry::Notice { text }) = state.chat_entries.last()
-    else {
-        panic!("expected a notice bubble");
-    };
-    assert!(text.contains("read_file"));
-    assert!(text.contains("run_command"));
-    assert!(
-        cmd_rx.try_recv().is_err(),
-        "/tools must not command the agent"
-    );
-}
-
-#[tokio::test]
 async fn tui_run_outcome_follows_driver_events_with_the_headless_precedence() {
     let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
     let mut pending_run_ids = PendingRunIds::default();

@@ -24,7 +24,6 @@
 pub const CLEAR_COMMAND_NAME: &str = "/clear";
 pub const RESET_COMMAND_NAME: &str = "/reset";
 pub const MODELS_COMMAND_NAME: &str = "/models";
-pub const TOOLS_COMMAND_NAME: &str = "/tools";
 pub const COMPACT_COMMAND_NAME: &str = "/compact";
 pub const SESSION_COMMAND_NAME: &str = "/session";
 
@@ -33,8 +32,6 @@ pub const SESSION_COMMAND_NAME: &str = "/session";
 pub enum SlashCommand {
     /// List the provider's models and switch to the selected one.
     Models,
-    /// Show the tools the running agent may call.
-    Tools,
     /// Drop the in-memory conversation and start a fresh persisted session.
     Clear,
     /// Resume or clone another persisted root conversation.
@@ -85,13 +82,6 @@ pub const SLASH_COMMANDS: &[SlashCommandInfo] = &[
         description: "List available models and switch the active one",
         command: SlashCommand::Models,
         accepts_argument: true,
-    },
-    SlashCommandInfo {
-        name: TOOLS_COMMAND_NAME,
-        aliases: &[],
-        description: "Show the tools the agent may call",
-        command: SlashCommand::Tools,
-        accepts_argument: false,
     },
     SlashCommandInfo {
         name: COMPACT_COMMAND_NAME,
@@ -188,7 +178,6 @@ mod tests {
     #[test]
     fn each_allowlisted_name_parses_to_its_command() {
         assert_eq!(parse_slash_command("/models"), Some(SlashCommand::Models));
-        assert_eq!(parse_slash_command("/tools"), Some(SlashCommand::Tools));
         assert_eq!(parse_slash_command("/clear"), Some(SlashCommand::Clear));
         for (name, command) in [
             ("/session", SlashCommand::Session),
@@ -215,8 +204,8 @@ mod tests {
 
     #[test]
     fn trailing_whitespace_is_tolerated() {
-        assert_eq!(parse_slash_command("/tools  "), Some(SlashCommand::Tools));
-        assert_eq!(parse_slash_command("/tools\n"), Some(SlashCommand::Tools));
+        assert_eq!(parse_slash_command("/clear  "), Some(SlashCommand::Clear));
+        assert_eq!(parse_slash_command("/clear\n"), Some(SlashCommand::Clear));
     }
 
     #[test]
@@ -242,7 +231,7 @@ mod tests {
 
     #[test]
     fn other_commands_reject_arguments() {
-        assert_eq!(parse_slash_command("/tools extra"), None);
+        assert_eq!(parse_slash_command("/compact extra"), None);
         assert_eq!(parse_slash_command("/clear extra"), None);
     }
 
@@ -258,7 +247,7 @@ mod tests {
         let suggestions = slash_command_suggestions("/");
         assert_eq!(
             suggestions.iter().map(|info| info.name).collect::<Vec<_>>(),
-            ["/clear", "/models", "/tools", "/compact", "/session", "/reset"]
+            ["/clear", "/models", "/compact", "/session", "/reset"]
         );
         for suggestion in suggestions {
             assert_eq!(

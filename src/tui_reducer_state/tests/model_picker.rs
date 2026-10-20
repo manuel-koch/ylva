@@ -228,10 +228,10 @@ fn refresh_slash_overlay_keeps_the_selection_while_the_choices_are_unchanged() {
 
     // A draft that narrows the choice set restarts the selection at the
     // top, mirroring the model picker's filter-change behaviour.
-    state.refresh_slash_overlay("/t");
+    state.refresh_slash_overlay("/s");
     assert_eq!(
         state.selected_slash_command().map(|command| command.name),
-        Some("/tools")
+        Some("/session")
     );
     let SlashOverlay::Suggestions { selected, .. } = &state.slash_overlay else {
         panic!("expected suggestions, got {:?}", state.slash_overlay);

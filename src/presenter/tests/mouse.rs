@@ -669,7 +669,7 @@ fn slash_overlay_drag_uses_the_scrolled_content_row() {
         effects.iter().any(|effect| matches!(
             effect,
             Effect::CopyToClipboard(text)
-                if text == &format!("{expected_first_line}\n/tools")
+                if text == &format!("{expected_first_line}\n/compa")
         )),
         "a scrolled drag must map to the visible overlay rows: {effects:?}"
     );

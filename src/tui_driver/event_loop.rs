@@ -125,11 +125,6 @@ where
     let mut cmd_tx = agent.command_sender();
     let mut engine = agent.engine();
     state.engine_display = agent.engine_display_info();
-    // Sorted once here so `/tools` output is stable — the registry is a
-    // `HashMap`, whose iteration order is not.
-    let mut available_tool_names = agent.registry().names();
-    available_tool_names.sort();
-    state.available_tool_names = available_tool_names;
 
     // Driver-local tracking — not part of AppState.
     let mut mouse_pos: Option<(u16, u16)> = None;
@@ -231,8 +226,6 @@ where
                                 state.replay_messages(&prepared.transcript.messages, &prepared.subagent_runs, state.replay_compaction_boundary);
                                 state.prepend_input_history(std::mem::take(&mut prepared.input_history));
                                 state.engine_display = agent.engine_display_info();
-                                state.available_tool_names = agent.registry().names();
-                                state.available_tool_names.sort();
                                 pending_run_ids = PendingRunIds::default();
                                 mouse_drag = MouseDrag::default();
                                 super::input::clear_textarea(&mut textarea);

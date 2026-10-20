@@ -417,10 +417,8 @@ impl AgentLoop {
 
     /// This loop's tool registry, as resolved by `AgentFactory::build` (per-
     /// `agent_type` `allowed_tools`, `include_spawn_subagent`, etc.).
-    /// `pub(crate)` because the only readers are same-crate: the TUI Driver
-    /// (which captures the resolved tool names once at startup for the
-    /// `/tools` slash command) and tests inspecting which tools ended up
-    /// registered.
+    /// `pub(crate)` because the only readers are same-crate tests inspecting
+    /// which tools ended up registered.
     pub(crate) fn registry(&self) -> &Arc<ToolRegistry> {
         &self.registry
     }

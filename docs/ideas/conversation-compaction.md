@@ -491,7 +491,7 @@ unnecessary compaction.
   budget estimates the projected model view and tool definitions. During a
   request, the footer instead estimates the serialized JSON body, including
   transport framing; after compaction applies, it shows the model-view estimate.
-- Provider serialization: [`src/llm/openai_compatible_messages.rs`](../../src/llm/openai_compatible_messages.rs)
+- Provider serialization: [`src/llm/openai_compatible_provider/messages.rs`](../../src/llm/openai_compatible_provider/messages.rs)
   and `src/llm/openai_compatible_provider.rs`.
 - `Context::set_token_estimator` recalculates cached message counts on model
   or estimator changes. The model-view readout does not sum these cached

@@ -410,7 +410,7 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
 
 /// Translate a recognized slash command into its effects.
 ///
-/// `/tools` and `/clear` clear the input first so the command line never
+/// `/clear`, `/session` and `/compact` clear the input first so the command line never
 /// lingers as a draft. `/models` instead normalizes the draft to the
 /// canonical `/models <filter>` form and leaves it in the textarea: the
 /// picker it opens stays keyed off that text, so further typing narrows the
@@ -436,7 +436,6 @@ fn slash_command_effects(state: &mut AppState, invocation: SlashCommandInvocatio
                 Effect::ListModels { filter },
             ]
         }
-        SlashCommand::Tools => vec![Effect::ClearTextarea, Effect::ShowTools],
         SlashCommand::Clear => vec![Effect::ClearTextarea, Effect::ClearConversation],
         SlashCommand::Session => vec![Effect::ClearTextarea, Effect::ListSessions],
         SlashCommand::Compact => vec![Effect::ClearTextarea, Effect::Compact],

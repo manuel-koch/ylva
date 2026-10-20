@@ -194,7 +194,6 @@ pub(super) async fn execute_effects(
             | Effect::SelectSession { .. }
             | Effect::CancelSessionSelection
             | Effect::Compact
-            | Effect::ShowTools
             | Effect::LoadSubagentTranscript { .. }
             | Effect::ListModels { .. }
             | Effect::SwitchModel(_) => {}
@@ -214,7 +213,6 @@ pub(super) fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Eff
                 | Effect::SelectSession { .. }
                 | Effect::CancelSessionSelection
                 | Effect::Compact
-                | Effect::ShowTools
                 | Effect::ListModels { .. }
                 | Effect::SwitchModel(_)
         )
@@ -249,9 +247,6 @@ pub(super) async fn execute_slash_effects(
                         .to_string(),
                 );
             }
-            Effect::ShowTools => {
-                state.push_notice(tools_notice_text(&state.available_tool_names));
-            }
             Effect::ListModels { filter } => {
                 state.slash_overlay = SlashOverlay::LoadingModels;
                 let result = fetch_model_list(Arc::clone(engine)).await;
@@ -263,17 +258,4 @@ pub(super) async fn execute_slash_effects(
             _ => {}
         }
     }
-}
-
-/// Render the `/tools` notice body.
-fn tools_notice_text(tool_names: &[String]) -> String {
-    if tool_names.is_empty() {
-        return "No tools are enabled for this session.".to_string();
-    }
-    let mut text = String::from("Tools available to the agent:");
-    for name in tool_names {
-        text.push_str("\n  • ");
-        text.push_str(name);
-    }
-    text
 }
