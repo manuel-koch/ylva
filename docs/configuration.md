@@ -1110,14 +1110,18 @@ evaluated independently:
   happens to match the same command.
 
 All commands in the script are then combined the same way (strictest
-verdict wins) into one overall verdict for the script. `--auto-approve-bash`
-is evaluated last and always wins regardless of `[tools.bash]` config,
+verdict wins) into one overall verdict for the script. A command matching
+no rule prevents auto-approval: if another command is `auto_approved`, the
+script requires user approval. Only a script whose every command is
+`auto_approved` can be structurally auto-approved. `--auto-approve-bash` is
+evaluated last and always wins regardless of `[tools.bash]` config,
 mirroring `--auto-approve-write`/`--auto-approve-edit`'s existing precedence
 for `write`/`edit`.
 
 When the script fails to parse, or every command in it is understood and
-legal but no rule fires, `bash` falls back to its own default of
-`user_approval_required`.
+legal but no rule fires for any command, the sandbox abstains. Unless
+`--auto-approve-bash` overrides that abstention, `bash` falls back to its own
+default of `user_approval_required`.
 
 ### Network tool rules (`network_request`)
 

@@ -45,24 +45,29 @@ impl SandboxContext {
     /// **Aggregation:** all per-statement contributions are combined across
     /// the whole script by worst-case ranking
     /// (`AutoDenied` > `UserApprovalRequired` > `AutoApproved`) into a single
-    /// structural verdict. `self.rules` (e.g. `--auto-approve-bash`'s
+    /// structural verdict. An unmatched command alongside an auto-approved
+    /// one yields `UserApprovalRequired`, so auto-approval requires every
+    /// command to be auto-approved. `self.rules` (e.g. `--auto-approve-bash`'s
     /// catch-all) is then evaluated once, matched against the raw `command`
     /// string, last-match-wins against the structural verdict — so it always
     /// wins regardless of any `[tools.bash]` config, mirroring
     /// [`SandboxContext::check_path`]'s existing precedence.
     ///
-    /// Returns `None` only when the script fails to parse at all, or every
-    /// extracted statement is fully analysable and legal but no rule/floor
-    /// fires and `self.rules` has no match either (pure abstention).
+    /// Returns `None` only when parsing fails or no extracted statement
+    /// produces a verdict, and `self.rules` has no match either (pure
+    /// abstention).
     pub fn check_command(&self, command: &str) -> Option<ApprovalCheck> {
         let structural_verdict = match bash_command_extractor::extract(command) {
             bash_command_extractor::ExtractionResult::ParseFailed => None,
             bash_command_extractor::ExtractionResult::Statements(statements) => {
                 let mut aggregate: Option<ApprovalCheck> = None;
+                let mut has_unmatched_command = false;
                 for statement in &statements {
                     let contribution = match statement {
                         bash_command_extractor::ExtractedStatement::Command(extracted) => {
-                            self.evaluate_command(extracted)
+                            let verdict = self.evaluate_command(extracted);
+                            has_unmatched_command |= verdict.is_none();
+                            verdict
                         }
                         bash_command_extractor::ExtractedStatement::Unanalysable => {
                             Some(ApprovalCheck::UserApprovalRequired)
@@ -70,11 +75,15 @@ impl SandboxContext {
                     };
                     aggregate = Self::worse_verdict(aggregate, contribution);
                 }
-                aggregate
+                if has_unmatched_command && aggregate == Some(ApprovalCheck::AutoApproved) {
+                    Some(ApprovalCheck::UserApprovalRequired)
+                } else {
+                    aggregate
+                }
             }
         };
 
-        // `self.rules` (e.g. --auto-approve-bash's catch-all) is always
+        // `self.rules` (e.g. --auto-approve-*'s catch-all) is always
         // evaluated last, matched against the raw command string, so it wins
         // regardless of the structural verdict above.
         let mut verdict = structural_verdict;

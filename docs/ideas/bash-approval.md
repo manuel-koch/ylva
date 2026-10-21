@@ -173,13 +173,10 @@ Layers, cheapest first. Ideas are additive.
    - A list is auto-approved only if **every** command in it is
      auto-approved by a rule.
 
-   *Known bug (verified 2026-10-21):* the second point does not hold yet.
-   `SandboxContext::check_command` combines per-command verdicts by
-   worst-case ranking, but a command matching no rule contributes `None`,
-   which loses to `AutoApproved`. With `{ command = ["cat", "**"],
-   verdict = "auto_approved" }`, `rm -rf foo; cat x` is auto-approved. An
-   unmatched command inside a list must count as `UserApprovalRequired`
-   (only a fully unmatched script may abstain).
+   `SandboxContext::check_command` enforces the second invariant for the
+   structural verdict: an unmatched command alongside an auto-approved one
+   requires user approval. Only a fully unmatched script may abstain.
+   The explicit `--auto-approve-bash` override still wins.
 3. **Treat env assignments, absolute/relative command paths and wrappers
    as unanalysable.** Match only bare names; refuse `./cat`, `/tmp/cat`,
    `env cat`, `command cat`, `nice`, `time`, `sudo`, `xargs`.

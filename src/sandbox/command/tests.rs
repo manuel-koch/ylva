@@ -132,6 +132,46 @@ fn check_command_aggregates_worst_case_across_multiple_commands() {
 }
 
 #[test]
+fn check_command_unmatched_command_in_list_blocks_auto_approval() {
+    let temporary_dir = tempfile::tempdir().unwrap();
+    let sandbox = make_sandbox(temporary_dir.path());
+    let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+        SandboxRuleConfig::CommandGlob {
+            command: vec!["cat".to_string(), "**".to_string()],
+            verdict: ApprovalVerdictConfig::AutoApproved,
+            reason: None,
+        },
+    ]);
+
+    for command in ["rm -rf foo; cat x", "cat x && rm -rf foo", "cat x | sh"] {
+        assert_eq!(
+            context.check_command(command),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "an unmatched command must block auto-approval of {command:?}"
+        );
+    }
+}
+
+#[test]
+fn check_command_all_commands_auto_approved_list_is_auto_approved() {
+    let temporary_dir = tempfile::tempdir().unwrap();
+    let sandbox = make_sandbox(temporary_dir.path());
+    let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+        SandboxRuleConfig::CommandGlob {
+            command: vec!["cat".to_string(), "**".to_string()],
+            verdict: ApprovalVerdictConfig::AutoApproved,
+            reason: None,
+        },
+    ]);
+
+    assert_eq!(
+        context.check_command("cat a; cat b"),
+        Some(ApprovalCheck::AutoApproved)
+    );
+    assert_eq!(context.check_command("rm -rf foo"), None);
+}
+
+#[test]
 fn check_command_auto_denied_in_one_segment_wins_over_others() {
     let temporary_dir = tempfile::tempdir().unwrap();
     let sandbox = make_sandbox(temporary_dir.path());

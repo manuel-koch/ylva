@@ -82,9 +82,9 @@ rules = [
     { command = ["echo", "**"],   verdict = "auto_approved" },
     { command = ["printf", "**"], verdict = "auto_approved" },
     { command = ["test", "**"],   verdict = "auto_approved" },
-    # need to use the default rules to avoid unwanted auto-approve
-    { rule = "unquoted_glob",              verdict = "user_approval_required" }
-    { rule = "unquoted_brace_expansion",   verdict = "user_approval_required" }
-    { rule = "variable_assignment_prefix", verdict = "user_approval_required" }
-    { rule = "backgrounded",               verdict = "user_approval_required" }
+    # need to use the default rules to avoid unwanted auto-approvals
+    { rule = "unquoted_glob",              verdict = "user_approval_required" },
+    { rule = "unquoted_brace_expansion",   verdict = "user_approval_required" },
+    { rule = "variable_assignment_prefix", verdict = "user_approval_required" },
+    { rule = "backgrounded",               verdict = "auto_denied" },
 ]

@@ -66,16 +66,16 @@ An implementing agent must flip `[ ]` to `[x]` immediately after completing
 each step and rewrite this file in place, so progress is resumable across
 sessions.
 
-1. [ ] Add failing regression tests in `src/sandbox/command/tests.rs`
+1. [x] Add failing regression tests in `src/sandbox/command/tests.rs`
    (TDD, run them and see them fail before step 2):
-   1. [ ] `check_command_unmatched_command_in_list_blocks_auto_approval`:
+   1. [x] `check_command_unmatched_command_in_list_blocks_auto_approval`:
       configured rule `["cat", "**"] → AutoApproved`; assert
       `Some(UserApprovalRequired)` for `rm -rf foo; cat x`,
       `cat x && rm -rf foo` and `cat x | sh`.
-   2. [ ] `check_command_all_commands_auto_approved_list_is_auto_approved`:
+   2. [x] `check_command_all_commands_auto_approved_list_is_auto_approved`:
       same rule; `cat a; cat b` → `Some(AutoApproved)`, and the single
       unmatched `rm -rf foo` → `None`.
-2. [ ] Fix the aggregation in `SandboxContext::check_command`
+2. [x] Fix the aggregation in `SandboxContext::check_command`
    (`src/sandbox/command.rs`): while iterating statements, track whether
    any `ExtractedStatement::Command` evaluated to `None`. After the loop, if
    the aggregate is `Some(AutoApproved)` and at least one command was
@@ -83,17 +83,17 @@ sessions.
    `Some(UserApprovalRequired)`. Leave all other outcomes (including
    all-`None` → `None`) unchanged. Keep `worse_verdict` /
    `approval_check_rank` as they are. Do not touch the `self.rules` loop.
-3. [ ] Update the doc comment of `check_command` (the **Aggregation**
+3. [x] Update the doc comment of `check_command` (the **Aggregation**
    paragraph and the "Returns `None` only when …" paragraph) to state: an
    unmatched command alongside an auto-approved one yields
    `UserApprovalRequired`; `None` is returned only when no command produced
    a verdict (or parsing failed) and `self.rules` has no match. Update the
    module doc line (`//! Command structure evaluation …`) only if it becomes
    inaccurate.
-4. [ ] Update `BashTool::needs_approval`'s doc comment in
+4. [x] Update `BashTool::needs_approval`'s doc comment in
    `src/agent/tools/bash.rs` only if it contradicts the new behavior (it
    currently describes abstention generically; likely no change).
-5. [ ] Update `docs/configuration.md`, section "`bash` command rules" →
+5. [x] Update `docs/configuration.md`, section "`bash` command rules" →
    "**Per-command evaluation and aggregation.**": after "All commands in the
    script are then combined the same way (strictest verdict wins) …", add
    that a command matching no rule never lets the script be auto-approved:
@@ -101,12 +101,12 @@ sessions.
    approval. Adjust the following paragraph ("When the script fails to
    parse, or every command in it is understood and legal but no rule
    fires …") so it stays accurate.
-6. [ ] Update `docs/ideas/bash-approval.md`, layer 2: replace the
+6. [x] Update `docs/ideas/bash-approval.md`, layer 2: replace the
    "*Known bug (verified 2026-10-21)*" paragraph with a short note that the
    "every command must be auto-approved" invariant is enforced by
    `SandboxContext::check_command`.
-7. [ ] Run `rumdl fmt` and `rumdl check` on the changed markdown files.
-8. [ ] Run `make format lint` and `make test-coverage`; fix any failure.
+7. [x] Run `rumdl fmt` and `rumdl check` on the changed markdown files.
+8. [x] Run `make format lint` and `make test-coverage`; fix any failure.
 
 ## Proposed Improvements
 

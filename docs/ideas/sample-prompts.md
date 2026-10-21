@@ -344,8 +344,8 @@ tests, and documentation.
 
 ## Follow context budgeting and compaction
 
-Explain exactly how Ylva estimates context size and decides when and how to
-compact a conversation.
+Explain exactly ( reading the sources & documentation ) how Ylva estimates
+context size and decides when and how to compact a conversation.
 
 Work in stages. First inspect token estimation and the footer readout.
 Then trace threshold evaluation, background summary generation, safe
@@ -361,6 +361,8 @@ commands that change the workspace. Keep investigating in additional focused
 stages if needed. Finish with a decision-flow outline, a worked example
 using hypothetical token estimates, and any gaps between the documented
 contract and tested behavior.
+
+Save your report to `.ylva/logs/context-budgeting-and-compaction.md`.
 
 ---
 
