@@ -18,10 +18,10 @@ and network exfiltration are not prevented by argument classification.
 
 This plan translates the Bash approval research into the agreed first delivery:
 argument-conditioned rules backed by small built-in command grammars, with
-conservative treatment of unsupported command forms. It is a planning document,
-not authorization to implement source changes. The design decisions below were
-refined through grilling and confirmed by the user. Planning is finalized;
-source implementation requires separate authorization.
+conservative treatment of unsupported command forms. The design decisions below
+were refined through grilling and confirmed by the user. Source implementation
+was separately authorized by the user's request to execute this plan; the
+checklist records execution progress.
 
 The agreed first delivery excludes executable pinning/sanitized `PATH`,
 Bash operand path scoping, learned persistent rules, an approval-verdict trail,
@@ -86,14 +86,14 @@ implementation unit includes its focused tests and the corresponding
 documentation from step 9; do not defer documentation until a
 later commit.
 
-1. [ ] Establish the agreed delivery contract and baseline. Open
+1. [x] Establish the agreed delivery contract and baseline. Open
    `src/sandbox/command.rs` first, then read `src/sandbox/rules.rs` and this
    plan's Implementation Hints. Run `cargo test --lib sandbox::command::tests`
    as the first focused baseline. Check `docs/architecture-design-records/`
    again before coding and raise any newly discovered conflict.
    Verify the existing unmatched-script and CLI-override tests remain the
    baseline rather than reimplementing their already-correct behavior.
-2. [ ] Add the shared argument-parsing model and one minimal grammar in a
+2. [x] Add the shared argument-parsing model and one minimal grammar in a
    private file-per-module under `src/sandbox/`, registered in
    `src/sandbox.rs`. Represent confidently identified options/subcommands,
    operands, option values, and incomplete/ambiguous analysis separately.
@@ -105,7 +105,7 @@ later commit.
    Introduce command-specific hooks only when necessary. Start with `cat`
    as a small vertical slice. Test known options, missing values, `--`,
    unknown tokens, quoted literals, and bundled flags without shell execution.
-3. [ ] Extend `SandboxRuleConfig`, `RawSandboxRuleConfig`, and `ResolvedRule`
+3. [x] Extend `SandboxRuleConfig`, `RawSandboxRuleConfig`, and `ResolvedRule`
    in `src/sandbox/rules.rs` with the agreed condition contract. Compile
    argument patterns once, using existing glob infrastructure where its
    semantics fit. Share semantic validation with
@@ -118,7 +118,7 @@ later commit.
    `with_arguments`, and retain empty `only_arguments` as a meaningful value.
    Cover TOML and agent-type configuration loading, unknown-key errors, and
    malformed condition patterns in owner-local rule/configuration tests.
-4. [ ] Change `SandboxContext::with_configured_rules` and `with_tool_rules` to
+4. [x] Change `SandboxContext::with_configured_rules` and `with_tool_rules` to
    return `Result` and propagate construction errors rather than skipping
    invalid entries. Carry that result through
    `src/agent/tools.rs::default_registry`, `src/agent_factory.rs`, skill-policy
@@ -126,7 +126,7 @@ later commit.
    Cover malformed direct-construction vetoes following an unconditional allow.
    Valid existing rules must keep their behavior; test callers unwrap known
    valid fixtures, while production callers propagate errors explicitly.
-5. [ ] Integrate conditional matching into
+5. [x] Integrate conditional matching into
    `src/sandbox/command.rs::evaluate_command`. Reuse one parsed result per
    command across conditional rules; do not parse commands for unconditional
    rules. Implement presence matching and complete allow-list matching as
@@ -137,14 +137,14 @@ later commit.
    an unparsed wildcard followed by a conditional veto, fully unmatched
    scripts, mixed approved/unmatched scripts, unanalysable statements,
    configured default-floor replacement, and final CLI-override precedence.
-6. [ ] Apply the executable/assignment/wrapper boundary at conditional-rule
+6. [x] Apply the executable/assignment/wrapper boundary at conditional-rule
    eligibility without changing extraction of existing supported forms. Do not unwrap
    wrappers or expand shell variables during analysis. Add regressions for
    `FOO=bar cat file`, `./cat file`, `/tmp/cat file`, `env cat file`,
    `command cat file`, `sudo cat file`, `time cat file`, shell-state commands,
    and scripts combining those with an approved command. Verify explicit
    unconditional rules and `--auto-approve-bash` behave exactly as agreed.
-7. [ ] Extend the agreed built-in grammar roster one command at a time, with tests
+7. [x] Extend the agreed built-in grammar roster one command at a time, with tests
    and documentation per command: `cat`, `ls`, `head`, `tail`, `wc`, `grep`,
    `rg`, `sort`, `find`, and `git status|log|diff|show`. Keep `sed`/`awk`
    unsupported by conditional rules. Record tool/OS
@@ -153,7 +153,7 @@ later commit.
    parseability with an approving policy. Cover macOS BSD/GNU differences,
    option values, long `=` forms, short bundles, operands preceding options,
    and subcommand-specific options only where actually supported.
-8. [ ] Strengthen owner-local tests in `src/sandbox/command/tests.rs`,
+8. [x] Strengthen owner-local tests in `src/sandbox/command/tests.rs`,
    `src/sandbox/rules/tests.rs`, the extractor tests, and grammar-local tests.
    Use a small independently authored bypass matrix covering `find -exec`,
    `-execdir`, `-delete`, `-fprint*`, `sort -o`, `rg --pre`, Git execution/output
@@ -170,7 +170,7 @@ later commit.
    conditional-rule wiring rather than duplicating parser cases. Verify
    representative existing unconditional configurations preserve their
    results, including grammarless broad approvals.
-9. [ ] Update `docs/configuration.md` with field syntax, selector semantics,
+9. [x] Update `docs/configuration.md` with field syntax, selector semantics,
    empty/composed-condition behavior, glob matching, supported grammars,
    partial-versus-complete parsing, precedence, and migration examples.
    Update `docs/features.md` to distinguish heuristic approval from enforced
@@ -186,13 +186,19 @@ later commit.
    `nl`, `cut`, `tr`, `echo`, `printf`, and `test` approvals as explicitly
    documented user-owned opt-outs, not as argument-checked rules. Do not
    migrate any other existing user configuration automatically.
-10. [ ] Verify the completed source change using `make format lint` followed
+10. [x] Verify the completed source change using `make format lint` followed
    by the single mandatory full test/coverage gate, `make test-coverage`,
    maintaining at least 80% aggregate line coverage. Run `make audit` only
    if dependencies changed. Verify changed Markdown with `rumdl check`.
    Do not run `make test` as a duplicate mandatory gate. Review the diff for
    unintended execution, configuration, or path-policy changes, finish the
    checklist, and leave staging/committing to a separately authorized action.
+
+Execution verification: `make format lint`, `make test-coverage` and changed-file
+`rumdl check` passed. Aggregate line coverage was 88.35%. Dependencies were
+unchanged, so no dependency audit was required. The utility option definitions
+use the user-selected module name `utility_options.rs`. No files were staged
+or committed.
 
 ## Proposed Improvements
 
@@ -269,11 +275,11 @@ later commit.
   exactly one of `rule`, `pattern`, or `command`. The public rule enum is
   constructed directly in multiple test suites; new fields affect those
   construction sites, not only deserialization.
-- `ResolvedRule::from_config` already returns typed errors.
-  `SandboxContext::with_configured_rules` currently logs and skips invalid
-  compiled rules. A skipped conditional veto after an unconditional allow
-  can weaken policy; the agreed fallible-construction change replaces this
-  fallback with explicit error propagation.
+- `ResolvedRule::from_config` returns typed errors. Before this implementation,
+  `SandboxContext::with_configured_rules` logged and skipped invalid compiled
+  rules. A skipped conditional veto after an unconditional allow could weaken
+  policy; construction now returns an error through the registry, factory and
+  skill policy instead.
 - `src/config/profile.rs::validate_tool_sandbox_rules` rejects misplaced
   rule kinds and command wildcards at load time. Profile tests live in
   `src/config/profile/tests/sandbox.rs` and unknown-key tests in

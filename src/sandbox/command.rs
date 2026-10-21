@@ -15,7 +15,9 @@
 //! Command structure evaluation and worst-case statement aggregation.
 
 use super::rules::{ResolvedRule, BACKGROUNDED_REASON};
-use super::{bash_command_extractor, ApprovalCheck, NamedSandboxRule, SandboxContext};
+use super::{
+    bash_command_extractor, command_arguments, ApprovalCheck, NamedSandboxRule, SandboxContext,
+};
 
 impl SandboxContext {
     /// Check whether `command` is allowed by the sandbox.
@@ -144,6 +146,7 @@ impl SandboxContext {
         match &self.configured_rules {
             Some(configured) => {
                 let mut verdict = None;
+                let mut argument_analysis = None;
                 for rule in configured {
                     match rule {
                         ResolvedRule::Named {
@@ -157,9 +160,20 @@ impl SandboxContext {
                         }
                         ResolvedRule::CommandGlob {
                             command: pattern,
+                            conditions,
                             verdict: rule_verdict,
                         } => {
                             if pattern.matches(&command.argv) {
+                                if let Some(conditions) = conditions {
+                                    if command.has_variable_assignment_prefix {
+                                        continue;
+                                    }
+                                    let analysis = argument_analysis
+                                        .get_or_insert_with(|| command_arguments::parse(command));
+                                    if !conditions.matches(analysis) {
+                                        continue;
+                                    }
+                                }
                                 verdict = Some(rule_verdict.clone());
                             }
                         }

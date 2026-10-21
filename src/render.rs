@@ -1610,6 +1610,7 @@ mod tests {
                 ..crate::agent::tools::ToolRegistryConfig::default()
             },
         )
+        .expect("valid sandbox fixture")
     }
 
     fn push_web_search_bubble(state: &mut AppState) {
@@ -1667,7 +1668,8 @@ mod tests {
         let mut registry = crate::agent::tools::default_registry(
             std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new())),
             crate::agent::tools::ToolRegistryConfig::default(),
-        );
+        )
+        .expect("valid sandbox fixture");
         registry.register(std::sync::Arc::new(
             crate::agent::tools::spawn_subagent::SpawnSubagentTool::new(false),
         ));

@@ -288,6 +288,13 @@ fn validate_tool_sandbox_rules(
                     index,
                 });
             }
+            rule.validate()
+                .map_err(|source| ConfigError::InvalidSandboxRule {
+                    path: path.to_path_buf(),
+                    tool: tool_name.clone(),
+                    index,
+                    source,
+                })?;
         }
     }
     Ok(())

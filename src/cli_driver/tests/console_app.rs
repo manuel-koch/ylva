@@ -36,7 +36,8 @@ fn display_registry_titles_the_backend_the_profile_configures() {
     let registry = default_registry(
         std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
         display_registry_config(&profile),
-    );
+    )
+    .expect("valid sandbox fixture");
     let web_search = registry
         .get(crate::agent::tools::web_search::WebSearchTool::NAME)
         .expect("web_search is part of the CLI tool set");
@@ -66,7 +67,8 @@ fn display_registry_titles_brave_when_the_profile_configures_it() {
     let registry = default_registry(
         std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
         display_registry_config(&profile),
-    );
+    )
+    .expect("valid sandbox fixture");
     let web_search = registry
         .get(crate::agent::tools::web_search::WebSearchTool::NAME)
         .expect("web_search is part of the CLI tool set");

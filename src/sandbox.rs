@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 mod command;
+mod command_arguments;
 mod network;
 mod path;
 mod rules;
@@ -43,6 +44,7 @@ pub use path::{expand_path_tokens, to_relative_path};
 #[cfg(test)]
 pub(crate) use rules::ApprovalVerdictConfig;
 use rules::ResolvedRule;
+pub use rules::ResolvedRuleError as SandboxRuleError;
 pub use rules::{ApprovalCheck, NamedSandboxRule, SandboxRule, SandboxRuleConfig};
 
 /// Shared sandbox. Holds the launch-directory anchor used to resolve relative
@@ -133,18 +135,13 @@ impl SandboxContext {
     }
 
     /// Tool-aware defense for callers that bypass profile validation.
-    pub fn with_tool_rules(self, tool_name: &str, rules: Vec<SandboxRuleConfig>) -> Self {
-        if tool_name != "read" && rules.iter().any(SandboxRuleConfig::is_read_tool_only) {
-            tracing::error!(
-                tool = tool_name,
-                "skill_sidecar rule rejected for non-read tool"
-            );
-            return self.with_rule(SandboxRule {
-                verdict: ApprovalCheck::AutoDenied {
-                    reason: "skill_sidecar is valid only for read".into(),
-                },
-                pattern: glob::Pattern::new("**").expect("valid glob"),
-            });
+    pub fn with_tool_rules(
+        self,
+        tool_name: &str,
+        rules: Vec<SandboxRuleConfig>,
+    ) -> Result<Self, SandboxRuleError> {
+        for rule in &rules {
+            rule.validate_for_tool(tool_name)?;
         }
         self.with_configured_rules(rules)
     }
@@ -178,24 +175,18 @@ impl SandboxContext {
     /// wants `outside_workspace`/`dot_path` protection must include those as
     /// explicit [`SandboxRuleConfig::Named`] entries in `rules`.
     ///
-    /// Invalid rules (a malformed glob pattern, or a `command` rule with a
-    /// misplaced `*`/`**` wildcard) are skipped (with a `tracing::warn!`)
-    /// rather than causing a panic or a hard config-load failure, since
-    /// sandbox rules are safety-critical and a single malformed rule should
-    /// not silently disable outside_workspace/dot_path protection.
-    pub fn with_configured_rules(mut self, rules: Vec<SandboxRuleConfig>) -> Self {
+    /// Invalid entries reject construction of the whole policy, so a malformed
+    /// restriction cannot leave an earlier approval effective.
+    pub fn with_configured_rules(
+        mut self,
+        rules: Vec<SandboxRuleConfig>,
+    ) -> Result<Self, SandboxRuleError> {
         let resolved = rules
             .into_iter()
-            .filter_map(|rule| match ResolvedRule::from_config(rule) {
-                Ok(resolved) => Some(resolved),
-                Err(error) => {
-                    tracing::warn!(%error, "skipping invalid sandbox rule");
-                    None
-                }
-            })
-            .collect();
+            .map(ResolvedRule::from_config)
+            .collect::<Result<_, _>>()?;
         self.configured_rules = Some(resolved);
-        self
+        Ok(self)
     }
 }
 

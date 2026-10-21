@@ -179,7 +179,8 @@ async fn skills_execute_through_normal_tools_and_persist_without_reopening_sourc
             ))),
             &profile,
             "default",
-        ),
+        )
+        .expect("valid sandbox fixture"),
     )
     .create_call(uuid::Uuid::new_v4(), serde_json::json!({"name":"example"}))
     .run()

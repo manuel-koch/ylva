@@ -82,7 +82,8 @@ fn tool_execution_log_events_carry_spanned_tool_call_id() {
         let registry = tools::default_registry(
             std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new())),
             tools::ToolRegistryConfig::default(),
-        );
+        )
+        .expect("valid sandbox fixture");
         let pending = PendingTool {
             call: registry
                 .create_call(

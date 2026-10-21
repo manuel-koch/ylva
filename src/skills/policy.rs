@@ -79,7 +79,7 @@ impl CallableSkills {
         if !loader_enabled {
             return Ok(Self::default());
         }
-        let context = loader_context(sandbox, profile, agent_type);
+        let context = loader_context(sandbox, profile, agent_type)?;
         let mut callable = Self::default();
         for (name, skill) in &catalog.skills {
             if explicit_names.is_some_and(|names| !names.contains(name)) {
@@ -142,7 +142,7 @@ pub fn loader_context(
     sandbox: Arc<RwLock<Sandbox>>,
     profile: &ProfileConfig,
     agent_type: &str,
-) -> SandboxContext {
+) -> Result<SandboxContext, crate::sandbox::SandboxRuleError> {
     let rules = profile
         .agents
         .get(agent_type)

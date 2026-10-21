@@ -54,6 +54,7 @@ const KNOWN_KEYS: &[&str] = &[
     "max_concurrent_subagents",
     "max_tool_iterations",
     "model",
+    "only_arguments",
     "pattern",
     "persona",
     "provider",
@@ -77,6 +78,7 @@ const KNOWN_KEYS: &[&str] = &[
     "verdict",
     "web_fetch",
     "web_search",
+    "with_arguments",
 ];
 
 /// One configuration key that no struct consumed.

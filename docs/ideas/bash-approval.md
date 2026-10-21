@@ -20,14 +20,37 @@ for auto-approval and in no way a security/sandbox feature, isn't it ?
 See [bash tool config](../../.ylva/profiles/other/config.toml)
 for some command rules.
 
+## Delivered scope
+
+Argument-conditioned rules and conservative built-in grammars are implemented;
+the authoritative contract and migration example are in
+[configuration](../configuration.md#bash-command-rules). The implementation plan
+is [argument-aware Bash approval](../plans/bash-approval-plan.md).
+
+`with_arguments` matches confident option/subcommand identities, not raw tokens.
+`only_arguments` additionally requires a complete parse. Unknown arity stops
+later evidence collection: `find . -weird -exec` does **not** supply confident
+`-exec` evidence, while `find . -delete -weird` retains earlier `-delete`.
+Equivalent aliases match together; values do not match conditions.
+Both conditions combine with AND. Selectors retain argv-shape semantics, so
+commands with arguments need an explicit tail such as `["git", "**"]`.
+Assignment/path/wrapper restrictions affect only conditional eligibility;
+unconditional rules remain deliberate user-owned opt-outs.
+
+The remaining layers below are deferred research, not delivered requirements:
+executable pinning, operand path scoping, learned persistent rules, verdict
+trails, OS isolation, heuristic scanners, LLM judging and explanation UI.
+External product comparisons and OS availability are unverified research notes.
+
 ## Research findings
 
-### Starting point in ylva
+### Historical starting point in ylva
 
 `src/sandbox/bash_command_extractor.rs` already parses commands with
 `tree-sitter-bash` and only analyses `list`/`pipeline`/`command` nodes.
 Redirections, substitutions, subshells, control flow, heredocs and
-backgrounding are `Unanalysable` (never auto-approved). Rules are argv globs
+unsupported forms are `Unanalysable` (require approval). Backgrounding is instead
+an extracted flag handled by a named structural rule. Original rules were argv globs
 (`["cat", "**"]`), i.e. they match the command *name* and accept any arguments.
 This closes the shell-syntax holes (`cat x > y`, `$(rm …)`) but not the
 flag holes of a command itself.
@@ -78,9 +101,9 @@ Layers, cheapest first. Ideas are additive.
      the rule does not match and other rules decide (default floor).
 
    ```toml
-   { command = ["find"], with_arguments = ["-exec", "-execdir", "-ok",
+   { command = ["find", "**"], with_arguments = ["-exec", "-execdir", "-ok",
      "-delete", "-fprint*", "-fls"], verdict = "user_approval_required" }
-   { command = ["git"], only_arguments = ["status", "log", "diff", "show"],
+   { command = ["git", "**"], only_arguments = ["status", "log", "diff", "show"],
      verdict = "auto_approved" }
    ```
 
@@ -136,17 +159,17 @@ Layers, cheapest first. Ideas are additive.
        it matches when a listed argument is *properly placed* by the
        grammar (as option or subcommand), even if other tokens are
        unplaceable. Independent of the rule's verdict; unplaceable or
-       ambiguous tokens are not evidence and neither match nor block (an
-       option value such as `find -name -exec` is not an option). Whether a
+       ambiguous tokens are not evidence; unknown arity stops collection of
+       later evidence without erasing earlier confident identities (an option
+       value such as `find -name -exec` is not an option). Whether a
        verdict is sensible for "argument present" is the rule author's
        responsibility; shipped approving rules use `only_arguments`.
      - `only_arguments` must know every argument: any unplaceable token
        makes it not match.
      - A rule that does not match makes no decision; other rules or the
-       default floor (user approval) decide. Thus a `with_arguments` veto
-       after a bare wildcard catches `find . -weird -exec`, but can be
-       evaded when the listed argument is not recognisable in any token
-       (e.g. hidden in an unparsable bundle). That wildcard is the user's
+       tool default decide. A `with_arguments` veto after a bare wildcard
+       cannot catch `find . -weird -exec`: the unknown predicate's arity
+       makes placement of `-exec` ambiguous. That wildcard is the user's
        explicit unparsed opt-out; the safe form is `only_arguments` on the
        approving rule.
 

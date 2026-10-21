@@ -28,3 +28,6 @@ docs/diagrams/*.svg
 
 # Graphify output
 graphify-out
+
+# Raw command history and replay reports can contain private data.
+/tests/sandbox_evaluation/data/

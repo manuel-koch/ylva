@@ -29,14 +29,17 @@ fn build_concurrency_scenario(
 ) -> ConcurrencyScenario {
     use ylva::subagent_manager::{SpawnFn, SpawnRequest, SubagentManager};
 
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig {
-            include_spawn_subagent: true,
-            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
-            ..ToolRegistryConfig::default()
-        },
-    ));
+    let registry = Arc::new(
+        default_registry(
+            make_sandbox(),
+            ToolRegistryConfig {
+                include_spawn_subagent: true,
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
+                ..ToolRegistryConfig::default()
+            },
+        )
+        .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let spawn_calls = (0..subagent_count)
         .map(|index| {
@@ -175,14 +178,17 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_subagents_
 
     use ylva::subagent_manager::{FinishResult, SpawnFn, SubagentManager};
 
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig {
-            include_spawn_subagent: true,
-            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
-            ..ToolRegistryConfig::default()
-        },
-    ));
+    let registry = Arc::new(
+        default_registry(
+            make_sandbox(),
+            ToolRegistryConfig {
+                include_spawn_subagent: true,
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
+                ..ToolRegistryConfig::default()
+            },
+        )
+        .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = SequencedMockProvider::new(
         vec![
@@ -389,14 +395,17 @@ async fn interleaved_subagent_tokens_retain_their_own_run_id() {
     use uuid::Uuid;
     use ylva::subagent_manager::{FinishResult, SpawnFn, SubagentManager};
 
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig {
-            include_spawn_subagent: true,
-            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
-            ..ToolRegistryConfig::default()
-        },
-    ));
+    let registry = Arc::new(
+        default_registry(
+            make_sandbox(),
+            ToolRegistryConfig {
+                include_spawn_subagent: true,
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
+                ..ToolRegistryConfig::default()
+            },
+        )
+        .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = SequencedMockProvider::new(
         vec![
@@ -856,14 +865,17 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
     use tokio_util::sync::CancellationToken;
     use ylva::subagent_manager::{FinishResult, SpawnFn, SubagentManager};
 
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig {
-            include_spawn_subagent: true,
-            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
-            ..ToolRegistryConfig::default()
-        },
-    ));
+    let registry = Arc::new(
+        default_registry(
+            make_sandbox(),
+            ToolRegistryConfig {
+                include_spawn_subagent: true,
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
+                ..ToolRegistryConfig::default()
+            },
+        )
+        .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -947,14 +959,17 @@ async fn stop_cancels_multiple_running_and_queued_subagents() {
     use tokio_util::sync::CancellationToken;
     use ylva::subagent_manager::{SpawnFn, SubagentManager};
 
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig {
-            include_spawn_subagent: true,
-            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
-            ..ToolRegistryConfig::default()
-        },
-    ));
+    let registry = Arc::new(
+        default_registry(
+            make_sandbox(),
+            ToolRegistryConfig {
+                include_spawn_subagent: true,
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
+                ..ToolRegistryConfig::default()
+            },
+        )
+        .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = SequencedMockProvider::new(
         vec![
@@ -1104,10 +1119,10 @@ async fn for_subagent_targeting_an_unknown_run_id_is_dropped_without_hanging_the
     // dropped, not panic or silently wedge the root loop's `select!` — the
     // root must stay fully responsive to its own, unrelated commands
     // afterwards.
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(make_sandbox(), ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(vec![MockEvent::Text("hi there".into())], interval);
     let (mut agent, mut ui_rx) = AgentLoop::new(

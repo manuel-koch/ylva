@@ -215,6 +215,43 @@ paths work in path tools and `bash`. See
 
 See [configuration](./configuration.md#sandbox-tool-approval-rules).
 
+### Argument-conditioned command rules
+
+- Shell extraction remains in `sandbox/bash_command_extractor.rs`; unsupported
+  shell structures still contribute approval-required outcomes. Private
+  `sandbox/command_arguments.rs` owns static command grammars, alias identities,
+  option arity and command-specific placement. It never executes tools or
+  resolves their binaries. Tables cite their tool/OS documentation and review
+  dates. Unknown or conflicting forms reduce convenience instead of guessing.
+  First-argument, ASCII-digit-only `head`/`tail` counts (`-N`) use the
+  `-n`/`--lines` identity and retain their attached value placement; suffixed
+  or later legacy forms remain incomplete. The shared numeric-count recognizer
+  also maps `git log -N` to `-n`/`--max-count` anywhere before `--`, excluding
+  consumed option values and other Git subcommands.
+  Git's dedicated `check-ignore` option scope recognizes `-v`/`--verbose`,
+  honors `--`, and requires an explicit path; stdin and other reporting modes
+  remain incomplete.
+- `sandbox/rules.rs` compiles condition globs and validates the shared semantic
+  contract used by profile loading and direct construction. Conditions are
+  command-only; the selector's literal first token chooses the grammar.
+  `SandboxContext::with_configured_rules` and `with_tool_rules` return errors,
+  propagated through the registry, agent factory and skill policy. A malformed
+  veto cannot be skipped after an unconditional allow, even with a CLI override.
+- `sandbox/command.rs` first applies the unchanged argv-shape matcher and then
+  lazily reuses one argument analysis across matching conditional rules.
+  Assignment prefixes are ineligible; paths and wrappers cannot select a bare
+  grammar. Unconditional rules never trigger argument parsing.
+- Presence matching uses confident option/subcommand identities, including
+  aliases, but excludes operands and option values. Unknown arity ends evidence
+  collection without erasing earlier evidence. Complete allow-list matching
+  additionally requires an entirely understood parse. Neither operation owns a
+  verdict; existing last-match ordering, default-floor replacement, strictest
+  script aggregation, unmatched-command handling and final CLI precedence stay
+  in their existing owners.
+
+See [argument conditions](configuration.md#bash-command-rules) for the roster,
+examples and limitations. This policy is not an execution sandbox.
+
 ## `read`/`write`/`edit` approval-to-use binding
 
 `create_call` runs before approval, so each call captures an `ApprovedTarget`

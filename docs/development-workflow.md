@@ -67,6 +67,12 @@ The recipe uses `$<` for the source and `$@` for the target, with `$(notdir ...)
 to select container-relative filenames. Shell command substitutions use `$$`
 so Make passes them through to the shell.
 
+## Offline Bash policy replay
+
+See the [sandbox evaluation README](../tests/sandbox_evaluation/README.md) for
+exporting Copilot Bash invocations, extending JSON collections, evaluating
+approval rules without executing commands, and running the tool tests.
+
 ## License headers
 
 Every project-authored source file must carry the project's copyright and

@@ -15,6 +15,72 @@
 use super::*;
 
 #[test]
+fn conditional_command_rules_validate_profile_and_inline_agents() {
+    for scope in ["tools.bash", "agents.reviewer.tools.bash"] {
+        for condition in [
+            r#"only_arguments = ["status", "--short"]"#,
+            r#"only_arguments = []"#,
+            r#"with_arguments = ["--output"], only_arguments = ["diff", "--output"]"#,
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            write_profile_config(temporary.path(), "conditional", &format!(
+                "[{scope}]\nrules = [{{ command = [\"git\", \"**\"], {condition}, verdict = \"auto_approved\" }}]"
+            ));
+            ProfileConfig::load_with_environment_at_workspace_root(
+                temporary.path(),
+                "conditional",
+                &HashMap::new(),
+                None,
+            )
+            .unwrap();
+        }
+        for rule in [
+            r#"{ command = ["sed", "**"], only_arguments = [], verdict = "auto_approved" }"#,
+            r#"{ command = ["cat", "**"], with_arguments = [], verdict = "auto_denied" }"#,
+            r#"{ command = ["cat", "**"], with_arguments = ["["], verdict = "auto_denied" }"#,
+            r#"{ command = ["./cat", "**"], only_arguments = [], verdict = "auto_approved" }"#,
+            r#"{ rule = "backgrounded", only_arguments = [], verdict = "auto_denied" }"#,
+            r#"{ command = ["cat", "**"], only_argument = [], verdict = "auto_denied" }"#,
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            write_profile_config(
+                temporary.path(),
+                "conditional",
+                &format!("[{scope}]\nrules = [{rule}]"),
+            );
+            assert!(
+                ProfileConfig::load_with_environment_at_workspace_root(
+                    temporary.path(),
+                    "conditional",
+                    &HashMap::new(),
+                    None
+                )
+                .is_err(),
+                "{scope}: {rule}"
+            );
+        }
+    }
+}
+
+#[test]
+fn agent_type_file_conditions_reach_profile_validation_in_toml_and_yaml() {
+    for (filename, contents) in [
+        ("reviewer.toml", "[tools.bash]\nrules = [{ command = [\"git\", \"**\"], only_arguments = [\"status\"], verdict = \"auto_approved\" }]"),
+        ("reviewer.md", "---\ntools:\n  bash:\n    rules:\n      - command: [git, '**']\n        only_arguments: [status]\n        verdict: auto_approved\n---\nReview changes.\n"),
+    ] {
+        for command in ["git", "sed"] {
+            let temporary = tempfile::tempdir().unwrap();
+            write_profile_config(temporary.path(), "conditional", "");
+            let agent_directory = temporary.path().join("conditional/agents");
+            std::fs::create_dir_all(&agent_directory).unwrap();
+            std::fs::write(agent_directory.join(filename), contents.replace("git", command)).unwrap();
+            let loaded = ProfileConfig::load_with_environment_at_workspace_root(temporary.path(), "conditional", &HashMap::new(), None);
+            assert_eq!(loaded.is_ok(), command == "git", "{filename}: {loaded:?}");
+        }
+    }
+}
+
+#[test]
 fn skill_sidecar_is_read_only_and_loader_accepts_path_rules() {
     for tool in [
         "bash",

@@ -347,6 +347,24 @@ mod tests {
     // --- "in scope" examples ---
 
     #[test]
+    fn executable_paths_and_wrappers_are_not_normalized_or_unwrapped() {
+        for (source, expected) in [
+            ("./cat file", vec!["./cat", "file"]),
+            ("/tmp/cat file", vec!["/tmp/cat", "file"]),
+            ("env cat file", vec!["env", "cat", "file"]),
+            ("command cat file", vec!["command", "cat", "file"]),
+            ("sudo cat file", vec!["sudo", "cat", "file"]),
+        ] {
+            let command = extract_single_command(source);
+            assert_eq!(argv_texts(&command), expected, "{source}");
+        }
+        let command = extract_single_command("FOO=bar cat file");
+        assert!(command.has_variable_assignment_prefix);
+        assert_eq!(argv_texts(&command), vec!["cat", "file"]);
+        assert_eq!(extract_single_command("cat ~/file").argv[1].text, "~/file");
+    }
+
+    #[test]
     fn extracts_semicolon_separated_commands() {
         let statements = match extract(r#"find . -type f ; echo "Foo" ; cat foo.txt"#) {
             ExtractionResult::Statements(statements) => statements,

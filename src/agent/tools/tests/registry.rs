@@ -15,6 +15,74 @@
 use super::*;
 
 #[test]
+fn conditional_rules_are_wired_and_cli_override_requires_valid_policy() {
+    let sandbox = Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::with_root(
+        "/workspace".into(),
+    )));
+    let rules: crate::config::ToolSandboxConfig = toml::from_str(
+        r#"
+rules = [{ command = ["sort", "**"], only_arguments = ["-n"], verdict = "auto_approved" }]
+"#,
+    )
+    .unwrap();
+    let configuration = |rules, auto_approve| ToolRegistryConfig {
+        allowed_tools: vec!["bash".into()],
+        tool_sandbox_rules: HashMap::from([("bash".into(), rules)]),
+        auto_approve,
+        ..ToolRegistryConfig::default()
+    };
+    let registry = default_registry(
+        sandbox.clone(),
+        configuration(rules.rules.clone(), std::collections::HashSet::new()),
+    )
+    .unwrap();
+    let tool = registry.get("bash").unwrap();
+    assert_eq!(
+        tool.needs_approval(&serde_json::json!({"command":"sort -n file"})),
+        ApprovalCheck::AutoApproved
+    );
+    assert_eq!(
+        tool.needs_approval(&serde_json::json!({"command":"sort -o output file"})),
+        ApprovalCheck::UserApprovalRequired
+    );
+    let registry = default_registry(
+        sandbox.clone(),
+        configuration(
+            rules.rules,
+            std::collections::HashSet::from([AutoApproveTool::Bash]),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        registry
+            .get("bash")
+            .unwrap()
+            .needs_approval(&serde_json::json!({"command":"sort -o output file"})),
+        ApprovalCheck::AutoApproved
+    );
+    let malformed: crate::config::ToolSandboxConfig = toml::from_str(
+        r#"
+rules = [
+  { command = ["sort", "**"], verdict = "auto_approved" },
+  { command = ["sort", "**"], with_arguments = ["["], verdict = "auto_denied" },
+]
+"#,
+    )
+    .unwrap();
+    assert!(
+        default_registry(
+            sandbox,
+            configuration(
+                malformed.rules,
+                std::collections::HashSet::from([AutoApproveTool::Bash])
+            )
+        )
+        .is_err(),
+        "CLI override cannot recover invalid policy construction"
+    );
+}
+
+#[test]
 fn registry_register_lookup_and_unknown_name() {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(TestTool));
@@ -44,7 +112,8 @@ fn registry_schema_is_tool_schema_envelope() {
 #[test]
 fn default_registry_registers_cli_tools() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
-    let registry = default_registry(sandbox, ToolRegistryConfig::default());
+    let registry =
+        default_registry(sandbox, ToolRegistryConfig::default()).expect("valid sandbox fixture");
     assert_eq!(registry.names().len(), 8);
     assert!(registry.get(read::ReadTool::NAME).is_some());
     assert!(registry.get(write::WriteTool::NAME).is_some());
@@ -66,7 +135,8 @@ fn default_registry_registers_tui_tools_including_clarify() {
             allowed_tools: DEFAULT_TUI_TOOLS.iter().map(|s| s.to_string()).collect(),
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
     assert_eq!(registry.names().len(), 9);
     assert!(registry.get(clarify::ClarifyTool::NAME).is_some());
     assert!(registry.get(web_search::WebSearchTool::NAME).is_some());
@@ -82,7 +152,8 @@ fn default_registry_keeps_web_fetch_out_when_not_allowed() {
             allowed_tools: vec![web_search::WebSearchTool::NAME.to_string()],
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
     assert!(registry.get(web_fetch::WebFetchTool::NAME).is_none());
 }
 
@@ -109,7 +180,8 @@ fn auto_approve_web_fetch_wins_over_configured_deny_rule() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let web_fetch_tool = registry
         .get(web_fetch::WebFetchTool::NAME)
@@ -140,7 +212,8 @@ fn configured_web_fetch_target_rule_applies_through_default_registry() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let web_fetch_tool = registry
         .get(web_fetch::WebFetchTool::NAME)
@@ -160,7 +233,8 @@ fn configured_web_fetch_target_rule_applies_through_default_registry() {
 #[test]
 fn default_registry_registers_web_search_with_a_non_empty_schema() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
-    let registry = default_registry(sandbox, ToolRegistryConfig::default());
+    let registry =
+        default_registry(sandbox, ToolRegistryConfig::default()).expect("valid sandbox fixture");
 
     let schema = registry
         .schemas()
@@ -202,7 +276,8 @@ fn auto_approve_web_search_wins_over_configured_deny_rule() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let web_search_tool = registry
         .get(web_search::WebSearchTool::NAME)
@@ -233,7 +308,8 @@ fn configured_web_search_rule_applies_through_default_registry() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let web_search_tool = registry
         .get(web_search::WebSearchTool::NAME)
@@ -283,6 +359,7 @@ fn brave_target_scoped_rule_matches_the_brave_endpoint_only() {
                 ..ToolRegistryConfig::default()
             },
         )
+        .expect("valid sandbox fixture")
     };
 
     let registry = registry_for("https://api.search.brave.com");
@@ -318,7 +395,8 @@ fn default_registry_respects_explicit_allowed_tools_subset() {
             ],
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
     assert_eq!(registry.names().len(), 2);
     assert!(registry.get(bash::BashTool::NAME).is_some());
     assert!(registry.get(read::ReadTool::NAME).is_some());
@@ -349,7 +427,8 @@ fn default_registry_wires_configured_rules_per_tool_only() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let dot_path = temp.path().join(".env").to_string_lossy().to_string();
 
@@ -395,7 +474,8 @@ fn auto_approve_write_wins_over_configured_deny_rule() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let dot_path = temp.path().join(".env").to_string_lossy().to_string();
     let write_tool = registry.get(write::WriteTool::NAME).expect("write tool");
@@ -431,7 +511,8 @@ fn auto_approve_bash_wins_over_configured_deny_rule() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let bash_tool = registry.get(bash::BashTool::NAME).expect("bash tool");
     assert_eq!(
@@ -466,7 +547,8 @@ fn auto_approve_read_wins_over_configured_deny_rule() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let dot_path = temp.path().join(".env").to_string_lossy().to_string();
     let read_tool = registry.get(read::ReadTool::NAME).expect("read tool");
@@ -502,7 +584,8 @@ fn auto_approve_glob_wins_over_configured_deny_rule() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let outside = temp
         .path()
@@ -544,7 +627,8 @@ fn auto_approve_search_wins_over_configured_deny_rule() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let outside = temp
         .path()
@@ -573,6 +657,8 @@ fn default_registry_wires_configured_command_glob_rules_for_bash() {
     tool_sandbox_rules.insert(
         bash::BashTool::NAME.to_string(),
         vec![crate::sandbox::SandboxRuleConfig::CommandGlob {
+            with_arguments: None,
+            only_arguments: None,
             command: vec!["git".to_string(), "status".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
@@ -584,7 +670,8 @@ fn default_registry_wires_configured_command_glob_rules_for_bash() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let bash_tool = registry.get(bash::BashTool::NAME).expect("bash tool");
     assert_eq!(
@@ -627,7 +714,8 @@ fn default_registry_wires_cross_filesystem_rule_for_read() {
             tool_sandbox_rules,
             ..ToolRegistryConfig::default()
         },
-    );
+    )
+    .expect("valid sandbox fixture");
 
     let read_tool = registry.get(read::ReadTool::NAME).expect("read tool");
     assert_eq!(

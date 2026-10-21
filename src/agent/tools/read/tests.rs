@@ -96,7 +96,8 @@ fn read_tool_cross_filesystem_rule_requires_user_approval_for_cross_device_path(
         verdict: ApprovalVerdictConfig::UserApprovalRequired,
         reason: None,
         target: None,
-    }]);
+    }])
+    .expect("valid sandbox fixture");
     let tool = ReadTool::new(context);
 
     assert_eq!(

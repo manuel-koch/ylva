@@ -209,7 +209,8 @@ fn identical_copies_include_nested_resources_and_preserve_the_winner() {
         verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
         target: None,
         reason: None,
-    }]);
+    }])
+    .expect("valid sandbox fixture");
     assert_eq!(
         context.check_path(&roots[0].join("example/resources/nested/a")),
         Some(crate::ApprovalCheck::AutoApproved),
@@ -729,7 +730,8 @@ fn symlinked_files_validate_logical_names_and_broken_roots_and_files_warn() {
             verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
             reason: None,
         },
-    ]);
+    ])
+    .expect("valid sandbox fixture");
     std::fs::remove_file(&target_file).unwrap();
     let changed = target.join("changed");
     std::fs::write(&changed, "Changed").unwrap();
@@ -942,6 +944,22 @@ fn unknown_skill_reports_rejection_provenance() {
 }
 
 #[test]
+fn callable_skill_policy_propagates_malformed_direct_restrictions() {
+    let (temporary, catalog, mut profile) = policy_fixture();
+    let rules: crate::config::ToolSandboxConfig = toml::from_str(
+        r#"
+rules = [
+  { pattern = "**", verdict = "auto_approved" },
+  { pattern = "[", verdict = "auto_denied" },
+]
+"#,
+    )
+    .unwrap();
+    profile.tools.insert("load_skill".into(), rules);
+    assert!(resolve_policy(&catalog, &profile, temporary.path(), true).is_err());
+}
+
+#[test]
 fn loader_delivers_snapshot_and_rejects_adversarial_names_without_side_effects() {
     use crate::Tool;
     crate::test_support::run_locked(async {
@@ -955,7 +973,8 @@ fn loader_delivers_snapshot_and_rejects_adversarial_names_without_side_effects()
             ))),
             &profile,
             "default",
-        );
+        )
+        .expect("valid sandbox fixture");
         let tool = crate::agent::tools::load_skill::LoadSkillTool::new(callable, context);
         assert!(tool.validate_args(&serde_json::json!({})).is_err());
         assert!(tool
@@ -1016,7 +1035,8 @@ fn loader_delivers_snapshot_and_rejects_adversarial_names_without_side_effects()
             pattern: "**".into(),
             verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
             reason: None,
-        }]);
+        }])
+        .expect("valid sandbox fixture");
         let callable =
             Arc::new(resolve_policy(&catalog, &profile, temporary.path(), false).unwrap());
         let denied = crate::agent::tools::load_skill::LoadSkillTool::new(callable, denied_context);
@@ -1056,7 +1076,8 @@ fn sidecar_rules_use_callable_canonical_boundaries_and_normal_ordering() {
                 target: None,
             },
             rule(ApprovalVerdictConfig::AutoApproved),
-        ]);
+        ])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_path(&sidecar),
         Some(crate::ApprovalCheck::AutoApproved)
@@ -1089,7 +1110,8 @@ fn sidecar_rules_use_callable_canonical_boundaries_and_normal_ordering() {
         Some(crate::ApprovalCheck::UserApprovalRequired)
     );
     let empty_context = crate::SandboxContext::new(sandbox.clone())
-        .with_configured_rules(vec![rule(ApprovalVerdictConfig::AutoApproved)]);
+        .with_configured_rules(vec![rule(ApprovalVerdictConfig::AutoApproved)])
+        .expect("valid sandbox fixture");
     assert_eq!(empty_context.check_path(&sidecar), None);
     for verdict in [
         ApprovalVerdictConfig::AutoApproved,
@@ -1098,7 +1120,8 @@ fn sidecar_rules_use_callable_canonical_boundaries_and_normal_ordering() {
     ] {
         let context = context
             .clone()
-            .with_configured_rules(vec![rule(verdict.clone())]);
+            .with_configured_rules(vec![rule(verdict.clone())])
+            .expect("valid sandbox fixture");
         assert!(matches!(
             (verdict, context.check_path(&sidecar)),
             (
@@ -1113,14 +1136,17 @@ fn sidecar_rules_use_callable_canonical_boundaries_and_normal_ordering() {
             )
         ));
     }
-    let denied = context.clone().with_configured_rules(vec![
-        rule(ApprovalVerdictConfig::AutoApproved),
-        SandboxRuleConfig::PathGlob {
-            pattern: "**".into(),
-            verdict: ApprovalVerdictConfig::AutoDenied,
-            reason: None,
-        },
-    ]);
+    let denied = context
+        .clone()
+        .with_configured_rules(vec![
+            rule(ApprovalVerdictConfig::AutoApproved),
+            SandboxRuleConfig::PathGlob {
+                pattern: "**".into(),
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            },
+        ])
+        .expect("valid sandbox fixture");
     assert!(matches!(
         denied.check_path(&sidecar),
         Some(crate::ApprovalCheck::AutoDenied { .. })
@@ -1129,10 +1155,7 @@ fn sidecar_rules_use_callable_canonical_boundaries_and_normal_ordering() {
         "load_skill",
         vec![rule(ApprovalVerdictConfig::AutoApproved)],
     );
-    assert!(matches!(
-        wrong_tool.check_path(&sidecar),
-        Some(crate::ApprovalCheck::AutoDenied { .. })
-    ));
+    assert!(wrong_tool.is_err());
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;

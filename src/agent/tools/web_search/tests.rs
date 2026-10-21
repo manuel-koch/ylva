@@ -321,13 +321,14 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
     ));
 
     // A configured `network_request` rule is the per-profile approval switch.
-    let configured_context =
-        default_sandbox_context().with_configured_rules(vec![SandboxRuleConfig::Named {
+    let configured_context = default_sandbox_context()
+        .with_configured_rules(vec![SandboxRuleConfig::Named {
             rule: NamedSandboxRule::NetworkRequest,
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
             target: None,
-        }]);
+        }])
+        .expect("valid sandbox fixture");
     let configured_tool = WebSearchTool::new(
         Arc::new(StubBackend::returning(Vec::new())),
         &config,

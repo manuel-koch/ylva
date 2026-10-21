@@ -25,7 +25,7 @@ fn registered_tool_titles_omit_unknown_arguments() {
         include_spawn_subagent: true,
         ..ToolRegistryConfig::default()
     };
-    let registry = default_registry(sandbox, config);
+    let registry = default_registry(sandbox, config).expect("valid sandbox fixture");
 
     for tool_name in registry.names() {
         let call = registry
@@ -48,7 +48,8 @@ fn bash_registry_call_orders_title_arguments_command_then_label() {
     // straight from `front.call.title_arguments()`, so the registry-built
     // call must already carry `command` (primary) ahead of `label` (prop).
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
-    let registry = default_registry(sandbox, ToolRegistryConfig::default());
+    let registry =
+        default_registry(sandbox, ToolRegistryConfig::default()).expect("valid sandbox fixture");
     let call = registry
         .create_call(
             bash::BashTool::NAME,

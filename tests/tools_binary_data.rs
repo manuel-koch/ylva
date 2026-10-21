@@ -27,6 +27,7 @@ fn binary_registry(workspace: &TempDir) -> ToolRegistry {
         ))),
         config,
     )
+    .expect("valid sandbox fixture")
 }
 
 #[tokio::test]

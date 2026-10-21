@@ -947,7 +947,9 @@ async fn run_cli_closes_thinking_section_before_tool_call() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(ylva::Sandbox::with_root(
         dir.path().to_path_buf(),
     )));
-    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
+    let registry = Arc::new(
+        default_registry(sandbox, ToolRegistryConfig::default()).expect("valid sandbox fixture"),
+    );
     let mut output = Vec::new();
     let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
     let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
@@ -1006,7 +1008,9 @@ async fn run_cli_auto_approves_read_and_runs_it() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(ylva::Sandbox::with_root(
         dir.path().to_path_buf(),
     )));
-    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
+    let registry = Arc::new(
+        default_registry(sandbox, ToolRegistryConfig::default()).expect("valid sandbox fixture"),
+    );
     let mut output = Vec::new();
     let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
     let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
@@ -1041,10 +1045,13 @@ async fn run_cli_denies_write_and_fed_back_as_error() {
         interval: Duration::from_millis(1),
         calls: Arc::new(AtomicUsize::new(0)),
     });
-    let registry = Arc::new(default_registry(
-        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            ToolRegistryConfig::default(),
+        )
+        .expect("valid sandbox fixture"),
+    );
     let mut output = Vec::new();
     let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
     let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
@@ -1077,10 +1084,13 @@ async fn run_cli_bash_denial_prints_label_and_command_sections() {
         interval: Duration::from_millis(1),
         calls: Arc::new(AtomicUsize::new(0)),
     });
-    let registry = Arc::new(default_registry(
-        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            ToolRegistryConfig::default(),
+        )
+        .expect("valid sandbox fixture"),
+    );
     let mut output = Vec::new();
     let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
     let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
@@ -1131,14 +1141,17 @@ async fn run_cli_waits_for_spawned_subagent_before_ending_conversation() {
         interval: Duration::from_millis(1),
         calls: Arc::clone(&calls),
     });
-    let registry = Arc::new(default_registry(
-        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
-        ToolRegistryConfig {
-            include_spawn_subagent: true,
-            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
-            ..ToolRegistryConfig::default()
-        },
-    ));
+    let registry = Arc::new(
+        default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            ToolRegistryConfig {
+                include_spawn_subagent: true,
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
+                ..ToolRegistryConfig::default()
+            },
+        )
+        .expect("valid sandbox fixture"),
+    );
     let mut output = Vec::new();
     let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
     let (mut agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
@@ -1307,10 +1320,13 @@ async fn console_app_reacts_to_subagent_finish_through_real_agent_factory_and_ru
         .create(&profile, "default", ylva::Role::Root)
         .expect("factory creates root agent");
 
-    let registry = Arc::new(default_registry(
-        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            ToolRegistryConfig::default(),
+        )
+        .expect("valid sandbox fixture"),
+    );
 
     let mut output = Vec::new();
     run_cli_to(
@@ -1477,10 +1493,13 @@ async fn spawned_subagent_bash_approval_is_routed_to_the_subagent_not_the_root()
         .create(&profile, "default", ylva::Role::Root)
         .expect("factory creates root agent");
 
-    let registry = Arc::new(default_registry(
-        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            ToolRegistryConfig::default(),
+        )
+        .expect("valid sandbox fixture"),
+    );
 
     let mut output = Vec::new();
     tokio::time::timeout(

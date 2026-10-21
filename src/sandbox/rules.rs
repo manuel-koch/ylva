@@ -15,7 +15,7 @@
 //! Serialized and compiled rule contracts, including command-glob matching.
 
 use super::network_target_pattern::NetworkTargetPattern;
-use super::{bash_command_extractor, network_target_pattern};
+use super::{bash_command_extractor, command_arguments};
 use glob::Pattern;
 use serde::Deserialize;
 
@@ -321,6 +321,12 @@ pub enum SandboxRuleConfig {
     /// Only valid under `[tools.bash]`/`[agents.<type>.tools.bash]`.
     CommandGlob {
         command: Vec<String>,
+        /// Any one confidently identified option/subcommand must match.
+        #[serde(default)]
+        with_arguments: Option<Vec<String>>,
+        /// Every option/subcommand must match, and parsing must be complete.
+        #[serde(default)]
+        only_arguments: Option<Vec<String>>,
         verdict: ApprovalVerdictConfig,
         #[serde(default)]
         reason: Option<String>,
@@ -338,6 +344,8 @@ struct RawSandboxRuleConfig {
     verdict: ApprovalVerdictConfig,
     reason: Option<String>,
     target: Option<String>,
+    with_arguments: Option<Vec<String>>,
+    only_arguments: Option<Vec<String>>,
 }
 
 impl TryFrom<RawSandboxRuleConfig> for SandboxRuleConfig {
@@ -351,7 +359,14 @@ impl TryFrom<RawSandboxRuleConfig> for SandboxRuleConfig {
             verdict,
             reason,
             target,
+            with_arguments,
+            only_arguments,
         } = raw;
+        if command.is_none() && (with_arguments.is_some() || only_arguments.is_some()) {
+            return Err(
+                "`with_arguments` and `only_arguments` are only valid on `command` entries".into(),
+            );
+        }
         match (rule, pattern, command) {
             (Some(rule), None, None) => Ok(Self::Named {
                 rule,
@@ -366,6 +381,8 @@ impl TryFrom<RawSandboxRuleConfig> for SandboxRuleConfig {
             }),
             (None, None, Some(command)) if target.is_none() => Ok(Self::CommandGlob {
                 command,
+                with_arguments,
+                only_arguments,
                 verdict,
                 reason,
             }),
@@ -380,6 +397,24 @@ impl TryFrom<RawSandboxRuleConfig> for SandboxRuleConfig {
 }
 
 impl SandboxRuleConfig {
+    /// Validate and compile this rule, including argument-condition semantics.
+    pub fn validate(&self) -> Result<(), ResolvedRuleError> {
+        ResolvedRule::from_config(self.clone()).map(|_| ())
+    }
+
+    /// Validate rule families for callers constructing policies directly.
+    pub fn validate_for_tool(&self, tool_name: &str) -> Result<(), ResolvedRuleError> {
+        let network_tool = matches!(tool_name, "web_search" | "web_fetch");
+        let invalid_kind = (self.is_read_tool_only() && tool_name != "read")
+            || (self.is_bash_tool_only() && tool_name != "bash")
+            || (self.is_network_tool_only() && !network_tool)
+            || (self.is_path_tool_only() && (tool_name == "bash" || network_tool))
+            || (self.has_target() && !self.is_network_tool_only());
+        if invalid_kind {
+            return Err(ResolvedRuleError::InvalidRuleKind(tool_name.to_string()));
+        }
+        Ok(())
+    }
     /// Whether this rule is restricted to the `read` tool, not read-only I/O generally.
     pub fn is_read_tool_only(&self) -> bool {
         matches!(
@@ -510,21 +545,96 @@ pub(super) enum ResolvedRule {
     },
     CommandGlob {
         command: CommandGlobPattern,
+        conditions: Option<ArgumentConditions>,
         verdict: ApprovalCheck,
     },
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ArgumentConditions {
+    with_arguments: Option<Vec<Pattern>>,
+    only_arguments: Option<Vec<Pattern>>,
+}
+
+impl ArgumentConditions {
+    fn compile(
+        command: &[String],
+        with_arguments: Option<Vec<String>>,
+        only_arguments: Option<Vec<String>>,
+    ) -> Result<Option<Self>, ResolvedRuleError> {
+        if with_arguments.is_none() && only_arguments.is_none() {
+            return Ok(None);
+        }
+        if !command
+            .first()
+            .is_some_and(|name| command_arguments::supports_command(name))
+        {
+            return Err(ResolvedRuleError::InvalidArgumentCondition(
+                "conditional command requires a literal bare executable with a built-in grammar"
+                    .into(),
+            ));
+        }
+        if with_arguments.as_ref().is_some_and(Vec::is_empty) {
+            return Err(ResolvedRuleError::InvalidArgumentCondition(
+                "`with_arguments` must not be empty".into(),
+            ));
+        }
+        fn compile_patterns(
+            patterns: Option<Vec<String>>,
+        ) -> Result<Option<Vec<Pattern>>, ResolvedRuleError> {
+            let Some(patterns) = patterns else {
+                return Ok(None);
+            };
+            let mut compiled_patterns = Vec::with_capacity(patterns.len());
+            for pattern in patterns {
+                if pattern.is_empty()
+                    || pattern.chars().any(char::is_whitespace)
+                    || pattern.contains('=')
+                {
+                    return Err(ResolvedRuleError::InvalidArgumentCondition(
+                        format!("argument pattern '{pattern}' must match an option/subcommand identity, not values"),
+                    ));
+                }
+                compiled_patterns.push(Pattern::new(&pattern)?);
+            }
+            Ok(Some(compiled_patterns))
+        }
+        Ok(Some(Self {
+            with_arguments: compile_patterns(with_arguments)?,
+            only_arguments: compile_patterns(only_arguments)?,
+        }))
+    }
+
+    pub(super) fn matches(&self, analysis: &command_arguments::ArgumentAnalysis) -> bool {
+        let matches_identity = |patterns: &[Pattern], aliases: &[&str]| {
+            patterns
+                .iter()
+                .any(|pattern| aliases.iter().any(|alias| pattern.matches(alias)))
+        };
+        self.with_arguments.as_ref().is_none_or(|patterns| {
+            analysis
+                .identities
+                .iter()
+                .any(|identity| matches_identity(patterns, identity))
+        }) && self.only_arguments.as_ref().is_none_or(|patterns| {
+            analysis.complete
+                && analysis
+                    .identities
+                    .iter()
+                    .all(|identity| matches_identity(patterns, identity))
+        })
+    }
+}
+
 /// Error produced by [`ResolvedRule::from_config`] when a
 /// [`SandboxRuleConfig`] can't be resolved into a working rule.
-/// [`super::SandboxContext::with_configured_rules`] treats every variant the same
-/// way: skip the rule and `tracing::warn!`, since a single malformed rule
-/// must not silently disable an entire tool's protection.
+/// Invalid policies are rejected rather than dropping individual restrictions.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ResolvedRuleError {
+pub enum ResolvedRuleError {
     #[error(transparent)]
     InvalidGlobPattern(#[from] glob::PatternError),
-    #[error(transparent)]
-    InvalidNetworkTargetPattern(#[from] network_target_pattern::NetworkTargetPatternError),
+    #[error("invalid network target pattern: {0}")]
+    InvalidNetworkTargetPattern(String),
     /// A `command` rule's `*`/`**` wildcard isn't the last element — see
     /// [`SandboxRuleConfig::has_misplaced_command_glob_wildcard`].
     /// `crate::config::profile::validate_tool_sandbox_rules` already
@@ -537,6 +647,10 @@ pub(super) enum ResolvedRuleError {
          a literal (never-matching) argument instead of a wildcard"
     )]
     MisplacedCommandGlobWildcard,
+    #[error("invalid argument condition: {0}")]
+    InvalidArgumentCondition(String),
+    #[error("sandbox rule is not valid for tool '{0}'")]
+    InvalidRuleKind(String),
 }
 
 impl ResolvedRule {
@@ -568,7 +682,10 @@ impl ResolvedRule {
                     verdict: verdict.to_approval_check(reason.as_deref(), default_reason),
                     target: target
                         .map(|pattern| NetworkTargetPattern::parse(&pattern))
-                        .transpose()?,
+                        .transpose()
+                        .map_err(|error| {
+                            ResolvedRuleError::InvalidNetworkTargetPattern(error.to_string())
+                        })?,
                 }
             }
             SandboxRuleConfig::PathGlob {
@@ -581,9 +698,12 @@ impl ResolvedRule {
             },
             SandboxRuleConfig::CommandGlob {
                 command,
+                with_arguments,
+                only_arguments,
                 verdict,
                 reason,
             } => ResolvedRule::CommandGlob {
+                conditions: ArgumentConditions::compile(&command, with_arguments, only_arguments)?,
                 command: CommandGlobPattern::from_tokens(&command),
                 verdict: verdict
                     .to_approval_check(reason.as_deref(), CONFIGURED_COMMAND_GLOB_REASON),

@@ -70,18 +70,46 @@ rules = [
 rules = [
     { command = ["true"],         verdict = "auto_approved" },
     { command = ["false"],        verdict = "auto_approved" },
-    { command = ["ls", "**"],     verdict = "auto_approved" },
-    { command = ["grep", "**"],   verdict = "auto_approved" },
-    { command = ["wc", "**"],     verdict = "auto_approved" },
+
+    { command = ["cat", "**"],    verdict = "auto_approved", only_arguments = ["-n", "-b", "-s"] },
+
+    { command = ["find", "**"],   verdict = "auto_approved", only_arguments = ["-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth", "-depth", "-a", "-o", "!", "-print"] },
+
+    # One subcommand identity per filter also permits global --no-pager.
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["check-ignore", "--no-pager", "--verbose"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["diff", "--no-pager", "--stat", "--check", "--cached", "--numstat", "--name-only", "--unified"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["status", "--no-pager", "--short", "--branch", "--untracked-files"] },
+    # Git log -N (ASCII digits only) shares the -n/--max-count identity.
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["log", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["show", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },
+
+    { command = ["grep", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-i", "-e", "-F", "-E", "-r", "-v", "-A", "-B", "-l", "-c", "-o", "-H", "-m", "--include", "--exclude", "--exclude-dir"] },
+
+    # First-argument head -N (ASCII digits only) is covered by -n below.
+    { command = ["head"],         verdict = "auto_approved" },
+    { command = ["head", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-c"] },
+
+    { command = ["ls", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-a", "-h", "-d", "-t", "-R"] },
+
+    { command = ["rg", "**"],     verdict = "auto_approved", only_arguments = ["-n", "-i", "-e", "-F", "-g", "-C", "-A", "-B", "--files"] },
+
+    { command = ["sort"],         verdict = "auto_approved" },
+    { command = ["sort", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-r", "-u", "-k"] },
+
+    # First-argument tail -N (ASCII digits only) is covered by -n below.
+    { command = ["tail"],         verdict = "auto_approved" },
+    { command = ["tail", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-c"] },
+
+    { command = ["wc", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-w", "-c", "-m"] },
+
+    # Grammarless broad rules below are deliberate user-owned opt-outs.
     { command = ["nl", "**"],     verdict = "auto_approved" },
-    { command = ["cat", "**"],    verdict = "auto_approved" },
     { command = ["cut", "**"],    verdict = "auto_approved" },
-    { command = ["head", "**"],   verdict = "auto_approved" },
-    { command = ["tail", "**"],   verdict = "auto_approved" },
     { command = ["tr", "**"],     verdict = "auto_approved" },
     { command = ["echo", "**"],   verdict = "auto_approved" },
     { command = ["printf", "**"], verdict = "auto_approved" },
     { command = ["test", "**"],   verdict = "auto_approved" },
+
     # need to use the default rules to avoid unwanted auto-approvals
     { rule = "unquoted_glob",              verdict = "user_approval_required" },
     { rule = "unquoted_brace_expansion",   verdict = "user_approval_required" },

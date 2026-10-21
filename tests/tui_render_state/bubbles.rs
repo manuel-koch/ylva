@@ -1617,7 +1617,8 @@ fn expanded_bash_command_section_renders_with_syntax_colors() {
     let registry = ylva::default_registry(
         std::sync::Arc::new(std::sync::RwLock::new(ylva::Sandbox::new())),
         ylva::ToolRegistryConfig::default(),
-    );
+    )
+    .expect("valid sandbox fixture");
     let call = registry
         .create_call(
             "bash",

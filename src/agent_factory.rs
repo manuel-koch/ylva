@@ -481,7 +481,7 @@ impl AgentFactory {
                 web_search: profile.web_search.clone(),
                 web_fetch: profile.web_fetch.clone(),
             },
-        ));
+        )?);
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
         let mut agent_loop = agent_loop
             .with_configured_engine_name(engine_name)

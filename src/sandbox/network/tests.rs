@@ -52,10 +52,13 @@ fn check_network_request_abstains_without_config() {
 #[test]
 fn configured_targetless_network_request_rule_applies_to_every_call() {
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(ApprovalVerdictConfig::AutoApproved, None, None),
-        ]);
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+            None,
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_network_request("https://docs.rs/anything"),
         Some(ApprovalCheck::AutoApproved),
@@ -70,11 +73,12 @@ fn configured_targetless_network_request_rule_applies_to_every_call() {
 #[test]
 fn configured_network_request_last_match_wins() {
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![
             network_request_rule(ApprovalVerdictConfig::AutoApproved, None, None),
             network_request_rule(ApprovalVerdictConfig::AutoDenied, Some("disabled"), None),
-        ]);
+        ])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_network_request(CALL_TARGET),
         Some(ApprovalCheck::AutoDenied {
@@ -87,10 +91,13 @@ fn configured_network_request_last_match_wins() {
 #[test]
 fn reasonless_network_request_deny_uses_the_default_reason() {
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(ApprovalVerdictConfig::AutoDenied, None, None),
-        ]);
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoDenied,
+            None,
+            None,
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_network_request(CALL_TARGET),
         Some(ApprovalCheck::AutoDenied {
@@ -110,6 +117,7 @@ fn auto_approve_catch_all_wins_over_configured_network_deny() {
             None,
             None,
         )])
+        .expect("valid sandbox fixture")
         .with_rule(SandboxRule {
             verdict: ApprovalCheck::AutoApproved,
             pattern: glob::Pattern::new("**").unwrap(),
@@ -127,14 +135,16 @@ fn path_and_command_rules_never_match_network_calls() {
     // [tools.web_search]; if one slips through it must still abstain
     // rather than auto-approve a call it cannot evaluate.
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![
             SandboxRuleConfig::PathGlob {
                 pattern: "**".to_string(),
                 verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,
             },
             SandboxRuleConfig::CommandGlob {
+                with_arguments: None,
+                only_arguments: None,
                 command: vec!["git".to_string()],
                 verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,
@@ -145,21 +155,21 @@ fn path_and_command_rules_never_match_network_calls() {
                 reason: None,
                 target: None,
             },
-        ]);
+        ])
+        .expect("valid sandbox fixture");
     assert_eq!(context.check_network_request(CALL_TARGET), None);
 }
 
 #[test]
 fn targeted_network_request_rule_matches_only_its_target() {
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(
-                ApprovalVerdictConfig::AutoApproved,
-                None,
-                Some("https://docs.rs"),
-            ),
-        ]);
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+            Some("https://docs.rs"),
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_network_request("https://docs.rs"),
         Some(ApprovalCheck::AutoApproved),
@@ -180,14 +190,13 @@ fn targeted_network_request_rule_matches_only_its_target() {
 #[test]
 fn targeted_network_request_rule_supports_wildcard_globs() {
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(
-                ApprovalVerdictConfig::AutoApproved,
-                None,
-                Some("https://*.example.com"),
-            ),
-        ]);
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+            Some("https://*.example.com"),
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_network_request("https://api.example.com"),
         Some(ApprovalCheck::AutoApproved),
@@ -204,14 +213,13 @@ fn targeted_network_request_rule_supports_wildcard_globs() {
         "`*` matches exactly one host label"
     );
 
-    let any_depth =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(
-                ApprovalVerdictConfig::AutoApproved,
-                None,
-                Some("https://**.example.com"),
-            ),
-        ]);
+    let any_depth = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+            Some("https://**.example.com"),
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         any_depth.check_network_request("https://api.example.com"),
         Some(ApprovalCheck::AutoApproved)
@@ -227,10 +235,13 @@ fn targeted_network_request_rule_supports_wildcard_globs() {
         "`**` matches one or more labels — the apex needs its own rule"
     );
 
-    let any_scheme =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(ApprovalVerdictConfig::AutoApproved, None, Some("*://host")),
-        ]);
+    let any_scheme = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+            Some("*://host"),
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         any_scheme.check_network_request("http://host"),
         Some(ApprovalCheck::AutoApproved)
@@ -245,14 +256,13 @@ fn targeted_network_request_rule_supports_wildcard_globs() {
 #[test]
 fn targeted_network_request_rule_matches_effective_ports() {
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(
-                ApprovalVerdictConfig::AutoApproved,
-                None,
-                Some("https://github.com"),
-            ),
-        ]);
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+            Some("https://github.com"),
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_network_request("https://github.com:443"),
         Some(ApprovalCheck::AutoApproved),
@@ -269,21 +279,21 @@ fn targeted_network_request_rule_matches_effective_ports() {
             ApprovalVerdictConfig::AutoApproved,
             None,
             Some("https://github.com:443"),
-        )]);
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         explicit_default.check_network_request("https://github.com"),
         Some(ApprovalCheck::AutoApproved),
         "the default-port spelling matches the bare key too"
     );
 
-    let any_port =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(
-                ApprovalVerdictConfig::AutoApproved,
-                None,
-                Some("https://github.com:*"),
-            ),
-        ]);
+    let any_port = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+            Some("https://github.com:*"),
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         any_port.check_network_request("https://github.com:8443"),
         Some(ApprovalCheck::AutoApproved),
@@ -299,14 +309,13 @@ fn targeted_network_request_rule_matches_effective_ports() {
 #[test]
 fn targeted_network_request_rule_defaults_a_schemeless_target_to_https() {
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(
-                ApprovalVerdictConfig::AutoApproved,
-                None,
-                Some("github.com"),
-            ),
-        ]);
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+            Some("github.com"),
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_network_request("https://github.com"),
         Some(ApprovalCheck::AutoApproved),
@@ -322,14 +331,13 @@ fn targeted_network_request_rule_defaults_a_schemeless_target_to_https() {
 #[test]
 fn non_matching_target_abstains() {
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(
-                ApprovalVerdictConfig::AutoDenied,
-                Some("blocked"),
-                Some("https://ads.example.com"),
-            ),
-        ]);
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoDenied,
+            Some("blocked"),
+            Some("https://ads.example.com"),
+        )])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_network_request("https://docs.rs"),
         None,
@@ -340,8 +348,8 @@ fn non_matching_target_abstains() {
 #[test]
 fn targeted_network_request_rules_follow_last_match_wins() {
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![
             network_request_rule(
                 ApprovalVerdictConfig::AutoApproved,
                 None,
@@ -352,7 +360,8 @@ fn targeted_network_request_rules_follow_last_match_wins() {
                 Some("https only"),
                 Some("https://docs.rs"),
             ),
-        ]);
+        ])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_network_request("https://docs.rs"),
         Some(ApprovalCheck::AutoDenied {
@@ -372,14 +381,13 @@ fn catch_all_wins_over_a_matching_target_rule() {
     // Mirrors --auto-approve-web-fetch: the appended `**` catch-all is
     // evaluated last and wins over any configured target rule.
     let temporary_dir = tempfile::tempdir().unwrap();
-    let context =
-        SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-            network_request_rule(
-                ApprovalVerdictConfig::AutoDenied,
-                None,
-                Some("https://docs.rs"),
-            ),
-        ]);
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(vec![network_request_rule(
+            ApprovalVerdictConfig::AutoDenied,
+            None,
+            Some("https://docs.rs"),
+        )])
+        .expect("valid sandbox fixture");
     let context = context.with_rule(SandboxRule {
         verdict: ApprovalCheck::AutoApproved,
         pattern: glob::Pattern::new("**").unwrap(),
@@ -424,7 +432,9 @@ fn private_address_rule(verdict: ApprovalVerdictConfig, target: Option<&str>) ->
 
 fn context_with(rules: Vec<SandboxRuleConfig>) -> SandboxContext {
     let temporary_dir = tempfile::tempdir().unwrap();
-    SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(rules)
+    SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(rules)
+        .expect("valid sandbox fixture")
 }
 
 #[test]

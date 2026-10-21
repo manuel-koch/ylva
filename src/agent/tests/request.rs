@@ -121,10 +121,10 @@ fn context_rejections_retry_once_before_deltas_with_a_smaller_projection() {
                 }),
                 configuration,
             ));
-            let registry = Arc::new(tools::default_registry(
-                test_sandbox(),
-                tools::ToolRegistryConfig::default(),
-            ));
+            let registry = Arc::new(
+                tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                    .expect("valid sandbox fixture"),
+            );
             let (mut agent, mut updates) = AgentLoop::new(engine, registry);
             let handle = agent.run();
             agent
@@ -282,10 +282,10 @@ fn irreducible_request_overhead_fails_visibly_without_contacting_the_provider() 
             }),
             configuration,
         ));
-        let registry = Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        ));
+        let registry = Arc::new(
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        );
         let (mut agent, mut updates) = AgentLoop::new(engine, registry);
         let handle = agent.run();
         agent
@@ -310,10 +310,10 @@ fn irreducible_request_overhead_fails_visibly_without_contacting_the_provider() 
 #[test]
 fn fresh_loop_reports_baseline_context_usage_before_any_prompt() {
     crate::test_support::run_locked(async {
-        let registry = Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        ));
+        let registry = Arc::new(
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        );
         let expected_tokens = {
             let engine = test_engine_with_context_length(64_000);
             let context = Context::new();

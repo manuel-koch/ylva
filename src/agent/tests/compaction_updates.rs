@@ -509,10 +509,10 @@ async fn a_completed_turn_above_the_soft_threshold_compacts_the_model_view() {
 
     let (agent_loop, mut ui_rx) = AgentLoop::new(
         active,
-        Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        )),
+        Arc::new(
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        ),
     );
     let mut agent_loop = agent_loop
         .with_compaction_engine(compact_engine)
@@ -712,10 +712,10 @@ async fn a_failed_background_summary_falls_back_to_dropping_at_the_next_boundary
 
     let (agent_loop, mut ui_rx) = AgentLoop::new(
         active,
-        Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        )),
+        Arc::new(
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        ),
     );
     let mut agent_loop = agent_loop.with_compaction_engine(compact_engine);
     let handle = agent_loop.run();
@@ -800,10 +800,10 @@ async fn a_turn_above_the_hard_threshold_drops_without_starting_a_summary() {
 
     let (agent_loop, mut ui_rx) = AgentLoop::new(
         active,
-        Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        )),
+        Arc::new(
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        ),
     );
     let mut agent_loop = agent_loop.with_compaction_engine(compact_engine);
     let handle = agent_loop.run();

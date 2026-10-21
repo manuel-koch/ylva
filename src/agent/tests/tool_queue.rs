@@ -85,7 +85,8 @@ fn unknown_tool_does_not_leave_bash_approval_idle() {
             },
         ));
         let mut registry =
-            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default());
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture");
         registry.register(Arc::new(GatedReadTool {
             inner: tools::read::ReadTool::new(SandboxContext::new(test_sandbox())),
             release: Arc::clone(&release_read),
@@ -187,14 +188,17 @@ fn large_read_result_is_capped_to_remaining_context_before_follow_up_request() {
                 hard_compaction_threshold: 0.8,
             },
         ));
-        let registry = Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig {
-                allowed_tools: vec![tools::read::ReadTool::NAME.to_string()],
-                auto_approve: std::collections::HashSet::from([tools::AutoApproveTool::Read]),
-                ..Default::default()
-            },
-        ));
+        let registry = Arc::new(
+            tools::default_registry(
+                test_sandbox(),
+                tools::ToolRegistryConfig {
+                    allowed_tools: vec![tools::read::ReadTool::NAME.to_string()],
+                    auto_approve: std::collections::HashSet::from([tools::AutoApproveTool::Read]),
+                    ..Default::default()
+                },
+            )
+            .expect("valid sandbox fixture"),
+        );
         let tool_schemas = registry.schemas();
         let (agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
         let mut agent_loop =
@@ -534,10 +538,10 @@ async fn advance_tool_queue_injects_pending_steers_before_starting_next_request(
 
 #[tokio::test]
 async fn a_budgeted_call_without_a_useful_allowance_is_skipped_not_executed() {
-    let registry = Arc::new(tools::default_registry(
-        test_sandbox(),
-        tools::ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let call_id = Uuid::new_v4();
     let mut pending_tools = VecDeque::from([PendingTool {
         call: registry
@@ -610,10 +614,10 @@ fn controlled_batch_caps_measure_round_trips_skips_and_task_continuity() {
                 }),
                 test_engine().config(),
             ));
-            let registry = Arc::new(tools::default_registry(
-                test_sandbox(),
-                tools::ToolRegistryConfig::default(),
-            ));
+            let registry = Arc::new(
+                tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                    .expect("valid sandbox fixture"),
+            );
             let (mut agent, mut updates) = AgentLoop::new(engine, registry);
             agent.test_batch_cap = batch_cap;
             let handle = agent.run();
@@ -670,10 +674,10 @@ fn invalid_denied_and_unknown_slots_do_not_backfill_or_execute_an_excess_write()
             }),
             test_engine().config(),
         ));
-        let registry = Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        ));
+        let registry = Arc::new(
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        );
         let (mut agent, mut updates) = AgentLoop::new(engine, registry);
         let handle = agent.run();
         agent
@@ -759,10 +763,10 @@ fn only_the_first_six_calls_of_a_response_are_executed() {
                 hard_compaction_threshold: 0.9,
             },
         ));
-        let registry = Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        ));
+        let registry = Arc::new(
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        );
         let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
         let handle = agent_loop.run();
         agent_loop

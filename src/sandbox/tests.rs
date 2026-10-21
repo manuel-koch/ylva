@@ -56,6 +56,8 @@ fn rule_replacement_preserves_appended_precedence_across_policy_owners() {
                 target: None,
             },
             SandboxRuleConfig::CommandGlob {
+                with_arguments: None,
+                only_arguments: None,
                 command: vec!["git".to_string(), "status".to_string()],
                 verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,
@@ -66,7 +68,8 @@ fn rule_replacement_preserves_appended_precedence_across_policy_owners() {
                 reason: None,
                 target: Some("https://docs.rs".to_string()),
             },
-        ]);
+        ])
+        .expect("valid sandbox fixture");
     assert_eq!(
         context.check_path(Path::new(".env")),
         Some(ApprovalCheck::AutoDenied {
@@ -88,26 +91,28 @@ fn rule_replacement_preserves_appended_precedence_across_policy_owners() {
         verdict: ApprovalCheck::AutoApproved,
         pattern: glob::Pattern::new("**").expect("catch-all pattern"),
     });
-    let replaced_context = appended_context.with_configured_rules(vec![
-        SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::DotPath,
-            verdict: ApprovalVerdictConfig::AutoDenied,
-            reason: None,
-            target: None,
-        },
-        SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::Backgrounded,
-            verdict: ApprovalVerdictConfig::AutoDenied,
-            reason: None,
-            target: None,
-        },
-        SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::NetworkRequest,
-            verdict: ApprovalVerdictConfig::AutoDenied,
-            reason: None,
-            target: None,
-        },
-    ]);
+    let replaced_context = appended_context
+        .with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+                target: None,
+            },
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::Backgrounded,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+                target: None,
+            },
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::NetworkRequest,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+                target: None,
+            },
+        ])
+        .expect("valid sandbox fixture");
     assert_eq!(
         replaced_context.check_path(Path::new(".env")),
         Some(ApprovalCheck::AutoApproved)

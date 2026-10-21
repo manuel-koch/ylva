@@ -101,10 +101,10 @@ fn clear_context_drops_stale_stream_event_from_a_superseded_generation() {
 
         let (mut agent_loop, mut ui_rx) = AgentLoop::new(
             engine,
-            Arc::new(tools::default_registry(
-                test_sandbox(),
-                tools::ToolRegistryConfig::default(),
-            )),
+            Arc::new(
+                tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                    .expect("valid sandbox fixture"),
+            ),
         );
         let handle = agent_loop.run();
         agent_loop
@@ -182,10 +182,10 @@ fn clear_context_records_the_root_agent_type_in_the_replacement_session() {
         ));
         let (agent_loop, mut ui_rx) = AgentLoop::new(
             engine,
-            Arc::new(tools::default_registry(
-                test_sandbox(),
-                tools::ToolRegistryConfig::default(),
-            )),
+            Arc::new(
+                tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                    .expect("valid sandbox fixture"),
+            ),
         );
         let mut agent_loop = agent_loop.with_agent_type("researcher").with_store(store);
 

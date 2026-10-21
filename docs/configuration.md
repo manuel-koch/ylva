@@ -1047,6 +1047,10 @@ default floor), so the flag always wins regardless of `[tools.*]`/
 
 ### `bash` command rules
 
+Use the [offline Bash policy replay runner](../tests/sandbox_evaluation/README.md)
+to evaluate a JSON collection against an explicit rule list without executing
+its commands.
+
 `bash` is a command tool, not a path tool: `[tools.bash]`/
 `[agents.<type>.tools.bash]` cannot reference `outside_workspace`/`dot_path`/
 `cross_filesystem` (path-only) or a path-glob `pattern` rule, and no other
@@ -1094,6 +1098,139 @@ that itself expands; a trailing `**` has no such restriction. A `*`/`**`
 that isn't the last element of `command` is a hard startup error, since it
 would otherwise silently degrade to a literal (effectively never-matching)
 argument instead of a wildcard.
+
+**Argument conditions.** A command rule may additionally set `with_arguments`,
+`only_arguments`, or both. These filters never change the argv-shape matcher:
+`["git", "**"]` requires at least one argument; `["git"]` still matches only
+an invocation with no arguments. Command-name globs are not supported.
+
+| Field | Matching requirement |
+|---|---|
+| `with_arguments` | At least one pattern matches a confidently identified option or subcommand. An empty list is invalid. |
+| `only_arguments` | Parsing is complete and every identified option/subcommand matches at least one pattern. An empty list permits operands but no options/subcommands. |
+
+Both fields combine with AND. Patterns use the existing case-sensitive
+`glob` syntax (`*`, `?`, character classes); malformed patterns are errors.
+Patterns match identities, not values: use `--output`, not `--output=file`.
+Empty patterns, whitespace and `=` in patterns are rejected. Equivalent
+documented short/long aliases match the same conditions, including wildcard
+patterns: `--number` also matches `cat -n`. Allowing a value-taking option
+allows any structurally valid value; conditions do not restrict its contents.
+Operands and consumed option values never impersonate an option/subcommand.
+For example, `find . -name -exec` has a `-name` predicate whose value is
+`-exec`; it does not supply `-exec` evidence.
+
+Conditional rules require a literal **bare executable name** with a built-in
+grammar. The roster is `cat`, `ls`, `head`, `tail`, `wc`, `grep`, `rg`, `sort`,
+`find`, and `git` with `check-ignore`, `status`, `log`, `diff`, or `show`.
+This is a conservative subset of BSD/macOS and GNU forms plus Git/ripgrep, not every option those
+tools implement. Tables record documentation provenance and review dates in
+the source. GNU long options, supported short bundles/attached values, and
+`--` termination are recognized where applicable. Cross-variant conflicts,
+unknown options, missing values and ambiguous bundles make parsing incomplete.
+For `grep`, options must precede the first positional pattern or file operand:
+`grep -A8 needle file` is recognized, but `grep needle -A8 file` is incomplete.
+With `-e PATTERN`, the pattern is an option value, so `grep -e needle -n file`
+is also recognized. This restriction avoids assuming GNU-style option
+permutation across platforms; `rg` supports interspersed options.
+Pass glob option values as separate quoted arguments, for example,
+`grep --include '*.rs' -e needle .`; mixed quoted/unquoted tokens such as
+`--include='*.rs'` remain unsupported by the shell extractor.
+For `head` and `tail`, a first-argument legacy `-N` containing only ASCII
+digits (for example, `head -20 file` or `tail -5`) shares the `-n`/`--lines`
+identity. An allow-list containing `-n` therefore covers these forms without
+numeric wildcard patterns. Suffixed forms such as `head -20c` or `tail -5f`
+and legacy numeric options after another argument remain incomplete; `--`
+still makes subsequent tokens operands rather than options.
+For `git log`, ASCII-digit-only `-N` (for example, `git log -5`) shares
+the `-n`/`--max-count` identity. `only_arguments = ["log", "-n"]` covers
+these forms without numeric wildcard patterns. Unlike `head`/`tail`, the
+count may follow other options or revisions, but not the `--` terminator.
+This shorthand recognition is limited to `git log`; other Git subcommands
+are unchanged. Option values such as `git log --grep -5` are not counts.
+Git global options and subcommand options have separate scopes; find predicates
+have their own operand/value rules. `sed` and `awk` have no conditional grammar.
+`git check-ignore` recognizes `-v`/`--verbose` and requires at least one
+explicit path, optionally after `--`; quoted paths remain operands.
+Other reporting/input modes, including `--stdin`, `--no-index`, `-q`, `-z`,
+and `-n`, are outside this initial subset.
+Invalid selectors, unsupported grammars, misplaced fields and malformed
+conditions fail loading, including in TOML/YAML agent-type files. Direct
+policy construction also returns an error rather than dropping invalid rules.
+
+Incomplete parsing does not itself approve, deny, or request approval. It
+prevents an `only_arguments` rule from matching. `with_arguments` can still
+match evidence confidently placed **before** ambiguity; unknown arity stops
+collection of later evidence. Thus `find . -delete -weird` supplies `-delete`,
+but `find . -weird -exec` supplies no confident `-exec`. Other rules still
+decide: a preceding unconditional approval remains effective if no later
+conditional rule matches. Prefer positive allow-lists over a broad approval
+followed by dangerous-option vetoes.
+
+Assignment-prefixed invocations (`FOO=bar cat file`), executable paths
+(`./cat`, `/bin/cat`), and wrappers (`env`, `command`, `sudo`, `time`) are
+ineligible for conditional rules. Wrappers are not unwrapped; shell variables
+are not expanded. Existing explicit unconditional rules retain their behavior,
+including broad approvals for commands without grammars. Shell-state commands
+such as `cd`, `export`, `set`, and `alias` are not in the grammar roster.
+
+**Conservative migration example.** Replace a broad
+`{ command = ["cat", "**"], verdict = "auto_approved" }` with a conditional
+allow-list. Re-add structural protections explicitly, since configuring rules
+replaces the floor:
+
+```toml
+[tools.bash]
+rules = [
+  { command = ["true"], verdict = "auto_approved" },
+  { command = ["false"], verdict = "auto_approved" },
+  { command = ["cat", "**"], only_arguments = ["-n", "-b", "-s"], verdict = "auto_approved" },
+  { command = ["ls", "**"], only_arguments = ["-l", "-a", "-h", "-d", "-t", "-R"], verdict = "auto_approved" },
+  { command = ["head", "**"], only_arguments = ["-n", "-c"], verdict = "auto_approved" },
+  { command = ["tail", "**"], only_arguments = ["-n", "-c"], verdict = "auto_approved" },
+  { command = ["wc", "**"], only_arguments = ["-l", "-w", "-c", "-m"], verdict = "auto_approved" },
+  { command = ["grep", "**"], only_arguments = ["-n", "-i", "-e", "-F", "-E", "-r", "-v", "-A", "-B", "-l", "-c", "-o", "-H", "-m", "--include", "--exclude", "--exclude-dir"], verdict = "auto_approved" },
+  { command = ["rg", "**"], only_arguments = ["-n", "-i", "-e", "-F", "-g", "-C", "-A", "-B", "--files"], verdict = "auto_approved" },
+  { command = ["sort", "**"], only_arguments = ["-n", "-r", "-u", "-k"], verdict = "auto_approved" },
+  { command = ["find", "**"], only_arguments = ["-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth", "-depth", "-a", "-o", "!", "-print"], verdict = "auto_approved" },
+  { command = ["git", "**"], only_arguments = ["check-ignore", "--no-pager", "--verbose"], verdict = "auto_approved" },
+  { command = ["git", "**"], only_arguments = ["status", "--no-pager", "--short", "--branch"], verdict = "auto_approved" },
+  { command = ["git", "**"], only_arguments = ["diff", "--no-pager", "--stat", "--check", "--cached", "--numstat", "--name-only", "--unified"], verdict = "auto_approved" },
+  { command = ["git", "**"], only_arguments = ["log", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"], verdict = "auto_approved" },
+  { command = ["git", "**"], only_arguments = ["show", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"], verdict = "auto_approved" },
+  { rule = "unquoted_glob", verdict = "user_approval_required" },
+  { rule = "unquoted_brace_expansion", verdict = "user_approval_required" },
+  { rule = "variable_assignment_prefix", verdict = "user_approval_required" },
+  { rule = "backgrounded", verdict = "auto_denied" },
+]
+```
+
+Each Git rule allows exactly one subcommand identity and its selected options.
+The shared `["git", "**"]` selector also matches global options before the
+subcommand, such as `git --no-pager status --short`; the argument filter still
+requires a complete parse and rejects other subcommands and unlisted options.
+The `check-ignore` rule covers `git check-ignore -v -- path/to/file` and its
+`--verbose` alias, while continuing to exclude global configuration overrides.
+`--max-count` also allows its `-n` alias and the numeric `git log -N` shorthand.
+Find's selected name/path and depth predicates can be combined with
+`-a`/`-and`, `-o`/`-or`, `!`/`-not`, and quoted parentheses.
+
+This excludes write/exec options such as `sort -o`, `rg --pre`, find's
+`-exec`/`-execdir`/`-delete`/`-fprint*`, and Git configuration, external-diff,
+textconv and output controls. Unknown forms fall through to other rules or
+the tool's approval default; they are not automatically denied.
+
+An allow-list is an **approval convenience, not a read-only guarantee or an
+execution sandbox**. Executable resolution, environment, configuration,
+plugins and filesystem state remain uncontrolled. Bash operands are not
+path-scoped; secret reads and exfiltration are not prevented. Prefer dedicated
+`read`, `glob`, and `search` for scoped access. No executable pinning, learned
+rules, OS isolation or approval-explanation UI is implied.
+
+Only the workspace sample `.ylva/profiles/other/config.toml` is migrated.
+It deliberately retains its existing grammarless broad `nl`, `cut`, `tr`,
+`echo`, `printf`, and `test` approvals as user-owned **unconditional opt-outs**,
+not argument-checked rules. Other existing configurations are not migrated.
 
 **Per-command evaluation and aggregation.** Each command in the script is
 evaluated independently:

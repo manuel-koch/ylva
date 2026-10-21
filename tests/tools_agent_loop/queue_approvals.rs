@@ -25,7 +25,9 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
         sandbox_root: dir.path().to_path_buf(),
     }));
-    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
+    let registry = Arc::new(
+        default_registry(sandbox, ToolRegistryConfig::default()).expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -93,7 +95,9 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
         sandbox_root: dir.path().to_path_buf(),
     }));
-    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
+    let registry = Arc::new(
+        default_registry(sandbox, ToolRegistryConfig::default()).expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -180,10 +184,10 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
 
 #[tokio::test(start_paused = true)]
 async fn failing_tool_emits_tool_error_and_still_reprompts() {
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(make_sandbox(), ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -248,7 +252,9 @@ async fn base64_read_result_stays_in_model_context_but_not_tool_bubble() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
         sandbox_root: dir.path().to_path_buf(),
     }));
-    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
+    let registry = Arc::new(
+        default_registry(sandbox, ToolRegistryConfig::default()).expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -314,10 +320,10 @@ async fn base64_read_result_stays_in_model_context_but_not_tool_bubble() {
 async fn denied_write_is_fed_back_and_triggers_a_new_request() {
     let dir = TempDir::new().expect("tempdir");
     let file = scratch_file(&dir, "a.txt", "content");
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(make_sandbox(), ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -382,10 +388,10 @@ async fn bash_call_pending_carries_label_in_title_arguments() {
     // while the call awaits approval — and the pending event's body
     // sections must lead with `Label` then `Command` for the expanded
     // bubble.
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(make_sandbox(), ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -485,10 +491,10 @@ async fn bash_call_pending_carries_label_in_title_arguments() {
 async fn bash_tool_done_content_sections_lead_with_label_and_command() {
     // Approving the call runs it; the completed bubble's body must lead
     // with `Label` then `Command`, followed by the command output.
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(make_sandbox(), ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -581,10 +587,10 @@ async fn ten_page_batch_preserves_continuity_after_a_failed_summary() {
 
 #[tokio::test(start_paused = true)]
 async fn iteration_guard_stops_after_max_reprompts() {
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(make_sandbox(), ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -633,10 +639,10 @@ async fn iteration_guard_stops_after_max_reprompts() {
 
 #[tokio::test(start_paused = true)]
 async fn iteration_guard_honors_a_custom_root_limit() {
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(make_sandbox(), ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -695,10 +701,10 @@ async fn thinking_deltas_surface_separately_from_assistant_text() {
     // Thinking/reasoning fragments must never contaminate the assistant text
     // accumulator: they arrive via `UiUpdate::AppendThinking` and are absent
     // from the final `Message::Assistant` content.
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(make_sandbox(), ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![

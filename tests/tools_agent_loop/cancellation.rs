@@ -16,10 +16,10 @@ use super::*;
 
 #[tokio::test(start_paused = true)]
 async fn stopping_pending_tool_emits_idle_after_tool_error() {
-    let registry = Arc::new(default_registry(
-        make_sandbox(),
-        ToolRegistryConfig::default(),
-    ));
+    let registry = Arc::new(
+        default_registry(make_sandbox(), ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -84,7 +84,9 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
         sandbox_root: dir.path().to_path_buf(),
     }));
-    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
+    let registry = Arc::new(
+        default_registry(sandbox, ToolRegistryConfig::default()).expect("valid sandbox fixture"),
+    );
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -151,7 +153,8 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
 
 #[tokio::test(start_paused = true)]
 async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
-    let mut registry = default_registry(make_sandbox(), ToolRegistryConfig::default());
+    let mut registry = default_registry(make_sandbox(), ToolRegistryConfig::default())
+        .expect("valid sandbox fixture");
     registry.register(Arc::new(SleepTool));
     let registry = Arc::new(registry);
     let interval = Duration::from_millis(5);

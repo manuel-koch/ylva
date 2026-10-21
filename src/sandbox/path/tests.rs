@@ -26,7 +26,8 @@ fn dot_path_matches_hidden_components_independently_of_location() {
             verdict: ApprovalVerdictConfig::AutoDenied,
             reason: Some("hidden path".into()),
             target: None,
-        }]);
+        }])
+        .expect("valid sandbox fixture");
 
     for path in [
         ".env",
@@ -93,15 +94,15 @@ fn outside_workspace_uses_discovered_workspace_without_rebasing_other_checks() {
         }
         let sandbox = make_sandbox(&launch_directory);
         let context = SandboxContext::new(Arc::clone(&sandbox));
-        let configured_context =
-            context
-                .clone()
-                .with_configured_rules(vec![SandboxRuleConfig::Named {
-                    rule: NamedSandboxRule::OutsideWorkspace,
-                    verdict: ApprovalVerdictConfig::AutoDenied,
-                    reason: Some("outside workspace".into()),
-                    target: None,
-                }]);
+        let configured_context = context
+            .clone()
+            .with_configured_rules(vec![SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::OutsideWorkspace,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: Some("outside workspace".into()),
+                target: None,
+            }])
+            .expect("valid sandbox fixture");
 
         for path in [
             workspace.join("README.md"),
@@ -514,14 +515,14 @@ fn configured_named_rule_overrides_default_dot_path_verdict() {
     let temporary_dir = make_visible_temporary_directory().unwrap();
     let workspace = temporary_dir.path().to_path_buf();
     let sandbox = make_sandbox(&workspace);
-    let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
-        SandboxRuleConfig::Named {
+    let context = SandboxContext::new(Arc::clone(&sandbox))
+        .with_configured_rules(vec![SandboxRuleConfig::Named {
             rule: NamedSandboxRule::DotPath,
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
             target: None,
-        },
-    ]);
+        }])
+        .expect("valid sandbox fixture");
 
     let dot_path = workspace.join(".env");
     assert_eq!(
@@ -576,24 +577,26 @@ fn configured_rules_mix_named_and_glob_last_match_wins() {
         "{}/.allowed_dot/**",
         canonical_sandbox_root.to_string_lossy()
     );
-    let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
-        SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::DotPath,
-            verdict: ApprovalVerdictConfig::AutoDenied,
-            reason: None,
-            target: None,
-        },
-        SandboxRuleConfig::PathGlob {
-            pattern: allow_pattern,
-            verdict: ApprovalVerdictConfig::AutoApproved,
-            reason: None,
-        },
-        SandboxRuleConfig::PathGlob {
-            pattern: dot_allow_pattern,
-            verdict: ApprovalVerdictConfig::AutoApproved,
-            reason: None,
-        },
-    ]);
+    let context = SandboxContext::new(Arc::clone(&sandbox))
+        .with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+                target: None,
+            },
+            SandboxRuleConfig::PathGlob {
+                pattern: allow_pattern,
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+            SandboxRuleConfig::PathGlob {
+                pattern: dot_allow_pattern,
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ])
+        .expect("valid sandbox fixture");
 
     // Regular dot-path still denied (only the named rule matches it).
     let dot_path = workspace.join(".env");
@@ -634,6 +637,7 @@ fn auto_approve_catch_all_wins_over_configured_deny_rule() {
             reason: None,
             target: None,
         }])
+        .expect("valid sandbox fixture")
         .with_rule(SandboxRule {
             verdict: ApprovalCheck::AutoApproved,
             pattern: glob::Pattern::new("**").unwrap(),
@@ -655,12 +659,14 @@ fn cross_filesystem_configured_context(
     verdict: ApprovalVerdictConfig,
     reason: Option<String>,
 ) -> SandboxContext {
-    SandboxContext::new(Arc::clone(sandbox)).with_configured_rules(vec![SandboxRuleConfig::Named {
-        rule: NamedSandboxRule::CrossFilesystem,
-        verdict,
-        reason,
-        target: None,
-    }])
+    SandboxContext::new(Arc::clone(sandbox))
+        .with_configured_rules(vec![SandboxRuleConfig::Named {
+            rule: NamedSandboxRule::CrossFilesystem,
+            verdict,
+            reason,
+            target: None,
+        }])
+        .expect("valid sandbox fixture")
 }
 
 #[test]
@@ -839,8 +845,8 @@ fn check_path_cross_filesystem_last_match_wins_against_outside_workspace() {
     let sandbox = make_sandbox(&workspace);
     let cross_device_path = Path::new("/dev/null");
 
-    let cross_filesystem_last =
-        SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+    let cross_filesystem_last = SandboxContext::new(Arc::clone(&sandbox))
+        .with_configured_rules(vec![
             SandboxRuleConfig::Named {
                 rule: NamedSandboxRule::OutsideWorkspace,
                 verdict: ApprovalVerdictConfig::AutoDenied,
@@ -853,7 +859,8 @@ fn check_path_cross_filesystem_last_match_wins_against_outside_workspace() {
                 reason: None,
                 target: None,
             },
-        ]);
+        ])
+        .expect("valid sandbox fixture");
     assert_eq!(
         cross_filesystem_last.check_path(cross_device_path),
         Some(ApprovalCheck::UserApprovalRequired),
@@ -861,8 +868,8 @@ fn check_path_cross_filesystem_last_match_wins_against_outside_workspace() {
          later cross_filesystem rule wins"
     );
 
-    let outside_workspace_last =
-        SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+    let outside_workspace_last = SandboxContext::new(Arc::clone(&sandbox))
+        .with_configured_rules(vec![
             SandboxRuleConfig::Named {
                 rule: NamedSandboxRule::CrossFilesystem,
                 verdict: ApprovalVerdictConfig::UserApprovalRequired,
@@ -875,7 +882,8 @@ fn check_path_cross_filesystem_last_match_wins_against_outside_workspace() {
                 reason: None,
                 target: None,
             },
-        ]);
+        ])
+        .expect("valid sandbox fixture");
     assert!(matches!(
         outside_workspace_last.check_path(cross_device_path),
         Some(ApprovalCheck::AutoDenied { .. })
@@ -890,27 +898,29 @@ fn check_path_cross_filesystem_last_match_wins_against_path_glob() {
     let sandbox = make_sandbox(&workspace);
     let cross_device_path = Path::new("/dev/null");
 
-    let glob_last = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
-        SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::CrossFilesystem,
-            verdict: ApprovalVerdictConfig::AutoDenied,
-            reason: None,
-            target: None,
-        },
-        SandboxRuleConfig::PathGlob {
-            pattern: "/dev/**".to_string(),
-            verdict: ApprovalVerdictConfig::AutoApproved,
-            reason: None,
-        },
-    ]);
+    let glob_last = SandboxContext::new(Arc::clone(&sandbox))
+        .with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::CrossFilesystem,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+                target: None,
+            },
+            SandboxRuleConfig::PathGlob {
+                pattern: "/dev/**".to_string(),
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ])
+        .expect("valid sandbox fixture");
     assert_eq!(
         glob_last.check_path(cross_device_path),
         Some(ApprovalCheck::AutoApproved),
         "the later path glob re-approves the cross-device path"
     );
 
-    let cross_filesystem_last =
-        SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+    let cross_filesystem_last = SandboxContext::new(Arc::clone(&sandbox))
+        .with_configured_rules(vec![
             SandboxRuleConfig::PathGlob {
                 pattern: "/dev/**".to_string(),
                 verdict: ApprovalVerdictConfig::AutoApproved,
@@ -922,7 +932,8 @@ fn check_path_cross_filesystem_last_match_wins_against_path_glob() {
                 reason: None,
                 target: None,
             },
-        ]);
+        ])
+        .expect("valid sandbox fixture");
     assert!(matches!(
         cross_filesystem_last.check_path(cross_device_path),
         Some(ApprovalCheck::AutoDenied { .. })
@@ -939,27 +950,29 @@ fn check_path_dot_path_ordering_unaffected_by_cross_filesystem_on_same_device() 
     let sandbox = make_sandbox(&workspace);
     let dot_path = workspace.join(".env");
 
-    let dot_path_last = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
-        SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::CrossFilesystem,
-            verdict: ApprovalVerdictConfig::AutoApproved,
-            reason: None,
-            target: None,
-        },
-        SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::DotPath,
-            verdict: ApprovalVerdictConfig::AutoDenied,
-            reason: None,
-            target: None,
-        },
-    ]);
+    let dot_path_last = SandboxContext::new(Arc::clone(&sandbox))
+        .with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::CrossFilesystem,
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+                target: None,
+            },
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+                target: None,
+            },
+        ])
+        .expect("valid sandbox fixture");
     assert!(matches!(
         dot_path_last.check_path(&dot_path),
         Some(ApprovalCheck::AutoDenied { .. })
     ));
 
-    let cross_filesystem_last =
-        SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+    let cross_filesystem_last = SandboxContext::new(Arc::clone(&sandbox))
+        .with_configured_rules(vec![
             SandboxRuleConfig::Named {
                 rule: NamedSandboxRule::DotPath,
                 verdict: ApprovalVerdictConfig::AutoDenied,
@@ -972,7 +985,8 @@ fn check_path_dot_path_ordering_unaffected_by_cross_filesystem_on_same_device() 
                 reason: None,
                 target: None,
             },
-        ]);
+        ])
+        .expect("valid sandbox fixture");
     assert!(
         matches!(
             cross_filesystem_last.check_path(&dot_path),

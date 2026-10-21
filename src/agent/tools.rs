@@ -805,7 +805,7 @@ impl Default for ToolRegistryConfig {
 pub fn default_registry(
     sandbox: std::sync::Arc<std::sync::RwLock<crate::sandbox::Sandbox>>,
     config: ToolRegistryConfig,
-) -> ToolRegistry {
+) -> Result<ToolRegistry, crate::sandbox::SandboxRuleError> {
     use crate::sandbox::SandboxContext;
 
     let allowed = &config.allowed_tools;
@@ -822,7 +822,7 @@ pub fn default_registry(
     let sandbox_context_for = |tool_name: &str, auto_approve_tool: AutoApproveTool| {
         let mut context = SandboxContext::new(Arc::clone(&sandbox));
         if let Some(rules) = config.tool_sandbox_rules.get(tool_name) {
-            context = context.with_tool_rules(tool_name, rules.clone());
+            context = context.with_tool_rules(tool_name, rules.clone())?;
         }
         if tool_name == read::ReadTool::NAME {
             context = context.with_skill_sources(Arc::new(
@@ -840,7 +840,7 @@ pub fn default_registry(
                 pattern: ::glob::Pattern::new("**").expect("** is a valid glob"),
             });
         }
-        context
+        Ok::<_, crate::sandbox::SandboxRuleError>(context)
     };
 
     // Registers `name` only when present in `allowed`, wiring its sandbox
@@ -850,30 +850,31 @@ pub fn default_registry(
          auto_approve_tool: AutoApproveTool,
          make: &dyn Fn(SandboxContext) -> Arc<dyn Tool>| {
             if allowed.iter().any(|allowed_name| allowed_name == name) {
-                registry.register(make(sandbox_context_for(name, auto_approve_tool)));
+                registry.register(make(sandbox_context_for(name, auto_approve_tool)?));
             }
+            Ok::<_, crate::sandbox::SandboxRuleError>(())
         };
 
     register_sandboxed_tool(read::ReadTool::NAME, AutoApproveTool::Read, &|context| {
         Arc::new(read::ReadTool::new(context))
-    });
+    })?;
     register_sandboxed_tool(write::WriteTool::NAME, AutoApproveTool::Write, &|context| {
         Arc::new(write::WriteTool::new(context))
-    });
+    })?;
     register_sandboxed_tool(glob::GlobTool::NAME, AutoApproveTool::Glob, &|context| {
         Arc::new(glob::GlobTool::new(context))
-    });
+    })?;
     register_sandboxed_tool(bash::BashTool::NAME, AutoApproveTool::Bash, &|context| {
         Arc::new(bash::BashTool::new(context))
-    });
+    })?;
     register_sandboxed_tool(
         search::SearchTool::NAME,
         AutoApproveTool::Search,
         &|context| Arc::new(search::SearchTool::new(context)),
-    );
+    )?;
     register_sandboxed_tool(edit::EditTool::NAME, AutoApproveTool::Edit, &|context| {
         Arc::new(edit::EditTool::new(context))
-    });
+    })?;
 
     if allowed
         .iter()
@@ -887,7 +888,7 @@ pub fn default_registry(
                 .get(load_skill::LoadSkillTool::NAME)
                 .cloned()
                 .unwrap_or_default(),
-        );
+        )?;
         registry.register(Arc::new(load_skill::LoadSkillTool::new(
             config.skills.clone(),
             context,
@@ -914,7 +915,7 @@ pub fn default_registry(
         registry.register(Arc::new(web_search::WebSearchTool::new(
             web_search_backend,
             &config.web_search,
-            sandbox_context_for(web_search::WebSearchTool::NAME, AutoApproveTool::WebSearch),
+            sandbox_context_for(web_search::WebSearchTool::NAME, AutoApproveTool::WebSearch)?,
         )));
     }
 
@@ -929,7 +930,7 @@ pub fn default_registry(
         registry.register(Arc::new(web_fetch::WebFetchTool::new(
             config.web_fetch.build_backend(),
             &config.web_fetch,
-            sandbox_context_for(web_fetch::WebFetchTool::NAME, AutoApproveTool::WebFetch),
+            sandbox_context_for(web_fetch::WebFetchTool::NAME, AutoApproveTool::WebFetch)?,
         )));
     }
 
@@ -956,7 +957,7 @@ pub fn default_registry(
         )));
     }
 
-    registry
+    Ok(registry)
 }
 
 #[cfg(test)]

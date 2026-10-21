@@ -370,36 +370,42 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
     // A target-less network_request rule matches every call.
     let tool = tool_with(
         backend(),
-        default_sandbox_context().with_configured_rules(vec![SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::NetworkRequest,
-            verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
-            reason: None,
-            target: None,
-        }]),
+        default_sandbox_context()
+            .with_configured_rules(vec![SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::NetworkRequest,
+                verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+                target: None,
+            }])
+            .expect("valid sandbox fixture"),
     );
     assert_eq!(tool.needs_approval(&url), ApprovalCheck::AutoApproved);
 
     // A matching `target` pattern applies to the requested URL's scheme://host.
     let tool = tool_with(
         backend(),
-        default_sandbox_context().with_configured_rules(vec![SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::NetworkRequest,
-            verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
-            reason: None,
-            target: Some("https://docs.rs".to_string()),
-        }]),
+        default_sandbox_context()
+            .with_configured_rules(vec![SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::NetworkRequest,
+                verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+                target: Some("https://docs.rs".to_string()),
+            }])
+            .expect("valid sandbox fixture"),
     );
     assert_eq!(tool.needs_approval(&url), ApprovalCheck::AutoApproved);
 
     // A non-matching `target` abstains.
     let tool = tool_with(
         backend(),
-        default_sandbox_context().with_configured_rules(vec![SandboxRuleConfig::Named {
-            rule: NamedSandboxRule::NetworkRequest,
-            verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
-            reason: None,
-            target: Some("https://example.com".to_string()),
-        }]),
+        default_sandbox_context()
+            .with_configured_rules(vec![SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::NetworkRequest,
+                verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+                target: Some("https://example.com".to_string()),
+            }])
+            .expect("valid sandbox fixture"),
     );
     assert_eq!(
         tool.needs_approval(&url),

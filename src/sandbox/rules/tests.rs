@@ -63,6 +63,8 @@ fn sandbox_rule_config_path_glob_variant_parses_from_toml() {
 #[test]
 fn has_misplaced_command_glob_wildcard_detects_non_trailing_single_wildcard() {
     let rule = SandboxRuleConfig::CommandGlob {
+        with_arguments: None,
+        only_arguments: None,
         command: vec!["git".to_string(), "*".to_string(), "status".to_string()],
         verdict: ApprovalVerdictConfig::AutoApproved,
         reason: None,
@@ -73,6 +75,8 @@ fn has_misplaced_command_glob_wildcard_detects_non_trailing_single_wildcard() {
 #[test]
 fn has_misplaced_command_glob_wildcard_detects_non_trailing_multi_wildcard() {
     let rule = SandboxRuleConfig::CommandGlob {
+        with_arguments: None,
+        only_arguments: None,
         command: vec!["git".to_string(), "**".to_string(), "status".to_string()],
         verdict: ApprovalVerdictConfig::AutoApproved,
         reason: None,
@@ -83,11 +87,15 @@ fn has_misplaced_command_glob_wildcard_detects_non_trailing_multi_wildcard() {
 #[test]
 fn has_misplaced_command_glob_wildcard_abstains_on_trailing_wildcard() {
     let single = SandboxRuleConfig::CommandGlob {
+        with_arguments: None,
+        only_arguments: None,
         command: vec!["git".to_string(), "status".to_string(), "*".to_string()],
         verdict: ApprovalVerdictConfig::AutoApproved,
         reason: None,
     };
     let multi = SandboxRuleConfig::CommandGlob {
+        with_arguments: None,
+        only_arguments: None,
         command: vec!["git".to_string(), "status".to_string(), "**".to_string()],
         verdict: ApprovalVerdictConfig::AutoApproved,
         reason: None,
@@ -122,4 +130,85 @@ fn approval_verdict_config_auto_denied_defaults_reason_when_omitted() {
             reason: "default reason".to_string()
         }
     );
+}
+
+#[test]
+fn argument_conditions_reject_invalid_selectors_and_patterns() {
+    for source in [
+        r#"command = ["sed", "**"]
+        only_arguments = ["-n"]"#,
+        r#"command = ["awk", "**"]
+        only_arguments = []"#,
+        r#"command = ["/bin/cat", "**"]
+        only_arguments = []"#,
+        r#"command = ["c*", "**"]
+        only_arguments = []"#,
+        r#"command = ["env", "cat", "**"]
+        only_arguments = []"#,
+        r#"command = []
+        only_arguments = []"#,
+        r#"command = ["cat", "**"]
+        with_arguments = []"#,
+        r#"command = ["cat", "**"]
+        only_arguments = ["["]"#,
+        r#"command = ["cat", "**"]
+        with_arguments = [""]"#,
+        r#"command = ["git", "**"]
+        with_arguments = ["--output=file"]"#,
+        r#"command = ["git", "**"]
+        with_arguments = ["log --oneline"]"#,
+    ] {
+        let rule: SandboxRuleConfig =
+            toml::from_str(&format!("{source}\nverdict = \"auto_denied\"")).unwrap();
+        assert!(rule.validate().is_err(), "{source}");
+    }
+}
+
+#[test]
+fn argument_fields_are_strict_command_only_lists() {
+    for source in [
+        r#"rule = "backgrounded"
+        only_arguments = []"#,
+        r#"pattern = "**"
+        with_arguments = ["-n"]"#,
+        r#"command = ["cat", "**"]
+        only_argument = []"#,
+        r#"command = ["cat", "**"]
+        only_arguments = "-n""#,
+        r#"command = ["cat", "**"]
+        with_arguments = [1]"#,
+    ] {
+        assert!(
+            toml::from_str::<SandboxRuleConfig>(&format!("{source}\nverdict = \"auto_denied\""))
+                .is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn malformed_direct_veto_rejects_policy_after_unconditional_allow() {
+    for restriction in [
+        r#"{ command = ["cat", "**"], with_arguments = [], verdict = "auto_denied" }"#,
+        r#"{ command = ["cat", "**"], only_arguments = ["["], verdict = "auto_denied" }"#,
+        r#"{ pattern = "[", verdict = "auto_denied" }"#,
+    ] {
+        #[derive(Deserialize)]
+        struct Rules {
+            rules: Vec<SandboxRuleConfig>,
+        }
+        let rules: Rules = toml::from_str(&format!(
+            r#"rules = [{{ command = ["cat", "**"], verdict = "auto_approved" }}, {restriction}]"#
+        ))
+        .unwrap();
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            super::super::Sandbox::with_root("/workspace".into()),
+        ));
+        assert!(
+            super::super::SandboxContext::new(sandbox)
+                .with_configured_rules(rules.rules)
+                .is_err(),
+            "{restriction}"
+        );
+    }
 }

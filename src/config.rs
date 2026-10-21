@@ -154,6 +154,17 @@ pub enum ConfigError {
         expected: String,
     },
     #[error(
+        "invalid sandbox rule at {} for tool '{tool}' (rules[{index}]): {source}",
+        display_path(path)
+    )]
+    InvalidSandboxRule {
+        path: PathBuf,
+        tool: String,
+        index: usize,
+        #[source]
+        source: crate::sandbox::SandboxRuleError,
+    },
+    #[error(
         "profile config at {} has a misplaced wildcard in [tools.{tool}].rules[{index}].command: \
          `*`/`**` only match trailing arguments, so they may only appear as the last element",
         display_path(path)

@@ -483,7 +483,9 @@ async fn settle_background_tasks() {
 }
 
 pub(in crate::agent) fn compaction_test_tools() -> Vec<ToolSchema> {
-    tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default()).schemas()
+    tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+        .expect("valid sandbox fixture")
+        .schemas()
 }
 
 /// Build the first turn of a conversation and pick a context window in
@@ -590,10 +592,10 @@ fn root_reprompts_after_subagent_finish_arrives_mid_stream() {
             },
         ));
 
-        let registry = Arc::new(default_registry(
-            test_sandbox(),
-            ToolRegistryConfig::default(),
-        ));
+        let registry = Arc::new(
+            default_registry(test_sandbox(), ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        );
 
         let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
         let manager = SubagentManager::new(

@@ -72,10 +72,10 @@ fn oversized_subagent_result_preserves_canonical_output_and_bounds_parent_projec
         let (_parent_subagent_ui_tx, parent_subagent_ui_rx) = mpsc::unbounded_channel();
         let (agent_loop, _ui_rx) = AgentLoop::new(
             root_engine,
-            Arc::new(default_registry(
-                test_sandbox(),
-                ToolRegistryConfig::default(),
-            )),
+            Arc::new(
+                default_registry(test_sandbox(), ToolRegistryConfig::default())
+                    .expect("valid sandbox fixture"),
+            ),
         );
         let mut agent_loop = agent_loop
             .with_subagent_manager(manager, finish_rx, parent_subagent_ui_rx)
@@ -198,18 +198,21 @@ fn subagent_role_run_returns_immediately_after_finish_tool_is_called() {
         let run_id = Uuid::new_v4();
         let call_id = Uuid::new_v4();
 
-        let registry = Arc::new(default_registry(
-            test_sandbox(),
-            ToolRegistryConfig {
-                allowed_tools: vec![],
-                agent_finish: Some(AgentFinishToolConfig {
-                    finish_tx: finish_tx.clone(),
-                    run_id,
-                    call_id,
-                }),
-                ..Default::default()
-            },
-        ));
+        let registry = Arc::new(
+            default_registry(
+                test_sandbox(),
+                ToolRegistryConfig {
+                    allowed_tools: vec![],
+                    agent_finish: Some(AgentFinishToolConfig {
+                        finish_tx: finish_tx.clone(),
+                        run_id,
+                        call_id,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("valid sandbox fixture"),
+        );
 
         let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
         agent_loop = agent_loop.with_subagent_role(SubagentRoleConfig {
@@ -285,10 +288,10 @@ fn root_role_does_not_receive_the_subagent_iteration_budget_heads_up() {
         // (only it can be silently cut off with no one to explain things to);
         // a root loop's `Interrupted` assistant bubble already tells a human
         // what happened, so it must not get this extra system message too.
-        let registry = Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        ));
+        let registry = Arc::new(
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        );
         let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
             Arc::new(MockProvider::new(
                 vec!["answer".to_string()],
@@ -373,10 +376,10 @@ fn subagent_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
             },
         ));
 
-        let registry = Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        ));
+        let registry = Arc::new(
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture"),
+        );
 
         let (finish_tx, _finish_rx) = mpsc::channel(1);
         let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::unbounded_channel();

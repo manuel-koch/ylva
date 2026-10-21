@@ -126,7 +126,7 @@ pub use llm::{
     OpenAiCompatibleProvider, OpenRouterProvider, Provider, RequestCost, ToolSchema,
 };
 pub use presenter::{TextareaContext, TuiEvent};
-pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext};
+pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext, SandboxRuleError};
 pub use slash_command::{
     parse_slash_command, parse_slash_command_invocation, slash_command_suggestions, SlashCommand,
     SlashCommandInfo, SlashCommandInvocation, SLASH_COMMANDS,

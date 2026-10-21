@@ -112,7 +112,18 @@ default; `bash` requires user approval by default but is subject to
 structural sandbox rules (backgrounded commands, variable-assignment
 prefixes, unquoted glob/brace expansion) and configurable `[tools.bash]`
 rules — see "`bash` command rules" in
-[configuration](./configuration.md#bash-command-rules). For ordinary path tools,
+[configuration](./configuration.md#bash-command-rules). Command rules can use
+argument allow-lists or presence filters backed by conservative built-in
+grammars; unknown/ambiguous syntax prevents complete allow-list matches.
+First-argument legacy numeric `head`/`tail` options such as `-20` match
+the same filters as `-n`/`--lines`; `git log -N` matches `-n`/`--max-count`
+filters before the `--` terminator.
+`git check-ignore` supports explicit path operands and `-v`/`--verbose`,
+including `--` termination; other reporting/input modes remain unsupported.
+These are approval heuristics, not proof of read-only execution or enforced
+isolation: they do not pin executables, scope Bash operand paths, or prevent
+secret reads and exfiltration. Explicit unconditional command approvals remain
+user-owned opt-outs. For ordinary path tools,
 when no tool-specific rules are configured, a built-in floor applies: a path
 outside the workspace root (the launch directory
 when no workspace marker exists) — or a dot-prefixed

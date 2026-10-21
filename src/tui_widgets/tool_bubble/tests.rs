@@ -182,7 +182,7 @@ fn load_skill_bubble_keeps_name_primary_and_source_in_expanded_body() {
         .unwrap();
         let tool = LoadSkillTool::new(
             Arc::new(callable),
-            loader_context(sandbox, &profile, "default"),
+            loader_context(sandbox, &profile, "default").expect("valid sandbox fixture"),
         );
         let arguments = serde_json::json!({"name": "unslop"});
         let result = tool
