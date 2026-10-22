@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  conventions:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Branch name
+        run: scripts/check-git-conventions.sh branch-name "${BRANCH_NAME}"
+        env:
+          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+      - name: Commit messages
+        if: github.event_name == 'pull_request'
+        run: scripts/check-git-conventions.sh commit-range "origin/${BASE_REF}..HEAD^2"
+        env:
+          BASE_REF: ${{ github.base_ref }}
+      - name: Git convention script tests
+        run: make test-git-conventions
+
+  verify:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tools
+        run: cargo install --locked cargo-llvm-cov cargo-audit rumdl
+      - run: make format-check
+      - run: make lint
+      - run: make test-coverage
+      - name: Detect dependency changes
+        id: dependency_changes
+        run: |
+          base="${BASE_SHA:-${BEFORE_SHA}}"
+          if [ -z "${base}" ] || echo "${base}" | grep -qE '^0+$' \
+              || ! git diff --quiet "${base}" HEAD -- Cargo.toml Cargo.lock; then
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+          fi
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+      - name: Dependency audit
+        if: steps.dependency_changes.outputs.changed == 'true'
+        run: make audit

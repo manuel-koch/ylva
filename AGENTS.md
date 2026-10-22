@@ -54,6 +54,9 @@ A Rust-based terminal UI that implements an agent-harness.
   - Imperatives — DO edit: "apply it", "do it", "go ahead", "fix it", "fix the bug",
     "implement it" (and equivalent-intent phrases)
 - Don't git branch/commit/stage anything without explicit user consent
+  - When consented: write [Conventional Commits](https://www.conventionalcommits.org/)
+    messages, use conventional branch names and never pass `--no-verify`; see
+    [development-workflow](./docs/development-workflow.md#git-hooks-and-conventions)
 
 When consent applies to a multi-step task, complete all the steps the user asked
 for before reporting back; partial completion is not the same as completion.

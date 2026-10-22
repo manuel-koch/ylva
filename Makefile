@@ -24,14 +24,15 @@ endif
 COVERAGE_THRESHOLD := 80
 
 .PHONY: render-all-diagrams \
-	lint audit format format-rust format-markdown \
+	lint audit format format-check format-rust format-markdown \
+	install-git-hooks uninstall-git-hooks test-git-conventions \
 	create-logs-dir \
 	graphify-update graphify-watch \
     clean \
 	build-debug build-debug-and-run \
 	build-release build-release-and-run build-debug-and-run-with-logs \
 	test test-e2e-persistence test-coverage test-coverage-missing \
-	install tag-version \
+	install \
 	outdated-dependencies upgrade-dependencies
 
 docs/diagrams/%.svg: docs/diagrams/%.mmd
@@ -66,6 +67,24 @@ format-rust:
 
 # Enforce consistent formatting
 format: format-rust format-markdown
+
+# Verify formatting without modifying files (used by CI)
+format-check:
+	cargo fmt --check
+	rumdl check --quiet $(REPO_ROOT)
+
+# Install the lefthook git hooks and the commit message template
+install-git-hooks:
+	lefthook install
+	git config --local commit.template .gitmessage
+
+uninstall-git-hooks:
+	lefthook uninstall
+	git config --local --unset commit.template || true
+
+# Verify the git convention check script
+test-git-conventions:
+	scripts/test-git-conventions.sh
 
 graphify-update:
 	graphify update .
@@ -158,9 +177,3 @@ outdated-dependencies:
 # Apply dependency upgrades to Cargo.lock (within semver bounds)
 upgrade-dependencies:
 	cargo update
-
-# Tag HEAD with the version from Cargo.toml (e.g. v0.2.0)
-tag-version:
-	$(eval VERSION := $(shell grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/'))
-	git tag v$(VERSION) HEAD
-	@echo "Tagged HEAD as v$(VERSION)"

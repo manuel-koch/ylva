@@ -178,6 +178,9 @@ for this project, not model certification.
    announcement-blocking defects fixed and verified.
 
 9. [ ] **Add macOS CI before announcement.**
+   Implemented by step 6 of
+   [git hooks and conventional commits](git-hooks-and-conventional-commits.md);
+   do not add a duplicate workflow.
    With approval, add workflows under `.github/workflows/` reusing the Makefile's
    checks and 80% aggregate coverage threshold. Fail on formatting differences and
    lint warnings, rather than merely formatting files or reporting warnings.

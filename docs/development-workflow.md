@@ -23,8 +23,12 @@ The following `make` targets are available:
 
 ```shell
 make format                          # Enforce consistent formatting on known files
+make format-check                    # Verify formatting without changing files (cargo fmt --check + rumdl check)
 make format-rust                     # Enforce consistent formatting on Rust files
 make format-markdown                 # Enforce consistent formatting on Markdown files
+make install-git-hooks               # Install lefthook git hooks and the commit message template
+make uninstall-git-hooks             # Remove the git hooks and the commit message template
+make test-git-conventions            # Test scripts/check-git-conventions.sh
 make lint                            # cargo check + cargo clippy — fix all warnings before committing
 make test-coverage                   # mandatory final test gate: run tests + print per-file coverage summary; fails if <80%
 make test-coverage-missing           # same as test-coverage but also prints uncovered line numbers
@@ -36,7 +40,6 @@ make build-debug-and-run-with-logs   # build debug binary and launch it with tra
 make build-release                   # cargo build (release)
 make build-release-and-run           # build release binary and launch it
 make install                         # cargo install --path . → ~/.cargo/bin/ylva
-make tag-version                     # tag HEAD with version from Cargo.toml
 make audit                           # cargo audit — fails on RustSec vulnerabilities in Cargo.lock
 make outdated-dependencies           # cargo update --dry-run — show available upgrades
 make upgrade-dependencies            # cargo update — apply dependency upgrades to Cargo.lock
@@ -49,6 +52,56 @@ or its command changes, update this section in the same commit (see
 [AGENTS](../AGENTS.md) → *Docs are part of the change set*).
 Other documents that reference `make` targets must delegate here rather than
 re-list targets, otherwise the lists drift the next time the `Makefile` changes.
+
+## Git hooks and conventions
+
+Decisions are recorded in
+[ADR-0001](./architecture-design-records/0001-use-lefthook-and-conventional-commits-for-git-conventions.md).
+Install [lefthook](https://github.com/evilmartians/lefthook) (e.g. `brew install lefthook`),
+then run `make install-git-hooks`. It installs the hooks and sets
+`commit.template` to [`.gitmessage`](../.gitmessage).
+
+Rules (implemented once in `scripts/check-git-conventions.sh`, shared with CI):
+
+- no commits on `main` (skipped on detached HEAD and during rebase, merge or cherry-pick)
+- branch names are `main` or `<prefix>/<lowercase-kebab>` with prefix one of
+  `feature bugfix hotfix release chore docs refactor test`
+- commit messages are [Conventional Commits](https://www.conventionalcommits.org/):
+  `type(scope)!: description` with type one of
+  `feat fix docs style refactor perf test build ci chore revert`; merge, revert,
+  `fixup!`/`squash!` messages and trailers (e.g. `Co-authored-by`) are accepted
+- pre-commit also runs `cargo fmt --check` (staged `*.rs`) and `rumdl check` (staged `*.md`);
+  lint, tests and audit run only in CI
+
+In an emergency, bypass the hooks with `git commit --no-verify`. Hooks are not a
+security boundary: CI re-checks branch name and commit messages, and the `main`
+ruleset requires a pull request with passing CI.
+
+## Continuous integration and releases
+
+[`ci.yml`](../.github/workflows/ci.yml) runs on macOS for pull requests and
+pushes to non-`main` branches, without secrets or live-provider tests. It runs
+`make format-check`, `make lint`, `make test-coverage`, `make audit` (only when
+`Cargo.toml` or `Cargo.lock` changed), the git convention checks for the branch
+name and every non-merge commit of a pull request, and `make test-git-conventions`.
+
+Pull requests are merged with merge commits, so each branch commit lands on `main`
+and must be conventional. The
+[pull request template](../.github/pull_request_template.md) holds the checklist.
+[Dependabot](../.github/dependabot.yml) updates `cargo` and GitHub Actions weekly
+using the `chore(deps)` prefix.
+
+Releases are automated by [release-plz](https://release-plz.dev/)
+([ADR-0002](./architecture-design-records/0002-use-release-plz-for-release-automation.md)):
+[`release.yml`](../.github/workflows/release.yml) opens a release PR bumping
+`Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` from conventional commits;
+merging it tags `vX.Y.Z` and creates the GitHub release (no crates.io publishing).
+Repository setup (maintainer, GitHub settings):
+
+- repository secret `RELEASE_PLZ_TOKEN`: fine-grained PAT with contents and
+  pull-requests write
+- ruleset on `main`: require a pull request and passing CI checks, allow only the
+  merge-commit method, bypass for the PAT owner
 
 ## Diagram rendering
 

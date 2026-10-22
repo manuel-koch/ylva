@@ -2,6 +2,11 @@
 
 ## Context
 
+Releases are automated by release-plz from conventional commits (see
+[development workflow](./development-workflow.md#continuous-integration-and-releases));
+its generated `CHANGELOG.md` feeds the GitHub release. This workflow remains an optional,
+manually curated summary.
+
 When requested by user, create brief release notes for recent commits (HEAD vs last tag,
 or an explicit range).
 Check the content of every commit, omit commits that are clearly not related to a

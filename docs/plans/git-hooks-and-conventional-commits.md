@@ -55,11 +55,11 @@ before editing files, creating new doc files, or staging/committing.
 
 1. [x] **Resolve the open questions** with the maintainer (resolved; see Implementation Hints →
    *Decisions*).
-2. [ ] **Record two ADRs** in `docs/architecture-design-records/` (directory currently empty;
+2. [x] **Record two ADRs** in `docs/architecture-design-records/` (directory currently empty;
    use the `architecture-decision-record` skill and its template) one for hooks and conventions
    (hook tool, hooks-vs-CI scope, commit/branch rules), one for release automation (release-plz,
    versioning, merge-commit strategy, CI scope).
-3. [ ] **Add the hook configuration** `lefthook.yml` at the repo root with:
+3. [x] **Add the hook configuration** `lefthook.yml` at the repo root with:
    - `pre-commit`: block when current branch is `main`; validate branch name against the
      regex `^(main|(feature|bugfix|hotfix|release|chore|docs|refactor|test)/[a-z0-9._-]+)$`
      (`main` stays a valid name so the no-commit-on-main check reports its own message);
@@ -74,17 +74,17 @@ before editing files, creating new doc files, or staging/committing.
    - Allow merge (`Merge pull request #N`, `Merge branch …`), revert and fixup/squash
      auto-generated messages and the `Co-authored-by` trailer used by Copilot commits. The
      check script/binary used by hooks and CI (steps 3 and 6) must implement this skip once.
-4. [ ] **Add Makefile targets** `install-git-hooks` (runs `lefthook install`;
+4. [x] **Add Makefile targets** `install-git-hooks` (runs `lefthook install`;
    add `uninstall-git-hooks` if cheap) and a non-mutating `format-check` target
    (`cargo fmt --check` + `rumdl check`; `make format` rewrites files and cannot gate CI/hooks)
    to `Makefile` and its `.PHONY` list; mirror them in the
    target list in `docs/development-workflow.md`. Add a `check-branch-name` / `check-commit-message`
    script or target only if the hook tool cannot express the check directly (KISS/YAGNI).
-5. [ ] **Test the hooks**: add a script-level or shell test only if custom scripts are
+5. [x] **Test the hooks**: add a script-level or shell test only if custom scripts are
    written; otherwise verify manually and record the commands in the ADR/dev-workflow doc.
    Manual verification: commit on `main` (rejected), commit with message `bad message`
    (rejected), `feat: add x` (accepted), branch `Foo_Bar` (rejected), `feature/foo` (accepted).
-6. [ ] **Add GitHub CI workflow** `.github/workflows/ci.yml`: triggers on `pull_request`
+6. [x] **Add GitHub CI workflow** `.github/workflows/ci.yml`: triggers on `pull_request`
    and `push` to non-`main` branches; macOS runner; install Rust toolchain
    (rustfmt, clippy, llvm-tools-preview), `cargo-llvm-cov`, `rumdl`, `cargo-audit`; cache
    cargo; run `make format-check`, `make lint`,
@@ -96,7 +96,7 @@ before editing files, creating new doc files, or staging/committing.
    (`test-e2e-persistence`) must not run. Use only the non-mutating
    `make format-check` from step 4.
 7. [ ] **Tag the baseline** `v0.31.1` on current `main` (with maintainer consent; no tags exist).
-8. [ ] **Add release workflow** `.github/workflows/release.yml` on push to `main` using
+8. [x] **Add release workflow** `.github/workflows/release.yml` on push to `main` using
    `release-plz` in release-PR mode: it opens/updates a release PR bumping `Cargo.toml` and
    `Cargo.lock` from conventional commits; merging it creates tag `vX.Y.Z` (same format as
    the former `make tag-version`) and a GitHub release with generated notes. GitHub releases only: no
@@ -107,23 +107,23 @@ before editing files, creating new doc files, or staging/committing.
    release PRs trigger CI; never expose it to fork PR jobs.
 9. [ ] **Configure branch protection** ruleset on `main` (GitHub setting, document steps):
    require PR and passing CI, merge-commit method only, bypass for the PAT owner used by release-plz.
-10. [ ] **Remove `make tag-version`** (Makefile target, `.PHONY` entry and the list in
+10. [x] **Remove `make tag-version`** (Makefile target, `.PHONY` entry and the list in
     `docs/development-workflow.md`); release-plz is the single source of truth for tags.
     Update `docs/release-notes-workflow.md`: release-plz's generated `CHANGELOG.md` feeds the
     GitHub release; the curated notes workflow stays as an optional manual summary.
-11. [ ] **Add a PR template** `.github/pull_request_template.md`: short checklist (conventional
+11. [x] **Add a PR template** `.github/pull_request_template.md`: short checklist (conventional
     commits, branch name, docs updated, `make format lint test-coverage` run). Local hooks can
     be bypassed; the template and the CI checks (steps 6 and 9) are the server-side backstop.
-12. [ ] **Add a commit message template** `.gitmessage` with the Conventional Commits format
+12. [x] **Add a commit message template** `.gitmessage` with the Conventional Commits format
     and allowed types as comments; have `make install-git-hooks` (step 4) set
     `git config --local commit.template .gitmessage`.
-13. [ ] **Add Dependabot** `.github/dependabot.yml` for `cargo` and `github-actions` ecosystems
+13. [x] **Add Dependabot** `.github/dependabot.yml` for `cargo` and `github-actions` ecosystems
     (weekly), with `commit-message.prefix: "chore(deps)"` so its commits pass the conventional
     commit CI check and release-plz parsing.
-14. [ ] **Reconcile `docs/plans/public-release-plan.md` task 9** (macOS CI): mark it as
+14. [x] **Reconcile `docs/plans/public-release-plan.md` task 9** (macOS CI): mark it as
     implemented by this plan's step 6 (cross-reference, no duplicate workflow), keeping its
     constraints (no secrets or paid-provider calls in untrusted PR jobs).
-15. [ ] **Update documentation** in the same change set:
+15. [x] **Update documentation** in the same change set:
     - `docs/development-workflow.md`: hooks section (install target, rules, bypass, commit
       template), CI contract, PR template, Dependabot, make-target list (incl.
       `format-check`), versioning/release flow.
@@ -134,8 +134,10 @@ before editing files, creating new doc files, or staging/committing.
     - `docs/release-notes-workflow.md`: relation to conventional commits/automated notes.
     - `CONTEXT.md` only if new domain terms are introduced.
     - Run `rumdl fmt` on changed Markdown.
-16. [ ] **Verify**: `make format lint`, `make test-coverage` (no Rust code changes expected,
-    so this should be unaffected), run the hook violation checks from step 5, confirm the
+16. [ ] **Verify** (done locally: hooks, `make format-check`, `make test-git-conventions`;
+    open: CI push, release-plz dry-run, both need GitHub): `make format lint`,
+    `make test-coverage` (no Rust code changes expected, so this should be unaffected),
+    run the hook violation checks from step 5, confirm the
     commit template is active, push a test branch to confirm the CI workflow, dry-run
     release-plz, and run `make audit` only if dependencies changed.
 17. [ ] **Remove or mark the idea file** `docs/ideas/git-hooks-and-conventional-commits.md`

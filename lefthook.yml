@@ -1,0 +1,18 @@
+pre-commit:
+  parallel: false
+  commands:
+    not-main:
+      run: scripts/check-git-conventions.sh not-main
+    branch-name:
+      run: scripts/check-git-conventions.sh branch-name
+    format-rust:
+      glob: "*.rs"
+      run: cargo fmt --check
+    format-markdown:
+      glob: "*.md"
+      run: rumdl check {staged_files}
+
+commit-msg:
+  commands:
+    conventional-commit:
+      run: scripts/check-git-conventions.sh commit-message {1}
