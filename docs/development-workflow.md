@@ -89,7 +89,8 @@ Pull requests are merged with merge commits, so each branch commit lands on `mai
 and must be conventional. The
 [pull request template](../.github/pull_request_template.md) holds the checklist.
 [Dependabot](../.github/dependabot.yml) updates `cargo` and GitHub Actions weekly
-using the `chore(deps)` prefix.
+using the `chore(deps)` prefix; minor/patch Cargo updates and all Actions
+updates are grouped into one PR each, major Cargo updates stay separate.
 
 Releases are automated by [release-plz](https://release-plz.dev/)
 ([ADR-0002](./architecture-design-records/0002-use-release-plz-for-release-automation.md)):
