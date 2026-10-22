@@ -18,5 +18,5 @@ commit_parsers = [
   { message = "^docs", group = "Documentation" },
   { message = "^revert", group = "Reverted" },
   { message = "^(style|test|build|ci|chore)", skip = true },
+  { message = ".*", skip = true },
 ]
-filter_unconventional = true
