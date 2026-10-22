@@ -10,7 +10,7 @@ gather_bash_calls:
 %.report.json: %.json
 	cargo run --quiet --example bash_policy_replay -- \
           $< \
-          --rules $(ROOT_DIR)/.ylva/profiles/other/config.toml \
+          --rules $(ROOT_DIR)/tests/sandbox_evaluation/sample.config.toml \
           > $@
 
 test:

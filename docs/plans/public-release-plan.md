@@ -88,9 +88,12 @@ for this project, not model certification.
    Exit criterion: an explicit, documented distribution decision and completion of
    its required changes before source publication.
 
-3. [ ] **Remove development-only configuration from the active default path.**
-   Inspect the tracked [workspace default profile](../../.ylva/profiles/default/config.toml)
-   and agent definitions, then follow profile loading in
+3. [x] **Remove development-only configuration from the active default path.**
+   Resolved by removing the tracked workspace `.ylva/` folder (default and
+   `other` profiles, the `broken` and `research-and-discover` agents, and the
+   `ylva-other` shim). A fresh checkout now has no workspace profile, so startup
+   uses the user's own profile. Original scope: inspect the workspace default
+   profile and agent definitions, then follow profile loading in
    `src/startup/profile.rs` and interpolation in `src/config/profile.rs`.
    Move development-only configuration out of the automatically selected default
    path, preserving workspace-profile precedence and explicit missing-variable
@@ -177,16 +180,15 @@ for this project, not model certification.
    Exit criterion: observations and an explicit reassessment are recorded, with
    announcement-blocking defects fixed and verified.
 
-9. [ ] **Add macOS CI before announcement.**
-   Implemented by step 6 of
-   [git hooks and conventional commits](git-hooks-and-conventional-commits.md);
-   do not add a duplicate workflow.
-   With approval, add workflows under `.github/workflows/` reusing the Makefile's
-   checks and 80% aggregate coverage threshold. Fail on formatting differences and
-   lint warnings, rather than merely formatting files or reporting warnings.
-   Include dependency audit and Markdown checks. Do not require a Linux matrix or
-   paid-provider CI; keep secrets and live paid calls out of untrusted PR jobs.
-   Update [development workflow](../development-workflow.md) with the CI contract.
+9. [ ] **Confirm macOS CI before announcement.**
+   The macOS workflow already exists:
+   [`ci.yml`](../../.github/workflows/ci.yml) runs format check, lint, the 80%
+   aggregate coverage gate, a conditional dependency audit, the git convention
+   checks, and Markdown checks (`rumdl`, via `make format-check` and `make lint`),
+   and is documented in
+   [development workflow](../development-workflow.md#continuous-integration-and-releases).
+   Do not add a duplicate workflow. It already runs without secrets or
+   live-provider tests, so only the hosted result remains to be confirmed.
    Exit criterion: the announcement candidate has passing hosted macOS checks.
    This task does not retroactively block experimental source publication.
 
@@ -228,9 +230,9 @@ intentionally replaces, not the agreed first-run contract.
 | Area | Finding | Evidence |
 | --- | --- | --- |
 | Product scope | Core functionality is substantial enough for an early-adopter release. | [Features](../features.md), [README](../../README.md) |
-| Onboarding blocker | The tracked default profile selects `local-dense`, using `gemma4:e4b-mlx`, and references multiple environment variables. A clean user's checkout does not have the advertised unconfigured default. | [Workspace profile](../../.ylva/profiles/default/config.toml) |
+| Onboarding blocker | The previously tracked default profile selected `local-dense`, using `gemma4:e4b-mlx`, and referenced multiple environment variables. A clean user's checkout does not have the advertised unconfigured default. | Removed tracked workspace profile (resolved by task 3) |
 | Startup contract | Implicit startup loads the workspace default profile when present. Missing referenced environment variables are errors, not mock-provider fallbacks. | `src/startup/profile.rs`, `src/config/profile.rs`, `src/config.rs` |
-| Development artifacts | The tracked workspace includes a `broken` agent backed by a model named `invalid`. These are active configuration, not isolated test fixtures. | `.ylva/profiles/default/agents/broken.md`, `.ylva/profiles/default/config.toml` |
+| Development artifacts | The previously tracked workspace included a `broken` agent backed by a model named `invalid`. These were active configuration, not isolated test fixtures. | Removed tracked workspace agents and profile (resolved by task 3) |
 | Provider uncertainty | Copilot uses an undocumented API and hardcoded VS Code client identity. The notes flag possible terms conflicts and unverified live behavior. | [Provider notes](../provider-notes.md) |
 | Safety messaging | Detailed docs describe Bash approval rules as heuristics without enforced isolation, while the README uses the shorter sandbox claim. | [Features](../features.md), [README](../../README.md) |
 | Quality evidence | A broad test suite and an 80% aggregate line-coverage gate exist. Current passing results were not established during the assessment. | `tests/`, `src/**/tests*`, [Makefile](../../Makefile) |

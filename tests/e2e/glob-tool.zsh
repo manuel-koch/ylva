@@ -15,7 +15,7 @@
 
 YLVA=${CARGO_TARGET_DIR:-./target}/debug/ylva
 ROOT_DIR=$(git rev-parse --show-toplevel)
-LOG_DIR=${ROOT_DIR}/.ylva/logs
+LOG_DIR=${ROOT_DIR}/tmp
 LOG_FORMAT=text
 PREFIX=$(basename $0 .zsh)
 

@@ -42,7 +42,7 @@ create a three sentence abstract of its content.
 
 Please read `/Volumes/Backups/foo/bar.txt`
 and describe its content.
-Delegate reading files to subagent (research-and-discover).
+Delegate reading files to subagent.
 
 Tell me a short story (200 words) about a little lamb that went to school.
 
@@ -66,16 +66,16 @@ How many markdown files are in `docs` folder ?
 Please read file `docs/development-workflow.md` and
 count the words in its content.
 
-Create a four line poem about a little lamp and save it to `.ylva/logs/poem.md`.
+Create a four line poem about a little lamp and save it to `tmp/poem.md`.
 
 Summarize current conversation and save it to `../logs/summary.md`.
 
 Create a 50 word sentence ( without newline ) and save it too `../logs/long-line.md`.
 
-Create a 50 word sentence ( without newline ) and save it too `.ylva/logs/long-line.md`.
+Create a 50 word sentence ( without newline ) and save it too `tmp/long-line.md`.
 
 Create a 50 word sentence ( without newline, use "-" to join words )
-and save it too `.ylva/logs/long-words-line.md`.
+and save it too `tmp/long-words-line.md`.
 
 Use search tool to find markdown files that contain the case-insensitive word `tool`.
 
@@ -88,15 +88,15 @@ report only the paths that matched.
 Use search tool to find Rust source files that contain the case-sensitive regexp `\w+Tool`,
 report only the matched regexp without path/line info.
 
-Create a four line poem about a little lamp and save it to `.ylva/logs/poem.md`.
+Create a four line poem about a little lamp and save it to `tmp/poem.md`.
 
-Replace all occurance of "lamp" in `.ylva/logs/poem.md` by "frog" using the `edit` tool!
+Replace all occurance of "lamp" in `tmp/poem.md` by "frog" using the `edit` tool!
 
-Replace first occurance of "lamp" in `.ylva/logs/poem.md` by "frog" using the `edit` tool!
+Replace first occurance of "lamp" in `tmp/poem.md` by "frog" using the `edit` tool!
 
-Replace line 2+3 in `.ylva/logs/poem.md` by one line "hello world" using the `edit` tool!
+Replace line 2+3 in `tmp/poem.md` by one line "hello world" using the `edit` tool!
 
-Replace line 1+2 in `.ylva/logs/poem.md` by
+Replace line 1+2 in `tmp/poem.md` by
 
 ```text
 lorem ipsum
@@ -105,14 +105,14 @@ this is a nice place to be"
 
 using the `edit` tool!
 
-Read `.ylva/logs/poem.md` and ask user which other animal ( free text, no constraint
+Read `tmp/poem.md` and ask user which other animal ( free text, no constraint
 or pre-selected options ) to use to replace existing animal in the poem.
 
-Read `.ylva/logs/poem.md` and ask user which other animal to use to replace existing animal
+Read `tmp/poem.md` and ask user which other animal to use to replace existing animal
 in the poem.
 Give user 5 random animal options to choose from.
 
-Read `.ylva/logs/poem.md` and ask user which other animal to use to replace existing animal
+Read `tmp/poem.md` and ask user which other animal to use to replace existing animal
 in the poem.
 Provide the current poem as context for the question.
 Give user 3 random animal options to choose from.
@@ -125,13 +125,13 @@ Create an image using a bash command:
 magick -size 200x200 canvas:white \
        -fill red -stroke none \
        -draw "polygon 100,71 75,114 125,114" \
-       .ylva/logs/sample.png
+       tmp/sample.png
 ```
 
-Read image `.ylva/logs/sample.png` ( using the `read` tool only ) and describe
+Read image `tmp/sample.png` ( using the `read` tool only ) and describe
 the content. Estimate the edge length of the geometrical shape, if any.
 
-Write a binary file with the textual content of "hello world" to `.ylva/logs/sample.txt`.
+Write a binary file with the textual content of "hello world" to `tmp/sample.txt`.
 
 ---
 
@@ -187,7 +187,7 @@ Run `tests/e2e/heavy-output.bash`.
 
 ---
 
-Use agent research-and-discover to delegate discovering tool capabilities in
+Use subagent to delegate discovering tool capabilities in
 workspace source-code.
 
 Run the following task in a subagent and let it report its findings back:
@@ -211,7 +211,7 @@ Use a subagent per tool and let subagent report findings back.
 
 ONLY use `bash` tool to search for relevant files!
 
-Save the complete summary to `.ylva/logs/summary.md`, don't edit an existing
+Save the complete summary to `tmp/summary.md`, don't edit an existing
 file nor use its current content. If file exists, override it.
 
 ---
@@ -251,7 +251,7 @@ its findings back.
 
 Format the result using markdown headers (per file) and the
 related file summary paragraph.
-Save the complete summary to `.ylva/logs/summary.md`, don't edit an existing file
+Save the complete summary to `tmp/summary.md`, don't edit an existing file
 nor use its current content. If file exists, override it.
 
 ---
@@ -362,7 +362,7 @@ stages if needed. Finish with a decision-flow outline, a worked example
 using hypothetical token estimates, and any gaps between the documented
 contract and tested behavior.
 
-Save your report to `.ylva/logs/context-budgeting-and-compaction.md`.
+Save your report to `tmp/context-budgeting-and-compaction.md`.
 
 ---
 
@@ -394,9 +394,9 @@ Do not edit files, install anything, access the network, or change Git state.
 
 ---
 
-Copy `docs/known-test-issues.md` to `.ylva/logs/dummy.md`
+Copy `docs/known-test-issues.md` to `tmp/dummy.md`
 ( overwrite target file if it exists ) using a `bash` tool call.
-Use skill `unslop` to rewrite `.ylva/logs/dummy.md`.
+Use skill `unslop` to rewrite `tmp/dummy.md`.
 
 ---
 
@@ -413,6 +413,6 @@ Perform a documenation review over the following files:
 - docs/features.md
 
 Save your findings as a markdown formatted report to
-`.ylva/logs/docs-review.md`.
+`tmp/docs-review.md`.
 
 ---

@@ -1227,11 +1227,6 @@ path-scoped; secret reads and exfiltration are not prevented. Prefer dedicated
 `read`, `glob`, and `search` for scoped access. No executable pinning, learned
 rules, OS isolation or approval-explanation UI is implied.
 
-Only the workspace sample `.ylva/profiles/other/config.toml` is migrated.
-It deliberately retains its existing grammarless broad `nl`, `cut`, `tr`,
-`echo`, `printf`, and `test` approvals as user-owned **unconditional opt-outs**,
-not argument-checked rules. Other existing configurations are not migrated.
-
 **Per-command evaluation and aggregation.** Each command in the script is
 evaluated independently:
 

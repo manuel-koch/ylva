@@ -5,8 +5,3 @@ line-length = 100
 [MD013]
 # Don't check line length inside code blocks
 code-blocks = false
-
-[per-file-ignores]
-".ylva/profiles/**/*.md" = [
-    "MD041", # First line in file should be a level 1 heading
-]

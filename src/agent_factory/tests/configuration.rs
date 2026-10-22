@@ -476,7 +476,7 @@ fn startup_groups_equivalent_capacity_warnings_without_merging_different_budgets
             }
             profile
                 .agents
-                .insert("research-and-discover".to_string(), research_agent);
+                .insert("researcher".to_string(), research_agent);
             let factory = AgentFactory::from_profile(&profile).expect("profile validates");
             let (mut root, mut updates) = factory
                 .create(&profile, "default", Role::Root)
@@ -529,8 +529,8 @@ fn startup_groups_equivalent_capacity_warnings_without_merging_different_budgets
                 "{notices:?}",
             );
             if different_budget {
-                assert!(!notices[0].contains("research-and-discover"), "{notices:?}");
-                assert!(notices[1].contains("research-and-discover"), "{notices:?}");
+                assert!(!notices[0].contains("researcher"), "{notices:?}");
+                assert!(notices[1].contains("researcher"), "{notices:?}");
                 if different_window {
                     assert!(notices[1].contains("65536"), "{notices:?}");
                 }
@@ -541,7 +541,7 @@ fn startup_groups_equivalent_capacity_warnings_without_merging_different_budgets
                     assert!(notices[1].contains("16384"), "{notices:?}");
                 }
             } else {
-                assert!(notices[0].contains("research-and-discover"), "{notices:?}");
+                assert!(notices[0].contains("researcher"), "{notices:?}");
             }
         }
     });
