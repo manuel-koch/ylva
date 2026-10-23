@@ -4,6 +4,21 @@ What each supported model provider does and does not report, as it affects
 Ylva's behavior. For configuration see [configuration](./configuration.md);
 for the implemented features see [features](./features.md).
 
+## Integration and model quality
+
+Keep these three things apart:
+
+- **Integration behavior:** what Ylva implements per provider (authentication,
+  streaming, tool calls, usage reporting), described in the sections below.
+  Provider APIs can change; integrations are best-effort.
+- **Observed limitations:** known gaps, such as the unverified live behavior of
+  GitHub Copilot noted below.
+- **Model quality:** not guaranteed or measured. Ylva designates no primary
+  provider, claims no compatibility with "most" models, and keeps no results
+  catalogue. The maintainer's experience is anecdotal: frontier models via
+  OpenRouter worked well; small local Ollama models worked with lower-quality
+  results.
+
 ## Usage and cost reporting
 
 Ylva totals only costs that the provider itself reports in a response (see

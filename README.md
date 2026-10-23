@@ -3,6 +3,26 @@
 Ylva (Old Norse for "she-wolf") is a Rust TUI and CLI agent-harness
 that coordinates model tool calls and schedules subagent runs.
 
+## Status and support
+
+> [!NOTE]
+> Ylva is a personal, experimental project maintained on a best-effort basis,
+> with no response-time guarantee. Do not depend on it for critical work.
+
+- **Platform:** macOS only. Linux is unverified; Windows is unsupported.
+- **Installation:** from source only (see below).
+- **Providers:** integrations are best-effort. No provider is primary and no
+  model quality or compatibility is guaranteed; see
+  [provider notes](docs/provider-notes.md#integration-and-model-quality).
+- **Modalities:** model output is text only. Generating images, audio, or
+  other non-text output is out of scope for now. Reading images and PDFs as
+  tool results works only with models that support it.
+- **Bugs and questions:** open a
+  [GitHub issue](https://github.com/manuel-koch/ylva/issues).
+- **Vulnerabilities:** do not post them in public issues. Use GitHub's private
+  vulnerability reporting for this repository
+  ([Security tab](https://github.com/manuel-koch/ylva/security)).
+
 ## Getting started
 
 Install a current stable [Rust toolchain](https://rustup.rs/) (including Cargo)
@@ -32,12 +52,39 @@ To add a provider interactively instead, run `ylva connect <provider> [--name <n
 Help, version, and the `profile`, `connect`, `init` and `session` commands work
 without a provider.
 
+Provider setup: [Ollama](https://ollama.com/) (local or cloud) via
+`ylva connect ollama`, or [OpenRouter](https://openrouter.ai/) via
+`ylva connect openrouter`.
+
 > [!WARNING]
 > The GitHub Copilot integration is unofficial. It relies on an undocumented
 > API and impersonates the VS Code Copilot Chat client (client id and editor
 > headers). It may break without notice and may conflict with GitHub's terms;
 > GitHub can suspend Copilot access for abuse or excessive requests. Use it at
 > your own risk; see [provider notes](docs/provider-notes.md#github-copilot).
+
+## Safety and data
+
+- **Approvals are policy checks, not isolation.** The tool-approval "sandbox"
+  decides which tool calls need your consent. It does not confine processes or
+  the filesystem at the OS level, and `bash` approval rules are heuristics. An
+  approved command runs with your user's full permissions and environment; see
+  [features](docs/features.md#sandbox-tool-approval-rules) and
+  [configuration](docs/configuration.md#sandbox-tool-approval-rules).
+- **Auto-approval removes the human check.** `--auto-approve-*` flags and
+  catch-all approval rules let the model act without asking. Use them only in
+  disposable or otherwise trusted environments.
+- **Provider data sharing.** With a hosted provider (OpenRouter, Ollama Cloud,
+  Copilot), prompts, file contents read by tools, tool output, and web results
+  are sent to that provider. Only a local Ollama server keeps them on your
+  machine.
+- **Local transcripts.** Sessions are stored unencrypted under `~/.ylva/chats`
+  (workspace-scoped profiles may use `<workspace>/.ylva/chats`) and may contain
+  secrets that appeared in a conversation; see
+  [persistence](docs/persistence.md).
+- **Diagnostic dumps are sensitive.** `YLVA_REQUEST_DUMP_PATH` writes request
+  and response bodies, including conversation content, to disk; see
+  [CLI options](docs/cli-options.md#http-request-and-response-dumps-ylva_request_dump_path).
 
 ## Documentation
 

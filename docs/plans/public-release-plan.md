@@ -155,7 +155,7 @@ for this project, not model certification.
    `make test-coverage` (88.03% lines); regression tests in
    `tests/cli_exit_codes.rs`. Not run: a fresh-clone source install.
 
-5. [ ] **Publish honest expectations and reporting routes.**
+5. [x] **Publish honest expectations and reporting routes.**
    State the personal/experimental status, macOS-only support, source installation,
    and best-effort maintenance in [README](../../README.md). Include concise Ollama
    and OpenRouter setup links without introducing a preferred model or compatibility
@@ -175,6 +175,14 @@ for this project, not model certification.
    security-policy document.
    Exit criterion: users can understand scope, trust boundaries, setup, and reporting
    without interpreting "best-effort" as either a safety guarantee or no guidance.
+
+   Progress (2026-10-23): README now carries status/support, provider setup
+   links, a safety-and-data section (approvals not isolation, auto-approval,
+   provider data sharing, transcripts, dumps), and provider notes separate
+   integration, limitations and model quality; `rumdl` passes. GitHub Issues is
+   enabled and private vulnerability reporting was enabled by the maintainer
+   and confirmed (2026-10-23). No separate security-policy document is created
+   unless approved.
 
 6. [ ] **Verify the source-publication candidate locally.**
    Run `make format lint`, `make test-coverage`, `make audit`, and `rumdl check`
