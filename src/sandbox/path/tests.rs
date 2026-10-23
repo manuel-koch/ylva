@@ -367,6 +367,48 @@ fn symlink_to_dot_file_inside_workspace_requires_user_approval() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn symlink_parent_traversal_out_of_workspace_requires_user_approval() {
+    let temporary_dir = make_visible_temporary_directory().unwrap();
+    let workspace = temporary_dir.path().join("workspace");
+    let outside = temporary_dir.path().join("outside");
+    let nested = outside.join("nested");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(outside.join("id_rsa"), "sensitive").unwrap();
+    std::os::unix::fs::symlink(&nested, workspace.join("link")).unwrap();
+
+    let context = SandboxContext::new(make_sandbox(&workspace));
+    // Existing and not-yet-existing targets resolve `link/..` physically.
+    for name in ["id_rsa", "new_file"] {
+        assert_eq!(
+            context.check_path(Path::new(&format!("link/../{name}"))),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "link/../{name} opens outside the workspace"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_parent_traversal_into_dot_directory_requires_user_approval() {
+    let temporary_dir = make_visible_temporary_directory().unwrap();
+    let workspace = temporary_dir.path().to_path_buf();
+    let dot_directory = workspace.join(".secrets");
+    let nested = dot_directory.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(dot_directory.join("token"), "sensitive").unwrap();
+    std::os::unix::fs::symlink(&nested, workspace.join("link")).unwrap();
+
+    let context = SandboxContext::new(make_sandbox(&workspace));
+    assert_eq!(
+        context.check_path(Path::new("link/../token")),
+        Some(ApprovalCheck::UserApprovalRequired),
+        "link/../token opens inside a dot directory"
+    );
+}
+
 #[test]
 fn to_relative_path_rewrites_absolute_path_inside_base() {
     let temporary_dir = make_visible_temporary_directory().unwrap();

@@ -73,6 +73,26 @@ for this project, not model certification.
    and explicit disposition of serious security findings. This is not proof of
    vulnerability absence and does not imply that the assessment found a leak.
 
+   Review record (2026-10-23, checkout `76878bb`, macOS): trufflehog over the
+   full history (all local and remote branches, tag `v0.31.1`) and the working
+   tree found no verified secrets; the only unverified hits are a test URL
+   placeholder and the gitignored, never-committed `.envrc`. No private hosts,
+   keys, or large/binary blobs in history; history is preserved. All source
+   files carry Apache-2.0 headers, no vendored third-party code; dependencies
+   are permissive (five MPL-2.0 crates, unmodified), `cargo audit` reports no
+   vulnerabilities (one allowed yanked warning). Security review dispositions:
+   medium finding "symlink-parent path approval bypass" →
+   [plan](./symlink-parent-path-approval.md); medium finding "untrusted
+   workspace configuration" → [plan](./workspace-config-trust.md). Low or
+   documented items (bash heuristics, inherited environment, log/dump file
+   permissions, incomplete SSRF reserved ranges) are not addressed here.
+   Progress (2026-10-23): the symlink-parent plan is implemented and verified
+   (`make format lint`, `make test-coverage`) in the working tree on top of
+   `76878bb`; not yet committed, so no commit is recorded. Remaining before
+   marking done: commit it and record the hash, execute the
+   workspace-config-trust plan (or record the maintainer's alternative
+   disposition) and re-verify.
+
 2. [ ] **Resolve Copilot distribution through a bounded evidence review.**
    Start with [provider notes](../provider-notes.md) and the Copilot authentication
    implementation. Review integration provenance, relevant published terms, and

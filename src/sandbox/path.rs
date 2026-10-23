@@ -299,7 +299,9 @@ impl SandboxContext {
         if let Ok(canonical) = std::fs::canonicalize(path) {
             return canonical;
         }
-        // Walk up to find the deepest existing ancestor.
+        // Walk up to find the deepest existing ancestor. A trailing `..` is
+        // kept in the tail (it has no file name) and collapsed once the anchor
+        // is canonical, where lexical collapsing is exact.
         let mut current = path.to_path_buf();
         let mut tail: Vec<std::ffi::OsString> = Vec::new();
         loop {
@@ -308,16 +310,16 @@ impl SandboxContext {
                 for component in tail.iter().rev() {
                     result.push(component);
                 }
-                return result;
+                return Self::normalize(Path::new("/"), &result);
             }
-            match current.file_name() {
-                Some(name) => {
-                    tail.push(name.to_owned());
-                    match current.parent() {
-                        Some(parent) => current = parent.to_path_buf(),
-                        None => break,
-                    }
-                }
+            let last_component = match current.components().next_back() {
+                Some(std::path::Component::Normal(name)) => name.to_owned(),
+                Some(std::path::Component::ParentDir) => "..".into(),
+                _ => break,
+            };
+            tail.push(last_component);
+            match current.parent() {
+                Some(parent) => current = parent.to_path_buf(),
                 None => break,
             }
         }
@@ -442,7 +444,6 @@ impl SandboxContext {
         // direct struct construction rather than Sandbox::new() / Sandbox::with_root().
         // This guards against macOS /var/folders → /private/var/folders mismatches.
         let sandbox_root = std::fs::canonicalize(&sandbox_root).unwrap_or(sandbox_root);
-        let normalized = Self::normalize(&sandbox_root, path);
         let requested = if path.is_absolute() {
             path.to_owned()
         } else {
@@ -465,11 +466,14 @@ impl SandboxContext {
                     })
             });
 
-        // Resolve symlinks and non-canonical prefixes (e.g. macOS /var → /private/var).
+        // Snapshot identities are already canonical and must not touch the
+        // filesystem. Everything else is resolved physically, exactly like the
+        // access itself: `..` is NOT collapsed lexically first, because
+        // `link/..` leaves the symlink's target directory.
         let effective = if snapshot {
-            normalized
+            Self::normalize(&sandbox_root, path)
         } else {
-            Self::canonicalize_best_effort(&normalized)
+            Self::canonicalize_best_effort(&std::path::absolute(&requested).unwrap_or(requested))
         };
         let path_str = effective.to_string_lossy();
 

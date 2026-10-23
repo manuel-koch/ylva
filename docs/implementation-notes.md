@@ -206,6 +206,12 @@ paths work in path tools and `bash`. See
   evaluation; without a marker both roots are the same path. Floor, configured
   `outside_workspace` rules and snapshot checks all use this comparison.
   Relative paths and `cross_filesystem` keep the launch-directory anchor.
+- `evaluate_path` judges `canonicalize_best_effort(absolute(path))` — the value
+  `ApprovedTarget` opens — without lexically collapsing `..` first (`link/..`
+  leaves the symlink's target directory). For nonexistent targets the walk-up
+  keeps trailing `..` components and collapses them once the existing anchor is
+  canonical. Snapshot checks keep the lexical `normalize` of already-canonical
+  identities.
 - `matches_dot_path` checks every component of the resolved absolute path
   without stripping either root (including hidden launch ancestors and paths
   outside the workspace). Enumeration keeps an explicit dot-path bypass.
@@ -261,6 +267,10 @@ swapped while approval was pending), then opens by canonical path with
 `O_NOFOLLOW` on Unix so a symlink planted in the final component fails. Check
 and open are not atomic and parents are not pinned (no `openat`-style
 handling): a swap inside that tiny window remains possible.
+
+The verdict and `ApprovedTarget` share the same resolution, so the mismatch
+check also covers the verdict: a path whose resolution changed after approval
+is refused, not re-prompted.
 
 ## `bash` tool process-group cleanup
 

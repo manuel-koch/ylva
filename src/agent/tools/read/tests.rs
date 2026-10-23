@@ -293,6 +293,26 @@ fn read_rejects_base64_without_explicit_bytes_mode() {
 }
 
 #[cfg(unix)]
+#[test]
+fn read_tool_symlink_parent_traversal_requires_user_approval() {
+    let outside = TempDir::new().expect("outside");
+    let workspace = TempDir::new().expect("workspace");
+    let nested = outside.path().join("nested");
+    std::fs::create_dir(&nested).expect("mkdir");
+    std::os::unix::fs::symlink(&nested, workspace.path().join("link")).expect("symlink");
+    let context = SandboxContext::new(std::sync::Arc::new(std::sync::RwLock::new(
+        crate::sandbox::Sandbox::with_root(workspace.path().to_path_buf()),
+    )));
+    let tool = ReadTool::new(context);
+
+    assert_eq!(
+        tool.needs_approval(&serde_json::json!({ "path": workspace.path().join("link/../secret.txt").display().to_string() })),
+        ApprovalCheck::UserApprovalRequired,
+        "`link/..` leaves the workspace and must not be judged lexically"
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn run_refuses_symlink_swapped_after_approval() {
     let dir = TempDir::new().expect("tempdir");

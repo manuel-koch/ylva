@@ -51,6 +51,26 @@ fn search_tool_outside_workspace_path_requires_user_approval() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn search_tool_symlink_parent_traversal_requires_user_approval() {
+    let outside = TempDir::new().expect("outside");
+    let workspace = TempDir::new().expect("workspace");
+    let nested = outside.path().join("nested");
+    std::fs::create_dir(&nested).expect("mkdir");
+    std::os::unix::fs::symlink(&nested, workspace.path().join("link")).expect("symlink");
+    let context = SandboxContext::new(std::sync::Arc::new(std::sync::RwLock::new(
+        crate::sandbox::Sandbox::with_root(workspace.path().to_path_buf()),
+    )));
+    let tool = SearchTool::new(context);
+
+    assert_eq!(
+        tool.needs_approval(&serde_json::json!({ "pattern": "x", "path": workspace.path().join("link/..").display().to_string() })),
+        ApprovalCheck::UserApprovalRequired,
+        "`link/..` leaves the workspace and must not be judged lexically"
+    );
+}
+
 // ── core search ───────────────────────────────────────────────────────────
 
 #[test]

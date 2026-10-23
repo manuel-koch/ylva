@@ -129,10 +129,13 @@ outside the workspace root (the launch directory
 when no workspace marker exists) — or a dot-prefixed
 component anywhere in the resolved absolute path, except for `glob` enumeration,
 which only lists paths — requires
-user approval instead of being auto-approved or rejected outright. Path
-tools can instead use configurable rule lists, including the opt-in
-`cross_filesystem` rule that matches paths on a different filesystem (device)
-than the sandbox root. A profile-level `[tools.<name>]` or higher-precedence
+user approval instead of being auto-approved or rejected outright. The
+resolved path is the physical location that is opened: symlinks are followed
+and `..` is applied after them, so `link/..` is judged relative to the
+symlink's target. Path tools can instead use configurable rule lists,
+including the opt-in `cross_filesystem` rule that matches paths on a
+different filesystem (device) than the sandbox root.
+A profile-level `[tools.<name>]` or higher-precedence
 `[agents.<type>.tools.<name>]` table fully replaces, rather than supplements,
 the default floor for that tool — see
 [sandbox rule replacement and precedence](./configuration.md#sandbox-tool-approval-rules).
