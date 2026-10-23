@@ -69,7 +69,7 @@ Provider setup: [Ollama](https://ollama.com/) (local or cloud) via
   decides which tool calls need your consent. It does not confine processes or
   the filesystem at the OS level, and `bash` approval rules are heuristics. An
   approved command runs with your user's full permissions and environment; see
-  [features](docs/features.md#sandbox-tool-approval-rules) and
+  [features](docs/features.md#tools-to-be-used-by-models) and
   [configuration](docs/configuration.md#sandbox-tool-approval-rules).
 - **Auto-approval removes the human check.** `--auto-approve-*` flags and
   catch-all approval rules let the model act without asking. Use them only in

@@ -82,8 +82,9 @@ for this project, not model certification.
    are permissive (five MPL-2.0 crates, unmodified), `cargo audit` reports no
    vulnerabilities (one allowed yanked warning). Security review dispositions:
    medium finding "symlink-parent path approval bypass" →
-   [plan](./symlink-parent-path-approval.md); medium finding "untrusted
-   workspace configuration" → [plan](./workspace-config-trust.md). Low or
+   plan `symlink-parent-path-approval` (implemented, file removed);
+   medium finding "untrusted workspace configuration" → plan
+   `workspace-config-trust` (implemented, file removed). Low or
    documented items (bash heuristics, inherited environment, log/dump file
    permissions, incomplete SSRF reserved ranges) are not addressed here.
    Progress (2026-10-23): the symlink-parent plan is implemented and verified
@@ -184,7 +185,7 @@ for this project, not model certification.
    and confirmed (2026-10-23). No separate security-policy document is created
    unless approved.
 
-6. [ ] **Verify the source-publication candidate locally.**
+6. [x] **Verify the source-publication candidate locally.**
    Run `make format lint`, `make test-coverage`, `make audit`, and `rumdl check`
    on changed Markdown. Fix formatting/lint findings and retain the existing 80%
    aggregate line-coverage threshold. Do not also run `make test` as a redundant
@@ -195,13 +196,28 @@ for this project, not model certification.
    publication candidate. Hosted CI and five-session dogfooding are not required
    for this milestone.
 
-7. [ ] **Publish experimental source with explicit approval.**
+   Result (2026-10-23, macOS, base commit `9c13967` plus doc-link fixes in
+   `README.md` and this plan): `make format lint` clean; `make test-coverage`
+   passed at 88.03% lines; `make audit` reports no vulnerabilities (one allowed
+   yanked-crate warning, `clipboard-win`); `rumdl check .` clean after fixing
+   two dead plan links and one stale README anchor. Missing-provider startup
+   with an empty `HOME` exits 2 with setup guidance. Not run: fresh-clone
+   source install. The final commit hash must be re-recorded when the fixes
+   are committed. Limitation: `make format` rewrites
+   `docs/ideas/sample-prompts.md` (rumdl non-idempotent); reverted.
+
+7. [x] **Publish experimental source with explicit approval.**
    Obtain approval for repository visibility changes and any commits, tags, or
    release publication involved. Verify external repository access, documentation
    links, installation instructions, and private reporting availability.
    Exit criterion: cleared source is publicly accessible with honest experimental
    disclosures. Do not treat this as an alpha announcement or an invitation to
    depend on Ylva for daily work.
+
+   Result (2026-10-23, maintainer): the repository was made public by the
+   maintainer. Verified via `gh`: visibility `PUBLIC`, anonymous HTTP 200,
+   Issues enabled, private vulnerability reporting enabled. Not re-verified:
+   clean-clone installation from the public URL.
 
 8. [ ] **Dogfood five real sessions and reassess.**
    Exercise understanding unfamiliar code, making a small approval-controlled
@@ -229,6 +245,14 @@ for this project, not model certification.
    live-provider tests, so only the hosted result remains to be confirmed.
    Exit criterion: the announcement candidate has passing hosted macOS checks.
    This task does not retroactively block experimental source publication.
+
+   Progress (2026-10-23): not yet confirmed. `ci.yml` ignores pushes to `main`
+   and no CI run has succeeded; the only completed non-cancelled runs (the
+   Dependabot cargo group, 2026-10-22) failed in `make test-coverage` on
+   `config::profile::tests::loading::profile_agent_type_file_shadows_global_only_for_that_profile`
+   (1926 passed, 1 failed). Cause not yet investigated (stale branch base vs.
+   macOS-runner environment); `make test-coverage` passes locally at `9c13967`.
+   Next: run CI on a branch/PR of the candidate commit and investigate the failure.
 
 10. [ ] **Verify the announcement candidate and prepare accurate notes.**
     Apply the development workflow's code-change gates to fixes arising from
