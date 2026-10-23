@@ -349,11 +349,9 @@ fn compute_scrollbar_thumb(
     let thumb_size = ((track_height * visible) / total_lines)
         .max(1)
         .min(track_height);
-    let thumb_top = if max_offset == 0 {
-        0
-    } else {
-        (row_offset * (track_height - thumb_size)) / max_offset
-    };
+    let thumb_top = (row_offset * (track_height - thumb_size))
+        .checked_div(max_offset)
+        .unwrap_or(0);
     (thumb_top, thumb_size)
 }
 

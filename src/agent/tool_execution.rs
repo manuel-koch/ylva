@@ -78,13 +78,9 @@ impl PendingTool {
                 };
                 match outcome {
                     Ok((Ok(tool_output), duration)) => {
-                        let result_metadata = tool_output.metadata().and_then(|m| {
-                            if m.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-                                None
-                            } else {
-                                Some(m)
-                            }
-                        });
+                        let result_metadata = tool_output
+                            .metadata()
+                            .filter(|m| !m.as_object().map(|o| o.is_empty()).unwrap_or(true));
                         let result_metadata_schema = result_metadata.as_ref().and_then(|_| {
                             tool_output
                                 .metadata_schema()
