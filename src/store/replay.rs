@@ -246,12 +246,12 @@ impl Store {
                         compaction_transcript_boundary = *transcript_boundary;
                     }
                 }
-                StoreEvent::ModelProjection { projection } => {
+                StoreEvent::ModelProjection { projection }
                     if model_projection.as_ref().is_none_or(|current| {
                         projection.projection_revision > current.projection_revision
-                    }) {
-                        model_projection = Some(projection.as_ref().clone());
-                    }
+                    }) =>
+                {
+                    model_projection = Some(projection.as_ref().clone());
                 }
                 _ => {}
             }
