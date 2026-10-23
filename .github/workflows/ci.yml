@@ -42,7 +42,9 @@ jobs:
           components: rustfmt, clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Install tools
-        run: cargo install --locked cargo-llvm-cov cargo-audit rumdl
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-audit,rumdl
       - run: make format-check
       - run: make lint
       - run: make test-coverage
