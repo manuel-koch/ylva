@@ -58,7 +58,7 @@ start before source publication, but does not block that milestone. No model-res
 matrix is required: workflow observations and candidate verification are evidence
 for this project, not model certification.
 
-1. [ ] **Clear the public tree/history, licensing, and high-risk paths.**
+1. [x] **Clear the public tree/history, licensing, and high-risk paths.**
    Review the intended public tree and full Git history, including configuration,
    fixtures, scripts, generated artifacts, and any proposed release attachments,
    for credentials and private data. Review project and dependency licensing and
@@ -88,8 +88,8 @@ for this project, not model certification.
    permissions, incomplete SSRF reserved ranges) are not addressed here.
    Progress (2026-10-23): the symlink-parent plan is implemented and verified
    (`make format lint`, `make test-coverage`) in `86af6bc3`.
-   Execute the workspace-config-trust plan (or record the maintainer's
-   alternative disposition) and re-verify.
+   Progress (2026-10-23): the workspace-config-trust plan is implemented and
+   verified (`make format lint`, `make test-coverage`) in `92dbdf7`.
 
 2. [ ] **Resolve Copilot distribution through a bounded evidence review.**
    Start with [provider notes](../provider-notes.md) and the Copilot authentication
