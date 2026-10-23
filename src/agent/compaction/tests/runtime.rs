@@ -415,6 +415,10 @@ fn no_op_sweep_log_reports_estimate_window_and_decision() {
             Duration::from_secs(DEFAULT_COMPACTION_TIMEOUT_SECS),
         );
 
+        // Prime the callsite under the capture subscriber: concurrent tests may
+        // have first-registered it without one (see known-test-issues).
+        runtime.sweep(&mut context, engine.as_ref(), &[], 0);
+        tracing::callsite::rebuild_interest_cache();
         runtime.sweep(&mut context, engine.as_ref(), &[], 0);
     });
 
