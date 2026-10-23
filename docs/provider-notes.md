@@ -42,6 +42,14 @@ from a price table.
   inactivity. It is exchanged for a session token (about 25–30 minutes) held
   in memory and refreshed five minutes before expiry. Personal access tokens
   cannot be exchanged and are rejected.
+- Distribution decision (2026-10-23, public-release review): the integration is
+  retained, with this risk disclosed in the README. Evidence: GitHub's terms
+  route non-Business/Enterprise users to Section J (AI Features) of the
+  [GitHub Terms of Service][github-terms], whose API terms (Section H) allow
+  suspension for abuse or excessive requests at GitHub's discretion. No
+  explicit permission or prohibition for third-party clients reusing the VS Code
+  identity was found; other clients doing the same are precedent, not
+  permission. GitHub has not endorsed this integration.
 - Risk: the API is undocumented and uses the *VS Code Copilot Chat* client id and
   editor headers, which Ylva hardcodes. It can change without notice, and using
   another application's identity may conflict with GitHub's terms; excessive
@@ -89,3 +97,4 @@ from a price table.
   per-request cost.
 
 [copilot-billing]: https://docs.github.com/en/copilot/concepts/billing-and-usage/individuals/billing
+[github-terms]: https://docs.github.com/en/site-policy/github-terms/github-terms-of-service

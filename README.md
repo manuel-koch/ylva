@@ -30,6 +30,13 @@ To add a provider interactively instead, run `ylva connect <provider> [--name <n
 Without configured engines or providers, Ylva uses a deterministic mock provider,
 not a real model.
 
+> [!WARNING]
+> The GitHub Copilot integration is unofficial. It relies on an undocumented
+> API and impersonates the VS Code Copilot Chat client (client id and editor
+> headers). It may break without notice and may conflict with GitHub's terms;
+> GitHub can suspend Copilot access for abuse or excessive requests. Use it at
+> your own risk; see [provider notes](docs/provider-notes.md#github-copilot).
+
 ## Documentation
 
 - [CLI reference](docs/cli-options.md): flags, subcommands, and headless usage.

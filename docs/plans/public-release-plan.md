@@ -91,7 +91,7 @@ for this project, not model certification.
    Progress (2026-10-23): the workspace-config-trust plan is implemented and
    verified (`make format lint`, `make test-coverage`) in `92dbdf7`.
 
-2. [ ] **Resolve Copilot distribution through a bounded evidence review.**
+2. [x] **Resolve Copilot distribution through a bounded evidence review.**
    Start with [provider notes](../provider-notes.md) and the Copilot authentication
    implementation. Review integration provenance, relevant published terms, and
    disclosures in comparable agent projects, recording authoritative sources and
@@ -105,6 +105,11 @@ for this project, not model certification.
    the decision and any required implementation changes.
    Exit criterion: an explicit, documented distribution decision and completion of
    its required changes before source publication.
+
+   Decision (2026-10-23, maintainer): retain Copilot with prominent risk
+   disclosure. Evidence and uncertainties are recorded in provider notes; the
+   README carries a warning. No implementation change required. Remaining
+   limitation: live behavior unverified, terms conflict not ruled out.
 
 3. [x] **Remove development-only configuration from the active default path.**
    Resolved by removing the tracked workspace `.ylva/` folder (default and
