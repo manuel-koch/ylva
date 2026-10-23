@@ -286,3 +286,44 @@ async fn interrupt_during_a_tool_run_exits_with_interrupted() {
     );
     assert!(stderr.contains("Resume with:"), "{stderr}");
 }
+
+fn run_without_provider(arguments: &[&str]) -> std::process::Output {
+    let home = TempDir::new().expect("tempdir");
+    Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(YLVA_HOME_ENVIRONMENT_VARIABLE, home.path())
+        .current_dir(home.path())
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the ylva binary")
+}
+
+#[test]
+fn conversation_without_provider_is_a_usage_error_with_setup_guidance() {
+    let output = run_without_provider(&["--no-tui", "--prompt", "hello"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(u8::from(ExitCode::UsageError))),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stderr.contains("ylva connect ollama"), "{stderr}");
+    assert!(stderr.contains("ylva connect openrouter"), "{stderr}");
+    assert!(!stdout.contains("mock response"), "{stdout}");
+}
+
+#[test]
+fn session_listing_works_without_provider() {
+    let output = run_without_provider(&["session", "list"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(u8::from(ExitCode::Success))),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

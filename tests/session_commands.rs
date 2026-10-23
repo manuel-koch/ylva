@@ -18,6 +18,7 @@ use ylva::{project_key, session_path, Store};
 #[tokio::test]
 async fn resumed_old_sessions_sort_by_last_use_and_are_not_selected_by_before() {
     let directory = tempfile::tempdir().unwrap();
+    write_mock_profile(directory.path());
     let chats_root = directory.path().join("chats");
     let resumed_identity = uuid::Uuid::from_u128(10);
     let inactive_identity = uuid::Uuid::from_u128(11);
@@ -230,6 +231,18 @@ async fn listing_groups_archived_and_nested_subagents_with_their_parents() {
     assert!(subagent_path.with_extension("jsonl.gz").exists());
 }
 
+/// Conversations need a configured provider; give the default profile an
+/// explicit mock engine.
+fn write_mock_profile(directory: &std::path::Path) {
+    let profile_directory = directory.join("profiles").join("default");
+    std::fs::create_dir_all(&profile_directory).unwrap();
+    std::fs::write(
+        profile_directory.join("config.toml"),
+        "[engines.default]\nprovider = \"mock\"\nmodel = \"test-model\"\n",
+    )
+    .unwrap();
+}
+
 fn command(directory: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ylva"));
     command
@@ -357,6 +370,7 @@ fn log_file_with_leading_tilde_is_written_under_home() {
 fn compiled_cli_logs_session_chains_in_text_and_json_without_prompt_content() {
     for format in ["text", "json"] {
         let directory = tempfile::tempdir().unwrap();
+        write_mock_profile(directory.path());
         let log_path = directory.path().join("session.log");
         let output = command(directory.path())
             .args([

@@ -21,6 +21,11 @@ module inventories, constants or field lists; read the source.
 - `SessionExitGuard` observes the shared current-store handle so `/clear` does
   not leave a stale startup identity; the binary prints it only after terminal
   restoration.
+- With no `[engines.*]`/`[provider_connections.*]` tables,
+  `startup::engines::engines_from_environment` builds engines from the
+  environment and fails with setup guidance when none is configured; there is
+  no implicit `MockProvider`. `provider = "mock"` remains available through
+  explicit configuration and test setup only.
 - `ylva profile` and `ylva session` dispatch before profile/provider
   initialization (`session` also before stdin consumption).
 - Profile shims are planned as a whole before writing; duplicate claims are

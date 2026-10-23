@@ -1170,7 +1170,8 @@ a more capable OpenRouter model for heavier tasks.
 
 See [engine configuration](configuration.md#engine-configuration) for fields
 and [profile file resolution](configuration.md#profile-file) for discovery,
-precedence, and provider fallback behavior.
+precedence, and provider discovery. A conversation never starts without a
+configured provider: Ylva exits with setup guidance instead of using a mock.
 
 ### Profile selection and resolution
 

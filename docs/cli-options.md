@@ -467,8 +467,12 @@ missing reference is a startup error. Named
 when they share the same implementation. `/models` queries every named
 connection and displays connection-qualified model choices. When no explicit
 engines or provider connections are configured, the supported environment
-providers are discovered instead. When no backend is configured, the
-`MockProvider` (deterministic streaming tokens) is used.
+providers are discovered instead. When none is configured either, an ordinary
+conversation (TUI or headless) does not start: Ylva prints setup guidance
+pointing to `ylva connect ollama`, `ylva connect openrouter` and the profile
+configuration, and exits with code 2 (usage or startup error). There is no
+implicit mock provider. Help, version, and the `profile`, `connect`, `init`,
+`trust` and `session` commands do not need a provider.
 
 In the TUI, `/models` presents named-engine shortcuts before raw catalog
 choices. Shortcuts activate the exact current Engine runtime; raw catalog

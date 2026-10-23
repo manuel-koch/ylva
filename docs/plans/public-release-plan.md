@@ -126,7 +126,7 @@ for this project, not model certification.
    Exit criterion: a fresh checkout does not require the maintainer's environment,
    local model, or deliberately invalid agent configuration.
 
-4. [ ] **Require real-provider setup before ordinary conversations.**
+4. [x] **Require real-provider setup before ordinary conversations.**
    Replace the implicit mock fallback for ordinary CLI/TUI conversation startup
    with an actionable configuration error. Point to existing
    `ylva connect ollama`, `ylva connect openrouter`, and configuration instructions.
@@ -147,6 +147,13 @@ for this project, not model certification.
    Exit criterion: no ordinary conversation silently uses a mock; a clean macOS
    checkout can install from source and receive correct setup guidance without
    credentials or an available local server.
+
+   Result (2026-10-23, macOS): `engines_from_environment` now fails with setup
+   guidance (exit code 2) when no provider is configured; the environment
+   mock fallback and demo provider were removed. Explicit `provider = "mock"`
+   configuration remains for tests. Verified with `make format lint` and
+   `make test-coverage` (88.03% lines); regression tests in
+   `tests/cli_exit_codes.rs`. Not run: a fresh-clone source install.
 
 5. [ ] **Publish honest expectations and reporting routes.**
    State the personal/experimental status, macOS-only support, source installation,

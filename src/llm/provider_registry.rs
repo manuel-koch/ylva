@@ -177,8 +177,8 @@ fn load_dotenv_values(path: &Path) -> anyhow::Result<HashMap<String, String>> {
 /// process environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderSelection {
-    /// The deterministic in-process provider used when no backend is
-    /// configured, or when an engine explicitly names `mock`.
+    /// The deterministic in-process provider used when an engine explicitly
+    /// names `mock`.
     Mock,
     /// A provider connection name backed by the OpenAI-compatible implementation.
     OpenAiCompatible {
@@ -356,15 +356,13 @@ impl ProviderRegistry {
         }
     }
 
-    /// Resolve the backend for a captured environment snapshot.
+    /// Resolve the backend for a captured environment snapshot, or `None` when
+    /// no provider is configured.
     ///
     /// Ollama has precedence over OpenRouter, and OpenRouter over Copilot, when
     /// several are configured.
-    pub fn from_environment(env: &ProviderEnv) -> ProviderSelection {
-        Self::all_from_environment(env)
-            .into_iter()
-            .next()
-            .expect("environment selection always contains at least one provider")
+    pub fn from_environment(env: &ProviderEnv) -> Option<ProviderSelection> {
+        Self::all_from_environment(env).into_iter().next()
     }
 
     /// Resolve every configured implementation kind from a captured
@@ -431,9 +429,6 @@ impl ProviderRegistry {
             });
         }
 
-        if selections.is_empty() {
-            selections.push(ProviderSelection::Mock);
-        }
         selections
     }
 
@@ -507,26 +502,6 @@ impl ProviderRegistry {
             },
         }
     }
-
-    /// Build the provider selected from the process environment.
-    ///
-    /// The environment-only fallback keeps the interactive demo response and
-    /// delay used when no real backend is configured.
-    pub fn provider_from_environment(
-        selection: ProviderSelection,
-    ) -> anyhow::Result<Arc<dyn Provider>> {
-        match selection {
-            ProviderSelection::Mock => Ok(Arc::new(MockProvider::new(
-                vec![
-                    "The sky looks blue ".to_string(),
-                    "because air molecules scatter ".to_string(),
-                    "blue light more than other colors.".to_string(),
-                ],
-                Duration::from_millis(60),
-            ))),
-            selection => Self::build(selection),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -534,11 +509,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn environment_resolution_falls_back_to_mock() {
+    fn environment_resolution_without_provider_is_empty() {
         assert_eq!(
             ProviderRegistry::from_environment(&ProviderEnv::default()),
-            ProviderSelection::Mock
+            None
         );
+        assert!(ProviderRegistry::all_from_environment(&ProviderEnv::default()).is_empty());
     }
 
     #[test]
@@ -551,13 +527,13 @@ mod tests {
 
         assert_eq!(
             ProviderRegistry::from_environment(&env),
-            ProviderSelection::OpenAiCompatible {
+            Some(ProviderSelection::OpenAiCompatible {
                 provider_kind: ProviderKind::Ollama,
                 provider_connection: ProviderKind::Ollama.as_str().to_string(),
                 base_url: "http://localhost:11434".to_string(),
                 model: DEFAULT_OLLAMA_MODEL.to_string(),
                 api_key: None,
-            }
+            })
         );
     }
 
@@ -570,13 +546,13 @@ mod tests {
 
         assert_eq!(
             ProviderRegistry::from_environment(&env),
-            ProviderSelection::OpenAiCompatible {
+            Some(ProviderSelection::OpenAiCompatible {
                 provider_kind: ProviderKind::Openrouter,
                 provider_connection: ProviderKind::Openrouter.as_str().to_string(),
                 base_url: DEFAULT_OPENROUTER_BASE_URL.to_string(),
                 model: DEFAULT_OPENROUTER_MODEL.to_string(),
                 api_key: Some("sk-or-key".to_string()),
-            }
+            })
         );
     }
 
@@ -605,12 +581,14 @@ mod tests {
             copilot_github_token: Some("ghu_token".to_string()),
             ..Default::default()
         };
-        let expected = |model: &str| ProviderSelection::OpenAiCompatible {
-            provider_kind: ProviderKind::Copilot,
-            provider_connection: "copilot".to_string(),
-            base_url: String::new(),
-            model: model.to_string(),
-            api_key: Some("ghu_token".to_string()),
+        let expected = |model: &str| {
+            Some(ProviderSelection::OpenAiCompatible {
+                provider_kind: ProviderKind::Copilot,
+                provider_connection: "copilot".to_string(),
+                base_url: String::new(),
+                model: model.to_string(),
+                api_key: Some("ghu_token".to_string()),
+            })
         };
         assert_eq!(
             ProviderRegistry::from_environment(&env),
@@ -626,6 +604,7 @@ mod tests {
         );
         assert_eq!(
             ProviderRegistry::from_environment(&env)
+                .expect("copilot token configures a provider")
                 .engine_config(None)
                 .api_base_url,
             None

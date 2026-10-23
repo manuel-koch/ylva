@@ -181,10 +181,10 @@ Research the requested topic.
 }
 
 /// With no `--profile` flag at all, a fresh `YLVA_HOME` (so no config file
-/// exists anywhere) still runs successfully against the in-code default
-/// profile — the implicit case stays tolerant.
+/// exists anywhere) is not a missing-profile error: the in-code default
+/// profile is used and only the absent provider stops the run.
 #[test]
-fn no_profile_flag_tolerates_a_missing_default_profile_config() {
+fn missing_default_profile_config_only_fails_for_the_missing_provider() {
     let ylva_home = TempDir::new().expect("tempdir");
 
     let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
@@ -196,11 +196,12 @@ fn no_profile_flag_tolerates_a_missing_default_profile_config() {
         .output()
         .expect("spawn the ylva binary");
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "the implicit default profile must not fail just because no config file exists yet; stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("no model provider is configured"),
+        "the implicit default profile must only fail for the missing provider: {stderr}"
     );
+    assert!(!stderr.contains("not found"), "{stderr}");
 }
 
 #[test]
@@ -215,6 +216,7 @@ fn whitespace_only_piped_stdin_uses_the_demo_prompt() {
 
 fn assert_stdin_uses_demo_prompt(input: &[u8]) {
     let ylva_home = TempDir::new().expect("isolated Ylva home");
+    write_default_profile_config(&ylva_home, "");
     let mut child = Command::new(env!("CARGO_BIN_EXE_ylva"))
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -265,6 +267,7 @@ fn assert_stdin_uses_demo_prompt(input: &[u8]) {
 #[test]
 fn an_unusable_chats_root_is_a_hard_error() {
     let ylva_home = TempDir::new().expect("tempdir");
+    write_default_profile_config(&ylva_home, "");
     fs::write(ylva_home.path().join("chats"), b"not a directory").expect("create chats file");
 
     let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
@@ -444,14 +447,22 @@ fn profile_list_abbreviates_the_home_directory_to_tilde() {
     );
 }
 
-/// Write a profile config for the implicit `default` profile.
+/// Explicit mock engine: ordinary conversations need a configured provider.
+const MOCK_ENGINE_CONFIG: &str = "[engines.default]\nprovider = \"mock\"\nmodel = \"test-model\"\n";
+
+/// Write a profile config for the implicit `default` profile, on top of a mock
+/// engine.
 fn write_default_profile_config(ylva_home: &TempDir, contents: &str) {
     let profile_directory = ylva_home
         .path()
         .join(ylva::PROFILES_DIRECTORY_NAME)
         .join(ylva::DEFAULT_PROFILE_NAME);
     fs::create_dir_all(&profile_directory).expect("create profile directory");
-    fs::write(profile_directory.join("config.toml"), contents).expect("write profile config");
+    fs::write(
+        profile_directory.join("config.toml"),
+        format!("{MOCK_ENGINE_CONFIG}\n{contents}"),
+    )
+    .expect("write profile config");
 }
 
 /// Spawn the compiled binary headlessly with `YLVA_HOME` and the working

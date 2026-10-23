@@ -221,8 +221,10 @@ over values from either profile environment file.
     Ylva supplies a built-in default profile with one `default` agent type
     that may spawn subagents, the dark theme, and no configured engines. The
     backend then comes from the environment variables in
-    `docs/cli-options.md`, so Ylva runs out of the box without writing a
-    config file.
+    `docs/cli-options.md`, so Ylva runs without writing a config file. With
+    neither engines nor environment providers, an ordinary conversation fails
+    at startup with setup guidance (`ylva connect ollama`,
+    `ylva connect openrouter`); there is no mock fallback.
 - An **unreadable or malformed** file is always a hard error (a startup error,
   see [exit codes](./cli-options.md#exit-codes)) naming the file and the parse
   problem, explicit or implicit; a config the user did write is never silently

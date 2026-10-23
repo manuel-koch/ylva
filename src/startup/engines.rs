@@ -46,7 +46,14 @@ pub(super) fn apply_provider_env_to_profile(
     }
 }
 
+const NO_PROVIDER_GUIDANCE: &str = "no model provider is configured; \
+run `ylva connect ollama` or `ylva connect openrouter`, or define a provider \
+connection and engine in your profile.";
+
 /// Build one engine for every provider configured by the environment.
+///
+/// Fails with setup guidance when no provider is configured; there is no
+/// implicit mock fallback.
 ///
 /// The first provider retains the profile's default engine name and therefore
 /// remains the initial active engine. Additional providers use their provider
@@ -57,6 +64,9 @@ pub(super) fn engines_from_environment(
     default_model: Option<&str>,
 ) -> anyhow::Result<HashMap<String, Arc<dyn Engine>>> {
     let selections = ProviderRegistry::all_from_environment(environment);
+    if selections.is_empty() {
+        anyhow::bail!(NO_PROVIDER_GUIDANCE);
+    }
     let mut engines = HashMap::new();
     for (index, selection) in selections.into_iter().enumerate() {
         let provider_connection = selection.provider_connection().to_string();
@@ -71,7 +81,7 @@ pub(super) fn engines_from_environment(
 
         log_provider_selection(&selection);
         let engine_config = selection.engine_config(default_model);
-        let provider = ProviderRegistry::provider_from_environment(selection)?;
+        let provider = ProviderRegistry::build(selection)?;
         engines.insert(
             engine_name,
             Arc::new(EngineImpl::new(provider, engine_config)) as Arc<dyn Engine>,
@@ -188,5 +198,16 @@ mod tests {
             "openrouter"
         );
         assert_eq!(engines["openrouter"].config().model, "hosted/model");
+    }
+
+    #[test]
+    fn environment_without_provider_fails_with_setup_guidance() {
+        let error = match engines_from_environment(&ProviderEnv::default(), "default", None) {
+            Ok(_) => panic!("no provider must not yield engines"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("ylva connect ollama"), "{error}");
+        assert!(error.contains("ylva connect openrouter"), "{error}");
     }
 }

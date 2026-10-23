@@ -20,15 +20,17 @@ ylva --help
 ylva
 ```
 
-For real model responses, configure Ollama, OpenRouter or GitHub Copilot using
+A model provider must be configured before a conversation can start; without
+one, Ylva exits with setup guidance (exit code 2). Configure Ollama, OpenRouter
+or GitHub Copilot using
 the
 [provider environment variables](docs/cli-options.md#environment-variables)
 or [profile configuration](docs/configuration.md#profile-file).
 To add a provider interactively instead, run `ylva connect <provider> [--name <name>]`
 (use provider `ollama`, `openrouter` or `copilot`); see
 [connect commands](docs/cli-options.md#connect-commands).
-Without configured engines or providers, Ylva uses a deterministic mock provider,
-not a real model.
+Help, version, and the `profile`, `connect`, `init` and `session` commands work
+without a provider.
 
 > [!WARNING]
 > The GitHub Copilot integration is unofficial. It relies on an undocumented
