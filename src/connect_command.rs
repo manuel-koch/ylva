@@ -252,6 +252,15 @@ pub fn run(
                 display_path(&config_path)
             )?;
         }
+        if let Some(notice) = workspace_config_root
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(|workspace_root| {
+                crate::config::workspace_trust::workspace_trust_notice(workspace_root, profile_name)
+            })
+        {
+            writeln!(output, "{notice}")?;
+        }
         anyhow::Ok(())
     })();
     match result {

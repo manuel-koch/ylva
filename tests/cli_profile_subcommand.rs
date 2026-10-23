@@ -264,6 +264,10 @@ fn workspace_create_and_delete_stay_in_the_workspace() {
         &[],
     );
     assert_eq!(exit_code(&created), 0, "workspace create: {created:?}");
+    assert!(
+        String::from_utf8_lossy(&created.stdout).contains("ylva --profile team trust"),
+        "workspace create must remind about trust: {created:?}"
+    );
     assert!(profile_directory(&workspace_profiles, "team")
         .join("config.toml")
         .exists());

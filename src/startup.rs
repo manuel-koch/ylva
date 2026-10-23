@@ -31,7 +31,7 @@ use crate::{AgentFactory, App, Cli, CliColorMode, ConsoleApp, TuiApp, DEFAULT_TU
 use engines::{apply_provider_env_to_profile, engines_from_environment, load_provider_env};
 use profile::{
     apply_cli_profile_overrides, load_profile, load_selected_profile_environment,
-    selected_profile_context, selected_profile_path,
+    selected_profile_context, selected_profile_path, trusted_profile_workspace_root,
 };
 use prompt::{explicit_prompt, initial_prompt};
 use session::{open_store, print_resume_hint, resolve_root_agent_type};
@@ -55,17 +55,79 @@ pub fn version_report() -> String {
         .render_with_locations(crate::ylva_home().as_deref(), workspace_root.as_deref())
 }
 
-pub fn run_init_command(workspace: bool, force: bool) -> Result<crate::InitReport, String> {
+/// `ylva trust [--revoke]`: approve (or withdraw approval of) the current
+/// workspace configuration of the selected profile; returns the report text.
+pub fn run_trust_command(
+    revoke: bool,
+    explicit_profile_name: Option<&str>,
+) -> Result<String, String> {
+    use crate::config::workspace_trust::{revoke_workspace_trust, trust_workspace};
+
+    let current_directory =
+        std::env::current_dir().map_err(|error| format!("cannot resolve cwd: {error}"))?;
+    let workspace_root = crate::discover_workspace_root(&current_directory).ok_or_else(|| {
+        "no workspace found: run inside a workspace with a .ylva directory or a git repository"
+            .to_string()
+    })?;
+    let ylva_home = crate::ylva_home()
+        .ok_or_else(|| "cannot resolve the home directory for ~/.ylva".to_string())?;
+    let profile_name = explicit_profile_name.unwrap_or(crate::DEFAULT_PROFILE_NAME);
+    let workspace_display = crate::home_relative_path::display_path(&workspace_root);
+    if revoke {
+        let removed = revoke_workspace_trust(&ylva_home, &workspace_root, profile_name)
+            .map_err(|error| error.to_string())?;
+        return Ok(if removed {
+            format!("Revoked trust for profile '{profile_name}' in {workspace_display}")
+        } else {
+            format!("Profile '{profile_name}' in {workspace_display} was not trusted")
+        });
+    }
+    let files = trust_workspace(&ylva_home, &workspace_root, profile_name)
+        .map_err(|error| error.to_string())?;
+    if files.is_empty() {
+        return Ok(format!(
+            "Nothing to trust: {workspace_display} has no workspace configuration for profile '{profile_name}'"
+        ));
+    }
+    let listing = files
+        .iter()
+        .map(|file| format!("  {}", crate::home_relative_path::display_path(file)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!(
+        "Trusted profile '{profile_name}' in {workspace_display}. Any effective edit to these files revokes the trust:\n{listing}"
+    ))
+}
+
+/// Seed starter files; returns the report text, which for a workspace ends
+/// with a notice when Ylva will refuse the (changed) workspace configuration
+/// until `ylva trust` approves it.
+///
+/// Seeding never trusts automatically: the workspace may hold other files
+/// (`.env`, agents) that came from a clone and were not reviewed.
+pub fn run_init_command(workspace: bool, force: bool) -> Result<String, String> {
     if workspace {
         let current_directory =
             std::env::current_dir().map_err(|error| format!("cannot resolve cwd: {error}"))?;
         let workspace_root =
             crate::discover_workspace_root(&current_directory).unwrap_or(current_directory);
-        crate::run_init_workspace(&workspace_root, force).map_err(|error| error.to_string())
+        let report =
+            crate::run_init_workspace(&workspace_root, force).map_err(|error| error.to_string())?;
+        let mut summary = report.summary();
+        if let Some(notice) = crate::config::workspace_trust::workspace_trust_notice(
+            &workspace_root,
+            crate::DEFAULT_PROFILE_NAME,
+        ) {
+            summary.push_str("\n\n");
+            summary.push_str(&notice);
+        }
+        Ok(summary)
     } else {
         let ylva_home = crate::ylva_home()
             .ok_or_else(|| "cannot resolve the home directory for ~/.ylva".to_string())?;
-        crate::run_init(&ylva_home, force).map_err(|error| error.to_string())
+        crate::run_init(&ylva_home, force)
+            .map(|report| report.summary())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -137,12 +199,16 @@ pub fn run(
         std::env::set_var(crate::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home);
     }
     let explicit_profile_name = cli.profile.as_deref();
-    let profile_environment =
-        load_selected_profile_environment(explicit_profile_name, workspace_root.as_deref())?;
+    let profile_workspace_root =
+        trusted_profile_workspace_root(explicit_profile_name, workspace_root.as_deref())?;
+    let profile_environment = load_selected_profile_environment(
+        explicit_profile_name,
+        profile_workspace_root.as_deref(),
+    )?;
     let mut profile = load_profile(
         explicit_profile_name,
         &profile_environment,
-        workspace_root.as_deref(),
+        profile_workspace_root.as_deref(),
     )?;
     for warning in &profile.config_warnings {
         tracing::warn!(%warning, "unknown configuration key");
@@ -153,7 +219,8 @@ pub fn run(
         }
     }
     apply_cli_profile_overrides(cli, &mut profile);
-    let profile_path = selected_profile_path(explicit_profile_name, workspace_root.as_deref())?;
+    let profile_path =
+        selected_profile_path(explicit_profile_name, profile_workspace_root.as_deref())?;
     let root_system_prompt =
         crate::compose_root_system_prompt(workspace_root.as_deref(), current_directory.as_deref())
             .map_err(|error| error.to_string())?;
@@ -196,7 +263,10 @@ pub fn run(
             AgentFactory::from_profile(&profile).map_err(|error| {
                 format!(
                     "{}: {error}",
-                    selected_profile_context(explicit_profile_name, workspace_root.as_deref())
+                    selected_profile_context(
+                        explicit_profile_name,
+                        profile_workspace_root.as_deref()
+                    )
                 )
             })?
         };
@@ -218,7 +288,7 @@ pub fn run(
         .map_err(|error| {
             format!(
                 "{}: {error}",
-                selected_profile_context(explicit_profile_name, workspace_root.as_deref())
+                selected_profile_context(explicit_profile_name, profile_workspace_root.as_deref())
             )
         })?;
 

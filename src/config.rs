@@ -31,6 +31,7 @@ pub mod soul;
 mod unknown_keys;
 mod web_fetch;
 mod web_search;
+pub(crate) mod workspace_trust;
 
 pub use agent::AgentConfig;
 pub use agent_type_file::AgentTypeDefinition;

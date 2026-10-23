@@ -203,6 +203,37 @@ fn execute(
             );
         }
     }
+    let code = execute_action(command, scope, environment, launcher, output, diagnostics)?;
+    if let (
+        SUCCESS,
+        Some(name),
+        ProfileScope::Workspace {
+            workspace_config_root,
+        },
+    ) = (code, name, scope)
+    {
+        if matches!(
+            command,
+            ProfileCommand::Create { .. } | ProfileCommand::Edit { .. }
+        ) {
+            if let Some(notice) = workspace_config_root.parent().and_then(|workspace_root| {
+                crate::config::workspace_trust::workspace_trust_notice(workspace_root, name)
+            }) {
+                writeln!(output, "{notice}")?;
+            }
+        }
+    }
+    Ok(code)
+}
+
+fn execute_action(
+    command: &ProfileCommand,
+    scope: &ProfileScope,
+    environment: &ProfileEnvironment,
+    launcher: &dyn EditorLauncher,
+    output: &mut dyn Write,
+    diagnostics: &mut dyn Write,
+) -> anyhow::Result<u8> {
     match command {
         ProfileCommand::List { .. } => list(std::slice::from_ref(scope), output),
         ProfileCommand::Create {

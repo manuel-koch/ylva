@@ -58,6 +58,8 @@ Ylva is highly customizable to adapt to user needs.
   - [x] Profile shims (`ylva-<name>`) to run a profile by name; add the shims
         directory to `PATH`
 - [x] Layered global/workspace configuration with `ylva init` scaffolding
+- [x] Workspace configuration blocks startup until approved with `ylva trust`,
+      so a cloned repository cannot redirect credentials or disable approvals
 - [x] A `SOUL.md` persona, and trusted `AGENTS.md` / `CLAUDE.md` instruction
       files folded into the system prompt
 - [x] Local Agent Skills with per-agent catalogs

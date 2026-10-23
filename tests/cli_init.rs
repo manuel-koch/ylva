@@ -104,6 +104,10 @@ fn workspace_init_seeds_the_profile_starters() {
         .join(ylva::PROFILE_CONFIG_FILE_NAME)
         .is_file());
     assert!(!workspace_root.path().join(".ylva/SOUL.md").exists());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("ylva trust"),
+        "init --workspace tells the user to trust the seeded configuration"
+    );
     assert!(!workspace_root.path().join(".ylva/agents").exists());
     assert!(fs::read_to_string(
         workspace_root

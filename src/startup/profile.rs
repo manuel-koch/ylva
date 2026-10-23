@@ -63,6 +63,41 @@ pub(super) fn load_profile(
     }
 }
 
+/// Workspace root to load the selected profile's workspace layer from.
+///
+/// Startup refuses to continue when the workspace ships configuration that was
+/// never approved with `ylva trust`, or changed since, rather than silently
+/// running with different settings than the workspace intends.
+pub(super) fn trusted_profile_workspace_root(
+    explicit_profile_name: Option<&str>,
+    workspace_root: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
+    use crate::config::workspace_trust::{workspace_trust, WorkspaceTrust};
+
+    let Some(workspace_root) = workspace_root else {
+        return Ok(None);
+    };
+    let profile_name = explicit_profile_name.unwrap_or(crate::DEFAULT_PROFILE_NAME);
+    let reason = match crate::ylva_home()
+        .ok_or_else(|| "the Ylva home cannot be resolved".to_string())
+        .and_then(|ylva_home| {
+            workspace_trust(&ylva_home, workspace_root, profile_name)
+                .map_err(|error| error.to_string())
+        }) {
+        Ok(WorkspaceTrust::NoConfiguration | WorkspaceTrust::Trusted) => {
+            return Ok(Some(workspace_root.to_path_buf()))
+        }
+        Ok(WorkspaceTrust::Untrusted) => "it was never trusted".to_string(),
+        Ok(WorkspaceTrust::Changed) => "it changed since it was trusted".to_string(),
+        Err(error) => format!("its trust status is unavailable: {error}"),
+    };
+    Err(format!(
+        "workspace configuration of profile '{profile_name}' in {} is not trusted: {reason}; \
+         review it, then run `ylva trust` to use it",
+        display_path(&workspace_root.join(crate::YLVA_DIR_NAME))
+    ))
+}
+
 /// Describe the profile file whose configuration is being materialized.
 ///
 /// `ProfileConfig` intentionally remains independent of its on-disk source,

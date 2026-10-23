@@ -203,6 +203,17 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    /// Trust the current workspace's profile configuration (.ylva/profiles, .ylva/agents)
+    ///
+    /// Ylva refuses to start in a workspace whose configuration is not trusted.
+    /// Trust applies to the selected profile only. Any later effective edit to its
+    /// config.toml or .env, or to a file under .ylva/agents (shared by all
+    /// profiles), revokes the trust. Review the files before trusting.
+    Trust {
+        /// Withdraw the trust instead of granting it
+        #[arg(long)]
+        revoke: bool,
+    },
     /// Set up a provider connection through a guided login
     Connect {
         #[command(subcommand)]

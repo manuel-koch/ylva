@@ -21,46 +21,34 @@ therefore:
 Workspace override is documented, intended behavior; the gap is the missing
 consent step and warning.
 
-## Decisions required before implementation
+## Decisions
 
-Ask the maintainer (do not assume):
+Recorded in [ADR-0003](../architecture-design-records/0003-trust-workspace-configuration-by-content-hash.md):
 
-- Trust model: per-workspace explicit trust (prompt + persisted allowlist keyed
-  by canonical workspace path) **or** restricting the workspace layer to
-  non-secret, non-endpoint, non-approval keys, **or** both.
-- Behavior for untrusted workspaces in non-interactive CLI use (ignore layer
-  with warning vs. configuration error, following the existing
-  configuration-error exit convention).
-- Whether credentials may ever be attached to a base URL that did not come from
-  the home profile.
+- Trust model: explicit, direnv-style approval of a content hash (normalized
+  `config.toml` and `.env`, plus `.ylva/agents/**`) per canonical workspace
+  path and profile, stored in `~/.ylva/trusted-workspaces.toml`.
+- Untrusted or changed workspace configuration makes startup fail with an
+  actionable error (no fallback to the home profile), in TUI and
+  non-interactive runs alike.
+- Approval is CLI-only (`ylva trust [--revoke]`); there is no prompt. A trusted
+  workspace is treated like the home profile, so separate endpoint, credential
+  and interpolation guards are unnecessary.
 
 ## Implementation Plan
 
-1. [ ] **Record the decision** as an ADR in
-   [architecture decisions](../architecture-design-records/) (use the
-   architecture-decision-record skill) covering the chosen trust model.
-2. [ ] **Failing tests first (TDD).** Configuration tests: an untrusted workspace
-   profile/`.env` does not change provider endpoints, interpolated secrets or
-   bash approval rules; a trusted one behaves as today (precedence preserved,
-   missing-variable errors still explicit).
-3. [ ] **Implement the trust gate** in config loading (start at
-   `src/startup/profile.rs` and `src/config/profile.rs`), plus the persisted
-   trust store (private file permissions via the existing `private_fs`
-   helpers) if per-workspace trust is chosen.
-4. [ ] **Credential/endpoint guard.** Refuse to attach provider credentials to an
-   `api_base_url` not originating from a trusted layer; return an actionable
-   error.
-5. [ ] **Interpolation scope.** Limit which environment variables untrusted or
-   workspace-layer values may interpolate, if the decision keeps any
-   workspace-layer secrets.
-6. [ ] **User interface.** Add the trust prompt/warning and any CLI flag or
-   command; keep help, version and session commands usable without it.
-7. [ ] **Documentation.** Update [configuration](../configuration.md),
-   [CLI options](../cli-options.md) (if a flag/command is added),
-   [features](../features.md), [implementation notes](../implementation-notes.md),
-   [README](../../README.md) trust/safety wording, and
-   [persistence](../persistence.md) if a trust store is added.
-8. [ ] **Verify** per [development workflow](../development-workflow.md):
+1. [x] **Record the decision** as ADR-0003.
+2. [x] **Tests first.** Unit tests for hash, normalization, scoping, revocation
+   and store permissions; integration tests in `tests/cli_workspace_trust.rs`.
+3. [x] **Implement the trust gate** in `src/config/workspace_trust.rs` and
+   `src/startup/profile.rs`, with the private trust store.
+4. [x] **User interface.** `ylva trust [--revoke]`; help, version and session
+   commands do not load a profile and stay usable.
+5. [x] **Documentation.** [configuration](../configuration.md),
+   [CLI options](../cli-options.md), [features](../features.md),
+   [implementation notes](../implementation-notes.md),
+   [README](../../README.md) and [persistence](../persistence.md).
+6. [x] **Verify** per [development workflow](../development-workflow.md):
    `make format lint`, `make test-coverage`; `rumdl check` on changed docs.
    Then record the commit in [public release plan](./public-release-plan.md)
    task 1.

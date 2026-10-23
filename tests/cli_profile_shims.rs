@@ -315,6 +315,10 @@ fn workspace_shim_changes_to_the_workspace_root_before_running_ylva() {
         &sandbox.workspace_profile_config("team"),
         UNRESOLVABLE_ENGINE_CONFIG,
     );
+    assert_eq!(
+        exit_code(&sandbox.in_workspace(&["--profile", "team", "trust"])),
+        0
+    );
 
     let output = sandbox.run_shim(
         &sandbox.workspace_shims().join("ylva-team"),

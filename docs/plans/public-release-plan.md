@@ -87,11 +87,9 @@ for this project, not model certification.
    documented items (bash heuristics, inherited environment, log/dump file
    permissions, incomplete SSRF reserved ranges) are not addressed here.
    Progress (2026-10-23): the symlink-parent plan is implemented and verified
-   (`make format lint`, `make test-coverage`) in the working tree on top of
-   `76878bb`; not yet committed, so no commit is recorded. Remaining before
-   marking done: commit it and record the hash, execute the
-   workspace-config-trust plan (or record the maintainer's alternative
-   disposition) and re-verify.
+   (`make format lint`, `make test-coverage`) in `86af6bc3`.
+   Execute the workspace-config-trust plan (or record the maintainer's
+   alternative disposition) and re-verify.
 
 2. [ ] **Resolve Copilot distribution through a bounded evidence review.**
    Start with [provider notes](../provider-notes.md) and the Copilot authentication

@@ -867,9 +867,10 @@ fn load_agent_types(
     let global_agents_root = profiles_root
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join("agents");
-    let profile_agents_root = profiles_root.join(profile_name).join("agents");
-    let project_agents_root = workspace_root.map(|root| root.join(YLVA_DIR_NAME).join("agents"));
+        .join(AGENTS_DIRECTORY_NAME);
+    let profile_agents_root = profiles_root.join(profile_name).join(AGENTS_DIRECTORY_NAME);
+    let project_agents_root =
+        workspace_root.map(|root| root.join(YLVA_DIR_NAME).join(AGENTS_DIRECTORY_NAME));
 
     let mut resolved_files = HashMap::<String, AgentTypeFile>::new();
     for (directory, scope) in [
@@ -1087,6 +1088,9 @@ fn valid_environment_name(name: &str) -> bool {
 }
 
 /// Longest accepted profile name, in characters.
+/// Directory holding agent-type files in the global, profile and project scopes.
+pub(crate) const AGENTS_DIRECTORY_NAME: &str = "agents";
+
 pub const MAX_PROFILE_NAME_LENGTH: usize = 64;
 
 /// Whether `name` may name a profile directory.

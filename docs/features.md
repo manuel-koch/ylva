@@ -1195,6 +1195,13 @@ the [shim reference](cli-options.md#shims) for naming and restrictions, and
 [managing profiles and shims](configuration.md#managing-profiles-and-shims)
 for scope, environment, and `PATH` setup.
 
+### Workspace configuration trust
+
+Workspace profile configuration (`config.toml`, `.env`, `.ylva/agents/**`) blocks
+startup until `ylva trust` approved its exact content; edits revoke the
+approval. See [workspace trust](configuration.md#workspace-trust)
+and the [trust command](cli-options.md#trust-command).
+
 ### Layered global persona and initialization
 
 Root and subagent contexts share a global SOUL enriched by trusted `AGENTS.md`

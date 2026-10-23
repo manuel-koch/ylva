@@ -84,6 +84,15 @@ See [persistence](persistence.md) and
   process environment.
 - `AgentFactory` validates every agent type's explicit engine reference before
   store or CLI/TUI startup, also for environment-discovered engines.
+- Workspace trust lives in `config/workspace_trust.rs`: `covered_files` lists
+  the selected profile's workspace `config.toml`, `.env` and `.ylva/agents/**`;
+  the fingerprint hashes relative path plus content, with `config.toml`
+  (sorted TOML tables) and `.env` (sorted variables) normalized and unparsable
+  content hashed verbatim. `startup::profile::trusted_profile_workspace_root`
+  returns an error for an untrusted or changed workspace that ships covered
+  files, so `startup::run` aborts before loading anything; profile, `.env` and
+  profile-path loading use the returned root. Library `ProfileConfig::load*`
+  wrappers are ungated; only startup gates.
 - `COMPACTION.md` resolves like `SOUL.md`. The summary request's code-owned
   framing marks message boundaries so source text is not mistaken for
   summarizer instructions. Subagent report reduction is deterministic and

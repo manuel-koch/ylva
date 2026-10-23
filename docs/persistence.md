@@ -39,6 +39,13 @@ other local users cannot read them. Existing files and directories keep their
 permissions. Transcripts are not a secure store: Ylva does not guarantee that
 they are free of secrets, so keep secrets out of conversations.
 
+### Workspace trust store
+
+`~/.ylva/trusted-workspaces.toml` (mode `0600`, replaced atomically) holds the
+approvals made by `ylva trust`: `[workspaces."<canonical workspace path>"]`
+maps each profile name to a SHA-256 hex digest of its covered workspace files.
+See [workspace trust](configuration.md#workspace-trust).
+
 ### Relocating the Ylva home with `YLVA_HOME`
 
 Setting `YLVA_HOME=/some/dir` makes Ylva read and write `/some/dir` directly

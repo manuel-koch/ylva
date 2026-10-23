@@ -15,7 +15,7 @@
 use clap::Parser;
 
 use ylva::logging::init_logging;
-use ylva::startup::{cli_color_enabled, run_init_command, version_report};
+use ylva::startup::{cli_color_enabled, run_init_command, run_trust_command, version_report};
 use ylva::{Cli, CliCommand, ExitCode};
 
 fn main() {
@@ -47,7 +47,18 @@ fn main() {
 
     if let Some(CliCommand::Init { workspace, force }) = &cli.command {
         match run_init_command(*workspace, *force) {
-            Ok(report) => println!("{}", report.summary()),
+            Ok(summary) => println!("{summary}"),
+            Err(message) => {
+                eprintln!("error: {message}");
+                exit_with(ExitCode::UsageError);
+            }
+        }
+        return;
+    }
+
+    if let Some(CliCommand::Trust { revoke }) = &cli.command {
+        match run_trust_command(*revoke, cli.profile.as_deref()) {
+            Ok(report) => println!("{report}"),
             Err(message) => {
                 eprintln!("error: {message}");
                 exit_with(ExitCode::UsageError);

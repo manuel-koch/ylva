@@ -363,6 +363,15 @@ scope, it prints `No shims in <directory>` and no PATH hint. For per-workspace
 `PATH` setup, see
 [configuration](configuration.md#managing-profiles-and-shims).
 
+## Trust command
+
+`ylva [--profile <profile>] trust [--revoke]` approves the current workspace's
+profile configuration (`.ylva/profiles/<profile>/config.toml` and `.env`,
+`.ylva/agents/**`) and lists the covered files. Until approved, and after any
+effective change, Ylva refuses to start in the workspace. `--revoke`
+withdraws the approval. The command needs a discovered workspace root and does
+not load a profile. See [workspace trust](configuration.md#workspace-trust).
+
 ## Connect commands
 
 `ylva [--profile <profile>] connect <provider> [--name <name>] [--workspace]`

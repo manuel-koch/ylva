@@ -163,15 +163,46 @@ Resolution follows the current directory, not the shim that started Ylva. A
 workspace profile with the same name as a home profile shadows that home
 profile whenever the current directory is inside the workspace.
 
+### Workspace trust
+
+A cloned repository must not be able to redirect your API keys, read other
+environment variables or disable approval prompts, so Ylva uses a workspace's
+profile configuration only after you approved its exact content
+([ADR-0003](architecture-design-records/0003-trust-workspace-configuration-by-content-hash.md)).
+The approval covers, for the selected profile:
+
+- `<workspace-root>/.ylva/profiles/<profile-name>/config.toml`
+- `<workspace-root>/.ylva/profiles/<profile-name>/.env`
+- every file below `<workspace-root>/.ylva/agents/`
+
+Review those files, then run `ylva trust` (with `--profile <name>` for a
+non-default profile) inside the workspace. Until then, and again after any
+change, Ylva refuses to start in that workspace and says why; it does not fall
+back to the home profile. Commands that load no profile (`--version`, `init`,
+`session`, `skill`, `profile`, `connect`, `trust`) keep working.
+`config.toml` and `.env` are compared by
+effective content, so comments, whitespace, quoting and ordering changes keep
+the approval; any other change requires `ylva trust` again. `ylva init --workspace`,
+`ylva profile create|edit --workspace` and `ylva connect --workspace` never trust
+automatically (the workspace may hold unreviewed files from a clone); when the
+profile is left untrusted or changed they end with a reminder to run `ylva trust`.
+`ylva trust --revoke` withdraws the approval.
+
+The home profile is always trusted.
+
+Instruction files (`AGENTS.md`, `SOUL.md`) and skills are not covered.
+Approvals are stored in `~/.ylva/trusted-workspaces.toml`
+(see [persistence](persistence.md#workspace-trust-store)).
+
 An optional `~/.ylva/profiles/<profile-name>/.env` file supplies provider
 environment variables and values for `${ENV_VAR}` interpolation in
 `config.toml`. When a workspace root is discovered, the matching
 `<workspace-root>/.ylva/profiles/<profile-name>/.env` is loaded as well.
 Project values override home-profile values, and exported process values still
-override both. Profiles without explicit `[engines.*]` or
-`[provider_connections.*]` tables use it for provider discovery. Already
-exported process variables take precedence over values from either profile
-environment file.
+override both. Workspace files are only used when [trusted](#workspace-trust).
+Profiles without explicit `[engines.*]` or `[provider_connections.*]` tables use
+it for provider discovery. Already exported process variables take precedence
+over values from either profile environment file.
 
 - `--profile <name>` selects the profile directory explicitly; without it,
   the implicit `default` profile is used (see below for how a missing file
