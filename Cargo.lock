@@ -4520,7 +4520,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "log",
- "nix 0.29.0",
+ "nix 0.31.3",
  "pulldown-cmark",
  "ratatui",
  "ratatui-textarea",
