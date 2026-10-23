@@ -95,6 +95,8 @@ fn provider_logs_effective_runtime_snapshot_without_sensitive_request_data() {
         let address = listener.local_addr().expect("local test server address");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept provider request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await.expect("read request");
             let response_body = "data: [DONE]\n\n";
             let response = format!(
                 "HTTP/1.1 200 OK\r\n\
