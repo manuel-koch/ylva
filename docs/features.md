@@ -484,7 +484,14 @@ marker in headless output — alongside a `tracing` warning in the log (see
   connection, shared across model discovery, metadata lookups, and chat. JSON
   catalog/detail GET and POST requests retry HTTP `429` and `5xx` responses
   with bounded exponential backoff and honor `Retry-After` delta-seconds or
-  HTTP-date values when provided.
+  HTTP-date values when provided. A `429`/`503` carrying `Retry-After` closes
+  a cooldown shared by every request of the same provider connection: no
+  request starts a new attempt before that delay elapsed, and each retry adds
+  up to 3 s of random jitter so parallel agents do not retry in lockstep. Such
+  responses are retried up to 6 times within about 90 s of total waiting
+  (other retryable failures keep 3 retries); the final error states the retry
+  count and waited time, e.g. `after 6 retries over 74s`. Waits stop promptly
+  on cancellation.
   Chat requests use the same retry policy before streaming begins; a provider
   error frame or a stream that closes without `[DONE]` is surfaced as a
   conversation error instead of a successful empty reply.
@@ -817,7 +824,11 @@ Completion order is not a reliable ordering signal. The profile-level
 simultaneous subagent runs, while `0` or a negative value means unlimited. Spawns
 beyond the cap wait in FIFO order. The cap applies across the delegation tree
 (delegation is currently one level deep; subagents cannot spawn further
-subagents). Provider request concurrency is a separate limit. Its description
+subagents). Provider request concurrency is a separate limit: each provider
+connection allows at most `MAX_CONCURRENT_PROVIDER_REQUESTS` (4) concurrently
+open requests, held for the whole streamed response, so root, subagents, title
+generation and compaction share it regardless of `max_concurrent_subagents`;
+excess agents wait for a free permit. Its description
 lists every configured agent type and its optional
 model-facing `description`, so the parent can choose a suitable type instead
 of guessing names.
@@ -863,7 +874,10 @@ parent keeps processing its own messages and tools while the subagent works.
 
 - Up to the profile's `max_concurrent_subagents` limit run at once (default
   `4`); `0` or a negative value removes the subagent-scheduler cap. Additional
-  calls wait in FIFO order and start as running subagents finish. Callers still
+  calls wait in FIFO order and start as running subagents finish. Running
+  subagents additionally share the provider connection's concurrent-request
+  cap (4), so excess agents wait for a free permit before they can stream.
+  Callers still
   correlate results by `run_id`, `tool_call_id`, and `label`, not completion
   order.
 - `--max-concurrent-subagents <N>` overrides the profile setting for one run;

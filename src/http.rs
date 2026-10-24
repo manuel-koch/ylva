@@ -19,6 +19,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tokio::time::Instant;
+
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -56,6 +58,56 @@ pub(crate) const MAX_RETRIES: usize = 3;
 pub(crate) const RETRY_BASE_SECONDS: u64 = 1;
 /// Upper bound on a single backoff delay, in seconds.
 pub(crate) const RETRY_MAX_SECONDS: u64 = 30;
+/// Maximum number of retries for `429`/`503` responses that carry `Retry-After`.
+pub(crate) const MAX_RETRIES_WITH_RETRY_AFTER: usize = 6;
+/// Upper bound on the total time spent waiting across all retries of one
+/// request that is retried because of `Retry-After`, in seconds.
+pub(crate) const RETRY_AFTER_TOTAL_WAIT_MAX_SECONDS: u64 = 90;
+/// Width of the uniform jitter added on top of `Retry-After`, in seconds, so
+/// parallel requests do not retry in lockstep.
+pub(crate) const RETRY_AFTER_JITTER_SECONDS: u64 = 3;
+
+/// Shared "not before" deadline: once any request receives a `Retry-After`,
+/// every request sharing this gate waits for it before its next attempt.
+/// Clones share the same deadline.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RetryCooldown {
+    not_before: std::sync::Arc<std::sync::Mutex<Option<Instant>>>,
+}
+
+impl RetryCooldown {
+    /// Close the gate for `delay`, never shortening an already later deadline.
+    pub(crate) fn note_retry_after(&self, delay: Duration) {
+        let deadline = Instant::now() + delay;
+        let mut not_before = self
+            .not_before
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if not_before.is_none_or(|current| current < deadline) {
+            *not_before = Some(deadline);
+        }
+    }
+
+    /// Wait until the gate is open. Returns the time waited, or `None` when
+    /// `cancel` fired first.
+    pub(crate) async fn wait_until_open(&self, cancel: &CancellationToken) -> Option<Duration> {
+        let started = Instant::now();
+        loop {
+            let deadline = *self
+                .not_before
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let remaining =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            match remaining {
+                Some(remaining) if !remaining.is_zero() => {
+                    sleep_cancel_aware(cancel, remaining).await?;
+                }
+                _ => return Some(started.elapsed()),
+            }
+        }
+    }
+}
 /// A caller-visible handle that the provider binds to the response dump paired
 /// with a request. It lets caller-side timeouts append their failure reason to
 /// the right response artifact even after stream processing has been dropped.
@@ -98,13 +150,19 @@ impl RequestDumpFailureHandler {
 #[derive(Debug, Clone)]
 pub(crate) struct RequestConcurrencyLimiter {
     semaphore: std::sync::Arc<Semaphore>,
+    cooldown: RetryCooldown,
 }
 
 impl RequestConcurrencyLimiter {
     pub(crate) fn new(max_concurrent_requests: usize) -> Self {
         Self {
             semaphore: std::sync::Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
+            cooldown: RetryCooldown::default(),
         }
+    }
+
+    pub(crate) fn cooldown(&self) -> &RetryCooldown {
+        &self.cooldown
     }
 
     pub(crate) async fn acquire(&self) -> anyhow::Result<OwnedSemaphorePermit> {
@@ -255,9 +313,13 @@ pub(crate) async fn get_json_with_headers(
             path,
         );
     }
-    let response = send_with_retry(url, operation, &CancellationToken::new(), || {
-        client.get(url).headers(headers.clone())
-    })
+    let response = send_with_retry(
+        url,
+        operation,
+        &CancellationToken::new(),
+        &RetryCooldown::default(),
+        || client.get(url).headers(headers.clone()),
+    )
     .await?;
     let body = read_buffered_response(response, &dump_context).await?;
     Ok(serde_json::from_slice(&body)?)
@@ -296,9 +358,13 @@ pub(crate) async fn post_json_with_dump_source(
     if let Some(path) = &request_dump_path {
         dump_request(url, &redacted_headers_json(&headers), body, path);
     }
-    let response = send_with_retry(url, operation, &CancellationToken::new(), || {
-        client.post(url).headers(headers.clone()).json(body)
-    })
+    let response = send_with_retry(
+        url,
+        operation,
+        &CancellationToken::new(),
+        &RetryCooldown::default(),
+        || client.post(url).headers(headers.clone()).json(body),
+    )
     .await?;
     let response_body = read_buffered_response(response, &dump_context).await?;
     Ok(serde_json::from_slice(&response_body)?)
@@ -419,8 +485,9 @@ pub(crate) async fn post_with_retry(
     headers: &reqwest::header::HeaderMap,
     body: &serde_json::Value,
     cancel: &CancellationToken,
+    cooldown: &RetryCooldown,
 ) -> anyhow::Result<reqwest::Response> {
-    send_with_retry(url, "chat completion", cancel, || {
+    send_with_retry(url, "chat completion", cancel, cooldown, || {
         client.post(url).headers(headers.clone()).json(body)
     })
     .await
@@ -439,7 +506,7 @@ pub(crate) async fn post_with_retry_and_limiter(
         _ = cancel.cancelled() => return Err(anyhow::anyhow!("cancelled")),
         permit = limiter.acquire() => permit?,
     };
-    let response = post_with_retry(client, url, headers, body, cancel).await?;
+    let response = post_with_retry(client, url, headers, body, cancel, limiter.cooldown()).await?;
     Ok((response, permit))
 }
 
@@ -447,6 +514,7 @@ async fn send_with_retry<RequestBuilderFactory>(
     url: &str,
     operation: &str,
     cancel: &CancellationToken,
+    cooldown: &RetryCooldown,
     mut build_request: RequestBuilderFactory,
 ) -> anyhow::Result<reqwest::Response>
 where
@@ -455,7 +523,12 @@ where
     let display_url = redacted_url_for_display(url);
     let url = display_url.as_str();
     let mut retries = 0usize;
+    let mut total_waited = Duration::ZERO;
     loop {
+        let Some(gate_waited) = cooldown.wait_until_open(cancel).await else {
+            return Err(anyhow::anyhow!("cancelled while waiting to retry"));
+        };
+        total_waited += gate_waited;
         let request = build_request();
 
         // Honour the cancel token during the initial HTTP round-trip.  The
@@ -505,10 +578,35 @@ where
                 status = status.as_u16(),
                 "non-retryable status"
             );
-            return Err(status_error(status, url, operation, &detail, retries));
+            return Err(status_error(
+                status,
+                url,
+                operation,
+                &detail,
+                retries,
+                total_waited,
+            ));
         }
 
-        if retries >= MAX_RETRIES {
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| parse_retry_after(value, SystemTime::now()));
+        let honors_retry_after = retry_after.is_some()
+            && matches!(
+                status,
+                reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::SERVICE_UNAVAILABLE
+            );
+        let retry_limit = if honors_retry_after {
+            MAX_RETRIES_WITH_RETRY_AFTER
+        } else {
+            MAX_RETRIES
+        };
+        let delay = retry_delay(retries + 1, retry_after);
+        let budget_exhausted = honors_retry_after
+            && total_waited + delay > Duration::from_secs(RETRY_AFTER_TOTAL_WAIT_MAX_SECONDS);
+        if retries >= retry_limit || budget_exhausted {
             let detail = response_body_detail(response).await;
             tracing::error!(
                 url,
@@ -517,28 +615,33 @@ where
                 retry = retries,
                 "retryable status but retries exhausted"
             );
-            return Err(status_error(status, url, operation, &detail, retries));
+            return Err(status_error(
+                status,
+                url,
+                operation,
+                &detail,
+                retries,
+                total_waited,
+            ));
         }
 
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| parse_retry_after(value, SystemTime::now()));
         retries += 1;
+        if let (true, Some(seconds)) = (honors_retry_after, retry_after) {
+            cooldown.note_retry_after(Duration::from_secs(seconds.min(RETRY_MAX_SECONDS)));
+        }
         tracing::warn!(
             url,
             operation,
             status = status.as_u16(),
             retry = retries,
+            delay_ms = delay.as_millis() as u64,
+            retry_after_seconds = retry_after,
             "retryable status; retrying"
         );
-        if sleep_cancel_aware(cancel, retry_delay(retries, retry_after))
-            .await
-            .is_none()
-        {
+        if sleep_cancel_aware(cancel, delay).await.is_none() {
             return Err(anyhow::anyhow!("cancelled while waiting to retry"));
         }
+        total_waited += delay;
     }
 }
 
@@ -867,13 +970,15 @@ fn snippet_from_body(body: &[u8]) -> String {
 }
 
 /// Build a terminal error for an HTTP `status`.
-/// Records the number of `retries` already performed when non-zero.
+/// Records the number of `retries` already performed and the `total_waited`
+/// time when retries is non-zero.
 fn status_error(
     status: reqwest::StatusCode,
     url: &str,
     operation: &str,
     body_snippet: &str,
     retries: usize,
+    total_waited: Duration,
 ) -> anyhow::Error {
     let status_number = status.as_u16();
     let url = redacted_url_for_display(url);
@@ -883,7 +988,7 @@ fn status_error(
         format!(": {body_snippet}")
     };
     let retry_note = if retries > 0 {
-        format!(" after {retries} retries")
+        format!(" after {retries} retries over {}s", total_waited.as_secs())
     } else {
         String::new()
     };
@@ -891,8 +996,10 @@ fn status_error(
 }
 
 /// Compute the next backoff delay. `Retry-After` (in seconds) wins
-/// when present; otherwise exponential backoff (`base * 2^(attempt-1)`) capped
-/// at [`RETRY_MAX_SECONDS`], with a small jitter.
+/// when present, plus up to [`RETRY_AFTER_JITTER_SECONDS`] of jitter (none for
+/// a zero delay) and capped at [`RETRY_MAX_SECONDS`]; otherwise exponential
+/// backoff (`base * 2^(attempt-1)`) capped at [`RETRY_MAX_SECONDS`], with
+/// full jitter.
 pub(crate) fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
     retry_delay_with_jitter(attempt, retry_after, jitter_fraction())
 }
@@ -904,7 +1011,11 @@ pub(crate) fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration 
 /// delay; bounds that must always hold are stated against fixed fractions.
 fn retry_delay_with_jitter(attempt: usize, retry_after: Option<u64>, jitter: f64) -> Duration {
     if let Some(seconds) = retry_after {
-        return Duration::from_secs(seconds.min(RETRY_MAX_SECONDS));
+        if seconds == 0 {
+            return Duration::ZERO;
+        }
+        let jittered = seconds as f64 + jitter * RETRY_AFTER_JITTER_SECONDS as f64;
+        return Duration::from_secs_f64(jittered.min(RETRY_MAX_SECONDS as f64));
     }
     let exponent = attempt.saturating_sub(1).min(63);
     let base = RETRY_BASE_SECONDS.saturating_mul(1u64 << exponent);
