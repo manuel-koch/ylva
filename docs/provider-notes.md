@@ -39,6 +39,13 @@ from a price table.
   own parser; see
   [model usage cost ledger](./implementation-notes.md#model-usage-cost-ledger).
 - The currency is always USD.
+- Every chat and model-listing request carries OpenRouter app attribution
+  headers so Ylva shows up on OpenRouter (see
+  <https://openrouter.ai/docs/app-attribution>): `HTTP-Referer:
+  https://github.com/manuel-koch/ylva`, `X-OpenRouter-Title: Ylva` and
+  `X-OpenRouter-Categories: cli-agent,personal-agent`. They are always sent
+  and cannot be disabled; they identify the application only and contain no
+  user data or secrets. No other provider sends them.
 
 ### GitHub Copilot
 

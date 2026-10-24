@@ -33,36 +33,36 @@ execution*; docs updates ship in the same commit as the code.
 
 ## Implementation Plan
 
-1. [ ] Read `docs/architecture-design-records/` (ADRs 0001–0003) and confirm
+1. [x] Read `docs/architecture-design-records/` (ADRs 0001–0003) and confirm
    none covers provider headers; no new ADR is expected.
-2. [ ] Write a failing test first in `src/llm/openrouter_provider.rs` (tests
+2. [x] Write a failing test first in `src/llm/openrouter_provider.rs` (tests
    module): a loopback server (reuse the pattern of
    `delegates_identity_runtime_settings_and_chat`) asserts the three headers
    are present on `POST /api/v1/chat/completions`. Add a similar assertion for
    the model-listing `GET /api/v1/models` request if an existing loopback
    pattern for `list_models` is available in `tests/http_provider.rs`.
-3. [ ] Add a builder method on `OpenAiCompatibleProvider`
+3. [x] Add a builder method on `OpenAiCompatibleProvider`
    (`src/llm/openai_compatible_provider.rs`, next to
    `with_request_authorizer`) such as `with_extra_headers(self,
    Vec<(&'static str, &'static str)>) -> Self` that sets `extra_headers`
    without requiring a request authorizer.
-4. [ ] Define the three headers as named constants in
+4. [x] Define the three headers as named constants in
    `src/llm/openrouter_provider.rs` (full descriptive names, no magic strings
    inline): referer value `env!("CARGO_PKG_REPOSITORY")`, title literal
    `Ylva`, categories `cli-agent,personal-agent`. Apply them always (no
    config opt-out) in `OpenRouterProvider::new` via the new builder. Add a
    test asserting the referer equals `https://github.com/manuel-koch/ylva`.
-5. [ ] Add a test that a plain `OpenAiCompatibleProvider` (and Ollama) sends
+5. [x] Add a test that a plain `OpenAiCompatibleProvider` (and Ollama) sends
    none of the headers.
-6. [ ] Update docs: `docs/provider-notes.md` (OpenRouter section: headers sent
+6. [x] Update docs: `docs/provider-notes.md` (OpenRouter section: headers sent
    and why), `docs/features.md` and `docs/implementation-notes.md` (where the
    OpenRouter provider/headers mechanism is described), and the README
    "Provider data sharing" bullet (README.md ~line 77) to state that
    OpenRouter requests identify Ylva via attribution headers.
-7. [ ] Delete `docs/ideas/openrouter-app.md` (superseded by this plan and the
+7. [x] Delete `docs/ideas/openrouter-app.md` (superseded by this plan and the
    docs). First check how other implemented ideas in `docs/ideas/` are
    handled and follow that convention if it differs.
-8. [ ] Run `rumdl fmt` and `rumdl check` on changed markdown, then
+8. [x] Run `rumdl fmt` and `rumdl check` on changed markdown, then
    `make format lint` and `make test-coverage`.
 
 ## Implementation Hints

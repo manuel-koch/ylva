@@ -22,6 +22,15 @@ use crate::llm::{ModelInfo, Provider, RequestCost, ToolSchema};
 
 use super::OpenAiCompatibleProvider;
 
+// OpenRouter app attribution (https://openrouter.ai/docs/app-attribution).
+// Header names are lowercase because `HeaderName::from_static` requires it.
+const APP_ATTRIBUTION_REFERER_HEADER: &str = "http-referer";
+const APP_ATTRIBUTION_TITLE_HEADER: &str = "x-openrouter-title";
+const APP_ATTRIBUTION_CATEGORIES_HEADER: &str = "x-openrouter-categories";
+const APP_ATTRIBUTION_REFERER: &str = env!("CARGO_PKG_REPOSITORY");
+const APP_ATTRIBUTION_TITLE: &str = "Ylva";
+const APP_ATTRIBUTION_CATEGORIES: &str = "cli-agent,personal-agent";
+
 /// Parse the request cost OpenRouter reports as `usage.cost` (credits, USD)
 /// in a stream frame. Usage-only frames carry no choices, so this is
 /// independent of the user-visible stream event parser.
@@ -60,7 +69,15 @@ impl OpenRouterProvider {
                 super::openai_compatible_provider::redact_chat_completion_request_body,
             )
             .with_provider_kind("openrouter")
-            .with_usage_cost_parser(parse_reported_cost),
+            .with_usage_cost_parser(parse_reported_cost)
+            .with_extra_headers(vec![
+                (APP_ATTRIBUTION_REFERER_HEADER, APP_ATTRIBUTION_REFERER),
+                (APP_ATTRIBUTION_TITLE_HEADER, APP_ATTRIBUTION_TITLE),
+                (
+                    APP_ATTRIBUTION_CATEGORIES_HEADER,
+                    APP_ATTRIBUTION_CATEGORIES,
+                ),
+            ]),
         }
     }
 
@@ -170,6 +187,14 @@ impl Provider for OpenRouterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attribution_referer_is_the_public_repository() {
+        assert_eq!(
+            APP_ATTRIBUTION_REFERER,
+            "https://github.com/manuel-koch/ylva"
+        );
+    }
 
     #[test]
     fn parses_reported_cost_from_usage_frames() {
