@@ -52,7 +52,7 @@ arboard = "3"
 jsonschema = { version = "0.17", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 sha2 = "0.10"
-dirs = "6"
+dirs = "7"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 toml = "1.1.5"
 dotenvy = "0.15"
