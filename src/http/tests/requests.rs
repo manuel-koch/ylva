@@ -16,11 +16,61 @@ use super::*;
 
 #[test]
 fn retry_delay_honors_retry_after() {
-    assert_eq!(retry_delay(1, Some(2)), Duration::from_secs(2));
+    assert_eq!(retry_delay(1, Some(0)), Duration::ZERO);
     assert_eq!(
-        retry_delay(5, Some(9999)),
+        retry_delay_with_jitter(1, Some(2), 0.0),
+        Duration::from_secs(2)
+    );
+    assert_eq!(
+        retry_delay_with_jitter(1, Some(2), 0.5),
+        Duration::from_millis(3500)
+    );
+    assert!(retry_delay_with_jitter(1, Some(2), 0.9999) < Duration::from_secs(5));
+    assert_eq!(
+        retry_delay_with_jitter(5, Some(9999), 0.5),
         Duration::from_secs(RETRY_MAX_SECONDS)
     );
+}
+
+#[test]
+fn cooldown_gate_extends_to_latest_deadline_and_never_shortens() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("build Tokio runtime");
+    runtime.block_on(async {
+        let cooldown = RetryCooldown::default();
+        let shared = cooldown.clone();
+        let cancel = CancellationToken::new();
+        assert_eq!(
+            cooldown.wait_until_open(&cancel).await,
+            Some(Duration::ZERO)
+        );
+        cooldown.note_retry_after(Duration::from_secs(10));
+        shared.note_retry_after(Duration::from_secs(2));
+        let waited = shared.wait_until_open(&cancel).await.expect("gate opens");
+        assert_eq!(waited, Duration::from_secs(10));
+        shared.note_retry_after(Duration::from_secs(20));
+        let waited = cooldown.wait_until_open(&cancel).await.expect("gate opens");
+        assert_eq!(waited, Duration::from_secs(20));
+    });
+}
+
+#[test]
+fn cooldown_gate_wait_is_cancel_aware() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("build Tokio runtime");
+    runtime.block_on(async {
+        let cooldown = RetryCooldown::default();
+        cooldown.note_retry_after(Duration::from_secs(3600));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(cooldown.wait_until_open(&cancel).await, None);
+    });
 }
 
 #[test]
@@ -90,6 +140,7 @@ fn status_error_joins_snippet_only_when_present() {
         "request",
         "not found on server",
         0,
+        Duration::ZERO,
     )
     .to_string();
     assert_eq!(
@@ -103,6 +154,7 @@ fn status_error_joins_snippet_only_when_present() {
         "request",
         "",
         0,
+        Duration::ZERO,
     )
     .to_string();
     assert_eq!(blank, "request failed with HTTP 404 for http://example/api");
@@ -113,12 +165,13 @@ fn status_error_joins_snippet_only_when_present() {
         "request",
         "down",
         MAX_RETRIES,
+        Duration::from_secs(74),
     )
     .to_string();
     assert_eq!(
         exhausted,
         format!(
-            "request failed with HTTP 503: down for http://example/api after {MAX_RETRIES} retries"
+            "request failed with HTTP 503: down for http://example/api after {MAX_RETRIES} retries over 74s"
         )
     );
 }
@@ -133,11 +186,12 @@ fn status_error_reports_prior_retries_on_non_retryable_status() {
         "request",
         "bad",
         2,
+        Duration::from_millis(1500),
     )
     .to_string();
     assert_eq!(
         message,
-        "request failed with HTTP 400: bad for http://example/api after 2 retries"
+        "request failed with HTTP 400: bad for http://example/api after 2 retries over 1s"
     );
 }
 
@@ -387,6 +441,7 @@ fn status_error_redacts_query_values() {
         "request",
         "",
         0,
+        Duration::ZERO,
     )
     .to_string();
     assert_eq!(
@@ -451,4 +506,79 @@ fn connection_failure_logs_and_errors_without_query_values() {
         assert!(!text.contains("hunter2"), "leaked userinfo: {text}");
         assert!(!text.contains("user:"), "leaked username: {text}");
     }
+}
+
+#[test]
+fn concurrent_callers_pause_together_after_retry_after_and_all_succeed() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const CALLERS: usize = 3;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("build Tokio runtime");
+    runtime.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("server address");
+        let arrivals = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Instant>::new()));
+        let server_arrivals = std::sync::Arc::clone(&arrivals);
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let arrivals = std::sync::Arc::clone(&server_arrivals);
+                tokio::spawn(async move {
+                    let mut request = [0_u8; 4096];
+                    let _ = stream.read(&mut request).await.expect("read request");
+                    let attempt = {
+                        let mut arrivals = arrivals.lock().expect("arrivals");
+                        arrivals.push(Instant::now());
+                        arrivals.len()
+                    };
+                    let (status, headers, body) = if attempt <= CALLERS {
+                        ("429 Too Many Requests", "Retry-After: 1\r\n", "slow down")
+                    } else {
+                        ("200 OK", "", r#"{"ok":true}"#)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.expect("write response");
+                });
+            }
+        });
+        let limiter = RequestConcurrencyLimiter::new(CALLERS);
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/chat");
+        let callers = (0..CALLERS).map(|_| {
+            let (limiter, client, url) = (limiter.clone(), client.clone(), url.clone());
+            tokio::spawn(async move {
+                post_with_retry_and_limiter(
+                    &client,
+                    &url,
+                    &reqwest::header::HeaderMap::new(),
+                    &serde_json::json!({}),
+                    &CancellationToken::new(),
+                    &limiter,
+                )
+                .await
+                .map(|(response, _permit)| response.status())
+            })
+        });
+        for caller in callers.collect::<Vec<_>>() {
+            let status = caller.await.expect("caller task").expect("caller succeeds");
+            assert_eq!(status, reqwest::StatusCode::OK);
+        }
+        let arrivals = arrivals.lock().expect("arrivals");
+        let first_rejection = arrivals[0];
+        assert_eq!(arrivals.len(), CALLERS * 2);
+        for retry_arrival in &arrivals[CALLERS..] {
+            assert!(
+                *retry_arrival - first_rejection >= Duration::from_secs(1),
+                "no retry may start before the shared Retry-After elapsed"
+            );
+        }
+    });
 }

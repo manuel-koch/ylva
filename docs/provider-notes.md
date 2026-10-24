@@ -46,6 +46,12 @@ from a price table.
   `X-OpenRouter-Categories: cli-agent,personal-agent`. They are always sent
   and cannot be disabled; they identify the application only and contain no
   user data or secrets. No other provider sends them.
+- Bursts of parallel requests (root, subagents, title generation) can make
+  OpenRouter answer `429` with `limit_source: openrouter_admission_control`
+  ("could not verify available credits in time") and a `Retry-After` header
+  (about 10 s), even with sufficient credits. Ylva honors the header (the body
+  copy is ignored), pauses all requests of the connection for that delay,
+  adds jitter and retries up to 6 times within about 90 s.
 
 ### GitHub Copilot
 

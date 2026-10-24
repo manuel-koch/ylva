@@ -133,6 +133,13 @@ See [configuration](./configuration.md),
 - One semaphore per provider connection bounds concurrency. Catalog calls hold
   a permit until the body is read; streamed chat until the stream closes.
   Retries of `429`/`5xx` (honoring `Retry-After`) stay under the same permit.
+  The limiter also owns a `RetryCooldown` ("not before" deadline shared by
+  clones): `send_with_retry` awaits it before every attempt and extends it
+  when a `429`/`503` carries `Retry-After`, so parallel requests pause
+  together. `retry_delay` adds `[0, RETRY_AFTER_JITTER_SECONDS)` jitter (none
+  for `Retry-After: 0`). Such responses get `MAX_RETRIES_WITH_RETRY_AFTER`
+  retries within `RETRY_AFTER_TOTAL_WAIT_MAX_SECONDS`; all else keeps
+  `MAX_RETRIES`. JSON helpers use a private, inert cooldown.
 - Provider clients use a connect timeout and an *idle* read timeout, neither
   configurable: the idle limit applies to headers and between chunks, so
   stalled servers fail while long, steadily streaming responses survive.
