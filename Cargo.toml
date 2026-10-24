@@ -56,7 +56,7 @@ dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 toml = "1.1.5"
 dotenvy = "0.15"
-tree-sitter = "0.25"
+tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
 clap = { version = "4", features = ["derive"] }
 scraper = "0.27.0"
