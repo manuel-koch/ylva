@@ -26,7 +26,6 @@ COVERAGE_THRESHOLD := 80
 .PHONY: render-all-diagrams \
 	lint audit format format-check format-rust format-markdown \
 	install-git-hooks uninstall-git-hooks test-git-conventions \
-	create-logs-dir \
 	graphify-update graphify-watch \
     clean \
 	build-debug build-debug-and-run \
@@ -94,14 +93,6 @@ graphify-update:
 graphify-watch:
 	graphify watch
 
-logs:
-	mkdir logs
-
-logs/.gitignore: logs
-	echo "**" > logs/.gitignore
-
-create-logs-dir: logs/.gitignore
-
 clean:
 	cargo clean -p ylva --target-dir "$(CARGO_TARGET_DIR)"
 
@@ -119,11 +110,12 @@ build-debug:
 build-debug-and-run:
 	cargo run
 
-# Build debug binary and launch it with loggin enabled
-build-debug-and-run-with-logs: create-logs-dir
-	YLVA_REQUEST_DUMP_PATH=logs/ylva.json cargo run --features artificial-tool-delay -- \
-	    --log-file logs/ylva_$(shell date +%s).log \
-	    --log-level trace
+# Build debug binary and launch it with logging and request-dump enabled
+build-debug-and-run-with-logs:
+	YLVA_REQUEST_DUMP_PATH=tmp/ylva.json \
+	    cargo run --features artificial-tool-delay -- \
+	        --log-file tmp/ylva_$(shell date +%s).log \
+	        --log-level trace
 
 # Build optimized release binary (output: ${CARGO_TARGET_DIR}/release/ylva)
 build-release:
