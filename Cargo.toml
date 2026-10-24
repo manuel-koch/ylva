@@ -11,10 +11,6 @@ name = "bash_policy_replay"
 path = "tests/sandbox_evaluation/bash_policy_replay.rs"
 test = true
 
-[features]
-# whether tool execution will be randomly prolonged by 3-5s
-artificial-tool-delay = []
-
 [profile.dev]
 debug = "line-tables-only"
 

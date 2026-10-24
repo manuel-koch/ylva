@@ -59,18 +59,6 @@ impl PendingTool {
                     }
                     result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
                         let start = std::time::Instant::now();
-                        // TODO: remove artificial delay
-                        #[cfg(feature = "artificial-tool-delay")]
-                        {
-                            let delay_secs = 2
-                                + (std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .subsec_nanos()
-                                    % 3) as u64;
-                            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-                        }
-                        // END TODO
                         let result = self.call.run().await;
                         let elapsed = start.elapsed();
                         (result, elapsed)

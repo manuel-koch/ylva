@@ -94,11 +94,7 @@ impl BuildInfo {
 
 /// Returns the names of non-default Cargo features enabled in this build.
 pub fn enabled_features() -> Vec<&'static str> {
-    let mut features: Vec<&'static str> = Vec::new();
-    if cfg!(feature = "artificial-tool-delay") {
-        features.push("artificial-tool-delay");
-    }
-    features
+    Vec::new()
 }
 
 #[cfg(test)]

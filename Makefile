@@ -113,7 +113,7 @@ build-debug-and-run:
 # Build debug binary and launch it with logging and request-dump enabled
 build-debug-and-run-with-logs:
 	YLVA_REQUEST_DUMP_PATH=tmp/ylva.json \
-	    cargo run --features artificial-tool-delay -- \
+	    cargo run -- \
 	        --log-file tmp/ylva_$(shell date +%s).log \
 	        --log-level trace
 
