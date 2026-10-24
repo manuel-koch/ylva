@@ -96,7 +96,8 @@ Releases are automated by [release-plz](https://release-plz.dev/)
 ([ADR-0002](./architecture-design-records/0002-use-release-plz-for-release-automation.md)):
 [`release.yml`](../.github/workflows/release.yml) opens a release PR bumping
 `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` from conventional commits;
-merging it tags `vX.Y.Z` and creates the GitHub release (no crates.io publishing).
+merging it tags `vX.Y.Z` and creates the GitHub release (no crates.io publishing;
+`git_only = true` makes release-plz compare against the latest git tag).
 Repository setup (maintainer, GitHub settings):
 
 - repository secret `RELEASE_PLZ_TOKEN`: fine-grained PAT with contents and

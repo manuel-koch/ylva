@@ -36,7 +36,9 @@ Chosen option: **release-plz in release-PR mode**
 * `.github/workflows/release.yml` runs on every push to `main`: it opens or updates a
   release PR (version bump in `Cargo.toml`/`Cargo.lock` and `CHANGELOG.md`) and, once
   that PR is merged, tags `vX.Y.Z` and creates the GitHub release.
-* `release-plz.toml` sets `publish = false`, ignores merge and non-conventional commits.
+* `release-plz.toml` sets `publish = false` and `git_only = true` (git tags, not the
+  crates.io registry, are the baseline for unreleased changes), ignores merge and
+  non-conventional commits.
 * release-plz authenticates with a fine-grained PAT stored as the repository secret
   `RELEASE_PLZ_TOKEN` (contents and pull-requests write), so release PRs trigger CI.
   The secret is never exposed to fork PR jobs.
