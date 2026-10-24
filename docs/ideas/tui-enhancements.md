@@ -21,3 +21,15 @@ when it arives at TUI.
 [tui]
 auto_expand_tool = ["read","write","edit"]
 ```
+
+We could allow configuration for auto expand of the current bubble
+that is under user-approval.
+Thus when approval starts, the bubble gets auto-expanded and when approval
+is thru, bubble gets collapsed again.
+
+```toml
+[tui]
+auto_expand_tool = ["clarify"]
+# or
+auto_expand_approve_tool = true
+```
