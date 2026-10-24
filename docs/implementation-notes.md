@@ -399,6 +399,9 @@ See [features](./features.md#cli-mode).
   the `Costs:` line from the same ledger at exit. Costs never enter
   `SessionExitSnapshot` or the store.
 - `MockProvider::with_reported_cost` scripts a cost for tests.
+- `OpenRouterProvider` sets its app attribution headers via the shared
+  `extra_headers` (lowercase names: `HeaderName::from_static` panics on
+  uppercase). The referer comes from `CARGO_PKG_REPOSITORY`.
 
 ### Policy and scheduling
 

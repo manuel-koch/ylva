@@ -455,6 +455,16 @@ impl OpenAiCompatibleProvider {
         self
     }
 
+    /// Send `extra_headers` with every chat and model-listing request.
+    /// Header names must be lowercase.
+    pub(crate) fn with_extra_headers(
+        mut self,
+        extra_headers: Vec<(&'static str, &'static str)>,
+    ) -> Self {
+        self.extra_headers = extra_headers;
+        self
+    }
+
     /// Send models that the catalog lists only for `/responses` through the
     /// Responses API instead of `/chat/completions`.
     pub(crate) fn with_responses_only_models(mut self) -> Self {

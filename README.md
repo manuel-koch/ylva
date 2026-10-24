@@ -77,7 +77,8 @@ Provider setup: [Ollama](https://ollama.com/) (local or cloud) via
 - **Provider data sharing.** With a hosted provider (OpenRouter, Ollama Cloud,
   Copilot), prompts, file contents read by tools, tool output, and web results
   are sent to that provider. Only a local Ollama server keeps them on your
-  machine.
+  machine. OpenRouter requests also carry attribution headers that identify
+  Ylva as the calling application.
 - **Local transcripts.** Sessions are stored unencrypted under `~/.ylva/chats`
   (workspace-scoped profiles may use `<workspace>/.ylva/chats`) and may contain
   secrets that appeared in a conversation; see

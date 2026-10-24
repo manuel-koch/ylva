@@ -1290,3 +1290,135 @@ fn lingering_socket_lines(port: u16) -> Vec<String> {
 fn is_lingering_line(line: &str) -> bool {
     line.contains("ESTABLISHED") || line.contains("CLOSE_WAIT")
 }
+
+const OPENROUTER_ATTRIBUTION_HEADER_NAMES: [&str; 3] = [
+    "http-referer",
+    "x-openrouter-title",
+    "x-openrouter-categories",
+];
+
+fn finite_chat_config() -> MockLlmConfig {
+    MockLlmConfig {
+        frames: vec![content_frame("ok")],
+        end_after_frames: true,
+        ..Default::default()
+    }
+}
+
+fn captured_header_value(server: &MockLlmServer, header_name: &str) -> Vec<Option<String>> {
+    server
+        .request_headers()
+        .iter()
+        .map(|request| {
+            request
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(header_name))
+                .map(|(_, value)| value.clone())
+        })
+        .collect()
+}
+
+fn assert_no_attribution_headers(server: &MockLlmServer) {
+    assert!(!server.request_headers().is_empty());
+    for header_name in OPENROUTER_ATTRIBUTION_HEADER_NAMES {
+        assert!(
+            captured_header_value(server, header_name)
+                .iter()
+                .all(Option::is_none),
+            "{header_name} must not be sent"
+        );
+    }
+}
+
+#[tokio::test]
+async fn openrouter_provider_sends_attribution_headers_on_chat_and_model_listing() {
+    let config = MockLlmConfig {
+        models: vec!["some/model".to_string()],
+        model_path: Some("/api/v1/models".to_string()),
+        ..finite_chat_config()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = OpenRouterProvider::new(
+        "openrouter".to_string(),
+        server.base_url(),
+        "some/model".to_string(),
+        Some("test-key".to_string()),
+    );
+
+    provider.list_models().await.expect("model listing");
+    let mut receiver = provider
+        .chat(Vec::new(), Vec::new(), CancellationToken::new())
+        .await
+        .expect("chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+
+    let expected = [
+        "https://github.com/manuel-koch/ylva",
+        "Ylva",
+        "cli-agent,personal-agent",
+    ];
+    assert_eq!(server.request_headers().len(), 2);
+    for (header_name, expected_value) in OPENROUTER_ATTRIBUTION_HEADER_NAMES.iter().zip(expected) {
+        assert_eq!(
+            captured_header_value(&server, header_name),
+            vec![Some(expected_value.to_string()); 2],
+            "{header_name} must be sent on chat and model listing"
+        );
+    }
+}
+
+#[tokio::test]
+async fn openrouter_attribution_headers_survive_runtime_config_cloning() {
+    let server = MockLlmServer::start(finite_chat_config())
+        .await
+        .expect("bind failed");
+    let provider = OpenRouterProvider::new(
+        "openrouter".to_string(),
+        server.base_url(),
+        "some/model".to_string(),
+        None,
+    );
+    let handle = provider.runtime_config_handle().expect("runtime config");
+    let cloned = provider
+        .with_runtime_config(handle)
+        .expect("runtime config clone");
+
+    let mut receiver = cloned
+        .chat(Vec::new(), Vec::new(), CancellationToken::new())
+        .await
+        .expect("chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+
+    assert_eq!(
+        captured_header_value(&server, "x-openrouter-title"),
+        vec![Some("Ylva".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn non_openrouter_providers_send_no_attribution_headers() {
+    let server = MockLlmServer::start(finite_chat_config())
+        .await
+        .expect("bind failed");
+    let provider = openai_compatible_provider_for(&server);
+    let mut receiver = provider
+        .chat(Vec::new(), Vec::new(), CancellationToken::new())
+        .await
+        .expect("chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+    provider.list_models().await.expect("model listing");
+    assert_no_attribution_headers(&server);
+
+    let ollama_server =
+        MockLlmServer::start_ollama_catalog(vec!["gemma4:latest".to_string()], Duration::ZERO)
+            .await
+            .expect("bind failed");
+    let ollama = OllamaProvider::new(
+        "ollama-local".to_string(),
+        ollama_server.base_url(),
+        "gemma4:latest".to_string(),
+        None,
+    );
+    ollama.list_models().await.expect("model listing");
+    assert_no_attribution_headers(&ollama_server);
+}

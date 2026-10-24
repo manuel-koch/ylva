@@ -394,7 +394,9 @@ title is restored when the TUI exits.
 Currently the following AI model providers are supported:
 
 - Ollama (OpenAI-compatible chat plus native model discovery endpoints)
-- OpenRouter ( via OpenAI compatible endpoints )
+- OpenRouter ( via OpenAI compatible endpoints; requests carry app
+  attribution headers identifying Ylva, see
+  [provider notes](./provider-notes.md#openrouter) )
 - GitHub Copilot ( via OpenAI compatible endpoints, using the Responses API for
   models that only support it; log in with `ylva connect copilot` )
 
