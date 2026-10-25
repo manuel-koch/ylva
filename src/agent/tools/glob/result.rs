@@ -198,7 +198,7 @@ impl ToolCallResult for GlobResult {
             return vec![];
         }
         vec![Section::Content(ContentSection {
-            label: None,
+            label: Some("Output".to_string()),
             content: text,
             file_extension: None,
             line_number_offset: Some(0),

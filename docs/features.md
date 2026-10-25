@@ -572,7 +572,7 @@ content preview; opaque or invalid UTF-8 bytes show only `read_bytes`
 metadata and no content section. Output is capped at 262144 raw selected
 bytes (256 KiB) (`truncated` field present in result metadata when capped):
 content past the cap is discarded silently with no in-text marker and the
-content section is labeled `Partial result`, the same vocabulary capped
+content section is labeled `Partial output`, the same vocabulary capped
 `bash` and `search` output uses. The cap wins over a larger explicit
 `limit`; complete recognized media reads (PNG/JPEG/WebP/GIF/PDF Base64
 attachments) are exempt, because a truncated image or PDF is unusable and
@@ -602,7 +602,8 @@ Write `content` to `path`, with the per-call `encoding` defaulting
 to `utf8`. Set `encoding: "base64"` to decode standard padded Base64 and
 write the resulting arbitrary bytes; invalid input fails before any parent
 directory or target-file change. Requires user approval before execution
-(approval-gated). UTF-8 writes retain their content previews. Base64 writes
+(approval-gated). UTF-8 writes retain their content previews, shown under a
+`Content:` section. Base64 writes
 whose decoded bytes are valid UTF-8 also show the decoded text preview;
 opaque or invalid UTF-8 bytes show only the byte-count confirmation and
 metadata. Content payloads are redacted from logs and argument spans. There
@@ -695,14 +696,15 @@ directories only when the command needs a different working directory. See
 Requires explicit human approval before execution. An
 optional `label` (3–6 word purpose of the command) describes what the
 command will do: the collapsed bubble title and the CLI status line show
-it as a `label=…` prop — including while the call is pending approval —
+it — in the collapsed title as the bare label text after the command,
+in the CLI status line as a `label=…` prop — including while the call is
+pending approval —
 and the expanded bubble body leads with a `Label` section followed by a
-`Command` section in every state (then a `Result` section with the
-command output once completed — or `Partial result` when the output cap
-truncated the capture — and a `Partial result` section after them when
+`Command` section in every state (then an `Output` section with the
+command output once completed — or `Partial output` when the output cap
+truncated the capture — and a `Partial output` section after them when
 the call fails with partial output). When those
-sections carry both arguments the expanded args line is hidden, while
-the collapsed title keeps them. An absent or blank `label` is omitted
+sections carry both arguments the expanded args line is hidden. An absent or blank `label` is omitted
 everywhere, and approval behavior does not depend on it. stdout
 and stderr are merged in true arrival order. Output is capped at 1000 whole
 output lines or 65536 bytes, whichever is hit first (`truncated` field
@@ -775,7 +777,7 @@ up to 8388608 bytes (8 MiB); a larger response fails with an explicit size
 error, never a truncated attachment. Other binary or non-UTF-8 bodies fail
 with a clear error naming the content type. Returned text (markdown or
 verbatim) is capped at 65536 bytes (64 KiB): longer output is truncated
-with `truncated: true` result metadata and a `Partial result` content
+with `truncated: true` result metadata and a `Partial output` content
 section, the same vocabulary capped `read`/`bash`/`search` output uses.
 Result metadata carries `url`, `final_url` (after redirects), `status`,
 `content_type`, and `media_type` for media results. The done tool bubble
@@ -857,7 +859,9 @@ should make its `result` self-contained rather than referencing
 concise and non-redundant, proportional to the task. It must not include
 meta-commentary or self-review narration about the subagent's process (e.g.
 "Self-Correction/Review:") — only the finished deliverable belongs there.
-If a subagent goes idle
+In the TUI the bubble title shows only the `status`; `result` (Markdown),
+`error` and `sources` render in the expanded body under `Error:`, `Sources:` and
+`Result:` (result last, matching the subagent header bubble). If a subagent goes idle
 without calling `agent_finish`, the parent instead receives a synthesized
 result built from the subagent's last assistant message; if the subagent hits
 its max-tool-iterations cap first, the parent receives a clear failure
@@ -944,6 +948,10 @@ streaming/running tools in the background:
   conversation scrollbar (track/thumb/arrows), are tinted to match the
   `spawn_subagent` bubble's own border color while drilled in, instead of
   the root conversation's neutral divider/scrollbar color.
+- The header bubble (collapsed or expanded, including its scrollbar column)
+  and the divider below it sit on a dim rose background tint
+  (`SUBAGENT_VIEW_HEADER_BG_COLOR`), so the header reads as distinct from the
+  scrollable transcript.
 - A subagent's transcript remains browsable after it finishes — nothing is
   discarded when a subagent completes.
 - The footer/header spinner keeps animating for as long as the subagent's
@@ -1114,8 +1122,19 @@ for the full mechanics.
   bracketed props, so the variant is rendered once.
 - **Tool bubble collapse/expand:** clicking a tool bubble's title line or its
   left-border bar toggles whether the bubble's arguments and result are shown
-  (expanded, `▼`) or hidden (collapsed, `▶`). Collapsed bubbles display only
-  the title line, useful for decluttering long conversations.
+  (expanded, `▼`) or hidden (collapsed, `▶`). A collapsed bubble shows a single
+  title line: the tool title, its main argument and optional label, with the
+  running or final duration right-aligned (the left part is truncated with `…`
+  before the duration is). Remaining arguments render only when expanded. This
+  also applies to the subagent drill-in header bubble. An expanded bubble is
+  laid out as title, the main argument, an underlined `Arguments:` section
+  listing the remaining arguments one `key=value` per line (e.g. `read`'s
+  `mode=lines`, `offset=926`), an underlined `Result:` section listing the
+  call's `key=value` summary pairs (e.g. `status=failure`), the sections
+  describing the call (`Label:`, `Command:`, `Task:`, …) and, last, the tool
+  output under `Output:` (`Partial output:` when truncated). Tools label their
+  output section `Output`/`Partial output` (older sessions saved with
+  `Result`/`Partial result` were migrated).
 - **Home-relative tool paths:** TUI path labels use `~` for the home directory,
   without changing execution or saved data.
 - **Expansion feedback:** expanding a tool or thinking bubble first shows

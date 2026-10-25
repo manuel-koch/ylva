@@ -1457,7 +1457,7 @@ fn over_cap_text_bytes() -> Vec<u8> {
 
 /// Assert the shared truncation contract: content cut at the cap, the
 /// model-facing `truncated: true` metadata, the schema property kept only
-/// when present, and the `Partial result` section label.
+/// when present, and the `Partial output` section label.
 fn assert_truncated_read(result: &ReadResult, expected_bytes: usize) {
     assert!(result.truncated, "result must be flagged truncated");
     assert_eq!(result.read_bytes, expected_bytes);
@@ -1481,8 +1481,8 @@ fn assert_truncated_read(result: &ReadResult, expected_bytes: usize) {
     if let Some(Section::Content(section)) = result.content_sections().first() {
         assert_eq!(
             section.label.as_deref(),
-            Some("Partial result"),
-            "truncated content must be labeled Partial result"
+            Some("Partial output"),
+            "truncated content must be labeled Partial output"
         );
     }
 }
@@ -1727,6 +1727,10 @@ fn read_untruncated_result_omits_truncated_metadata_and_section_label() {
         let Section::Content(section) = &sections[0] else {
             panic!("expected a text content section");
         };
-        assert_eq!(section.label, None, "uncapped reads keep no label");
+        assert_eq!(
+            section.label.as_deref(),
+            Some("Output"),
+            "uncapped reads label their output Result"
+        );
     });
 }

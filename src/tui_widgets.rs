@@ -37,7 +37,7 @@ use crate::markdown::render_markdown;
 use crate::saturating_cast::saturating_u16;
 use crate::theme::{
     CHAT_SELECTION_BG, INPUT_BORDER_COLOR, MUTED_TEXT_COLOR, SEPARATOR_LINE_COLOR,
-    SUBAGENT_VIEW_SEPARATOR_COLOR, USER_MESSAGE_BG_COLOR,
+    SUBAGENT_VIEW_HEADER_BG_COLOR, SUBAGENT_VIEW_SEPARATOR_COLOR, USER_MESSAGE_BG_COLOR,
 };
 use crate::tui_reducer_state::BubbleExpansionTarget;
 use crate::tui_reducer_state::ChatEntry;
@@ -399,6 +399,15 @@ fn draw_internal(
             }
         }
 
+        // Tint the whole header block (content, scrollbar column and the
+        // divider below) so the drill-in header reads as distinct from the
+        // scrollable transcript; cells the content leaves untouched keep it.
+        for tinted_area in [header_area, header_separator_area] {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(SUBAGENT_VIEW_HEADER_BG_COLOR)),
+                tinted_area,
+            );
+        }
         let paragraph = Paragraph::new(header_lines);
         frame.render_widget(paragraph, header_content_area);
 

@@ -140,7 +140,7 @@ impl ToolCallResult for WriteResult {
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
         vec![Section::Content(ContentSection {
-            label: None,
+            label: Some("Content".to_string()),
             content: content.to_string(),
             file_extension,
             line_number_offset: Some(0),
@@ -204,7 +204,7 @@ impl ToolCall for WriteCall {
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
         vec![Section::Content(ContentSection {
-            label: None,
+            label: Some("Content".to_string()),
             content,
             file_extension,
             line_number_offset: Some(0),

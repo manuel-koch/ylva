@@ -198,7 +198,7 @@ impl ToolCallResult for SearchResult {
                 .collect::<Vec<_>>()
                 .join("\n");
             return vec![Section::Content(ContentSection {
-                label: None,
+                label: Some("Output".to_string()),
                 content: paths,
                 file_extension: None,
                 line_number_offset: None,

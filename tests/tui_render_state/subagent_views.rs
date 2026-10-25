@@ -618,6 +618,31 @@ fn subagent_view_header_shortens_spawn_subagent_title() {
         !rendered.contains("Spawn Subagent"),
         "the plain title-cased tool name must not appear in the header: {rendered:?}"
     );
+
+    let row_text = |y: u16| -> String {
+        (0..60u16)
+            .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect()
+    };
+    let title_row = (0..20u16)
+        .find(|&y| row_text(y).contains("Subagent"))
+        .expect("header title row");
+    let separator_row = (title_row..20u16)
+        .find(|&y| row_text(y).starts_with('─'))
+        .expect("divider below the header");
+    let header_background = ratatui::style::Color::Rgb(40, 20, 34);
+    for y in [title_row, separator_row] {
+        assert_eq!(
+            buf.cell((59, y)).unwrap().bg,
+            header_background,
+            "row {y} must carry the header tint"
+        );
+    }
+    assert_ne!(
+        buf.cell((30, separator_row + 1)).unwrap().bg,
+        header_background,
+        "the chat area below the divider stays untinted"
+    );
 }
 
 /// While viewing a finished subagent's transcript, if the root loop is still
@@ -769,7 +794,7 @@ fn subagent_bubble_title_carries_the_agent_type_as_a_subtype() {
         "the label stays the inline primary: {title_row:?}"
     );
     assert!(
-        title_row.contains("status=unstructured"),
-        "the summary is untouched by the subtype promotion: {title_row:?}"
+        !title_row.contains("status="),
+        "the summary pairs are only rendered when expanded: {title_row:?}"
     );
 }

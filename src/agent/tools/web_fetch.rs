@@ -60,7 +60,7 @@ static WEB_FETCH_DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock:
          up to {media_max} bytes (a larger response fails, never a \
          truncated attachment). Text output is capped at {output_max} \
          bytes; longer output is truncated and flagged (`truncated` \
-         metadata, `Partial result` label). Only http:// and https:// \
+         metadata, `Partial output` label). Only http:// and https:// \
          URLs are accepted.",
         media_max = READ_MEDIA_MAX_BYTES,
         output_max = WEB_FETCH_MAX_OUTPUT_BYTES,

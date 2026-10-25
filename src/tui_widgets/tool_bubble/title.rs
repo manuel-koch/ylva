@@ -24,15 +24,42 @@ use super::super::bubbles::BubbleStyle;
 use super::super::SPINNER_FRAMES;
 use super::ToolBubbleArgs;
 
-struct SummarySegment {
-    text: String,
-    style: Style,
+/// A `key=value` result summary pair and the style it renders with.
+pub(super) struct SummaryPair {
+    pub(super) text: String,
+    pub(super) style: Style,
 }
 
-fn summary_spans(segments: &[SummarySegment]) -> Vec<Span<'static>> {
-    segments
+/// The finished call's `key=value` summary pairs, rendered in the expanded
+/// body's `Result:` section rather than in the title.
+pub(super) fn summary_pairs(bubble: &ToolBubbleArgs<'_>) -> Vec<SummaryPair> {
+    let ToolCallState::Done { summary, .. } = bubble.state else {
+        return vec![];
+    };
+    let is_subagent = bubble.name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME;
+    let dim_white = Style::default()
+        .fg(CONTENT_COLOR)
+        .add_modifier(Modifier::DIM);
+    let failure_status = Style::default()
+        .fg(ERROR_COLOR)
+        .add_modifier(Modifier::BOLD);
+    summary
         .iter()
-        .map(|segment| Span::styled(segment.text.clone(), segment.style))
+        .map(|(key, value)| SummaryPair {
+            text: format!(
+                "{key}={}",
+                if bubble.path_like_arguments.contains(&key.as_str()) {
+                    crate::home_relative_path::display_path(std::path::Path::new(value))
+                } else {
+                    value.clone()
+                }
+            ),
+            style: if is_subagent && key == "status" && value == "failure" {
+                failure_status
+            } else {
+                dim_white
+            },
+        })
         .collect()
 }
 
@@ -178,7 +205,7 @@ pub(super) fn append_tool_chrome(
                     }
                 })
             });
-    let props_text: String = iter
+    let property_lines: Vec<String> = iter
         .filter_map(|(k, v)| {
             scalar_prop_value(v).map(|value| {
                 let value = display_value(k, value);
@@ -191,17 +218,16 @@ pub(super) fn append_tool_chrome(
                 format!("{k}={display_value}")
             })
         })
-        .collect::<Vec<_>>()
-        .join(" ");
+        .collect();
 
     let content_sections = bubble.content_sections(&extra_content_sections);
 
-    // The expanded args line is redundant when the body sections already
+    // The expanded arguments are redundant when the body sections already
     // carry every title argument (bash: the `Label`/`Command` sections cover
     // `label`/`command`), so it is skipped; the collapsed title line always
     // keeps the args. Data-driven by section labels — tools whose sections
     // don't cover their title keys (`edit`, `write`, `spawn_subagent`) keep
-    // rendering the args line as before, as do old persisted bubbles whose
+    // rendering the arguments as before, as do old persisted bubbles whose
     // sections predate this rule.
     let content_section_labels: Vec<String> = content_sections
         .iter()
@@ -217,10 +243,39 @@ pub(super) fn append_tool_chrome(
             .iter()
             .all(|(key, _)| content_section_labels.contains(&key.to_lowercase()));
 
-    let has_args = primary_text.as_ref().is_some_and(|s| !s.is_empty()) || !props_text.is_empty();
+    let dim_white = Style::default()
+        .fg(CONTENT_COLOR)
+        .add_modifier(Modifier::DIM);
+
+    // The duration is `time_text`, right-aligned in the title row; the
+    // `key=value` summary pairs render in the expanded `Result:` section.
+    let has_summary_pairs = !summary_pairs(&bubble).is_empty();
+    let time_text: String = match state {
+        ToolCallState::Running { .. } if is_subagent && !is_queued_subagent => elapsed_seconds
+            .map(|elapsed_seconds| format!("{elapsed_seconds}s"))
+            .unwrap_or_default(),
+        ToolCallState::Done { duration, .. } => format!("{:.3}s", duration.as_secs_f64()),
+        ToolCallState::Error { duration, .. } if duration.as_nanos() > 0 => {
+            format!("{:.3}s", duration.as_secs_f64())
+        }
+        _ => String::new(),
+    };
+    // The optional tool label (e.g. bash's `label`) accompanies the primary
+    // argument in the collapsed title; it is never the primary itself.
+    let label_text: Option<String> = title_arguments
+        .iter()
+        .skip(usize::from(primary_text.is_some()))
+        .find(|(key, _)| key == "label")
+        .and_then(|(_, value)| scalar_prop_value(value))
+        .map(|value| sanitize_inline(&value))
+        .filter(|value| !value.is_empty());
+
+    let has_args =
+        primary_text.as_ref().is_some_and(|s| !s.is_empty()) || !property_lines.is_empty();
     let has_expandable_body = !content_sections.is_empty()
         || matches!(state, ToolCallState::Done { result_section, .. } if !result_section.content.is_empty())
-        || has_args;
+        || has_args
+        || has_summary_pairs;
     let expand_indicator = if has_expandable_body {
         if collapsed {
             "▶"
@@ -231,140 +286,31 @@ pub(super) fn append_tool_chrome(
         " "
     };
 
-    let tool_ran = matches!(state, ToolCallState::Done { .. });
-    let dim_white = Style::default()
-        .fg(CONTENT_COLOR)
-        .add_modifier(Modifier::DIM);
-    let failure_status = Style::default()
-        .fg(ERROR_COLOR)
-        .add_modifier(Modifier::BOLD);
-
-    // The caller assigns each segment's style explicitly so summary
-    // rendering does not need to infer special text from the final string.
-    let mut summary_segments: Vec<SummarySegment> = vec![];
-    let summary_text: String = match state {
-        ToolCallState::Running { .. } if is_subagent && !is_queued_subagent => {
-            if let Some(elapsed_seconds) = elapsed_seconds {
-                let duration_formatted = format!("{elapsed_seconds}s");
-                summary_segments.push(SummarySegment {
-                    text: duration_formatted.clone(),
-                    style: dim_white,
-                });
-                duration_formatted
-            } else {
-                String::new()
-            }
-        }
-        ToolCallState::Done {
-            summary, duration, ..
-        } => {
-            let duration_seconds = duration.as_secs_f64();
-            let duration_formatted = format!("{duration_seconds:.3}s");
-            let mut parts: Vec<String> = summary
-                .iter()
-                .map(|(key, value)| format!("{key}={}", display_value(key, value.clone())))
-                .collect();
-            parts.push(duration_formatted);
-            for (index, (key, value)) in summary.iter().enumerate() {
-                if index > 0 {
-                    summary_segments.push(SummarySegment {
-                        text: " ".to_string(),
-                        style: dim_white,
-                    });
-                }
-                summary_segments.push(SummarySegment {
-                    text: format!("{key}={}", display_value(key, value.clone())),
-                    style: if is_subagent && key == "status" && value == "failure" {
-                        failure_status
-                    } else {
-                        dim_white
-                    },
-                });
-            }
-            if !summary.is_empty() {
-                summary_segments.push(SummarySegment {
-                    text: " ".to_string(),
-                    style: dim_white,
-                });
-            }
-            summary_segments.push(SummarySegment {
-                text: format!("{duration_seconds:.3}s"),
-                style: dim_white,
-            });
-            parts.join(" ")
-        }
-        ToolCallState::Error { duration, .. } if duration.as_nanos() > 0 => {
-            summary_segments.push(SummarySegment {
-                text: format!("{:.3}s", duration.as_secs_f64()),
-                style: dim_white,
-            });
-            format!("{:.3}s", duration.as_secs_f64())
-        }
-        _ => String::new(),
-    };
-
     // Build the indicator + tool-name prefix.
     let title_prefix = format!("{expand_indicator} {display_title}");
 
     // ── Title rendering ─────────────────────────────────────────────────────
     // Two display modes controlled by `collapsed`:
     //
-    //   Collapsed — single line: `{prefix} {primary_arg} {props} [→ {summary}]`
-    //     If the full text exceeds `wrap_width`, the line is truncated and
-    //     terminated with "…" (dim white) so the bubble always fits in the
-    //     terminal width. Region styling still applies to the visible chars.
+    //   Collapsed — single line: `{prefix} {primary_arg} {label}  {time}`
+    //     The time (running or final duration) is right-aligned. If the left
+    //     part exceeds the width left of the time, it is truncated and
+    //     terminated with "…" (dim white) so the time always stays visible.
     //
-    //   Expanded — two sections:
-    //     Line 1: `{prefix} [→ {summary}]`
-    //             prefix in border colour, summary in dim white.
-    //     Lines 2+: args (`{primary_arg} {props}`) only when args are present
-    //             and not already fully covered by body sections.
-    //             Hard-broken on `\n`, then width-wrapped at `wrap_width - 2`
-    //             with a two-space indent. Primary arg chars → bold white;
-    //             props chars → dim white.
+    //   Expanded — sections:
+    //     Line 1: `{prefix}  {time}`, prefix in border colour, time right-aligned.
+    //     Next lines: the primary arg (bold white), then, under an underlined
+    //             `Arguments:` label, the remaining args one `key=value` per
+    //             line (dim white), each width-wrapped at `wrap_width - 2`
+    //             with a two-space indent. Only when present and not already
+    //             fully covered by body sections.
+    //   Result summary pairs and tool output render in the body, see `body`.
 
     let prefix_char_len = title_prefix.chars().count();
 
-    // ── Build the args portion (shared between modes) ──────────────────────
-    // `args_after_prefix` starts with a space when non-empty.
-    let mut args_after_prefix = String::new();
-    let primary_content_len: usize; // chars in the primary arg value (no leading space)
-    if let Some(ref primary) = primary_text {
-        if !primary.is_empty() {
-            args_after_prefix.push(' ');
-            args_after_prefix.push_str(primary);
-            primary_content_len = primary.chars().count();
-        } else {
-            primary_content_len = 0;
-        }
-    } else {
-        primary_content_len = 0;
-    }
-    if !props_text.is_empty() {
-        args_after_prefix.push(' ');
-        args_after_prefix.push_str(&props_text);
-    }
-
-    // Summary suffix, used in both modes.
-    let summary_prefix = if has_args && tool_ran { " → " } else { " " };
-    if !summary_text.is_empty() {
-        summary_segments.insert(
-            0,
-            SummarySegment {
-                text: summary_prefix.to_string(),
-                style: dim_white,
-            },
-        );
-    }
-    let summary_suffix: String = if !summary_text.is_empty() {
-        if has_args && tool_ran {
-            format!(" → {summary_text}")
-        } else {
-            format!(" {summary_text}")
-        }
-    } else {
-        String::new()
-    };
+    let primary_content_len: usize = primary_text
+        .as_ref()
+        .map_or(0, |primary| primary.chars().count());
 
     let bold_white = Style::default()
         .fg(CONTENT_COLOR)
@@ -389,9 +335,18 @@ pub(super) fn append_tool_chrome(
     // `line_text` is the display string for the prefix+args portion of the row.
     // `prefix_end` and `primary_end` are char-index boundaries within `line_text`.
     // `truncated` appends a dim TRUNCATION_MARKER when the args were truncated.
-    // Summary segments are always rendered after the optional marker so the
-    // summary / duration stays visible even when args are truncated.
+    // The time is always rendered right-aligned after the optional marker so it
+    // stays visible even when args are truncated.
     const TRUNCATION_MARKER: &str = "…";
+    let time_char_len = time_text.chars().count();
+    let push_time_aligned = |spans: &mut Vec<Span<'static>>, used_chars: usize| {
+        if time_char_len == 0 {
+            return;
+        }
+        let padding = wrap_width.saturating_sub(used_chars + time_char_len).max(1);
+        spans.push(Span::raw(" ".repeat(padding)));
+        spans.push(Span::styled(time_text.clone(), dim_white));
+    };
     let emit_styled_line = |lines: &mut Vec<Line>,
                             line_text: &str,
                             prefix_end: usize,
@@ -423,17 +378,26 @@ pub(super) fn append_tool_chrome(
         if truncated {
             spans.push(Span::styled(TRUNCATION_MARKER, dim_white));
         }
-        if !summary_segments.is_empty() {
-            spans.extend(summary_spans(&summary_segments));
-        }
+        let used_chars = total + usize::from(truncated);
+        push_time_aligned(&mut spans, used_chars);
         lines.push(Line::from(spans));
     };
 
     if collapsed {
-        // ── Collapsed: single line, args truncated to always show summary ──
-        // Sanitize control characters that would break single-line rendering:
-        // newlines and tabs in the bash command must become visible inline glyphs.
-        let sanitized_args: String = args_after_prefix
+        // ── Collapsed: single line, args truncated to always show the time ──
+        // Only the primary argument and optional label are shown. Sanitize
+        // control characters that would break single-line rendering: newlines
+        // and tabs in the bash command must become visible inline glyphs.
+        let mut collapsed_args = String::new();
+        if let Some(primary) = primary_text.as_ref().filter(|primary| !primary.is_empty()) {
+            collapsed_args.push(' ');
+            collapsed_args.push_str(primary);
+        }
+        if let Some(label) = &label_text {
+            collapsed_args.push(' ');
+            collapsed_args.push_str(label);
+        }
+        let sanitized_args: String = collapsed_args
             .chars()
             .map(|c| match c {
                 '\n' => '↵',
@@ -443,15 +407,18 @@ pub(super) fn append_tool_chrome(
             })
             .collect();
         let sanitized_args_chars: Vec<char> = sanitized_args.chars().collect();
-        let summary_char_len = summary_suffix.chars().count();
 
-        // Reserve space for the summary suffix so it is always visible.
-        // The available columns for the args portion are: total width minus
-        // the prefix and the summary. One extra column is needed when
-        // truncating to leave room for TRUNCATION_MARKER.
+        // Reserve space (plus one gap column) for the right-aligned time.
+        // One extra column is needed when truncating to leave room for
+        // TRUNCATION_MARKER.
+        let time_reserved = if time_char_len > 0 {
+            time_char_len + 1
+        } else {
+            0
+        };
         let available_for_args = wrap_width
             .saturating_sub(prefix_char_len)
-            .saturating_sub(summary_char_len);
+            .saturating_sub(time_reserved);
         let args_fit = sanitized_args_chars.len() <= available_for_args;
         let truncated = !args_fit;
         let display_args_len = if truncated {
@@ -477,74 +444,47 @@ pub(super) fn append_tool_chrome(
         };
         emit_styled_line(lines, &display_text, prefix_end, primary_end, truncated);
     } else {
-        // ── Expanded: line 1 = prefix + summary; lines 2+ = args ──────────
+        // ── Expanded: line 1 = prefix + right-aligned time; then args, summary ──
 
-        // Line 1: prefix in border colour, summary in dim white.
-        let first_line = format!("{title_prefix}{summary_suffix}");
-        let first_chars: Vec<char> = first_line.chars().collect();
-        let first_total = first_chars.len();
-        let mut first_spans: Vec<Span> = vec![bar.clone(), spinner_or_margin.clone()];
-        let pe = prefix_char_len.min(first_total);
-        if pe > 0 {
-            first_spans.push(Span::styled(
-                first_chars[..pe].iter().collect::<String>(),
+        // Line 1: prefix in border colour, time right-aligned in dim white.
+        let mut first_spans: Vec<Span<'static>> = vec![
+            bar.clone(),
+            spinner_or_margin.clone(),
+            Span::styled(
+                title_prefix.clone(),
                 Style::default().fg(TOOL_BUBBLE_BORDER_COLOR),
-            ));
-        }
-        if first_total > pe {
-            first_spans.extend(summary_spans(&summary_segments));
-        }
+            ),
+        ];
+        push_time_aligned(&mut first_spans, prefix_char_len);
         lines.push(Line::from(first_spans));
 
-        // Lines 2+: args, hard-broken then width-wrapped. Skipped when the
-        // body sections already carry every title argument (see
+        // Lines 2+: the primary argument, then the remaining arguments one
+        // `key=value` per line under an underlined `Arguments:` label. Skipped
+        // when the body sections already carry every title argument (see
         // `args_covered_by_sections` above).
-        if !args_after_prefix.is_empty() && !args_covered_by_sections {
-            // Strip the leading space that `args_after_prefix` carries.
-            let args_text = args_after_prefix.trim_start_matches(' ');
+        if has_args && !args_covered_by_sections {
             let arg_wrap_width = wrap_width.saturating_sub(2).max(1);
-            let hard_segments: Vec<&str> = args_text.split('\n').collect();
-            let mut arg_lines: Vec<String> = Vec::new();
-            for segment in &hard_segments {
-                for chunk in textwrap::wrap(segment, arg_wrap_width) {
-                    arg_lines.push(chunk.to_string());
+            let indented_line = |text: String, text_style: Style| {
+                Line::from(vec![
+                    bar.clone(),
+                    margin.clone(),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(text, text_style),
+                ])
+            };
+            if let Some(primary) = primary_text.as_ref().filter(|primary| !primary.is_empty()) {
+                for chunk in textwrap::wrap(primary, arg_wrap_width) {
+                    lines.push(indented_line(chunk.into_owned(), bold_white));
                 }
             }
-
-            // Track char offset within `args_text` to preserve bold/dim boundary.
-            let mut chars_consumed: usize = 0;
-            for arg_line in &arg_lines {
-                let chunk_chars: Vec<char> = arg_line.chars().collect();
-                let chunk_len = chunk_chars.len();
-
-                // Primary region: first `primary_content_len` chars of `args_text`.
-                let primary_end_in_chunk = primary_content_len
-                    .saturating_sub(chars_consumed)
-                    .min(chunk_len);
-
-                let indent = "  ";
-
-                let mut cont_spans: Vec<Span> = vec![bar.clone(), margin.clone()];
-                cont_spans.push(Span::styled(indent, Style::default()));
-                if primary_end_in_chunk > 0 {
-                    cont_spans.push(Span::styled(
-                        chunk_chars[..primary_end_in_chunk]
-                            .iter()
-                            .collect::<String>(),
-                        bold_white,
-                    ));
+            if !property_lines.is_empty() {
+                lines.push(Line::from(vec![bar.clone(), margin.clone()]));
+                super::body::push_section_label(lines, style, "Arguments:");
+                for property in &property_lines {
+                    for chunk in textwrap::wrap(property, arg_wrap_width) {
+                        lines.push(indented_line(chunk.into_owned(), dim_white));
+                    }
                 }
-                if chunk_len > primary_end_in_chunk {
-                    cont_spans.push(Span::styled(
-                        chunk_chars[primary_end_in_chunk..]
-                            .iter()
-                            .collect::<String>(),
-                        dim_white,
-                    ));
-                }
-                lines.push(Line::from(cont_spans));
-
-                chars_consumed += chunk_len;
             }
         }
     }

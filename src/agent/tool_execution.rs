@@ -108,7 +108,7 @@ impl PendingTool {
                         if let Some(output) = &partial_output {
                             content_sections.push(crate::agent::tools::Section::Content(
                                 crate::agent::tools::ContentSection {
-                                    label: Some("Partial result".to_string()),
+                                    label: Some("Partial output".to_string()),
                                     content: output.clone(),
                                     file_extension: None,
                                     line_number_offset: Some(0),

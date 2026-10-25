@@ -189,7 +189,11 @@ fn text_success_carries_text_and_metadata() {
     }
     match &sections[1] {
         Section::Content(section) => {
-            assert_eq!(section.label, None, "complete results carry no label");
+            assert_eq!(
+                section.label.as_deref(),
+                Some("Output"),
+                "complete results label their output Result"
+            );
             assert_eq!(section.content, "# Title");
         }
         other => panic!("expected a content section, got {other:?}"),
@@ -223,7 +227,7 @@ fn truncated_text_carries_metadata_and_the_partial_result_section() {
     assert_eq!(sections.len(), 2);
     match &sections[1] {
         Section::Content(section) => {
-            assert_eq!(section.label.as_deref(), Some("Partial result"));
+            assert_eq!(section.label.as_deref(), Some("Partial output"));
         }
         other => panic!("expected a content section, got {other:?}"),
     }

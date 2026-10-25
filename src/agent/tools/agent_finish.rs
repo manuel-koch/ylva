@@ -29,7 +29,9 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::{Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS};
+use super::{
+    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
+};
 use crate::sandbox::ApprovalCheck;
 use crate::subagent_manager::{FinishResult, FinishResultOrigin};
 
@@ -188,6 +190,49 @@ impl ToolCall for AgentFinishCall {
         DEFAULT_TOOL_TIMEOUT_SECS
     }
 
+    fn is_body_argument(&self, key: &str) -> bool {
+        matches!(key, "result" | "error" | "sources")
+    }
+
+    fn pending_content_sections(&self) -> Vec<Section> {
+        let text_argument = |key: &str| {
+            self.raw_arguments
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+        let sources = self
+            .raw_arguments
+            .get("sources")
+            .and_then(Value::as_array)
+            .map(|sources| {
+                sources
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.is_empty());
+        [
+            ("Error", text_argument("error"), Some("md")),
+            ("Sources", sources, None),
+            ("Result", text_argument("result"), Some("md")),
+        ]
+        .into_iter()
+        .filter_map(|(label, content, file_extension)| {
+            content.map(|content| {
+                Section::Content(ContentSection {
+                    label: Some(label.to_string()),
+                    content,
+                    file_extension: file_extension.map(str::to_string),
+                    line_number_offset: None,
+                })
+            })
+        })
+        .collect()
+    }
+
     fn argument_order(&self, key: &str) -> usize {
         match key {
             "status" => 0,
@@ -253,6 +298,36 @@ mod tests {
             run_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
         }
+    }
+
+    #[test]
+    fn result_error_and_sources_move_from_the_title_into_sections() {
+        let tool = AgentFinishTool::new(test_config());
+        let arguments = serde_json::json!({
+            "status": "success",
+            "result": "## Findings\n- one",
+            "sources": ["a.md", "b.md"],
+        });
+        let call = tool.create_call(Uuid::new_v4(), arguments);
+
+        let title_keys: Vec<String> = call.title_arguments().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(title_keys, ["status"]);
+
+        let sections: Vec<(String, String)> = call
+            .pending_content_sections()
+            .into_iter()
+            .map(|section| match section {
+                Section::Content(content) => (content.label.unwrap(), content.content),
+                other => panic!("unexpected section {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            sections,
+            [
+                ("Sources".to_string(), "a.md\nb.md".to_string()),
+                ("Result".to_string(), "## Findings\n- one".to_string()),
+            ]
+        );
     }
 
     #[test]

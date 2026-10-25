@@ -357,7 +357,7 @@ fn live_bash_tool_bubble_matches_serialized_and_replayed_bubble() {
         result_section: ResultSection::plain(result.clone()),
         summary: vec![("output_bytes".to_string(), result.len().to_string())],
         content_sections: vec![Section::Content(ContentSection {
-            label: Some("Result".to_string()),
+            label: Some("Output".to_string()),
             content: result,
             file_extension: None,
             line_number_offset: Some(0),
@@ -676,7 +676,7 @@ fn live_spawn_subagent_tool_bubble_matches_serialized_and_replayed_bubble() {
         line_number_offset: None,
     });
     let result_section = Section::Content(ContentSection {
-        label: Some("Result".to_string()),
+        label: Some("Output".to_string()),
         content: subagent_result.to_string(),
         file_extension: Some("md".to_string()),
         line_number_offset: None,

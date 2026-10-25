@@ -505,7 +505,7 @@ fn bash_result_content_sections_lead_with_label_then_command_before_output() {
     }
     match &sections[2] {
         Section::Content(section) => {
-            assert_eq!(section.label.as_deref(), Some("Result"));
+            assert_eq!(section.label.as_deref(), Some("Output"));
             assert_eq!(section.content, "lorem ipsum\n");
             assert_eq!(section.line_number_offset, Some(0));
         }
@@ -527,8 +527,8 @@ fn bash_result_truncated_output_labels_partial_result() {
         Section::Content(section) => {
             assert_eq!(
                 section.label.as_deref(),
-                Some("Partial result"),
-                "truncated capture must be labeled Partial result"
+                Some("Partial output"),
+                "truncated capture must be labeled Partial output"
             );
             assert_eq!(section.content, "first thousand lines only\n");
         }
@@ -546,7 +546,7 @@ fn bash_result_truncated_output_labels_partial_result() {
     assert_eq!(sections.len(), 1);
     match &sections[0] {
         Section::Content(section) => {
-            assert_eq!(section.label.as_deref(), Some("Partial result"))
+            assert_eq!(section.label.as_deref(), Some("Partial output"))
         }
         other => panic!("unexpected section type: {other:?}"),
     }

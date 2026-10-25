@@ -45,7 +45,7 @@ pub use native::{HttpFetchBackend, MAX_REDIRECTS};
 /// Maximum number of bytes of model-facing text (HTML-derived markdown or
 /// verbatim text) a `web_fetch` result carries. Longer output is truncated on
 /// a UTF-8 character boundary and flagged `truncated` (metadata +
-/// `Partial result` content-section label, no in-text marker) — the same
+/// `Partial output` content-section label, no in-text marker) — the same
 /// vocabulary capped `read`/`bash`/`search` output uses.
 pub const WEB_FETCH_MAX_OUTPUT_BYTES: usize = 65536;
 
