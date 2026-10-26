@@ -29,7 +29,8 @@ For every agent show info:
 
 Should this be a dedicated keybinding instead of a slash-command ?
 Keybinding would be more usable when you are in the mids of drafting a message
-and want to view finished/running subagents.
+and want to view finished/running subagents or a current clarify/approval
+is shown and pressing esc would abort the current clarify/approval.
 
 ## /status
 
