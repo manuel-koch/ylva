@@ -1176,8 +1176,9 @@ for the full mechanics.
   banner's question/context text, and a user's clarify answer render Markdown
   instead of plain wrapped text. Supported: **bold**/*italic*, `inline code`
   (distinct color), fenced code blocks (dim, verbatim, syntax-highlighted
-  when a language tag is given), bullet/numbered lists, headings,
-  blockquotes, horizontal rules, and tables. Tables fit the bubble width,
+  when a language tag is given), bullet/numbered lists (nested lists are
+  indented under their parent item), headings, blockquotes,
+  horizontal rules, and tables. Tables fit the bubble width,
   including by character-wrapping unbroken cell content when necessary.
   Styled Markdown rows use terminal display widths, including for wide
   Unicode glyphs, so content stays inside the bubble. Plain text with no

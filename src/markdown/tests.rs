@@ -153,6 +153,32 @@ fn bullet_list_gets_prefix_and_indented_continuation() {
 }
 
 #[test]
+fn nested_loose_bullet_list_is_indented_without_blank_before_children() {
+    let md = "- Task A:\n  - one\n  - two\n\n- Task B:\n  - three";
+    let rendered: Vec<String> = render_markdown(md, 80).iter().map(plain_text).collect();
+    assert_eq!(
+        rendered,
+        vec![
+            "• Task A:",
+            "  • one",
+            "  • two",
+            "",
+            "• Task B:",
+            "  • three",
+        ]
+    );
+}
+
+#[test]
+fn nested_numbered_list_wraps_under_its_own_indent() {
+    let rendered: Vec<String> = render_markdown("- a\n  1. one two three", 10)
+        .iter()
+        .map(plain_text)
+        .collect();
+    assert_eq!(rendered, vec!["• a", "  1. one", "     two", "     three"]);
+}
+
+#[test]
 fn numbered_list_gets_prefix() {
     let lines = render_markdown("1. first\n2. second", 80);
     let rendered: Vec<String> = lines.iter().map(plain_text).collect();
