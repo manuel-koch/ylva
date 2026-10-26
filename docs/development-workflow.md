@@ -98,10 +98,19 @@ Releases are automated by [release-plz](https://release-plz.dev/)
 `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` from conventional commits;
 merging it tags `vX.Y.Z` and creates the GitHub release (no crates.io publishing;
 `git_only = true` makes release-plz compare against the latest git tag).
+[`release-notes.yml`](../.github/workflows/release-notes.yml) runs when a release is
+published (or manually via `workflow_dispatch` with a tag). It builds Ylva, runs it
+headless over the commits since the previous tag following
+[release-notes-workflow](./release-notes-workflow.md) with the restricted profile
+[`.github/workflows/release-notes.config.toml`](../.github/workflows/release-notes.config.toml) (`write`/`edit` only on
+`release-notes.md`, `bash` only for read-only `git log`/`show`/`diff`), and replaces the
+GitHub release body with the curated notes. `CHANGELOG.md` stays release-plz-generated
+and is not touched.
 Repository setup (maintainer, GitHub settings):
 
 - repository secret `RELEASE_PLZ_TOKEN`: fine-grained PAT with contents and
   pull-requests write
+- repository secret `OPENROUTER_API_KEY`: provider key for the release-notes job
 - ruleset on `main`: require a pull request and passing CI checks, allow only the
   merge-commit method, bypass for the PAT owner
 

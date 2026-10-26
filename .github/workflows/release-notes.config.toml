@@ -1,0 +1,55 @@
+# Ylva profile for the release-notes workflow (.github/workflows/release-notes.yml).
+# The workflow installs it as the `release-notes` profile under a temporary YLVA_HOME.
+default_engine = "default"
+
+[provider_connections.openrouter]
+provider = "openrouter"
+api_base_url = "https://openrouter.ai"
+api_key = "${OPENROUTER_API_KEY}"
+
+[engines.default]
+provider_connection = "openrouter"
+model = "openai/gpt-6-luna"
+
+[agents.default]
+allowed_tools = ["write", "edit", "bash"]
+
+# Last match wins: only `release-notes.md` inside the workspace may be written or edited.
+[tools.write]
+rules = [
+  { pattern = "**", verdict = "auto_denied", reason = "Only release-notes.md may be changed." },
+  { pattern = "**/release-notes.md", verdict = "auto_approved" },
+  { rule = "outside_workspace", verdict = "auto_denied" },
+]
+
+[tools.edit]
+rules = [
+  { pattern = "**", verdict = "auto_denied", reason = "Only release-notes.md may be changed." },
+  { pattern = "**/release-notes.md", verdict = "auto_approved" },
+  { rule = "outside_workspace", verdict = "auto_denied" },
+]
+
+# Only read-only history queries; other commands have no rule, so they fall back to approval, which headless mode denies.
+# Excluded on purpose: --output (writes files), --ext-diff and --textconv (run external programs).
+[tools.bash]
+rules = [
+  {
+      command = ["git", "**"],
+      only_arguments = ["log", "show", "--no-pager", "--oneline", "--pretty", "--format", "--decorate", "--no-decorate", "--graph", "--all", "--branches", "--tags", "--no-walk", "--first-parent", "--merges", "--no-merges", "--reverse", "--date-order", "--topo-order", "--follow", "--no-notes", "--max-count", "--skip", "--since", "--until", "--author", "--committer", "--grep", "--date", "--max-parents", "--min-parents", "--patch", "--no-patch", "--raw", "--numstat", "--shortstat", "--stat", "--name-only", "--name-status", "--summary", "--check", "--no-color", "--no-ext-diff", "--no-textconv", "--unified", "--find-renames", "--no-renames"],
+      verdict = "auto_approved"
+  },
+  {
+      command = ["git", "**"],
+      only_arguments = ["diff", "--no-pager", "--patch", "--no-patch", "--raw", "--numstat", "--shortstat", "--stat", "--name-only", "--name-status", "--summary", "--check", "--no-color", "--no-ext-diff", "--no-textconv", "--unified", "--find-renames", "--no-renames"],
+      verdict = "auto_approved"
+  },
+  {
+      command = ["head", "**"],
+      only_arguments = ["-n", "-c"],
+      verdict = "auto_approved"
+  },
+  { rule = "unquoted_glob",              verdict = "auto_denied" },
+  { rule = "unquoted_brace_expansion",   verdict = "auto_denied" },
+  { rule = "variable_assignment_prefix", verdict = "auto_denied" },
+  { rule = "backgrounded",               verdict = "auto_denied" },
+]

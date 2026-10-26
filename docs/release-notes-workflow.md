@@ -4,8 +4,10 @@
 
 Releases are automated by release-plz from conventional commits (see
 [development workflow](./development-workflow.md#continuous-integration-and-releases));
-its generated `CHANGELOG.md` feeds the GitHub release. This workflow remains an optional,
-manually curated summary.
+its generated `CHANGELOG.md` is the developer-facing commit log. This workflow is the
+user-facing, curated summary: the
+[`release-notes.yml`](../.github/workflows/release-notes.yml) job runs it with Ylva after
+each release and replaces the GitHub release body. It can also be run manually.
 
 When requested by user, create brief release notes for recent commits (HEAD vs last tag,
 or an explicit range).
@@ -34,6 +36,14 @@ Output entries one after another with nothing between them — no `---` separato
 only blank lines between entries, no numbered lists, no extra headings.
 The trailing blank line inside each entry is the only allowed spacing.
 
+Breaking changes are never mixed into ordinary entries. A commit is breaking when its
+type is followed by `!` (e.g. `feat!:`) or its message has a `BREAKING CHANGE:` footer.
+When there are any, put them first, under one `## Breaking changes` heading placed
+directly after the title (the only allowed extra heading). Give each entry the
+title prefix `Breaking:` and state in its text what users must change or lose. Omit
+the heading when there are none. A breaking commit is included even if it looks like
+a refactor.
+
 ```markdown
 **{change title}**
 
@@ -51,6 +61,23 @@ Example file content for two consecutive entries in the generated release notes
 **Fix: Wrong Activity Indicator**
 
 Executing a chat message should update the current activity indicator.
+
+**Tool `read` introduced**
+
+AI model can now use the `read` tool to access file within the workspace,
+```
+
+Example with a breaking change:
+
+```markdown
+# Session storage changes and new agent tool availability
+
+## Breaking changes
+
+**Breaking: Session section labels renamed**
+
+Persisted session files use new content-section labels; sessions saved by older
+versions may display their previous labels.
 
 **Tool `read` introduced**
 
