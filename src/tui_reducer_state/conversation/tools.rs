@@ -16,7 +16,15 @@
 
 use super::super::{ConversationView, STREAMING_THINKING_ENTRY_INDEX};
 use super::{AppState, BubbleExpansionTarget, ChatEntry, Focus, ToolCallState, TuiMode};
+use crate::tui_reducer_state::QueuedClarify;
 use uuid::Uuid;
+
+/// The next prompt waiting for the user, as picked by
+/// [`AppState::next_pending_interaction`].
+pub(crate) enum PendingInteraction {
+    Approval { tool_id: Uuid, tool_name: String },
+    Clarify(QueuedClarify),
+}
 
 impl AppState {
     /// Find the most-recent `ToolBubble` with `id == target_id`, searching
@@ -89,6 +97,22 @@ impl AppState {
         })
     }
 
+    /// The earliest-arrived prompt still waiting (approval or queued
+    /// clarify), so approvals and clarify questions are shown in strict
+    /// arrival order.
+    pub(crate) fn next_pending_interaction(&self) -> Option<PendingInteraction> {
+        self.pending_approval_order.iter().find_map(|id| {
+            if let Some(request) = self.queued_clarifies.get(id) {
+                return Some(PendingInteraction::Clarify(request.clone()));
+            }
+            self.pending_approval_name(*id)
+                .map(|tool_name| PendingInteraction::Approval {
+                    tool_id: *id,
+                    tool_name,
+                })
+        })
+    }
+
     /// Name of the tool bubble `tool_id` when it is still awaiting approval
     /// in the root or any subagent transcript.
     fn pending_approval_name(&self, tool_id: Uuid) -> Option<String> {
@@ -109,15 +133,41 @@ impl AppState {
         })
     }
 
-    /// Drops queued approvals whose bubble has left `Pending` (answered,
-    /// denied, stopped, or cleared), keeping the request order of the rest.
+    /// Whether the clarify bubble `id` is still running, i.e. unanswered.
+    fn clarify_bubble_is_running(&self, id: Uuid) -> bool {
+        fn find_in(messages: &[ChatEntry], id: Uuid) -> bool {
+            messages.iter().any(|entry| {
+                matches!(
+                    entry,
+                    ChatEntry::ToolBubble { id: entry_id, state, .. }
+                        if *entry_id == id && matches!(**state, ToolCallState::Running { .. })
+                )
+            })
+        }
+        find_in(&self.chat_entries, id)
+            || self
+                .subagent_conversations
+                .values()
+                .any(|conversation| find_in(&conversation.messages, id))
+    }
+
+    /// Drops queued prompts that were resolved — an approval whose bubble
+    /// left `Pending` (answered, denied, stopped, or cleared), or a queued
+    /// clarify that is no longer running — keeping the arrival order of the
+    /// rest.
     pub(crate) fn prune_pending_approval_order(&mut self) {
         let still_pending: Vec<Uuid> = self
             .pending_approval_order
             .iter()
             .copied()
-            .filter(|tool_id| self.pending_approval_name(*tool_id).is_some())
+            .filter(|id| {
+                self.pending_approval_name(*id).is_some()
+                    || (self.queued_clarifies.contains_key(id)
+                        && self.clarify_bubble_is_running(*id))
+            })
             .collect();
+        self.queued_clarifies
+            .retain(|id, _| still_pending.contains(id));
         self.pending_approval_order = still_pending;
     }
 

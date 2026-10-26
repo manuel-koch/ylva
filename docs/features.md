@@ -895,8 +895,10 @@ parent keeps processing its own messages and tools while the subagent works.
   cancels every running and queued subagent, settling each spawn call as cancelled.
 - A subagent's own tool calls go through the same approval flow as the
   parent's — a subagent is never auto-denied just for being a subagent. Approval
-  prompts are presented one at a time in request order; a subagent waiting behind
-  another prompt stays blocked while other subagents continue running.
+  prompts and `clarify` questions share one queue and are presented one at a
+  time in strict arrival order; a prompt on screen is never displaced by a later
+  one, and a subagent waiting behind another prompt stays blocked while other
+  subagents continue running.
 - Use `--auto-approve-spawn` to skip the human-approval prompt for
   `spawn_subagent` calls (mirrors `--auto-approve-edit` / `--auto-approve-write`).
 - Concurrent subagents share a filesystem. They may write the same file at the

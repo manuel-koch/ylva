@@ -378,10 +378,17 @@ pub enum Effect {
         id: Uuid,
         reason: String,
     },
-    /// Send `AgentCommand::AnswerClarify(answer)` to the agent.
-    AnswerClarify(String),
-    /// Send `AgentCommand::AbortClarify` to the agent (user cancelled without answering).
-    AbortClarify,
+    /// Send `AgentCommand::AnswerClarify(answer)` to the agent that asked
+    /// clarify question `id`.
+    AnswerClarify {
+        id: Uuid,
+        answer: String,
+    },
+    /// Send `AgentCommand::AbortClarify` to the agent that asked clarify
+    /// question `id` (user cancelled without answering).
+    AbortClarify {
+        id: Uuid,
+    },
     /// Send `AgentCommand::Stop` to the agent.
     StopAgent,
     /// Quit the TUI event loop.

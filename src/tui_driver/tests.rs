@@ -86,13 +86,14 @@ async fn clarify_commands_keep_their_destination_after_the_reducer_leaves_pendin
             let mut textarea = TextArea::from(["unfinished draft"]);
             configure_textarea(&mut textarea);
             let context = textarea_ctx_from(&textarea);
+            let clarify_id = Uuid::new_v4();
             process_one_update(
                 &mut state,
                 &mut textarea,
                 &cmd_tx,
                 &context,
                 &UiUpdate::ClarifyPending {
-                    id: Uuid::new_v4(),
+                    id: clarify_id,
                     question: "Which option?".to_string(),
                     context: None,
                     choices: None,
@@ -161,7 +162,7 @@ async fn clarify_commands_keep_their_destination_after_the_reducer_leaves_pendin
                 &mut state,
                 &mut textarea,
                 &cmd_tx,
-                vec![Effect::AbortClarify],
+                vec![Effect::AbortClarify { id: clarify_id }],
                 &mut mouse_drag,
                 &mut clipboard,
                 &mut pending_run_ids,

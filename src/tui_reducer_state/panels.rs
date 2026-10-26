@@ -38,6 +38,16 @@ pub struct HelpPopupState {
     pub help_drag_active: bool,
 }
 
+/// A clarify question waiting behind another approval or clarify prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedClarify {
+    pub id: uuid::Uuid,
+    pub question: String,
+    pub context: Option<String>,
+    pub choices: Option<Vec<String>>,
+    pub run_id: Option<uuid::Uuid>,
+}
+
 /// Clarify-tool banner scroll/drag state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ClarifyBannerState {

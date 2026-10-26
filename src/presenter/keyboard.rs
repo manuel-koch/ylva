@@ -25,6 +25,7 @@ use crate::tui_reducer_state::{
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::time::Instant;
+use uuid::Uuid;
 
 // ─── Keyboard routing ─────────────────────────────────────────────────────────
 
@@ -171,6 +172,16 @@ fn keyboard_main(
         InputEvent::KeyInput(key_event) => handle_key_main(state, key_event, textarea),
     }
 }
+/// Leaves `ClarifyPending` for `Pending`, returning the id of the clarify
+/// question that was on screen.
+fn take_clarify_id(state: &mut AppState) -> Option<Uuid> {
+    let TuiMode::ClarifyPending { id, .. } = state.mode else {
+        return None;
+    };
+    state.mode = TuiMode::Pending;
+    Some(id)
+}
+
 fn keyboard_clarify(
     state: &mut AppState,
     event: InputEvent,
@@ -184,22 +195,31 @@ fn keyboard_clarify(
         }
         InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => {
-            state.mode = TuiMode::Pending;
-            vec![Effect::AbortClarify, Effect::RestoreInputState]
+            let Some(id) = take_clarify_id(state) else {
+                return vec![];
+            };
+            vec![Effect::AbortClarify { id }, Effect::RestoreInputState]
         }
         InputEvent::Escape => {
             if textarea.is_empty {
-                state.mode = TuiMode::Pending;
-                vec![Effect::AbortClarify, Effect::RestoreInputState]
+                let Some(id) = take_clarify_id(state) else {
+                    return vec![];
+                };
+                vec![Effect::AbortClarify { id }, Effect::RestoreInputState]
             } else {
                 vec![Effect::ClearTextarea]
             }
         }
         InputEvent::Paste(text) => vec![Effect::Paste(text)],
         InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Enter => {
-            state.mode = TuiMode::Pending;
+            let Some(id) = take_clarify_id(state) else {
+                return vec![];
+            };
             vec![
-                Effect::AnswerClarify(textarea.text.clone()),
+                Effect::AnswerClarify {
+                    id,
+                    answer: textarea.text.clone(),
+                },
                 Effect::RestoreInputState,
             ]
         }

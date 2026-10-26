@@ -62,7 +62,7 @@ pub use model_picker::{
     ChoiceLabel, InputSnapshot, ModelChoice, ModelParameterEdit, ParameterField, PickerRowLayout,
     SlashOverlay,
 };
-pub use panels::{ClarifyBannerState, HelpPopupState, TuiDisplayMetadata};
+pub use panels::{ClarifyBannerState, HelpPopupState, QueuedClarify, TuiDisplayMetadata};
 pub use selection::{BannerDragSelection, ChatSelection};
 pub use session_picker::{SessionAction, SessionChoice, SessionPicker, SessionPickerPhase};
 

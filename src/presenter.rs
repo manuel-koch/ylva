@@ -58,11 +58,17 @@ pub struct TextareaContext {
 
 /// Apply one event to `state`, return the effects the Driver must execute.
 pub fn update(state: &mut AppState, event: TuiEvent, textarea: &TextareaContext) -> Vec<Effect> {
-    match event {
+    let mut effects = match event {
         TuiEvent::Input(input_event) => route_keyboard(state, input_event, textarea),
         TuiEvent::Mouse(mouse_event) => route_mouse(state, mouse_event, textarea),
         TuiEvent::Domain(domain_event) => route_domain(state, domain_event),
+    };
+    // A queued clarify just reached the screen: park the draft like a
+    // freshly arrived clarify does.
+    if std::mem::take(&mut state.queued_clarify_activated) {
+        effects.push(Effect::SaveInputStateAndClear);
     }
+    effects
 }
 
 #[cfg(test)]

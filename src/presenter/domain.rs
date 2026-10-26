@@ -720,7 +720,12 @@ fn domain_clarify_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effec
                     run_id,
                 },
             );
-            state.mode = TuiMode::Pending;
+            // Only the clarify call's own completion ends the question; other
+            // tools (e.g. from parallel subagents) finishing must not drop it.
+            if matches!(state.mode, TuiMode::ClarifyPending { id: clarify_id, .. } if clarify_id == id)
+            {
+                state.mode = TuiMode::Pending;
+            }
             vec![]
         }
         DomainEvent::AgentIdle | DomainEvent::StreamCancelled => {
@@ -728,6 +733,15 @@ fn domain_clarify_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             state.focus = Focus::MainInput;
             vec![]
         }
+        // Tool lifecycle events of other agents (e.g. parallel subagents)
+        // keep flowing while a question is open; dropping them would lose
+        // their bubbles, titles and queued approvals.
+        event @ (DomainEvent::ToolPending { .. }
+        | DomainEvent::ClarifyPending { .. }
+        | DomainEvent::ToolStart { .. }
+        | DomainEvent::ToolProgress { .. }
+        | DomainEvent::ToolKilled { .. }
+        | DomainEvent::ToolDenied { .. }) => domain_pending(state, event),
         _ => vec![],
     }
 }

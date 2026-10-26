@@ -15,7 +15,7 @@
 //! Pure tool bubbles event handling.
 
 use crate::agent::tools::clarify::ClarifyTool;
-use crate::tui_reducer_state::{AppState, ChatEntry, Effect, Focus, ToolCallState, TuiMode};
+use crate::tui_reducer_state::{AppState, ChatEntry, Effect, Focus, QueuedClarify, ToolCallState};
 use uuid::Uuid;
 
 /// Shared handling for `DomainEvent::ToolPending`, used identically by
@@ -48,9 +48,7 @@ pub(super) fn push_tool_pending_bubble(
             }),
             collapsed: true,
         });
-    let already_awaiting_approval = matches!(state.focus, Focus::ToolApproval { .. })
-        || state.pending_tool_approval().is_some()
-        || matches!(state.mode, TuiMode::ClarifyPending { .. });
+    let already_awaiting_approval = state.has_outstanding_interaction();
     state.pending_approval_order.push(id);
     if already_awaiting_approval {
         return vec![];
@@ -108,17 +106,20 @@ pub(super) fn push_clarify_pending_bubble(
             }),
             collapsed: false,
         });
-    state.mode = TuiMode::ClarifyPending {
+    let request = QueuedClarify {
         id,
         question,
         context,
         choices,
+        run_id,
     };
-    // Scroll the clarify banner to the bottom so the question and choices
-    // are visible immediately; clamped to max_scroll on render.
-    state.clarify_banner_state.clarify_scroll_offset = usize::MAX;
-    state.focus = Focus::MainInput;
-    state.note_interactive_pause(run_id);
+    // Strict arrival order: behind another prompt, wait for it to resolve.
+    if state.has_outstanding_interaction() {
+        state.pending_approval_order.push(id);
+        state.queued_clarifies.insert(id, request);
+        return vec![];
+    }
+    state.show_clarify(request);
     // The banner sits on the same rows above the input as the approval
     // footer, so this save parks draft *and* overlay together — see
     // `InputSnapshot`.

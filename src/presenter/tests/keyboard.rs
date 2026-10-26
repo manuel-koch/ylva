@@ -823,8 +823,9 @@ fn clarify_digit_passes_through_to_textarea() {
 #[test]
 fn clarify_enter_answers_and_restores_textarea() {
     let mut state = AppState::new();
+    let clarify_id = Uuid::new_v4();
     state.mode = TuiMode::ClarifyPending {
-        id: Uuid::new_v4(),
+        id: clarify_id,
         question: "Pick one".to_string(),
         context: None,
         choices: None,
@@ -838,7 +839,10 @@ fn clarify_enter_answers_and_restores_textarea() {
     assert_eq!(
         effects,
         vec![
-            Effect::AnswerClarify("free-form answer".to_string()),
+            Effect::AnswerClarify {
+                id: clarify_id,
+                answer: "free-form answer".to_string(),
+            },
             Effect::RestoreInputState,
         ]
     );
@@ -847,8 +851,9 @@ fn clarify_enter_answers_and_restores_textarea() {
 #[test]
 fn clarify_esc_with_empty_input_aborts_question() {
     let mut state = AppState::new();
+    let clarify_id = Uuid::new_v4();
     state.mode = TuiMode::ClarifyPending {
-        id: Uuid::new_v4(),
+        id: clarify_id,
         question: "Pick one".to_string(),
         context: None,
         choices: None,
@@ -859,7 +864,7 @@ fn clarify_esc_with_empty_input_aborts_question() {
         &empty_textarea(),
     );
     assert_eq!(state.mode, TuiMode::Pending);
-    assert!(effects.contains(&Effect::AbortClarify));
+    assert!(effects.contains(&Effect::AbortClarify { id: clarify_id }));
     assert!(effects.contains(&Effect::RestoreInputState));
 }
 

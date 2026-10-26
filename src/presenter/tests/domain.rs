@@ -357,6 +357,233 @@ fn domain_streaming_clarify_pending_resets_scroll_to_bottom() {
 }
 
 #[test]
+fn clarify_pending_survives_unrelated_tool_done_and_ends_on_its_own() {
+    let tool_done = |id: Uuid| {
+        TuiEvent::Domain(DomainEvent::ToolDone {
+            id,
+            name: "search".to_string(),
+            result_section: ResultSection::plain(String::new()),
+            summary: vec![],
+            duration: std::time::Duration::from_secs(1),
+            content_sections: vec![],
+            run_id: None,
+        })
+    };
+    let mut state = AppState::new();
+    let clarify_id = Uuid::new_v4();
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ClarifyPending {
+            id: clarify_id,
+            question: "Test?".to_string(),
+            context: None,
+            choices: None,
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+
+    update(&mut state, tool_done(Uuid::new_v4()), &empty_textarea());
+    assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
+
+    update(&mut state, tool_done(clarify_id), &empty_textarea());
+    assert_eq!(state.mode, TuiMode::Pending);
+}
+
+#[test]
+fn prompts_are_shown_in_strict_arrival_order_across_approvals_and_clarifies() {
+    let tool_pending = |id: Uuid| DomainEvent::ToolPending {
+        id,
+        name: "bash".to_string(),
+        arguments: serde_json::json!({"command": "sleep 1"}),
+        content_sections: vec![],
+        title_arguments: vec![],
+        run_id: None,
+    };
+    let tool_start = |id: Uuid| DomainEvent::ToolStart {
+        id,
+        name: "bash".to_string(),
+        arguments: serde_json::json!({"command": "sleep 1"}),
+        content_sections: vec![],
+        title_arguments: vec![],
+        run_id: None,
+    };
+    let clarify_pending = |id: Uuid| DomainEvent::ClarifyPending {
+        id,
+        question: "Which?".to_string(),
+        context: None,
+        choices: None,
+        run_id: None,
+    };
+    let clarify_done = |id: Uuid| DomainEvent::ToolDone {
+        id,
+        name: "clarify".to_string(),
+        result_section: ResultSection::plain(String::new()),
+        summary: vec![],
+        duration: std::time::Duration::from_secs(1),
+        content_sections: vec![],
+        run_id: None,
+    };
+
+    let mut state = AppState::new();
+    state.mode = TuiMode::Streaming;
+    let (first_approval, clarify, second_approval) =
+        (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+    update(
+        &mut state,
+        TuiEvent::Domain(tool_pending(first_approval)),
+        &empty_textarea(),
+    );
+    let effects = update(
+        &mut state,
+        TuiEvent::Domain(clarify_pending(clarify)),
+        &empty_textarea(),
+    );
+    update(
+        &mut state,
+        TuiEvent::Domain(tool_pending(second_approval)),
+        &empty_textarea(),
+    );
+
+    // The clarify did not displace the approval on screen.
+    assert!(effects.is_empty());
+    assert!(matches!(state.mode, TuiMode::Streaming));
+    assert!(matches!(
+        state.focus,
+        Focus::ToolApproval { tool_id, .. } if tool_id == first_approval
+    ));
+
+    // The first approval resolves: the clarify (earlier than the second
+    // approval) is next.
+    let effects = update(
+        &mut state,
+        TuiEvent::Domain(tool_start(first_approval)),
+        &empty_textarea(),
+    );
+    assert!(matches!(
+        state.mode,
+        TuiMode::ClarifyPending { id, .. } if id == clarify
+    ));
+    assert_eq!(state.focus, Focus::MainInput);
+    assert!(effects.contains(&Effect::SaveInputStateAndClear));
+
+    // After the clarify's call completes, the second approval follows.
+    state.mode = TuiMode::Pending; // as set when the user answers
+    update(
+        &mut state,
+        TuiEvent::Domain(clarify_done(clarify)),
+        &empty_textarea(),
+    );
+    assert!(matches!(
+        state.focus,
+        Focus::ToolApproval { tool_id, .. } if tool_id == second_approval
+    ));
+    assert!(state.queued_clarifies.is_empty());
+}
+
+#[test]
+fn approval_arriving_during_clarify_is_shown_after_the_answer() {
+    let mut state = AppState::new();
+    state.mode = TuiMode::Streaming;
+    let (clarify, approval) = (Uuid::new_v4(), Uuid::new_v4());
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ClarifyPending {
+            id: clarify,
+            question: "Which?".to_string(),
+            context: None,
+            choices: None,
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ToolPending {
+            id: approval,
+            name: "bash".to_string(),
+            arguments: serde_json::json!({"command": "sleep 1"}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+    state.mode = TuiMode::Pending; // as set when the user answers
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ToolDone {
+            id: clarify,
+            name: "clarify".to_string(),
+            result_section: ResultSection::plain(String::new()),
+            summary: vec![],
+            duration: std::time::Duration::from_secs(1),
+            content_sections: vec![],
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+    assert!(matches!(
+        state.focus,
+        Focus::ToolApproval { tool_id, .. } if tool_id == approval
+    ));
+}
+
+#[test]
+fn tool_start_during_clarify_keeps_its_bubble_and_title_arguments() {
+    let mut state = AppState::new();
+    state.mode = TuiMode::Streaming;
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Which?".to_string(),
+            context: None,
+            choices: None,
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+    let search = Uuid::new_v4();
+    let title_arguments = vec![("pattern".to_string(), serde_json::json!("a|b"))];
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ToolStart {
+            id: search,
+            name: "search".to_string(),
+            arguments: serde_json::json!({"pattern": "a|b"}),
+            content_sections: vec![],
+            title_arguments: title_arguments.clone(),
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ToolDone {
+            id: search,
+            name: "search".to_string(),
+            result_section: ResultSection::plain(String::new()),
+            summary: vec![],
+            duration: std::time::Duration::from_secs(1),
+            content_sections: vec![],
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+    assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
+    let Some(ChatEntry::ToolBubble { state: bubble, .. }) = state.find_tool_bubble_mut(search)
+    else {
+        panic!("search bubble missing");
+    };
+    assert!(matches!(
+        bubble.as_ref(),
+        ToolCallState::Done { title_arguments: shown, .. } if *shown == title_arguments
+    ));
+}
+
+#[test]
 fn subagent_engine_configuration_is_retained_for_its_conversation_view() {
     let mut state = AppState::new();
     let run_id = Uuid::new_v4();

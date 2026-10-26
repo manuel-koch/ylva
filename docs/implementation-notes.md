@@ -550,6 +550,11 @@ See [persistence](./persistence.md) for on-disk contracts.
 - Pending approval/clarify updates carry `run_id`; replies are wrapped in
   `AgentCommand::ForSubagent`. A stale or unknown `run_id` is logged and
   dropped.
+- Approvals and clarify questions share the strict-FIFO
+  `AppState::pending_approval_order`. A clarify arriving behind another prompt
+  is parked in `queued_clarifies` and shown by `resume_pending_tool_approval`
+  when it reaches the head. `Effect::AnswerClarify`/`AbortClarify` carry the
+  clarify `id`, which the driver maps to the asking `run_id`.
 - Ordering: streamed text/thinking is tagged with the subagent's `run_id` in
   the factory's forward task, so concurrent streams are never misattributed.
   The shared subagent UI channel is unbounded (no update dropped, never blocks

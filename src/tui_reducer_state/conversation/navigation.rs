@@ -14,9 +14,11 @@
 
 //! Conversation / navigation state and operations.
 
+use super::tools::PendingInteraction;
 use super::{
     AppState, BubbleExpansionTarget, ChatEntry, ConversationView, Focus, ToolCallState, TuiMode,
 };
+use crate::tui_reducer_state::QueuedClarify;
 use uuid::Uuid;
 
 impl AppState {
@@ -116,18 +118,64 @@ impl AppState {
             }
             self.focus = Focus::MainInput;
         }
-        if let Some((tool_id, tool_name)) = self.pending_tool_approval() {
-            let run_id = self
-                .subagent_conversations
-                .iter()
-                .find_map(|(run_id, conversation)| {
-                    conversation.messages.iter().any(
-                    |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id),
-                ).then_some(*run_id)
-                });
-            self.focus = Focus::ToolApproval { tool_id, tool_name };
-            self.note_interactive_pause(run_id);
+        match self.next_pending_interaction() {
+            Some(PendingInteraction::Approval { tool_id, tool_name }) => {
+                self.show_tool_approval(tool_id, tool_name);
+            }
+            Some(PendingInteraction::Clarify(request)) => {
+                self.queued_clarifies.remove(&request.id);
+                self.show_clarify(request);
+                self.queued_clarify_activated = true;
+            }
+            None => {}
         }
+    }
+
+    /// Hands the keyboard to the clarify banner for `request`.
+    pub(crate) fn show_clarify(&mut self, request: QueuedClarify) {
+        let QueuedClarify {
+            id,
+            question,
+            context,
+            choices,
+            run_id,
+        } = request;
+        self.mode = TuiMode::ClarifyPending {
+            id,
+            question,
+            context,
+            choices,
+        };
+        // Scroll the banner to the bottom so the question and choices are
+        // visible immediately; clamped to max_scroll on render.
+        self.clarify_banner_state.clarify_scroll_offset = usize::MAX;
+        self.focus = Focus::MainInput;
+        self.note_interactive_pause(run_id);
+    }
+
+    /// Whether the user is already busy with, or has queued, an approval or
+    /// clarify prompt — a newly arrived one must wait its turn.
+    pub(crate) fn has_outstanding_interaction(&self) -> bool {
+        matches!(self.focus, Focus::ToolApproval { .. })
+            || matches!(self.mode, TuiMode::ClarifyPending { .. })
+            || self.next_pending_interaction().is_some()
+    }
+
+    fn show_tool_approval(&mut self, tool_id: Uuid, tool_name: String) {
+        let run_id = self
+            .subagent_conversations
+            .iter()
+            .find_map(|(run_id, conversation)| {
+                conversation
+                    .messages
+                    .iter()
+                    .any(
+                        |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id),
+                    )
+                    .then_some(*run_id)
+            });
+        self.focus = Focus::ToolApproval { tool_id, tool_name };
+        self.note_interactive_pause(run_id);
     }
 
     pub fn switch_to_subagent_view(&mut self, run_id: Uuid) {
