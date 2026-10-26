@@ -16,7 +16,7 @@ use super::*;
 
 use crate::llm::engine::{CompactionEngineDisplayInfo, EngineDisplayInfo};
 use crate::llm::{ModelInfo, ModelSelectionTarget, ProviderModelOption};
-use crate::theme::{COMPACTION_MISMATCH_COLOR, MUTED_TEXT_COLOR};
+use crate::theme::{compaction_mismatch_color, muted_text_color};
 use crate::tui_reducer_state::{ChoiceLabel, ModelChoice, ModelParameterEdit, ParameterField};
 use ratatui::style::Color;
 
@@ -157,10 +157,10 @@ fn draft_window_matching_explicit_compaction_engine_clears_mismatch_highlight() 
 
     let mismatching = picker_overlay(None);
     let (_, mismatch_color) = detail_text_and_color(&mismatching, &display);
-    assert_eq!(mismatch_color, Some(COMPACTION_MISMATCH_COLOR));
+    assert_eq!(mismatch_color, Some(compaction_mismatch_color()));
 
     let matching = picker_overlay(Some(context_length_draft(0, 128 * KB, true)));
     let (text, matching_color) = detail_text_and_color(&matching, &display);
     assert_eq!(text, "Compaction uses other/small, context: 131.1K");
-    assert_eq!(matching_color, Some(MUTED_TEXT_COLOR));
+    assert_eq!(matching_color, Some(muted_text_color()));
 }

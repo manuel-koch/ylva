@@ -69,7 +69,7 @@ pub struct WebFetchResult {
     /// Recognized media type when the body is complete supported media.
     media_type: Option<String>,
     /// `true` when `text` was cut; reported as `truncated: true` metadata
-    /// and the `Partial result` content-section label.
+    /// and the `Partial output` content-section label.
     truncated: bool,
 }
 
@@ -248,7 +248,14 @@ impl ToolCallResult for WebFetchResult {
         if let Some(preview) = preview.filter(|content| !content.is_empty()) {
             // Truncated content is an incomplete display of the result — same
             // vocabulary as bash's and read's partial-output sections.
-            let label = self.truncated.then(|| "Partial result".to_string());
+            let label = Some(
+                if self.truncated {
+                    "Partial output"
+                } else {
+                    "Output"
+                }
+                .to_string(),
+            );
             sections.push(Section::Content(ContentSection {
                 label,
                 content: preview.to_string(),

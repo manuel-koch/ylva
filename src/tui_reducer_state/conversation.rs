@@ -625,6 +625,11 @@ impl AppState {
                     .started_at
                     .map(|started_at| (conversation.info.bubble_id, started_at))
             })
+            .chain(
+                self.bash_started_at
+                    .iter()
+                    .map(|(id, started_at)| (*id, *started_at)),
+            )
             .collect()
     }
 

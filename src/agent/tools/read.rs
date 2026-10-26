@@ -30,7 +30,7 @@
 //! carry at most
 //! [`READ_OUTPUT_LIMIT_BYTES`] of raw selected bytes. Content past the cap is
 //! cut silently (no in-text marker) and reported as `truncated: true` in the
-//! result metadata plus a `Partial result` content-section label, so the model
+//! result metadata plus a `Partial output` content-section label, so the model
 //! can continue via `offset`/`limit`. Complete recognized media reads
 //! (PNG/JPEG/WebP/GIF/PDF Base64 attachments) are exempt: a truncated image or
 //! PDF is unusable, and `media_type` is only ever recognized for complete
@@ -99,7 +99,7 @@ pub(crate) const SUPPORTED_MEDIA_TYPES: &[&str] = &[
 /// result: `bytes` + `utf8`, non-media `bytes` + `base64`, `lines`, `chars`
 /// and autodetect text. Content past the cap is discarded silently (no in-text
 /// marker): the result metadata carries `truncated: true` and the UI content
-/// section is labeled `Partial result`, the same vocabulary `bash` and
+/// section is labeled `Partial output`, the same vocabulary `bash` and
 /// `search` use. The cap wins over a larger explicit `limit`.
 ///
 /// Complete recognized media reads (PNG/JPEG/WebP/GIF/PDF Base64 attachments)
@@ -245,7 +245,7 @@ pub struct ReadResult {
     /// complete source file.
     pub media_type: Option<String>,
     /// `true` when [`READ_OUTPUT_LIMIT_BYTES`] cut `content`; reported as
-    /// `truncated: true` metadata and the `Partial result` section label.
+    /// `truncated: true` metadata and the `Partial output` section label.
     pub truncated: bool,
 }
 
@@ -347,7 +347,14 @@ impl ToolCallResult for ReadResult {
             .map(|e| e.to_lowercase());
         // Truncated content is an incomplete display of the result — same
         // vocabulary as bash's partial-output section.
-        let label = self.truncated.then(|| "Partial result".to_string());
+        let label = Some(
+            if self.truncated {
+                "Partial output"
+            } else {
+                "Output"
+            }
+            .to_string(),
+        );
         vec![Section::Content(ContentSection {
             label,
             content: preview.to_string(),

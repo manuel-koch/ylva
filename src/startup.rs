@@ -225,6 +225,7 @@ pub fn run(
         crate::compose_root_system_prompt(workspace_root.as_deref(), current_directory.as_deref())
             .map_err(|error| error.to_string())?;
     crate::highlight::set_active_theme(profile.theme);
+    tracing::info!(theme = ?profile.theme, "theme selected");
     let provider_env = load_provider_env(&profile_environment)?;
     apply_provider_env_to_profile(&mut profile, &provider_env);
 

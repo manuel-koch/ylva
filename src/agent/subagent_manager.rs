@@ -123,7 +123,7 @@ impl FinishResult {
 
     /// Renders this outcome as tool-bubble content sections for the TUI:
     /// `"failure"` shows `error` under an `"Error"` label; `"success"` and
-    /// `"unstructured"` both show `result` under a `"Result"` label (the
+    /// `"unstructured"` both show `result` under an `"Output"` label (the
     /// unstructured fallback captures the subagent's last assistant text into
     /// the same field — see `AgentFactory::run_subagent`); a non-empty
     /// `sources` list is always appended as its own `"Sources"` section.
@@ -163,7 +163,7 @@ impl FinishResult {
                 sections.push(section);
             }
         } else if let Some(result) = self.result.as_ref().filter(|s| !s.is_empty()) {
-            sections.push(markdown_section("Result", result.clone()));
+            sections.push(markdown_section("Output", result.clone()));
         }
         if !self.sources.is_empty() {
             let bullet_list = self
@@ -1301,7 +1301,7 @@ mod tests {
         let sections = result.content_sections();
         assert_eq!(sections.len(), 1);
         let (label, content, file_extension) = content_section_text(&sections[0]);
-        assert_eq!(label, "Result");
+        assert_eq!(label, "Output");
         assert_eq!(content, "# All done\n\nEverything worked.");
         assert_eq!(file_extension, "md");
     }
@@ -1320,7 +1320,7 @@ mod tests {
         let sections = result.content_sections();
         assert_eq!(sections.len(), 1);
         let (label, content, _) = content_section_text(&sections[0]);
-        assert_eq!(label, "Result");
+        assert_eq!(label, "Output");
         assert_eq!(content, "last assistant text");
     }
 
@@ -1376,7 +1376,7 @@ mod tests {
         let sections = result.content_sections();
         assert_eq!(sections.len(), 2);
         let (result_label, ..) = content_section_text(&sections[0]);
-        assert_eq!(result_label, "Result");
+        assert_eq!(result_label, "Output");
         let (sources_label, sources_content, _) = content_section_text(&sections[1]);
         assert_eq!(sources_label, "Sources");
         assert_eq!(sources_content, "- a.rs\n- b.rs");

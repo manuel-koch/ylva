@@ -20,7 +20,7 @@ mod title;
 
 use ratatui::text::Line;
 
-use crate::theme::TOOL_BUBBLE_BORDER_COLOR;
+use crate::theme::tool_bubble_border_color;
 use crate::tui_reducer_state::ToolCallState;
 
 use super::bubbles::BubbleStyle;
@@ -125,7 +125,7 @@ pub(super) fn append_tool_layout(
     chrome_only: bool,
 ) -> usize {
     let bubble_start_row = lines.len();
-    let style = BubbleStyle::new(TOOL_BUBBLE_BORDER_COLOR);
+    let style = BubbleStyle::new(tool_bubble_border_color());
     let extra_content_sections = title::append_tool_chrome(lines, bubble, &style, wrap_width);
     let body_start = lines.len();
     if chrome_only {

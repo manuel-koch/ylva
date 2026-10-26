@@ -21,9 +21,9 @@ use ratatui::text::{Line, Span};
 
 use crate::markdown::render_markdown;
 use crate::theme::{
-    ASSISTANT_STREAM_BORDER_COLOR, INTERRUPTED_COLOR, THINKING_BORDER_COLOR,
-    USER_MESSAGE_BORDER_COLOR, USER_MESSAGE_CANCELLED_BORDER_COLOR,
-    USER_MESSAGE_QUEUED_BORDER_COLOR, USER_MESSAGE_STEERED_BORDER_COLOR,
+    assistant_stream_border_color, interrupted_color, thinking_border_color,
+    user_message_border_color, user_message_cancelled_border_color,
+    user_message_queued_border_color, user_message_steered_border_color,
 };
 use crate::tui_reducer_state::UserMessageState;
 
@@ -105,13 +105,13 @@ pub(super) fn append_assistant_lines(
     width: usize,
 ) {
     let border_color = if interrupted {
-        INTERRUPTED_COLOR
+        interrupted_color()
     } else {
-        ASSISTANT_STREAM_BORDER_COLOR
+        assistant_stream_border_color()
     };
     let style = BubbleStyle::new(border_color);
     let text_style = if interrupted {
-        Style::default().fg(INTERRUPTED_COLOR)
+        Style::default().fg(interrupted_color())
     } else {
         Style::default()
     };
@@ -122,7 +122,7 @@ pub(super) fn append_assistant_lines(
         lines.push(style.content_line(
             vec![Span::styled(
                 ellipsis,
-                Style::default().fg(INTERRUPTED_COLOR),
+                Style::default().fg(interrupted_color()),
             )],
             Style::default(),
         ));
@@ -132,7 +132,7 @@ pub(super) fn append_assistant_lines(
 /// Render in-progress assistant text as a blue-bordered bubble with a blinking
 /// cursor on the last line. Mirrors the layout of `append_user_lines`.
 pub(super) fn append_streaming_lines(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
-    let style = BubbleStyle::new(ASSISTANT_STREAM_BORDER_COLOR);
+    let style = BubbleStyle::new(assistant_stream_border_color());
 
     let mut wrapped = render_markdown(text, width);
     if wrapped.is_empty() {
@@ -146,7 +146,7 @@ pub(super) fn append_streaming_lines(lines: &mut Vec<Line<'static>>, text: &str,
             spans.push(Span::styled(
                 "▊",
                 Style::default()
-                    .fg(ASSISTANT_STREAM_BORDER_COLOR)
+                    .fg(assistant_stream_border_color())
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -172,7 +172,7 @@ pub(super) fn append_thinking_lines(
     thinking_title_rows: &mut Vec<(usize, usize, usize)>,
     width: usize,
 ) {
-    let style = BubbleStyle::new(THINKING_BORDER_COLOR);
+    let style = BubbleStyle::new(thinking_border_color());
     let dim = Style::default().add_modifier(Modifier::DIM);
     let title_text = format!("Thought for {:.3}s", duration.as_secs_f64());
 
@@ -230,7 +230,7 @@ pub(super) fn append_streaming_thinking_lines(
     thinking_title_rows: &mut Vec<(usize, usize, usize)>,
     width: usize,
 ) {
-    let style = BubbleStyle::new(THINKING_BORDER_COLOR);
+    let style = BubbleStyle::new(thinking_border_color());
     let dim = Style::default().add_modifier(Modifier::DIM);
     let elapsed_seconds = thinking_started_at
         .map(|started_at| started_at.elapsed().as_secs())
@@ -268,7 +268,7 @@ pub(super) fn append_streaming_thinking_lines(
                 spans.push(Span::styled(
                     "▊",
                     Style::default()
-                        .fg(THINKING_BORDER_COLOR)
+                        .fg(thinking_border_color())
                         .add_modifier(Modifier::BOLD),
                 ));
             }
@@ -293,10 +293,10 @@ pub(super) fn append_user_lines(
     width: usize,
 ) {
     let (border_color, dim) = match state {
-        UserMessageState::Sent => (USER_MESSAGE_BORDER_COLOR, false),
-        UserMessageState::Queued => (USER_MESSAGE_QUEUED_BORDER_COLOR, true),
-        UserMessageState::Steered => (USER_MESSAGE_STEERED_BORDER_COLOR, false),
-        UserMessageState::Cancelled => (USER_MESSAGE_CANCELLED_BORDER_COLOR, true),
+        UserMessageState::Sent => (user_message_border_color(), false),
+        UserMessageState::Queued => (user_message_queued_border_color(), true),
+        UserMessageState::Steered => (user_message_steered_border_color(), false),
+        UserMessageState::Cancelled => (user_message_cancelled_border_color(), true),
     };
     let style = BubbleStyle::new(border_color);
     let text_style = if dim {
@@ -313,7 +313,7 @@ pub(super) fn append_user_lines(
             vec![Span::styled(
                 label,
                 Style::default()
-                    .fg(INTERRUPTED_COLOR)
+                    .fg(interrupted_color())
                     .add_modifier(Modifier::DIM),
             )],
             Style::default(),

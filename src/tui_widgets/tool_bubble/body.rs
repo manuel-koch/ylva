@@ -22,14 +22,38 @@ use crate::highlight::{
 };
 use crate::markdown::render_markdown;
 use crate::theme::{
-    CONTENT_COLOR, DIFF_ADDED_COLOR, DIFF_CONTEXT_COLOR, DIFF_REMOVED_COLOR, MUTED_TEXT_COLOR,
+    content_color, diff_added_color, diff_context_color, diff_removed_color, muted_text_color,
 };
 use crate::tui_reducer_state::ToolCallState;
 
 use super::super::bubbles::BubbleStyle;
 use super::super::chat::terminal_display_width;
 use super::diff::parse_hunk_header;
+use super::title::summary_pairs;
 use super::ToolBubbleArgs;
+
+fn is_output_section(section: &crate::agent::tools::Section) -> bool {
+    matches!(section, crate::agent::tools::Section::Content(content)
+    if content.label.as_deref().is_some_and(|label| {
+        matches!(label.to_lowercase().as_str(), "output" | "partial output")
+    }))
+}
+
+pub(super) fn push_section_label(lines: &mut Vec<Line<'static>>, style: &BubbleStyle, label: &str) {
+    let [bar, margin] = style.prefix_spans();
+    let dim_style = Style::default()
+        .fg(content_color())
+        .add_modifier(Modifier::DIM);
+    lines.push(Line::from(vec![
+        bar,
+        margin,
+        Span::styled("  ", dim_style),
+        Span::styled(
+            label.to_string(),
+            dim_style.add_modifier(Modifier::UNDERLINED),
+        ),
+    ]));
+}
 
 /// Returns a derived label for a tool result, or `None` for plain output.
 fn result_section_title(tool_name: &str, section_id: &str) -> Option<String> {
@@ -63,7 +87,7 @@ fn append_result_section_lines(
     // bar, since unset modifiers are unioned in, not overridden, when a span
     // has no modifier of its own.
     let dim = Style::default()
-        .fg(CONTENT_COLOR)
+        .fg(content_color())
         .add_modifier(Modifier::DIM);
     let mut md_lines = render_markdown(content, content_wrap_width);
     if md_lines.is_empty() {
@@ -110,15 +134,31 @@ pub(super) fn append_tool_body(
         ..
     } = bubble;
     let [bar, margin] = style.prefix_spans();
-    let content_sections = bubble.content_sections(extra_content_sections);
+    // Tool output sections render last, after the sections describing the call.
+    let mut content_sections = bubble.content_sections(extra_content_sections);
+    content_sections.sort_by_key(|section| is_output_section(section));
     // Body (body sections + result) — hidden when collapsed.
     if !collapsed {
+        // `Result:` lists the finished call's `key=value` summary pairs.
+        let pairs = summary_pairs(&bubble);
+        if !pairs.is_empty() {
+            lines.push(Line::from(vec![bar.clone(), margin.clone()]));
+            push_section_label(lines, style, "Result:");
+            for pair in &pairs {
+                for wrapped in textwrap::wrap(&pair.text, wrap_width.saturating_sub(2).max(1)) {
+                    lines.push(Line::from(vec![
+                        bar.clone(),
+                        margin.clone(),
+                        Span::raw("  "),
+                        Span::styled(wrapped.into_owned(), pair.style),
+                    ]));
+                }
+            }
+        }
         if !content_sections.is_empty() {
-            let show_labels = content_sections.len() > 1;
-            for (section_index, section) in content_sections.iter().enumerate() {
+            for section in content_sections.iter() {
                 // Empty line before every section; separates sections from each
                 // other and from the title area above the body.
-                let _ = section_index;
                 lines.push(Line::from(vec![bar.clone(), margin.clone()]));
                 match section {
                     crate::agent::tools::Section::Content(content_section) => {
@@ -132,23 +172,8 @@ pub(super) fn append_tool_body(
                         } else {
                             std::borrow::Cow::Borrowed(content_section.content.as_str())
                         };
-                        // Label header (only when multiple sections).
-                        if show_labels {
-                            if let Some(label) = &content_section.label {
-                                let label_str = format!("{label}:");
-                                let dim_style = Style::default()
-                                    .fg(CONTENT_COLOR)
-                                    .add_modifier(Modifier::DIM);
-                                lines.push(Line::from(vec![
-                                    bar.clone(),
-                                    margin.clone(),
-                                    Span::styled("  ", dim_style),
-                                    Span::styled(
-                                        label_str,
-                                        dim_style.add_modifier(Modifier::UNDERLINED),
-                                    ),
-                                ]));
-                            }
+                        if let Some(label) = &content_section.label {
+                            push_section_label(lines, style, &format!("{label}:"));
                         }
 
                         // Markdown-flagged sections (e.g. `spawn_subagent`'s `task`/
@@ -213,7 +238,7 @@ pub(super) fn append_tool_body(
                                         let gutter_str = format!("  {line_num:>digits$}: ");
                                         spans.push(Span::styled(
                                             gutter_str,
-                                            Style::default().fg(MUTED_TEXT_COLOR),
+                                            Style::default().fg(muted_text_color()),
                                         ));
                                     } else {
                                         spans.push(Span::styled("  ", Style::default()));
@@ -234,23 +259,8 @@ pub(super) fn append_tool_body(
                         }
                     }
                     crate::agent::tools::Section::Diff(diff_section) => {
-                        // Label header (only when multiple sections).
-                        if show_labels {
-                            if let Some(label) = &diff_section.label {
-                                let label_str = format!("{label}:");
-                                let dim_style = Style::default()
-                                    .fg(CONTENT_COLOR)
-                                    .add_modifier(Modifier::DIM);
-                                lines.push(Line::from(vec![
-                                    bar.clone(),
-                                    margin.clone(),
-                                    Span::styled("  ", dim_style),
-                                    Span::styled(
-                                        label_str,
-                                        dim_style.add_modifier(Modifier::UNDERLINED),
-                                    ),
-                                ]));
-                            }
+                        if let Some(label) = &diff_section.label {
+                            push_section_label(lines, style, &format!("{label}:"));
                         }
 
                         // Pre-scan hunk headers to determine gutter column width.
@@ -290,7 +300,7 @@ pub(super) fn append_tool_body(
                                     Span::styled(
                                         text_str,
                                         Style::default()
-                                            .fg(MUTED_TEXT_COLOR)
+                                            .fg(muted_text_color())
                                             .add_modifier(Modifier::DIM),
                                     ),
                                 ]));
@@ -300,17 +310,17 @@ pub(super) fn append_tool_body(
                             let (line_color, left_num, right_num) = if diff_line.starts_with('+') {
                                 let n = new_line;
                                 new_line += 1;
-                                (DIFF_ADDED_COLOR, None, Some(n))
+                                (diff_added_color(), None, Some(n))
                             } else if diff_line.starts_with('-') {
                                 let n = old_line;
                                 old_line += 1;
-                                (DIFF_REMOVED_COLOR, Some(n), None)
+                                (diff_removed_color(), Some(n), None)
                             } else {
                                 let o = old_line;
                                 let n = new_line;
                                 old_line += 1;
                                 new_line += 1;
-                                (DIFF_CONTEXT_COLOR, Some(o), Some(n))
+                                (diff_context_color(), Some(o), Some(n))
                             };
 
                             let left_str = left_num
@@ -337,7 +347,7 @@ pub(super) fn append_tool_body(
                                     (
                                         Span::styled(
                                             gutter_str.clone(),
-                                            Style::default().fg(MUTED_TEXT_COLOR),
+                                            Style::default().fg(muted_text_color()),
                                         ),
                                         format!("{prefix} {wrapped_chunk}"),
                                     )
@@ -367,7 +377,7 @@ pub(super) fn append_tool_body(
                             Span::styled(
                                 label_str,
                                 Style::default()
-                                    .fg(CONTENT_COLOR)
+                                    .fg(content_color())
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]));
@@ -407,10 +417,10 @@ pub(super) fn append_tool_body(
 
                                 if row_index == 0 {
                                     let prefix_style = if search_result_line.is_match {
-                                        Style::default().fg(MUTED_TEXT_COLOR)
+                                        Style::default().fg(muted_text_color())
                                     } else {
                                         Style::default()
-                                            .fg(MUTED_TEXT_COLOR)
+                                            .fg(muted_text_color())
                                             .add_modifier(Modifier::DIM)
                                     };
                                     spans.push(Span::styled(prefix.clone(), prefix_style));
@@ -458,6 +468,10 @@ pub(super) fn append_tool_body(
             // for this (tool, section-id) pair, or as plain text otherwise.
             if !result_section.content.is_empty() {
                 let title = result_section_title(name, &result_section.id);
+                if title.is_none() {
+                    lines.push(Line::from(vec![bar.clone(), margin.clone()]));
+                    push_section_label(lines, style, "Output:");
+                }
                 append_result_section_lines(
                     lines,
                     style,

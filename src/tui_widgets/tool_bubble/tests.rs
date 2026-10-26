@@ -72,19 +72,38 @@ fn tool_bubble_abbreviates_only_declared_home_path_attributes() {
                         .flat_map(|line| &line.spans)
                         .map(|span| span.content.as_ref())
                         .collect::<String>();
+                    if collapsed {
+                        assert!(!rendered.contains("path="), "{rendered}");
+                        assert!(!rendered.contains("label="), "{rendered}");
+                        let invocation = if primary {
+                            format!("Read {expected} {home_path}")
+                        } else {
+                            format!("Read needle {home_path}")
+                        };
+                        assert!(rendered.contains(&invocation), "{rendered}");
+                        continue;
+                    }
                     assert!(rendered.contains(&format!("path={expected}")), "{rendered}");
                     assert!(
                         rendered.contains(&format!("label={home_path}")),
                         "{rendered}"
                     );
-                    let invocation = if primary && collapsed {
-                        format!("Read {expected} label=")
-                    } else if primary {
-                        format!("{expected} label=")
+                    let argument_line = if primary {
+                        expected.to_string()
                     } else {
-                        format!("path={expected} label=")
+                        format!("path={expected}")
                     };
-                    assert!(rendered.contains(&invocation), "{rendered}");
+                    assert!(
+                        lines.iter().any(|line| {
+                            let text = line
+                                .spans
+                                .iter()
+                                .map(|span| span.content.as_ref())
+                                .collect::<String>();
+                            text.trim_end().ends_with(&argument_line)
+                        }),
+                        "{rendered}"
+                    );
                 }
             }
         }
@@ -286,11 +305,13 @@ fn load_skill_bubble_keeps_name_primary_and_source_in_expanded_body() {
                     .map(|span| span.content.as_ref())
                     .collect::<String>();
                 let expected_title = if collapsed {
-                    "▶ Load Skill unslop → 0.000s"
+                    "▶ Load Skill unslop"
                 } else {
-                    "▼ Load Skill → 0.000s"
+                    "▼ Load Skill"
                 };
-                assert!(title.ends_with(expected_title), "{title}");
+                assert!(title.contains(expected_title), "{title}");
+                assert!(title.ends_with("0.000s"), "{title}");
+                assert_eq!(title.chars().count(), 1 + 2 + 512, "{title}");
                 assert!(!title.contains(&canonical_source), "{title}");
                 assert!(!title.contains("name="), "{title}");
                 let body = lines[1..]
@@ -405,14 +426,14 @@ fn split_tool_layout_preserves_chrome_body_and_hit_ranges() {
                     let chrome_text = chrome
                         .iter()
                         .flat_map(|line| &line.spans)
-                        .filter(|span| span.style.fg == Some(crate::theme::ERROR_COLOR))
+                        .filter(|span| span.style.fg == Some(crate::theme::error_color()))
                         .map(|span| span.content.trim())
                         .collect::<Vec<_>>()
                         .join(" ");
                     assert!(chrome_text.contains(diagnostic));
                 }
 
-                let style = BubbleStyle::new(TOOL_BUBBLE_BORDER_COLOR);
+                let style = BubbleStyle::new(tool_bubble_border_color());
                 let mut parts = vec![Line::from("preceding entry")];
                 let extra_sections = title::append_tool_chrome(&mut parts, bubble, &style, width);
                 body::append_tool_body(&mut parts, bubble, &style, &extra_sections, width);
@@ -561,7 +582,7 @@ fn tool_bubble_renders_execution_error_content_literally() {
 #[test]
 fn failed_subagent_status_is_red_in_root_and_header_bubble_titles() {
     use super::{append_tool_bubble_lines, ToolBubbleArgs};
-    use crate::theme::ERROR_COLOR;
+    use crate::theme::error_color;
     use crate::tui_reducer_state::{ResultSection, ToolCallState};
     use ratatui::style::Modifier;
 
@@ -598,9 +619,14 @@ fn failed_subagent_status_is_red_in_root_and_header_bubble_titles() {
             let failure_status_span = lines
                 .iter()
                 .flat_map(|line| line.spans.iter())
-                .find(|span| span.content.as_ref() == "status=failure")
-                .expect("failed subagent status should be rendered");
-            assert_eq!(failure_status_span.style.fg, Some(ERROR_COLOR));
+                .find(|span| span.content.as_ref() == "status=failure");
+            if collapsed {
+                assert!(failure_status_span.is_none(), "status belongs to the body");
+                continue;
+            }
+            let failure_status_span =
+                failure_status_span.expect("failed subagent status should be rendered");
+            assert_eq!(failure_status_span.style.fg, Some(error_color()));
             assert!(
                 failure_status_span
                     .style
@@ -709,6 +735,44 @@ fn running_subagent_bubble_shows_spinner_not_queued_glyph() {
 }
 
 #[test]
+fn running_bash_bubble_shows_elapsed_seconds() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::tui_reducer_state::ToolCallState;
+
+    let state = ToolCallState::Running {
+        arguments: serde_json::json!({"command": "sleep 10"}),
+        content_sections: vec![],
+        title_arguments: vec![("command".to_string(), serde_json::json!("sleep 10"))],
+        progress_arguments: vec![],
+    };
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut bubble_title_rows = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "bash",
+            state: &state,
+            collapsed: true,
+            spinner_frame: 0,
+            elapsed_seconds: Some(7),
+            display_title_override: None,
+            subtype_argument: None,
+            path_like_arguments: &[],
+        },
+        &mut bubble_title_rows,
+        80,
+    );
+
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(rendered.contains("7s"), "got: {rendered:?}");
+}
+
+#[test]
 fn subagent_bubble_hides_run_id_from_title() {
     use super::{append_tool_bubble_lines, ToolBubbleArgs};
     use crate::tui_reducer_state::ToolCallState;
@@ -810,4 +874,182 @@ fn display_title_override_replaces_title_cased_tool_name() {
         !rendered.contains("Spawn Subagent"),
         "the plain title-cased tool name must not also appear, got: {rendered:?}"
     );
+}
+
+#[test]
+fn collapsed_title_shows_primary_and_label_with_right_aligned_time() {
+    use crate::tui_reducer_state::ResultSection;
+
+    let state = ToolCallState::Done {
+        arguments: serde_json::json!({}),
+        title_arguments: vec![
+            ("command".into(), serde_json::json!("make test")),
+            ("label".into(), serde_json::json!("run tests")),
+            ("timeout".into(), serde_json::json!(30)),
+        ],
+        content_sections: vec![],
+        result_section: ResultSection::plain(""),
+        summary: vec![("exit".into(), "0".into())],
+        duration: std::time::Duration::from_millis(1500),
+    };
+    let render = |collapsed: bool, width: usize| -> Vec<String> {
+        let mut lines = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "bash",
+                state: &state,
+                collapsed,
+                spinner_frame: 0,
+                elapsed_seconds: None,
+                display_title_override: None,
+                subtype_argument: None,
+                path_like_arguments: &[],
+            },
+            &mut vec![],
+            width,
+        );
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    };
+
+    let collapsed = render(true, 40);
+    assert_eq!(collapsed.len(), 1);
+    assert_eq!(
+        collapsed[0],
+        format!(
+            "▌  ▶ Bash make test run tests{}1.500s",
+            " ".repeat(40 - 26 - 6)
+        )
+    );
+
+    let truncated = render(true, 24);
+    assert!(
+        truncated[0].ends_with("…  1.500s") || truncated[0].ends_with("… 1.500s"),
+        "{}",
+        truncated[0]
+    );
+    assert_eq!(truncated[0].chars().count(), 3 + 24);
+
+    let expanded = render(false, 40);
+    assert!(expanded[0].starts_with("▌  ▼ Bash") && expanded[0].ends_with("1.500s"));
+    assert!(expanded.iter().any(|line| line.contains("timeout=30")));
+    assert!(expanded.iter().any(|line| line.contains("exit=0")));
+}
+
+#[test]
+fn expanded_body_lists_result_pairs_first_and_output_last() {
+    use crate::agent::tools::{ContentSection, Section};
+    use crate::tui_reducer_state::ResultSection;
+
+    let section = |label: &str, content: &str| {
+        Section::Content(ContentSection {
+            label: Some(label.into()),
+            content: content.into(),
+            file_extension: None,
+            line_number_offset: None,
+        })
+    };
+    let state = ToolCallState::Done {
+        arguments: serde_json::json!({}),
+        title_arguments: vec![],
+        content_sections: vec![
+            section("Output", "printed-text"),
+            section("Label", "Greet"),
+            section("Command", "echo hello"),
+        ],
+        result_section: ResultSection::plain(""),
+        summary: vec![("output_bytes".into(), "6".into())],
+        duration: std::time::Duration::from_millis(38),
+    };
+    let mut lines = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "bash",
+            state: &state,
+            collapsed: false,
+            spinner_frame: 0,
+            elapsed_seconds: None,
+            display_title_override: None,
+            subtype_argument: None,
+            path_like_arguments: &[],
+        },
+        &mut vec![],
+        60,
+    );
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect();
+    let position = |needle: &str| rendered.find(needle).unwrap_or_else(|| panic!("{needle}"));
+    assert!(position("Result:") < position("output_bytes=6"));
+    assert!(position("output_bytes=6") < position("Label:"));
+    assert!(position("Label:") < position("Command:"));
+    assert!(position("Command:") < position("Output:"));
+    assert!(position("Output:") < position("printed-text"));
+}
+
+#[test]
+fn expanded_arguments_render_under_arguments_section() {
+    use crate::tui_reducer_state::ResultSection;
+
+    let state = ToolCallState::Done {
+        arguments: serde_json::json!({}),
+        title_arguments: vec![
+            ("path".into(), serde_json::json!("docs/configuration.md")),
+            ("mode".into(), serde_json::json!("lines")),
+            ("offset".into(), serde_json::json!(926)),
+        ],
+        result_section: ResultSection::plain(String::new()),
+        summary: vec![],
+        duration: std::time::Duration::ZERO,
+        content_sections: vec![],
+    };
+    let mut lines = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "read",
+            state: &state,
+            collapsed: false,
+            spinner_frame: 0,
+            elapsed_seconds: None,
+            display_title_override: None,
+            subtype_argument: None,
+            path_like_arguments: &[],
+        },
+        &mut vec![],
+        80,
+    );
+    let rows: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    let tail: Vec<&str> = rows
+        .iter()
+        .map(|row| row.trim_start_matches(|c| c != ' ').trim())
+        .collect();
+    assert!(tail[1].ends_with("docs/configuration.md"), "{rows:?}");
+    assert_eq!(tail[2], "", "{rows:?}");
+    assert!(rows[3].ends_with("Arguments:"), "{rows:?}");
+    assert!(rows[4].ends_with("mode=lines"), "{rows:?}");
+    assert!(rows[5].ends_with("offset=926"), "{rows:?}");
 }

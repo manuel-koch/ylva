@@ -36,8 +36,8 @@ use crate::conversation_render_cache::ConversationRenderCache;
 use crate::markdown::render_markdown;
 use crate::saturating_cast::saturating_u16;
 use crate::theme::{
-    CHAT_SELECTION_BG, INPUT_BORDER_COLOR, MUTED_TEXT_COLOR, SEPARATOR_LINE_COLOR,
-    SUBAGENT_VIEW_SEPARATOR_COLOR, USER_MESSAGE_BG_COLOR,
+    chat_selection_bg, input_border_color, muted_text_color, separator_line_color,
+    subagent_view_header_bg_color, subagent_view_separator_color, user_message_bg_color,
 };
 use crate::tui_reducer_state::BubbleExpansionTarget;
 use crate::tui_reducer_state::ChatEntry;
@@ -393,18 +393,27 @@ fn draw_internal(
                         line,
                         column_start.saturating_sub(alignment_offset),
                         column_end.saturating_sub(alignment_offset),
-                        CHAT_SELECTION_BG,
+                        chat_selection_bg(),
                     );
                 }
             }
         }
 
+        // Tint the whole header block (content, scrollbar column and the
+        // divider below) so the drill-in header reads as distinct from the
+        // scrollable transcript; cells the content leaves untouched keep it.
+        for tinted_area in [header_area, header_separator_area] {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(subagent_view_header_bg_color())),
+                tinted_area,
+            );
+        }
         let paragraph = Paragraph::new(header_lines);
         frame.render_widget(paragraph, header_content_area);
 
         // Show the scroll indicators/scrollbar only when the bubble's full
         // content overflows the clamped header height. Tinted
-        // `SUBAGENT_VIEW_SEPARATOR_COLOR` — this scrollbar only ever renders
+        // `subagent_view_separator_color()` — this scrollbar only ever renders
         // while the header bubble (i.e. the subagent view) is showing.
         if total_lines > visible {
             render_chat_scrollbar(
@@ -414,14 +423,14 @@ fn draw_internal(
                 max_offset,
                 total_lines,
                 visible,
-                SUBAGENT_VIEW_SEPARATOR_COLOR,
+                subagent_view_separator_color(),
             );
         }
 
         // Separator between the header bubble and the chat area below it —
         // mirrors the separator between the chat area and the input/footer
         // panel, so the header never reads as part of the scrollable
-        // conversation-list. Tinted `SUBAGENT_VIEW_SEPARATOR_COLOR` (always the
+        // conversation-list. Tinted `subagent_view_separator_color()` (always the
         // case here — this branch only runs while a header bubble, i.e. the
         // subagent view, is showing) rather than the neutral root-view color.
         let header_separator_line = "─".repeat(header_separator_area.width as usize);
@@ -429,7 +438,7 @@ fn draw_internal(
             Paragraph::new(Line::from(Span::styled(
                 header_separator_line,
                 Style::default()
-                    .fg(SUBAGENT_VIEW_SEPARATOR_COLOR)
+                    .fg(subagent_view_separator_color())
                     .add_modifier(Modifier::DIM),
             ))),
             header_separator_area,
@@ -456,9 +465,9 @@ fn draw_internal(
     // reserved for the root conversation.
     let in_subagent_view = state.subagent_view.subagent_view_bubble.is_some();
     let separator_color = if in_subagent_view {
-        SUBAGENT_VIEW_SEPARATOR_COLOR
+        subagent_view_separator_color()
     } else {
-        SEPARATOR_LINE_COLOR
+        separator_line_color()
     };
     let separator_line = "─".repeat(separator_area.width as usize);
     frame.render_widget(
@@ -487,10 +496,10 @@ fn draw_internal(
             })
             .border_style(
                 Style::default()
-                    .fg(INPUT_BORDER_COLOR)
+                    .fg(input_border_color())
                     .add_modifier(Modifier::DIM),
             )
-            .style(Style::default().bg(USER_MESSAGE_BG_COLOR)),
+            .style(Style::default().bg(user_message_bg_color())),
     );
     frame.render_widget(&*textarea, input_area);
 
@@ -504,7 +513,7 @@ fn draw_internal(
     // Show ↑/↓ based on the tracked viewport position, not the cursor row.
     if wrapped_rows > input_height as usize && input_area.height >= 1 && input_area.width >= 1 {
         let input_indicator_style = Style::default()
-            .fg(INPUT_BORDER_COLOR)
+            .fg(input_border_color())
             .add_modifier(Modifier::DIM);
         if state.input_scroll_top > 0 {
             frame.render_widget(
@@ -541,8 +550,8 @@ fn draw_internal(
             Paragraph::new(Line::styled(
                 "Enter reason for denial here…",
                 Style::default()
-                    .fg(MUTED_TEXT_COLOR)
-                    .bg(USER_MESSAGE_BG_COLOR),
+                    .fg(muted_text_color())
+                    .bg(user_message_bg_color()),
             )),
             placeholder_area,
         );

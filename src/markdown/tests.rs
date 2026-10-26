@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::*;
-use crate::theme::INLINE_CODE_FG;
+use crate::theme::inline_code_fg;
 
 #[test]
 fn display_column_slices_respect_wide_and_zero_width_characters() {
@@ -89,7 +89,7 @@ fn inline_code_gets_distinct_color() {
         .into_iter()
         .find(|s| s.content.as_ref() == "cargo")
         .unwrap();
-    assert_eq!(code_span.style.fg, Some(INLINE_CODE_FG));
+    assert_eq!(code_span.style.fg, Some(inline_code_fg()));
 }
 
 fn spans_of(line: &Line<'static>) -> Vec<Span<'static>> {
@@ -106,7 +106,7 @@ fn fenced_code_block_renders_verbatim_with_syntax_highlighting() {
     assert_eq!(rendered, vec!["1 │ fn main() {}", "2 │     indented"]);
     // Each non-blank line starts with a dim gutter span.
     for line in lines.iter().filter(|l| !l.spans.is_empty()) {
-        assert_eq!(line.spans[0].style.fg, Some(MARKDOWN_DIM_FG));
+        assert_eq!(line.spans[0].style.fg, Some(markdown_dim_fg()));
     }
 }
 
@@ -136,10 +136,10 @@ fn fenced_code_block_with_language_shows_label() {
     assert_eq!(rendered[1], "1 │ let x = 1;");
     // Label is dim+italic.
     let label_span = &lines[0].spans[0];
-    assert_eq!(label_span.style.fg, Some(MARKDOWN_DIM_FG));
+    assert_eq!(label_span.style.fg, Some(markdown_dim_fg()));
     assert!(label_span.style.add_modifier.contains(Modifier::ITALIC));
     // Gutter span on code line is dim.
-    assert_eq!(lines[1].spans[0].style.fg, Some(MARKDOWN_DIM_FG));
+    assert_eq!(lines[1].spans[0].style.fg, Some(markdown_dim_fg()));
 }
 
 #[test]
@@ -150,6 +150,32 @@ fn bullet_list_gets_prefix_and_indented_continuation() {
     assert_eq!(rendered[1], "  three");
     assert_eq!(rendered[2], "  four");
     assert_eq!(rendered[3], "  five");
+}
+
+#[test]
+fn nested_loose_bullet_list_is_indented_without_blank_before_children() {
+    let md = "- Task A:\n  - one\n  - two\n\n- Task B:\n  - three";
+    let rendered: Vec<String> = render_markdown(md, 80).iter().map(plain_text).collect();
+    assert_eq!(
+        rendered,
+        vec![
+            "• Task A:",
+            "  • one",
+            "  • two",
+            "",
+            "• Task B:",
+            "  • three",
+        ]
+    );
+}
+
+#[test]
+fn nested_numbered_list_wraps_under_its_own_indent() {
+    let rendered: Vec<String> = render_markdown("- a\n  1. one two three", 10)
+        .iter()
+        .map(plain_text)
+        .collect();
+    assert_eq!(rendered, vec!["• a", "  1. one", "     two", "     three"]);
 }
 
 #[test]
@@ -187,7 +213,7 @@ fn blockquote_gets_dim_prefix() {
     let lines = render_markdown("> quoted text", 80);
     let prefix_span = &lines[0].spans[0];
     assert_eq!(prefix_span.content.as_ref(), "│ ");
-    assert_eq!(prefix_span.style.fg, Some(MARKDOWN_DIM_FG));
+    assert_eq!(prefix_span.style.fg, Some(markdown_dim_fg()));
     assert_eq!(plain_text(&lines[0]), "│ quoted text");
 }
 
@@ -266,7 +292,7 @@ fn table_inline_code_in_cell_gets_code_color() {
         .iter()
         .find(|s| s.content.as_ref() == "val")
         .expect("inline code span in table cell");
-    assert_eq!(code_span.style.fg, Some(INLINE_CODE_FG));
+    assert_eq!(code_span.style.fg, Some(inline_code_fg()));
 }
 
 #[test]

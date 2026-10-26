@@ -39,18 +39,16 @@ use tokio::sync::mpsc;
 ///   `execute_effects` when the corresponding `ApproveTool`/`DenyTool` effect
 ///   fires. A missing key means "root's own pending tool" — same meaning as
 ///   `run_id: None` on the originating `UiUpdate`.
-/// - `clarify_run_id` tracks the *current* pending clarify's `run_id`
-///   separately, because `Effect::AnswerClarify`/`Effect::AbortClarify`
-///   carry no `id` at all (unlike `ApproveTool`/`DenyTool`) — the Presenter
-///   already resets `AppState::mode` out of `ClarifyPending` in the same
-///   `presenter::update` call that produces these effects, so the id can't
-///   be recovered from `state.mode` by the time `execute_effects` runs. Set
-///   in `process_one_update` from `UiUpdate::ClarifyPending::run_id`; taken
-///   (cleared) in `execute_effects` when `AnswerClarify`/`AbortClarify` fires.
+/// - `clarify_run_ids` maps a pending clarify question's `id` to the `run_id`
+///   (`None` for the root) that asked it. Several clarify questions can be
+///   outstanding at once (the Presenter shows them one at a time), so the
+///   map is keyed by `id`, which `Effect::AnswerClarify`/`AbortClarify`
+///   carry. Set in `process_one_update` from `UiUpdate::ClarifyPending`;
+///   consumed in `execute_effects` when `AnswerClarify`/`AbortClarify` fires.
 #[derive(Debug, Default)]
 pub(super) struct PendingRunIds {
     tool_run_ids: std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
-    clarify_run_id: Option<uuid::Uuid>,
+    clarify_run_ids: std::collections::HashMap<uuid::Uuid, Option<uuid::Uuid>>,
     /// Terminal facts for the exit code. Recorded here because this struct is
     /// already threaded through every update and effect path.
     pub(super) run_outcome: RunOutcome,
@@ -72,8 +70,8 @@ impl PendingRunIds {
         {
             self.tool_run_ids.insert(*id, *run_id);
         }
-        if let UiUpdate::ClarifyPending { run_id, .. } = update {
-            self.clarify_run_id = *run_id;
+        if let UiUpdate::ClarifyPending { id, run_id, .. } = update {
+            self.clarify_run_ids.insert(*id, *run_id);
         }
     }
 }
@@ -146,12 +144,12 @@ pub(super) async fn execute_effects(
                 let _ =
                     cmd_tx.try_send(route_command(run_id, AgentCommand::DenyTool { id, reason }));
             }
-            Effect::AnswerClarify(answer) => {
-                let run_id = pending_run_ids.clarify_run_id.take();
+            Effect::AnswerClarify { id, answer } => {
+                let run_id = pending_run_ids.clarify_run_ids.remove(&id).flatten();
                 let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::AnswerClarify(answer)));
             }
-            Effect::AbortClarify => {
-                let run_id = pending_run_ids.clarify_run_id.take();
+            Effect::AbortClarify { id } => {
+                let run_id = pending_run_ids.clarify_run_ids.remove(&id).flatten();
                 let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::AbortClarify));
             }
             Effect::StopAgent => {

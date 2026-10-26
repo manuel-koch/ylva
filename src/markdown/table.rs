@@ -18,7 +18,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::text::{terminal_display_width, wrap_table_words, TableWord, Word};
-use crate::theme::MARKDOWN_DIM_FG;
+use crate::theme::markdown_dim_fg;
 
 /// Distributes `total` units across `weights.len()` buckets proportionally
 /// to `weights`, using the largest-remainder method so the allocation sums
@@ -146,7 +146,7 @@ pub(super) fn flush_table(
                 .collect();
         }
     }
-    let separator_style = Style::default().fg(MARKDOWN_DIM_FG);
+    let separator_style = Style::default().fg(markdown_dim_fg());
     let empty_table_words: Vec<TableWord> = Vec::new();
     for (is_header, cells) in rows {
         let extra = if *is_header {

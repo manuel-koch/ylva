@@ -85,14 +85,14 @@ fn resumed_tool_paths_use_home_labels_in_cached_and_uncached_rendering() {
                     })
                     .unwrap();
                 let rendered = state.conversation.chat_rendered_lines.join("\n");
-                assert!(
-                    rendered.contains("path=~/ylva-render-test/file.rs"),
-                    "{rendered}"
-                );
                 assert!(!rendered.contains(&path), "{rendered}");
                 if collapsed {
                     assert!(rendered.contains("Read ~/ylva-render-test/file.rs"));
                 } else {
+                    assert!(
+                        rendered.contains("path=~/ylva-render-test/file.rs"),
+                        "{rendered}"
+                    );
                     assert!(rendered.contains("File content stays verbatim"));
                 }
             }
@@ -1532,8 +1532,8 @@ fn collapsed_bash_bubble_keeps_command_and_label_in_title() {
         "collapsed title must keep the command primary: {title_row}"
     );
     assert!(
-        title_row.contains("label=Greet the user"),
-        "collapsed title must keep the label prop: {title_row}"
+        title_row.contains("echo hi Greet the user"),
+        "collapsed title must keep the label after the command: {title_row}"
     );
 }
 
@@ -1694,7 +1694,7 @@ fn expanded_bash_command_section_renders_with_syntax_colors() {
 }
 
 #[test]
-fn expanded_bash_done_bubble_renders_result_header_last() {
+fn expanded_bash_done_bubble_renders_output_header_last() {
     use ylva::tui_reducer_state::ResultSection;
     use ylva::ToolCallState;
 
@@ -1723,7 +1723,7 @@ fn expanded_bash_done_bubble_renders_result_header_last() {
                         line_number_offset: None,
                     }),
                     ylva::agent::tools::Section::Content(ylva::agent::tools::ContentSection {
-                        label: Some("Result".to_string()),
+                        label: Some("Output".to_string()),
                         content: "hi\n".to_string(),
                         file_extension: None,
                         line_number_offset: Some(0),
@@ -1752,11 +1752,11 @@ fn expanded_bash_done_bubble_renders_result_header_last() {
         .expect("Command header should render");
     let result_row = rows
         .iter()
-        .position(|row| row.contains("Result:"))
-        .expect("Result header should render");
+        .position(|row| row.contains("Output:"))
+        .expect("Output header should render");
     assert!(
         label_row < command_row && command_row < result_row,
-        "headers must render Label, Command, Result in order: {label_row} {command_row} {result_row}"
+        "headers must render Label, Command, Output in order: {label_row} {command_row} {result_row}"
     );
     assert!(
         !rows.iter().any(|row| row.contains("label=")),
@@ -1764,7 +1764,7 @@ fn expanded_bash_done_bubble_renders_result_header_last() {
     );
     assert!(
         rows[result_row..].iter().any(|row| row.contains("hi")),
-        "result content should render under the Result header: {rows:?}"
+        "output should render under the Output header: {rows:?}"
     );
 }
 
@@ -1848,12 +1848,8 @@ fn collapsed_bubble_caps_title_args_with_the_ellipsis_glyph() {
         "the cut must not leave a space before the marker: {title_row:?}"
     );
     assert!(
-        title_row.contains('→'),
-        "the duration summary stays visible after the marker: {title_row:?}"
-    );
-    assert!(
-        title_row.contains("… → 1.234s"),
-        "the marker is followed by the duration summary: {title_row:?}"
+        title_row.trim_end().ends_with("… 1.234s"),
+        "the marker is followed by the right-aligned duration: {title_row:?}"
     );
 }
 

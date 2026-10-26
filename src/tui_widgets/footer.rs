@@ -22,8 +22,8 @@ use ratatui::Frame;
 
 use crate::agent::AgentMode;
 use crate::theme::{
-    APPROVE_BACKGROUND_COLOR, APPROVE_HOVER_BACKGROUND_COLOR, BUTTON_TEXT_COLOR,
-    DENY_BACKGROUND_COLOR, DENY_HOVER_BACKGROUND_COLOR, FOOTER_STATUS_COLOR, MUTED_TEXT_COLOR,
+    approve_background_color, approve_hover_background_color, button_text_color,
+    deny_background_color, deny_hover_background_color, footer_status_color, muted_text_color,
 };
 use crate::tui_reducer_state::{ActiveSubagentCounts, ChatEntry, SlashOverlay, ToolCallState};
 use crate::tui_render_state::TuiState;
@@ -428,7 +428,7 @@ fn draw_footer_row(
     frame.render_widget(
         Paragraph::new(Line::styled(
             label_text,
-            Style::default().fg(MUTED_TEXT_COLOR),
+            Style::default().fg(muted_text_color()),
         ))
         .alignment(Alignment::Right),
         label_area,
@@ -472,7 +472,7 @@ fn draw_footer_meta(frame: &mut Frame, area: Rect, state: &TuiState) {
     frame.render_widget(
         Paragraph::new(Line::styled(
             format!(" {}", parts.join(" ")),
-            Style::default().fg(MUTED_TEXT_COLOR),
+            Style::default().fg(muted_text_color()),
         )),
         area,
     );
@@ -623,7 +623,7 @@ pub(super) fn draw_normal_footer(
     };
     match split_footer_rows(footer_area) {
         FooterRows::Wide { status, controls } => {
-            draw_footer_row(frame, status, &row_1_text, FOOTER_STATUS_COLOR, state);
+            draw_footer_row(frame, status, &row_1_text, footer_status_color(), state);
             draw_footer_hints(
                 frame,
                 controls,
@@ -637,7 +637,7 @@ pub(super) fn draw_normal_footer(
             meta,
             controls,
         } => {
-            draw_footer_status(frame, status, &row_1_text, FOOTER_STATUS_COLOR);
+            draw_footer_status(frame, status, &row_1_text, footer_status_color());
             draw_footer_meta(frame, meta, state);
             draw_footer_hints(frame, controls, footer_hints, None, None);
         }
@@ -682,7 +682,7 @@ fn draw_footer_hints(
 ) {
     let hints_area = draw_footer_context_usage(frame, area, cost_total_text, context_usage_text, 9);
 
-    let normal_style = Style::default().fg(MUTED_TEXT_COLOR);
+    let normal_style = Style::default().fg(muted_text_color());
     let key_style = normal_style.add_modifier(Modifier::BOLD);
     let mut spans = Vec::with_capacity(hints.len() * 4 + 1);
     spans.push(Span::styled(" ", normal_style));
@@ -727,7 +727,7 @@ fn draw_footer_context_usage(
         frame.render_widget(
             Paragraph::new(Line::styled(
                 format!(" {usage}"),
-                Style::default().fg(MUTED_TEXT_COLOR),
+                Style::default().fg(muted_text_color()),
             ))
             .alignment(Alignment::Right),
             usage_area,
@@ -776,7 +776,7 @@ pub(super) fn draw_approval_footer(
     let deny_width = deny_label.chars().count() as u16;
     let controls_area = match split_footer_rows(footer_area) {
         FooterRows::Wide { status, controls } => {
-            draw_footer_row(frame, status, &row_1_text, FOOTER_STATUS_COLOR, state);
+            draw_footer_row(frame, status, &row_1_text, footer_status_color(), state);
             draw_footer_context_usage(
                 frame,
                 controls,
@@ -790,7 +790,7 @@ pub(super) fn draw_approval_footer(
             meta,
             controls,
         } => {
-            draw_footer_status(frame, status, &row_1_text, FOOTER_STATUS_COLOR);
+            draw_footer_status(frame, status, &row_1_text, footer_status_color());
             draw_footer_meta(frame, meta, state);
             controls
         }
@@ -818,27 +818,27 @@ pub(super) fn draw_approval_footer(
     // typed a denial reason — pressing Enter at that point denies instead.
     let approve_style = if !input_is_empty {
         Style::default()
-            .fg(MUTED_TEXT_COLOR)
+            .fg(muted_text_color())
             .add_modifier(Modifier::DIM)
     } else if approve_hovered {
         Style::default()
-            .fg(BUTTON_TEXT_COLOR)
-            .bg(APPROVE_HOVER_BACKGROUND_COLOR)
+            .fg(button_text_color())
+            .bg(approve_hover_background_color())
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
-            .fg(BUTTON_TEXT_COLOR)
-            .bg(APPROVE_BACKGROUND_COLOR)
+            .fg(button_text_color())
+            .bg(approve_background_color())
     };
     let deny_style = if deny_hovered {
         Style::default()
-            .fg(BUTTON_TEXT_COLOR)
-            .bg(DENY_HOVER_BACKGROUND_COLOR)
+            .fg(button_text_color())
+            .bg(deny_hover_background_color())
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
-            .fg(BUTTON_TEXT_COLOR)
-            .bg(DENY_BACKGROUND_COLOR)
+            .fg(button_text_color())
+            .bg(deny_background_color())
     };
 
     frame.render_widget(

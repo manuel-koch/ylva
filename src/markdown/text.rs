@@ -17,7 +17,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::theme::INLINE_CODE_FG;
+use crate::theme::inline_code_fg;
 
 /// The inline formatting in effect for a run of text: bold/italic modifiers
 /// and whether it originates from an inline code span (distinct color).
@@ -32,7 +32,7 @@ impl InlineStyle {
     pub(super) fn to_style(self) -> Style {
         let mut style = Style::default();
         if self.code {
-            style = style.fg(INLINE_CODE_FG);
+            style = style.fg(inline_code_fg());
         }
         let mut modifier = Modifier::empty();
         if self.bold {

@@ -23,11 +23,11 @@ use ratatui::Frame;
 use crate::markdown::render_markdown;
 use crate::saturating_cast::saturating_u16;
 use crate::theme::{
-    ACTIVE_MODEL_COLOR, CHAT_SCROLLBAR_COLOR, CLARIFY_BANNER_FG_COLOR,
-    CLARIFY_BANNER_SCROLL_INDICATOR_COLOR, CLARIFY_BANNER_SELECTION_FG_COLOR,
-    COMPACTION_MISMATCH_COLOR, LIST_BORDER_COLOR, LIST_SELECTION_BACKGROUND_COLOR,
-    LIST_SELECTION_FOREGROUND_COLOR, LIST_TEXT_COLOR, MUTED_TEXT_COLOR, OVERLAY_SELECTION_COLOR,
-    TOAST_BG_COLOR, TOAST_FG_COLOR,
+    active_model_color, chat_scrollbar_color, clarify_banner_fg_color,
+    clarify_banner_scroll_indicator_color, clarify_banner_selection_fg_color,
+    compaction_mismatch_color, list_border_color, list_selection_background_color,
+    list_selection_foreground_color, list_text_color, muted_text_color, overlay_selection_color,
+    toast_bg_color, toast_fg_color,
 };
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, model_picker_row_is_details,
@@ -165,11 +165,13 @@ pub(super) fn draw_slash_overlay(
             let button_style = |action| {
                 if picker.action == action {
                     Style::default()
-                        .fg(LIST_SELECTION_FOREGROUND_COLOR)
-                        .bg(LIST_SELECTION_BACKGROUND_COLOR)
+                        .fg(list_selection_foreground_color())
+                        .bg(list_selection_background_color())
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(LIST_TEXT_COLOR).bg(MUTED_TEXT_COLOR)
+                    Style::default()
+                        .fg(list_text_color())
+                        .bg(muted_text_color())
                 }
             };
             details.push(Line::from(vec![
@@ -251,7 +253,7 @@ pub(super) fn draw_slash_overlay(
             let Some(_) = entry_index else {
                 return Line::styled(
                     "─".repeat(content_width),
-                    Style::default().fg(MUTED_TEXT_COLOR),
+                    Style::default().fg(muted_text_color()),
                 );
             };
             let entry = &entries[row_index];
@@ -279,15 +281,15 @@ pub(super) fn draw_slash_overlay(
                 });
             let style = if is_selected {
                 Style::default()
-                    .fg(LIST_SELECTION_FOREGROUND_COLOR)
-                    .bg(LIST_SELECTION_BACKGROUND_COLOR)
+                    .fg(list_selection_foreground_color())
+                    .bg(list_selection_background_color())
                     .add_modifier(Modifier::BOLD)
             } else if is_active_model_row {
                 Style::default()
-                    .fg(ACTIVE_MODEL_COLOR)
+                    .fg(active_model_color())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(LIST_TEXT_COLOR)
+                Style::default().fg(list_text_color())
             };
             if is_model_details_row {
                 let indent_width = MODEL_PICKER_DETAIL_INDENT.chars().count();
@@ -308,7 +310,7 @@ pub(super) fn draw_slash_overlay(
     frame.render_widget(Clear, panel_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(LIST_BORDER_COLOR))
+        .border_style(Style::default().fg(list_border_color()))
         .title(title);
     let inner_area = block.inner(panel_area);
     frame.render_widget(block, panel_area);
@@ -342,7 +344,7 @@ pub(super) fn draw_slash_overlay(
         frame.render_widget(
             Paragraph::new(Line::styled(
                 "─".repeat(inner_area.width.saturating_sub(1) as usize),
-                Style::default().fg(MUTED_TEXT_COLOR),
+                Style::default().fg(muted_text_color()),
             )),
             separator_area,
         );
@@ -355,7 +357,7 @@ pub(super) fn draw_slash_overlay(
             apply_overlay_drag_highlight(&mut detail_lines, details_area, selection);
         }
         frame.render_widget(
-            Paragraph::new(detail_lines).style(Style::default().fg(MUTED_TEXT_COLOR)),
+            Paragraph::new(detail_lines).style(Style::default().fg(muted_text_color())),
             details_area,
         );
         if matches!(overlay, SlashOverlay::SessionPicker(_)) {
@@ -387,7 +389,7 @@ pub(super) fn draw_slash_overlay(
             max_first_visible,
             rows.len(),
             content_height as usize,
-            CHAT_SCROLLBAR_COLOR,
+            chat_scrollbar_color(),
         );
     }
 }
@@ -456,7 +458,12 @@ fn apply_overlay_drag_highlight(
         } else {
             usize::MAX
         };
-        apply_selection_highlight_to_line(line, column_start, column_end, OVERLAY_SELECTION_COLOR);
+        apply_selection_highlight_to_line(
+            line,
+            column_start,
+            column_end,
+            overlay_selection_color(),
+        );
     }
 }
 
@@ -528,9 +535,9 @@ fn model_picker_detail_lines(
                     )
                 };
             let color = if mismatch {
-                COMPACTION_MISMATCH_COLOR
+                compaction_mismatch_color()
             } else {
-                MUTED_TEXT_COLOR
+                muted_text_color()
             };
             Line::styled(
                 format!(
@@ -631,7 +638,7 @@ pub(super) fn draw_clarify_banner(
     );
 
     // Scroll indicators at the right edge of the first / last visible row.
-    let scroll_indicator_style = Style::default().fg(CLARIFY_BANNER_SCROLL_INDICATOR_COLOR);
+    let scroll_indicator_style = Style::default().fg(clarify_banner_scroll_indicator_color());
     let indicator_col = area.x + area.width.saturating_sub(1);
     if effective_scroll > 0 && area.height > 0 {
         frame.render_widget(
@@ -671,7 +678,7 @@ fn banner_markdown_line_with_selection(
         let text: String = md_line.spans.iter().map(|s| s.content.as_ref()).collect();
         banner_line_with_selection(text, abs_row, area_x, drag, bold)
     } else {
-        md_line.patch_style(Style::default().fg(CLARIFY_BANNER_FG_COLOR))
+        md_line.patch_style(Style::default().fg(clarify_banner_fg_color()))
     };
     line.patch_style(overlay)
 }
@@ -688,20 +695,20 @@ fn banner_line_with_selection(
 ) -> Line<'static> {
     let normal_style = if bold {
         Style::default()
-            .fg(CLARIFY_BANNER_FG_COLOR)
+            .fg(clarify_banner_fg_color())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(CLARIFY_BANNER_FG_COLOR)
+        Style::default().fg(clarify_banner_fg_color())
     };
     let selected_style = if bold {
         Style::default()
-            .fg(CLARIFY_BANNER_SELECTION_FG_COLOR)
-            .bg(CLARIFY_BANNER_FG_COLOR)
+            .fg(clarify_banner_selection_fg_color())
+            .bg(clarify_banner_fg_color())
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
-            .fg(CLARIFY_BANNER_SELECTION_FG_COLOR)
-            .bg(CLARIFY_BANNER_FG_COLOR)
+            .fg(clarify_banner_selection_fg_color())
+            .bg(clarify_banner_fg_color())
     };
 
     let Some(sel) = drag else {
@@ -764,15 +771,15 @@ pub(super) fn draw_toast(frame: &mut Frame, area: Rect, message: &str) {
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .style(Style::default().fg(TOAST_FG_COLOR).bg(TOAST_BG_COLOR));
+        .style(Style::default().fg(toast_fg_color()).bg(toast_bg_color()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     frame.render_widget(
         Paragraph::new(Line::styled(
             content,
             Style::default()
-                .fg(TOAST_FG_COLOR)
-                .bg(TOAST_BG_COLOR)
+                .fg(toast_fg_color())
+                .bg(toast_bg_color())
                 .add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Center),

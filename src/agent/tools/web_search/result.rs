@@ -76,7 +76,7 @@ impl ToolCallResult for WebSearchResult {
             return vec![];
         }
         vec![Section::Content(ContentSection {
-            label: None,
+            label: Some("Output".to_string()),
             content: self.text.clone(),
             file_extension: None,
             line_number_offset: None,

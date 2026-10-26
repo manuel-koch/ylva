@@ -177,7 +177,7 @@ date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum ; date ; s
 Run the following command exactly like given (as-is, don't re-write/collapse linebreaks ) in bash:
 
 ```shell
-for n in seq 1 5 ; do
+for n in $(seq 1 5) ; do
   echo "$(date) lorem ipsum"
   sleep 3
 done
@@ -217,6 +217,19 @@ file nor use its current content. If file exists, override it.
 ---
 
 Which subagent types can you use to delegate tasks ?
+
+---
+
+Run the following tasks each in a distinct subagent concurrently:
+
+- Task A:
+  - Search for files that relate to bash tool
+  - Run bash script `for i in {1..3}; do date +%s; echo "hello world"; sleep 1; done`
+  - Use `rumdl` to check markdown docs at `docs/ideas/*.md`
+
+- Task B:
+  - Clarify with user ( using the `clarify` tool and ask for an animal name )
+  - Create a four line poem about a the selected animal and save it to `tmp/poem.md`
 
 ---
 

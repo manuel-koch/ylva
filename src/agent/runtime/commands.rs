@@ -396,7 +396,7 @@ impl RunState {
                             .remove(&cancelled.call_id)
                             .unwrap_or_default();
                         content_sections.push(tools::Section::Content(tools::ContentSection {
-                            label: Some("Result".to_string()),
+                            label: Some("Output".to_string()),
                             content:
                                 "Cancelled: the parent agent stopped before the subagent finished."
                                     .to_string(),

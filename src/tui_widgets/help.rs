@@ -22,7 +22,7 @@ use ratatui::Frame;
 
 use crate::build_info::BUILD_INFO;
 use crate::home_relative_path::display_path;
-use crate::theme::{CHAT_SELECTION_BG, HELP_POPUP_BORDER_COLOR, HELP_POPUP_HEADING_COLOR};
+use crate::theme::{chat_selection_bg, help_popup_border_color, help_popup_heading_color};
 use crate::tui_reducer_state::{CONFIRM_TIMEOUT, HELP_HORIZONTAL_SCROLL_COLUMNS};
 use crate::tui_render_state::TuiState;
 
@@ -143,7 +143,7 @@ pub(super) fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(HELP_POPUP_BORDER_COLOR))
+        .border_style(Style::default().fg(help_popup_border_color()))
         .title(" Help")
         .title_alignment(Alignment::Left)
         .padding(Padding::uniform(1));
@@ -155,7 +155,7 @@ pub(super) fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
     // heading line followed by its entries; sections are separated by a blank.
     // No leading space on heading text — the popup padding provides the margin.
     let heading_style = Style::default()
-        .fg(HELP_POPUP_HEADING_COLOR)
+        .fg(help_popup_heading_color())
         .add_modifier(Modifier::BOLD);
 
     let sections = help_sections();
@@ -281,7 +281,7 @@ pub(super) fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
                     line,
                     column_start,
                     column_end,
-                    CHAT_SELECTION_BG,
+                    chat_selection_bg(),
                 );
             }
         }
@@ -303,7 +303,7 @@ pub(super) fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
     let can_scroll_down = scroll_y < max_scroll_y;
     let can_scroll_left = scroll_x > 0;
     let can_scroll_right = scroll_x < max_scroll_x;
-    let indicator_style = Style::default().fg(HELP_POPUP_BORDER_COLOR);
+    let indicator_style = Style::default().fg(help_popup_border_color());
 
     let pad_col_right = popup.x + popup.width.saturating_sub(2);
     let pad_col_left = popup.x + 1;

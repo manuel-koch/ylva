@@ -556,7 +556,7 @@ async fn bash_tool_done_content_sections_lead_with_label_and_command() {
         vec![
             Some("Label".to_string()),
             Some("Command".to_string()),
-            Some("Result".to_string())
+            Some("Output".to_string())
         ],
         "completed body must be Label, Command, then Result"
     );

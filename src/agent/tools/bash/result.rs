@@ -98,15 +98,15 @@ impl ToolCallResult for BashResult {
             // Truncated capture is an incomplete display of the result —
             // same vocabulary as a failure's partial-output section.
             let label = if self.truncated {
-                "Partial result"
+                "Partial output"
             } else {
-                "Result"
+                "Output"
             };
             sections.push(Section::Content(ContentSection {
                 label: Some(label.to_string()),
                 content: self.output.clone(),
                 file_extension: None,
-                line_number_offset: Some(0),
+                line_number_offset: None,
             }));
         }
         sections

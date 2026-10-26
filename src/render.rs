@@ -170,7 +170,7 @@ fn draw_expansion_indicator(frame: &mut Frame, state: &TuiState, target: BubbleE
     frame.render_widget(
         Paragraph::new(EXPANSION_FEEDBACK_LABEL).style(
             Style::default()
-                .fg(crate::theme::NOTICE_COLOR)
+                .fg(crate::theme::notice_color())
                 .add_modifier(Modifier::BOLD),
         ),
         Rect::new(area.right() - width, area.y + row as u16, width, 1),

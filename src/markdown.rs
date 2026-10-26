@@ -38,7 +38,7 @@ use table::flush_table;
 pub(crate) use text::slice_by_display_columns;
 use text::{push_words, terminal_display_width, wrap_words, InlineStyle, Word};
 
-use crate::theme::MARKDOWN_DIM_FG;
+use crate::theme::markdown_dim_fg;
 
 /// Tracks the counter for an in-progress list so nested items number/bullet
 /// correctly; `Bullet` lists never advance, `Ordered` increments per item.
@@ -64,6 +64,10 @@ pub fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
     let mut quote_depth: usize = 0;
     let mut pending_item_prefix: Option<String> = None;
     let mut item_continuation_indent: usize = 0;
+    // One entry per open list item: its marker width, and whether it holds a
+    // paragraph (a "loose" item, which gets a trailing spacer line).
+    let mut item_marker_widths: Vec<usize> = Vec::new();
+    let mut item_has_paragraph: Vec<bool> = Vec::new();
     let mut heading_level: Option<usize> = None;
     let mut code_block_buffer: Option<String> = None;
     // Language tag from a fenced code block opening (e.g. "rust", "python").
@@ -95,6 +99,15 @@ pub fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
                     heading_level = Some(level as usize);
                 }
                 Tag::List(start) => {
+                    flush_buffer(
+                        &mut out,
+                        &mut buffer,
+                        width,
+                        quote_depth,
+                        &mut pending_item_prefix,
+                        item_continuation_indent,
+                        heading_level,
+                    );
                     if list_stack.is_empty() {
                         push_spacer_if_needed(&mut out);
                     }
@@ -104,9 +117,12 @@ pub fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
                     });
                 }
                 Tag::Item => {
-                    let (prefix, indent) = list_item_prefix(&mut list_stack);
-                    pending_item_prefix = Some(prefix);
-                    item_continuation_indent = indent;
+                    let (marker, marker_width) = list_item_prefix(&mut list_stack);
+                    let parent_indent: usize = item_marker_widths.iter().sum();
+                    pending_item_prefix = Some(format!("{}{marker}", " ".repeat(parent_indent)));
+                    item_continuation_indent = parent_indent + marker_width;
+                    item_marker_widths.push(marker_width);
+                    item_has_paragraph.push(false);
                 }
                 Tag::CodeBlock(kind) => {
                     push_spacer_if_needed(&mut out);
@@ -149,10 +165,17 @@ pub fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
                         push_spacer_if_needed(&mut out);
                     }
                     if matches!(tag_end, TagEnd::Item) {
-                        item_continuation_indent = 0;
+                        item_marker_widths.pop();
+                        item_continuation_indent = item_marker_widths.iter().sum();
+                        if item_has_paragraph.pop().unwrap_or(false) {
+                            push_spacer_if_needed(&mut out);
+                        }
                     }
                     if matches!(tag_end, TagEnd::Paragraph) {
-                        push_spacer_if_needed(&mut out);
+                        match item_has_paragraph.last_mut() {
+                            Some(has_paragraph) => *has_paragraph = true,
+                            None => push_spacer_if_needed(&mut out),
+                        }
                     }
                 }
                 TagEnd::BlockQuote(_) => quote_depth = quote_depth.saturating_sub(1),
@@ -332,7 +355,7 @@ fn flush_buffer(
         if quote_depth > 0 {
             spans.push(Span::styled(
                 quote_prefix.clone(),
-                Style::default().fg(MARKDOWN_DIM_FG),
+                Style::default().fg(markdown_dim_fg()),
             ));
         }
         if index == 0 {
