@@ -32,7 +32,7 @@ use ratatui::Frame;
 use crate::agent::tools::ToolRegistry;
 use crate::build_info::BUILD_INFO;
 use crate::theme::{
-    BUILD_INFO_COLOR, CHAT_SCROLLBAR_COLOR, LOGO_COLOR, SUBAGENT_VIEW_SEPARATOR_COLOR,
+    build_info_color, chat_scrollbar_color, logo_color, subagent_view_separator_color,
 };
 use crate::tui_reducer_state::{ChatEntry, ToolCallState, UserMessageState};
 use crate::tui_render_state::TuiState;
@@ -76,9 +76,9 @@ pub(super) fn draw_chat(
     // root conversation's neutral scrollbar color.
     let in_subagent_view = state.subagent_view.subagent_view_bubble.is_some();
     let scrollbar_color = if in_subagent_view {
-        SUBAGENT_VIEW_SEPARATOR_COLOR
+        subagent_view_separator_color()
     } else {
-        CHAT_SCROLLBAR_COLOR
+        chat_scrollbar_color()
     };
 
     // row_width is the full column count of content_area; bubble helpers pad
@@ -432,7 +432,9 @@ pub(super) fn render_chat_scrollbar(
 fn append_logo(lines: &mut Vec<Line>, profile_name: &str) {
     lines.push(Line::default());
     lines.push(Line::default());
-    let style = Style::default().fg(LOGO_COLOR).add_modifier(Modifier::BOLD);
+    let style = Style::default()
+        .fg(logo_color())
+        .add_modifier(Modifier::BOLD);
     for row in LOGO {
         lines.push(Line::styled(row.to_string(), style).alignment(Alignment::Center));
     }
@@ -440,12 +442,12 @@ fn append_logo(lines: &mut Vec<Line>, profile_name: &str) {
     lines.push(Line::default());
     let build_info_text = format!("v{}  {}", BUILD_INFO.version, BUILD_INFO.git_commit);
     lines.push(
-        Line::styled(build_info_text, Style::default().fg(BUILD_INFO_COLOR))
+        Line::styled(build_info_text, Style::default().fg(build_info_color()))
             .alignment(Alignment::Center),
     );
     let profile_text = format!("profile: {profile_name}");
     lines.push(
-        Line::styled(profile_text, Style::default().fg(BUILD_INFO_COLOR))
+        Line::styled(profile_text, Style::default().fg(build_info_color()))
             .alignment(Alignment::Center),
     );
     // A blank spacer separates the wordmark block from the conversation.

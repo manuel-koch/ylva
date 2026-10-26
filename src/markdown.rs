@@ -38,7 +38,7 @@ use table::flush_table;
 pub(crate) use text::slice_by_display_columns;
 use text::{push_words, terminal_display_width, wrap_words, InlineStyle, Word};
 
-use crate::theme::MARKDOWN_DIM_FG;
+use crate::theme::markdown_dim_fg;
 
 /// Tracks the counter for an in-progress list so nested items number/bullet
 /// correctly; `Bullet` lists never advance, `Ordered` increments per item.
@@ -332,7 +332,7 @@ fn flush_buffer(
         if quote_depth > 0 {
             spans.push(Span::styled(
                 quote_prefix.clone(),
-                Style::default().fg(MARKDOWN_DIM_FG),
+                Style::default().fg(markdown_dim_fg()),
             ));
         }
         if index == 0 {

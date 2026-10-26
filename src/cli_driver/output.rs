@@ -18,7 +18,7 @@ use std::io::Write;
 
 use ratatui::style::Color;
 
-use crate::theme::THINKING_BORDER_COLOR;
+use crate::theme::thinking_border_color;
 
 /// Which kind of assistant output is currently being written to the CLI
 /// stream, mirroring the TUI's `partial_thinking_text` /
@@ -121,7 +121,7 @@ pub(super) fn flush_stream_section(
             write_cli_styled_line(
                 out,
                 &format!("[thought for {:.3}s]", elapsed.as_secs_f64()),
-                THINKING_BORDER_COLOR,
+                thinking_border_color(),
                 true,
                 output_options,
             )?;

@@ -827,7 +827,7 @@ fn drag_on_header_bubble_copies_text_without_toggling_collapse() {
             .expect("selected header cell")
             .style()
             .bg,
-        Some(crate::theme::CHAT_SELECTION_BG),
+        Some(crate::theme::chat_selection_bg()),
         "the selected header range must be highlighted"
     );
     let effects = update(

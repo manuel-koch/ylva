@@ -507,7 +507,7 @@ fn bash_result_content_sections_lead_with_label_then_command_before_output() {
         Section::Content(section) => {
             assert_eq!(section.label.as_deref(), Some("Output"));
             assert_eq!(section.content, "lorem ipsum\n");
-            assert_eq!(section.line_number_offset, Some(0));
+            assert_eq!(section.line_number_offset, None);
         }
         other => panic!("unexpected section type: {other:?}"),
     }

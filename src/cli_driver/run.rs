@@ -35,8 +35,8 @@ use crate::run_outcome::RunOutcome;
 use crate::sandbox::ApprovalCheck;
 use crate::stop_signal::StopSignals;
 use crate::theme::{
-    ASSISTANT_STREAM_BORDER_COLOR, ERROR_COLOR, INTERRUPTED_COLOR, NOTICE_COLOR,
-    THINKING_BORDER_COLOR, TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BORDER_COLOR,
+    assistant_stream_border_color, error_color, interrupted_color, notice_color,
+    thinking_border_color, tool_bubble_border_color, user_message_border_color,
 };
 use crate::ToolRegistry;
 
@@ -155,7 +155,7 @@ pub(super) async fn run_cli_to_with_title(
     write_cli_styled_line(
         out,
         "---[ User ]---",
-        USER_MESSAGE_BORDER_COLOR,
+        user_message_border_color(),
         false,
         output_options,
     )?;
@@ -243,7 +243,7 @@ pub(super) async fn run_cli_to_with_title(
                     write_cli_styled_line(
                         out,
                         "---[ Assistant Thinking ]---",
-                        THINKING_BORDER_COLOR,
+                        thinking_border_color(),
                         true,
                         output_options,
                     )?;
@@ -271,7 +271,7 @@ pub(super) async fn run_cli_to_with_title(
                     write_cli_styled_line(
                         out,
                         "---[ Assistant ]---",
-                        ASSISTANT_STREAM_BORDER_COLOR,
+                        assistant_stream_border_color(),
                         false,
                         output_options,
                     )?;
@@ -311,7 +311,7 @@ pub(super) async fn run_cli_to_with_title(
                         write_cli_styled_line(
                             out,
                             &format!("[tool] {invocation}"),
-                            TOOL_BUBBLE_BORDER_COLOR,
+                            tool_bubble_border_color(),
                             false,
                             output_options,
                         )?;
@@ -325,7 +325,7 @@ pub(super) async fn run_cli_to_with_title(
                         write_cli_styled_line(
                             out,
                             &format!("[tool] {denied_invocation} → auto-denied: {reason}"),
-                            ERROR_COLOR,
+                            error_color(),
                             false,
                             output_options,
                         )?;
@@ -345,7 +345,7 @@ pub(super) async fn run_cli_to_with_title(
                         write_cli_styled_line(
                             out,
                             &format!("[tool] {denied_invocation} → denied: {reason}"),
-                            ERROR_COLOR,
+                            error_color(),
                             false,
                             output_options,
                         )?;
@@ -384,7 +384,7 @@ pub(super) async fn run_cli_to_with_title(
                     &format!(
                         "[tool] {clarify_title} [question={question}] → denied: {clarify_name} is not available in CLI mode"
                     ),
-                    ERROR_COLOR,
+                    error_color(),
                     false,
                     output_options,
                 )?;
@@ -423,7 +423,7 @@ pub(super) async fn run_cli_to_with_title(
                 write_cli_styled_line(
                     out,
                     &format!("[tool] {invocation}"),
-                    TOOL_BUBBLE_BORDER_COLOR,
+                    tool_bubble_border_color(),
                     false,
                     output_options,
                 )?;
@@ -462,7 +462,7 @@ pub(super) async fn run_cli_to_with_title(
                 write_cli_styled_line(
                     out,
                     &format!("[tool] {title} done ({duration_s:.3}s){summary_str}"),
-                    TOOL_BUBBLE_BORDER_COLOR,
+                    tool_bubble_border_color(),
                     false,
                     output_options,
                 )?;
@@ -480,7 +480,7 @@ pub(super) async fn run_cli_to_with_title(
                     write_cli_styled_line(
                         out,
                         &format!("[tool] error: {error}"),
-                        ERROR_COLOR,
+                        error_color(),
                         false,
                         output_options,
                     )?;
@@ -505,7 +505,7 @@ pub(super) async fn run_cli_to_with_title(
                 write_cli_styled_line(
                     out,
                     &format!("[tool] auto-denied '{name}': {reason}"),
-                    ERROR_COLOR,
+                    error_color(),
                     false,
                     output_options,
                 )?;
@@ -514,7 +514,7 @@ pub(super) async fn run_cli_to_with_title(
                 write_cli_styled_line(
                     out,
                     "[tool] killed",
-                    INTERRUPTED_COLOR,
+                    interrupted_color(),
                     false,
                     output_options,
                 )?;
@@ -560,7 +560,7 @@ pub(super) async fn run_cli_to_with_title(
                         write_cli_styled_line(
                             out,
                             "---[ Notice ]---",
-                            NOTICE_COLOR,
+                            notice_color(),
                             false,
                             output_options,
                         )?;
@@ -570,7 +570,7 @@ pub(super) async fn run_cli_to_with_title(
                         write_cli_styled_line(
                             out,
                             &format!("[subagent {run_id}] notice: {text}"),
-                            NOTICE_COLOR,
+                            notice_color(),
                             false,
                             output_options,
                         )?;
@@ -613,7 +613,7 @@ pub(super) async fn run_cli_to_with_title(
                 write_cli_styled_line(
                     out,
                     "---[ Interrupted ]---",
-                    INTERRUPTED_COLOR,
+                    interrupted_color(),
                     false,
                     output_options,
                 )?;
@@ -648,7 +648,7 @@ pub(super) async fn run_cli_to_with_title(
                         write_cli_styled_line(
                             out,
                             "---[ Error ]---",
-                            ERROR_COLOR,
+                            error_color(),
                             false,
                             output_options,
                         )?;
@@ -666,7 +666,7 @@ pub(super) async fn run_cli_to_with_title(
                         write_cli_styled_line(
                             out,
                             &format!("[subagent {run_id}] error: {message}"),
-                            ERROR_COLOR,
+                            error_color(),
                             false,
                             output_options,
                         )?;

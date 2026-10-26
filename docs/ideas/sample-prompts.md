@@ -177,7 +177,7 @@ date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum ; date ; s
 Run the following command exactly like given (as-is, don't re-write/collapse linebreaks ) in bash:
 
 ```shell
-for n in seq 1 5 ; do
+for n in $(seq 1 5) ; do
   echo "$(date) lorem ipsum"
   sleep 3
 done

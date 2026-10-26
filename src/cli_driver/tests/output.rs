@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::super::output::*;
-use crate::theme::{THINKING_BORDER_COLOR, USER_MESSAGE_BORDER_COLOR};
+use crate::theme::{thinking_border_color, user_message_border_color};
 
 #[test]
 fn styled_cli_line_stays_plain_when_colors_are_disabled() {
@@ -22,7 +22,7 @@ fn styled_cli_line_stays_plain_when_colors_are_disabled() {
     write_cli_styled_line(
         &mut output,
         "---[ User ]---",
-        USER_MESSAGE_BORDER_COLOR,
+        user_message_border_color(),
         false,
         CliOutputOptions::plain(),
     )
@@ -38,7 +38,7 @@ fn styled_cli_line_uses_the_shared_tui_color_and_resets_ansi_state() {
     write_cli_styled_line(
         &mut output,
         "---[ Assistant Thinking ]---",
-        THINKING_BORDER_COLOR,
+        thinking_border_color(),
         true,
         CliOutputOptions::new(true),
     )

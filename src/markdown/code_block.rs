@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span};
 use crate::highlight::{
     active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line,
 };
-use crate::theme::MARKDOWN_DIM_FG;
+use crate::theme::markdown_dim_fg;
 
 /// Renders a fenced code block using syntect syntax highlighting.
 /// Each source line is prefixed with a right-aligned line number and a dim
@@ -36,7 +36,7 @@ pub(super) fn push_highlighted_code_block(
         out.push(Line::from(Span::styled(
             lang.to_string(),
             Style::default()
-                .fg(MARKDOWN_DIM_FG)
+                .fg(markdown_dim_fg())
                 .add_modifier(Modifier::ITALIC),
         )));
     }
@@ -46,7 +46,7 @@ pub(super) fn push_highlighted_code_block(
     }
     let line_count = trimmed.lines().count();
     let gutter_width = line_count.to_string().len();
-    let gutter_style = Style::default().fg(MARKDOWN_DIM_FG);
+    let gutter_style = Style::default().fg(markdown_dim_fg());
     // "{:>gutter_width$} │ " — digits, one space, the "│" glyph, one space.
     let gutter_prefix_width = gutter_width + 3;
     let continuation_gutter = Span::styled(" ".repeat(gutter_prefix_width), gutter_style);

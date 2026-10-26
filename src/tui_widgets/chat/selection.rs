@@ -124,7 +124,7 @@ pub(in crate::tui_widgets) fn rendered_line_selection_data(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::CHAT_SELECTION_BG;
+    use crate::theme::chat_selection_bg;
 
     fn plain_line(text: &str) -> Line<'static> {
         Line::from(vec![Span::raw(text.to_owned())])
@@ -133,7 +133,7 @@ mod tests {
     fn highlighted_in(line: &Line<'_>) -> String {
         line.spans
             .iter()
-            .filter(|s| s.style.bg == Some(CHAT_SELECTION_BG))
+            .filter(|s| s.style.bg == Some(chat_selection_bg()))
             .map(|s| s.content.as_ref())
             .collect()
     }
@@ -141,18 +141,18 @@ mod tests {
     #[test]
     fn selection_highlight_highlights_middle_chars_only() {
         let mut line = plain_line("Hello, world!");
-        apply_selection_highlight_to_line(&mut line, 7, 12, CHAT_SELECTION_BG);
+        apply_selection_highlight_to_line(&mut line, 7, 12, chat_selection_bg());
         assert_eq!(highlighted_in(&line), "world");
     }
 
     #[test]
     fn selection_highlight_empty_range_leaves_line_unchanged() {
         let mut line = plain_line("Hello");
-        apply_selection_highlight_to_line(&mut line, 3, 3, CHAT_SELECTION_BG);
+        apply_selection_highlight_to_line(&mut line, 3, 3, chat_selection_bg());
         assert!(
             line.spans
                 .iter()
-                .all(|s| s.style.bg != Some(CHAT_SELECTION_BG)),
+                .all(|s| s.style.bg != Some(chat_selection_bg())),
             "no span should be highlighted for an empty range"
         );
     }
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn selection_highlight_max_col_end_highlights_to_end_of_line() {
         let mut line = plain_line("Hello");
-        apply_selection_highlight_to_line(&mut line, 2, usize::MAX, CHAT_SELECTION_BG);
+        apply_selection_highlight_to_line(&mut line, 2, usize::MAX, chat_selection_bg());
         assert_eq!(highlighted_in(&line), "llo");
     }
 
@@ -171,7 +171,7 @@ mod tests {
             Span::raw("bar".to_owned()),
         ]);
         // Select "ob" spanning both spans: cols 2..4.
-        apply_selection_highlight_to_line(&mut line, 2, 4, CHAT_SELECTION_BG);
+        apply_selection_highlight_to_line(&mut line, 2, 4, chat_selection_bg());
         assert_eq!(highlighted_in(&line), "ob");
     }
 
@@ -182,7 +182,7 @@ mod tests {
             Span::styled("A日".to_owned(), Style::default().fg(foreground)),
             Span::raw("e\u{301}Z".to_owned()),
         ]);
-        apply_selection_highlight_to_line(&mut line, 2, 4, CHAT_SELECTION_BG);
+        apply_selection_highlight_to_line(&mut line, 2, 4, chat_selection_bg());
         assert_eq!(highlighted_in(&line), "日e\u{301}");
         assert_eq!(line.width(), 5);
         assert!(line

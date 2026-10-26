@@ -106,7 +106,7 @@ impl ToolCallResult for BashResult {
                 label: Some(label.to_string()),
                 content: self.output.clone(),
                 file_extension: None,
-                line_number_offset: Some(0),
+                line_number_offset: None,
             }));
         }
         sections

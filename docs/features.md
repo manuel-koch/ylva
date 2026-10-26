@@ -1181,9 +1181,10 @@ for the full mechanics.
   Markdown syntax wraps as plain text. Unsupported syntax (links, images,
   HTML) degrades to plain text rather than crashing or dropping content.
   Markdown and syntax highlighting are applied live while a response streams.
-- **Selectable syntax theme:** code blocks and file previews highlight with
-  either the `dark` or the `light` theme, chosen with the `theme` key of the
-  selected profile (see [configuration](./configuration.md#profile-file)).
+- **Selectable colour theme:** the `theme` key of the selected profile (see
+  [configuration](./configuration.md#profile-file)) picks `dark` (default,
+  for dark terminal backgrounds) or `light` (for light ones). It switches the
+  syntax-highlighting palette and the UI palette.
 - **Thinking bubble:** extended-thinking/reasoning output gets its own
   bubble: dim-blue border, Markdown rendering, shown before the assistant's
   reply. Starts expanded; title shows a live elapsed timer while streaming,

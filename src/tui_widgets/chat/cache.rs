@@ -28,8 +28,8 @@ use crate::conversation_render_cache::{
 };
 use crate::highlight::active_theme;
 use crate::theme::{
-    CHAT_SCROLLBAR_COLOR, CHAT_SELECTION_BG, ERROR_COLOR, MUTED_TEXT_COLOR, NOTICE_COLOR,
-    SUBAGENT_VIEW_SEPARATOR_COLOR, THINKING_BORDER_COLOR,
+    chat_scrollbar_color, chat_selection_bg, error_color, muted_text_color, notice_color,
+    subagent_view_separator_color, thinking_border_color,
 };
 use crate::tui_reducer_state::{BubbleExpansionTarget, ChatEntry, ToolCallState, UserMessageState};
 use crate::tui_render_state::TuiState;
@@ -266,7 +266,7 @@ pub(super) fn build_entry(
                     } else {
                         format!("      {wrapped}")
                     },
-                    Style::default().fg(ERROR_COLOR),
+                    Style::default().fg(error_color()),
                 ));
             }
         }
@@ -279,7 +279,7 @@ pub(super) fn build_entry(
                     plural_noun(*summarized_messages, "message", "messages")
                 ),
                 Style::default()
-                    .fg(MUTED_TEXT_COLOR)
+                    .fg(muted_text_color())
                     .add_modifier(Modifier::DIM),
             ));
         }
@@ -296,7 +296,7 @@ pub(super) fn build_entry(
                         } else {
                             format!("     {wrapped}")
                         },
-                        Style::default().fg(NOTICE_COLOR),
+                        Style::default().fg(notice_color()),
                     ));
                 }
             }
@@ -466,7 +466,7 @@ pub(in crate::tui_widgets) fn draw_cached_chat(
             let dim = Style::default().add_modifier(Modifier::DIM);
             layout
                 .rows
-                .push(BubbleStyle::new(THINKING_BORDER_COLOR).content_line(
+                .push(BubbleStyle::new(thinking_border_color()).content_line(
                     vec![Span::styled(
                         format!("{indicator} Thinking… ({elapsed_seconds}s)"),
                         dim,
@@ -587,9 +587,9 @@ pub(in crate::tui_widgets) fn draw_cached_chat(
             total,
             visible,
             if source.header.is_some() {
-                SUBAGENT_VIEW_SEPARATOR_COLOR
+                subagent_view_separator_color()
             } else {
-                CHAT_SCROLLBAR_COLOR
+                chat_scrollbar_color()
             },
         );
     }
@@ -619,7 +619,7 @@ pub(super) fn highlight_visible_rows(
                     } else {
                         usize::MAX
                     },
-                    CHAT_SELECTION_BG,
+                    chat_selection_bg(),
                 );
             }
         }

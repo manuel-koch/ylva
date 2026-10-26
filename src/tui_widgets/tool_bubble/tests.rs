@@ -426,14 +426,14 @@ fn split_tool_layout_preserves_chrome_body_and_hit_ranges() {
                     let chrome_text = chrome
                         .iter()
                         .flat_map(|line| &line.spans)
-                        .filter(|span| span.style.fg == Some(crate::theme::ERROR_COLOR))
+                        .filter(|span| span.style.fg == Some(crate::theme::error_color()))
                         .map(|span| span.content.trim())
                         .collect::<Vec<_>>()
                         .join(" ");
                     assert!(chrome_text.contains(diagnostic));
                 }
 
-                let style = BubbleStyle::new(TOOL_BUBBLE_BORDER_COLOR);
+                let style = BubbleStyle::new(tool_bubble_border_color());
                 let mut parts = vec![Line::from("preceding entry")];
                 let extra_sections = title::append_tool_chrome(&mut parts, bubble, &style, width);
                 body::append_tool_body(&mut parts, bubble, &style, &extra_sections, width);
@@ -582,7 +582,7 @@ fn tool_bubble_renders_execution_error_content_literally() {
 #[test]
 fn failed_subagent_status_is_red_in_root_and_header_bubble_titles() {
     use super::{append_tool_bubble_lines, ToolBubbleArgs};
-    use crate::theme::ERROR_COLOR;
+    use crate::theme::error_color;
     use crate::tui_reducer_state::{ResultSection, ToolCallState};
     use ratatui::style::Modifier;
 
@@ -626,7 +626,7 @@ fn failed_subagent_status_is_red_in_root_and_header_bubble_titles() {
             }
             let failure_status_span =
                 failure_status_span.expect("failed subagent status should be rendered");
-            assert_eq!(failure_status_span.style.fg, Some(ERROR_COLOR));
+            assert_eq!(failure_status_span.style.fg, Some(error_color()));
             assert!(
                 failure_status_span
                     .style

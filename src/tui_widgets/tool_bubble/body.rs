@@ -22,7 +22,7 @@ use crate::highlight::{
 };
 use crate::markdown::render_markdown;
 use crate::theme::{
-    CONTENT_COLOR, DIFF_ADDED_COLOR, DIFF_CONTEXT_COLOR, DIFF_REMOVED_COLOR, MUTED_TEXT_COLOR,
+    content_color, diff_added_color, diff_context_color, diff_removed_color, muted_text_color,
 };
 use crate::tui_reducer_state::ToolCallState;
 
@@ -42,7 +42,7 @@ fn is_output_section(section: &crate::agent::tools::Section) -> bool {
 pub(super) fn push_section_label(lines: &mut Vec<Line<'static>>, style: &BubbleStyle, label: &str) {
     let [bar, margin] = style.prefix_spans();
     let dim_style = Style::default()
-        .fg(CONTENT_COLOR)
+        .fg(content_color())
         .add_modifier(Modifier::DIM);
     lines.push(Line::from(vec![
         bar,
@@ -87,7 +87,7 @@ fn append_result_section_lines(
     // bar, since unset modifiers are unioned in, not overridden, when a span
     // has no modifier of its own.
     let dim = Style::default()
-        .fg(CONTENT_COLOR)
+        .fg(content_color())
         .add_modifier(Modifier::DIM);
     let mut md_lines = render_markdown(content, content_wrap_width);
     if md_lines.is_empty() {
@@ -238,7 +238,7 @@ pub(super) fn append_tool_body(
                                         let gutter_str = format!("  {line_num:>digits$}: ");
                                         spans.push(Span::styled(
                                             gutter_str,
-                                            Style::default().fg(MUTED_TEXT_COLOR),
+                                            Style::default().fg(muted_text_color()),
                                         ));
                                     } else {
                                         spans.push(Span::styled("  ", Style::default()));
@@ -300,7 +300,7 @@ pub(super) fn append_tool_body(
                                     Span::styled(
                                         text_str,
                                         Style::default()
-                                            .fg(MUTED_TEXT_COLOR)
+                                            .fg(muted_text_color())
                                             .add_modifier(Modifier::DIM),
                                     ),
                                 ]));
@@ -310,17 +310,17 @@ pub(super) fn append_tool_body(
                             let (line_color, left_num, right_num) = if diff_line.starts_with('+') {
                                 let n = new_line;
                                 new_line += 1;
-                                (DIFF_ADDED_COLOR, None, Some(n))
+                                (diff_added_color(), None, Some(n))
                             } else if diff_line.starts_with('-') {
                                 let n = old_line;
                                 old_line += 1;
-                                (DIFF_REMOVED_COLOR, Some(n), None)
+                                (diff_removed_color(), Some(n), None)
                             } else {
                                 let o = old_line;
                                 let n = new_line;
                                 old_line += 1;
                                 new_line += 1;
-                                (DIFF_CONTEXT_COLOR, Some(o), Some(n))
+                                (diff_context_color(), Some(o), Some(n))
                             };
 
                             let left_str = left_num
@@ -347,7 +347,7 @@ pub(super) fn append_tool_body(
                                     (
                                         Span::styled(
                                             gutter_str.clone(),
-                                            Style::default().fg(MUTED_TEXT_COLOR),
+                                            Style::default().fg(muted_text_color()),
                                         ),
                                         format!("{prefix} {wrapped_chunk}"),
                                     )
@@ -377,7 +377,7 @@ pub(super) fn append_tool_body(
                             Span::styled(
                                 label_str,
                                 Style::default()
-                                    .fg(CONTENT_COLOR)
+                                    .fg(content_color())
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]));
@@ -417,10 +417,10 @@ pub(super) fn append_tool_body(
 
                                 if row_index == 0 {
                                     let prefix_style = if search_result_line.is_match {
-                                        Style::default().fg(MUTED_TEXT_COLOR)
+                                        Style::default().fg(muted_text_color())
                                     } else {
                                         Style::default()
-                                            .fg(MUTED_TEXT_COLOR)
+                                            .fg(muted_text_color())
                                             .add_modifier(Modifier::DIM)
                                     };
                                     spans.push(Span::styled(prefix.clone(), prefix_style));

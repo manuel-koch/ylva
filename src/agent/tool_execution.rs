@@ -111,7 +111,7 @@ impl PendingTool {
                                     label: Some("Partial output".to_string()),
                                     content: output.clone(),
                                     file_extension: None,
-                                    line_number_offset: Some(0),
+                                    line_number_offset: None,
                                 },
                             ));
                         }

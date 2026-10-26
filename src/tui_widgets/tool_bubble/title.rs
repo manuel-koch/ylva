@@ -17,7 +17,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::theme::{CONTENT_COLOR, ERROR_COLOR, TOOL_BUBBLE_BORDER_COLOR};
+use crate::theme::{content_color, error_color, tool_bubble_border_color};
 use crate::tui_reducer_state::ToolCallState;
 
 use super::super::bubbles::BubbleStyle;
@@ -38,10 +38,10 @@ pub(super) fn summary_pairs(bubble: &ToolBubbleArgs<'_>) -> Vec<SummaryPair> {
     };
     let is_subagent = bubble.name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME;
     let dim_white = Style::default()
-        .fg(CONTENT_COLOR)
+        .fg(content_color())
         .add_modifier(Modifier::DIM);
     let failure_status = Style::default()
-        .fg(ERROR_COLOR)
+        .fg(error_color())
         .add_modifier(Modifier::BOLD);
     summary
         .iter()
@@ -244,7 +244,7 @@ pub(super) fn append_tool_chrome(
             .all(|(key, _)| content_section_labels.contains(&key.to_lowercase()));
 
     let dim_white = Style::default()
-        .fg(CONTENT_COLOR)
+        .fg(content_color())
         .add_modifier(Modifier::DIM);
 
     // The duration is `time_text`, right-aligned in the title row; the
@@ -313,19 +313,19 @@ pub(super) fn append_tool_chrome(
         .map_or(0, |primary| primary.chars().count());
 
     let bold_white = Style::default()
-        .fg(CONTENT_COLOR)
+        .fg(content_color())
         .add_modifier(Modifier::BOLD);
 
     let spinner_or_margin: Span = if is_queued_subagent {
         // Queued (not yet actually running): a static glyph, not the
         // animated spinner, since nothing is actively executing yet — the
         // subagent is only waiting for the currently running one to finish.
-        Span::styled("≡ ", Style::default().fg(TOOL_BUBBLE_BORDER_COLOR))
+        Span::styled("≡ ", Style::default().fg(tool_bubble_border_color()))
     } else if matches!(state, ToolCallState::Running { .. }) {
         let spinner_char = SPINNER_FRAMES[spinner_frame as usize % SPINNER_FRAMES.len()];
         Span::styled(
             format!("{spinner_char} "),
-            Style::default().fg(TOOL_BUBBLE_BORDER_COLOR),
+            Style::default().fg(tool_bubble_border_color()),
         )
     } else {
         margin.clone()
@@ -360,7 +360,7 @@ pub(super) fn append_tool_chrome(
         if pe > 0 {
             spans.push(Span::styled(
                 chars[..pe].iter().collect::<String>(),
-                Style::default().fg(TOOL_BUBBLE_BORDER_COLOR),
+                Style::default().fg(tool_bubble_border_color()),
             ));
         }
         if ae > pe {
@@ -452,7 +452,7 @@ pub(super) fn append_tool_chrome(
             spinner_or_margin.clone(),
             Span::styled(
                 title_prefix.clone(),
-                Style::default().fg(TOOL_BUBBLE_BORDER_COLOR),
+                Style::default().fg(tool_bubble_border_color()),
             ),
         ];
         push_time_aligned(&mut first_spans, prefix_char_len);
@@ -501,7 +501,7 @@ pub(super) fn append_tool_chrome(
             lines.push(Line::from(vec![
                 bar.clone(),
                 margin.clone(),
-                Span::styled(error_label, Style::default().fg(ERROR_COLOR)),
+                Span::styled(error_label, Style::default().fg(error_color())),
             ]));
         }
     }
