@@ -251,9 +251,14 @@ pub(super) fn append_tool_chrome(
     // `key=value` summary pairs render in the expanded `Result:` section.
     let has_summary_pairs = !summary_pairs(&bubble).is_empty();
     let time_text: String = match state {
-        ToolCallState::Running { .. } if is_subagent && !is_queued_subagent => elapsed_seconds
-            .map(|elapsed_seconds| format!("{elapsed_seconds}s"))
-            .unwrap_or_default(),
+        ToolCallState::Running { .. }
+            if (is_subagent && !is_queued_subagent)
+                || name == crate::agent::tools::bash::BashTool::NAME =>
+        {
+            elapsed_seconds
+                .map(|elapsed_seconds| format!("{elapsed_seconds}s"))
+                .unwrap_or_default()
+        }
         ToolCallState::Done { duration, .. } => format!("{:.3}s", duration.as_secs_f64()),
         ToolCallState::Error { duration, .. } if duration.as_nanos() > 0 => {
             format!("{:.3}s", duration.as_secs_f64())

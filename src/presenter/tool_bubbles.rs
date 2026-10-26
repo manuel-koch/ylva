@@ -135,6 +135,12 @@ pub(super) fn update_tool_bubble_to_running(
     title_arguments: Vec<(String, serde_json::Value)>,
     run_id: Option<Uuid>,
 ) {
+    if name == crate::agent::tools::bash::BashTool::NAME {
+        state
+            .bash_started_at
+            .entry(id)
+            .or_insert_with(std::time::Instant::now);
+    }
     if let Some(entry) = state.find_tool_bubble_mut(id) {
         if let ChatEntry::ToolBubble {
             state: bubble_state,

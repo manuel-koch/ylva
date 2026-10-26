@@ -148,6 +148,9 @@ pub struct AppState {
     /// whenever the next queued subagent started, corrupting whichever
     /// subagent's conversation the user was currently viewing.
     pub subagent_conversations: HashMap<Uuid, SubagentConversation>,
+    /// Instant each `bash` call started running, keyed by tool bubble id;
+    /// drives the live duration counter while the bubble is `Running`.
+    pub bash_started_at: HashMap<Uuid, Instant>,
     /// Provider/model identity for each constructed subagent engine, keyed by
     /// subagent run id. Subagent conversations can remain drillable after a run
     /// finishes, so these entries have the same session lifetime as their
@@ -315,9 +318,12 @@ impl AppState {
 
             active_view: ConversationView::Root,
             subagent_conversations: HashMap::new(),
+            bash_started_at: HashMap::new(),
             subagent_engine_displays: HashMap::new(),
             running_subagents: HashMap::new(),
             pending_approval_order: Vec::new(),
+            queued_clarifies: HashMap::new(),
+            queued_clarify_activated: false,
             auto_switched_to_subagent: false,
             pre_pause_view: None,
             last_bubble_click: None,

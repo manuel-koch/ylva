@@ -735,6 +735,44 @@ fn running_subagent_bubble_shows_spinner_not_queued_glyph() {
 }
 
 #[test]
+fn running_bash_bubble_shows_elapsed_seconds() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::tui_reducer_state::ToolCallState;
+
+    let state = ToolCallState::Running {
+        arguments: serde_json::json!({"command": "sleep 10"}),
+        content_sections: vec![],
+        title_arguments: vec![("command".to_string(), serde_json::json!("sleep 10"))],
+        progress_arguments: vec![],
+    };
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut bubble_title_rows = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "bash",
+            state: &state,
+            collapsed: true,
+            spinner_frame: 0,
+            elapsed_seconds: Some(7),
+            display_title_override: None,
+            subtype_argument: None,
+            path_like_arguments: &[],
+        },
+        &mut bubble_title_rows,
+        80,
+    );
+
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(rendered.contains("7s"), "got: {rendered:?}");
+}
+
+#[test]
 fn subagent_bubble_hides_run_id_from_title() {
     use super::{append_tool_bubble_lines, ToolBubbleArgs};
     use crate::tui_reducer_state::ToolCallState;
