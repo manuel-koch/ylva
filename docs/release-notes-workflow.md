@@ -12,6 +12,13 @@ or an explicit range).
 Check the content of every commit, omit commits that are clearly not related to a
 feature or bugfix.
 
+Read each commit as a Conventional Commit: the title has the form
+`type(scope): description`. Treat `!` before the colon (for example,
+`feat(api)!: ...`) as a breaking-change marker. Also recognize a body line beginning
+with `BREAKING CHANGES:` or `BREAKING-CHANGES:` as a breaking-change marker.
+When either marker is present, make the breaking change and its compatibility impact
+clear in the release-note entry; use the commit body and diff to describe the impact.
+
 Write the release notes to `docs/release-notes-<FROM>-to-<TO>.md`,
 e.g. `docs/release-notes-v0.2-to-v0.3.md` (overwrite if it already exists).
 Do not print the content to the conversation — only confirm the file was written.
