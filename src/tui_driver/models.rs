@@ -337,17 +337,21 @@ fn refresh_compaction_display(
 pub(super) fn compaction_switch_notice(
     engine_display: &crate::llm::engine::EngineDisplayInfo,
     target: &crate::llm::engine::ModelSelectionTarget,
+    selection: &ModelSelection,
 ) -> Option<String> {
     let compaction = engine_display.compaction_engine.as_ref()?;
     if compaction.follows_conversation {
-        let target_name = target
-            .engine_name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-            .unwrap_or(&target.provider_connection);
-        return Some(format!(
-            "Compaction now uses selected engine '{target_name}'."
-        ));
+        // Only a named-engine pick names an engine; a provider-model pick
+        // names the model, since the backing engine is an implementation detail.
+        return Some(match selection {
+            ModelSelection::NamedEngine { engine_name, .. } => {
+                format!("Compaction now uses selected engine '{engine_name}'.")
+            }
+            ModelSelection::ProviderModel(_) => format!(
+                "Compaction now uses selected model '{}/{}'.",
+                target.provider_connection, target.model
+            ),
+        });
     }
 
     let target_is_compaction_engine = compaction.shares_conversation
@@ -409,7 +413,9 @@ pub(super) async fn switch_model(
             };
             match preview {
                 Ok(target) => {
-                    if let Some(effect) = compaction_switch_notice(&state.engine_display, &target) {
+                    if let Some(effect) =
+                        compaction_switch_notice(&state.engine_display, &target, selection)
+                    {
                         confirmation.push(' ');
                         confirmation.push_str(&effect);
                     }
