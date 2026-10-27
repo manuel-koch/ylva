@@ -17,12 +17,16 @@ use super::{flag, optional, required, OptionSpec};
 // All provenance reviewed 2026-10-21. These are selected spellings, not
 // exhaustive OS grammars. GNU long options are accepted only in full.
 // BSD/GNU arity conflicts (notably ls -I/-T and tail -f) are omitted.
-// Options after operands are incomplete except in ripgrep's documented CLI.
+// Options after operands are incomplete except for grep and ripgrep, which permute.
+// GNU grep: options may follow operands unless POSIXLY_CORRECT is set
+// (residual risk, see docs/configuration.md); BSD/macOS grep verified on Darwin.
+// https://www.gnu.org/software/grep/manual/html_node/Usage.html
+// https://www.gnu.org/software/libc/manual/html_node/Using-Getopt.html (permutation)
 // https://www.gnu.org/software/coreutils/manual/html_node/Common-options.html
 // https://www.gnu.org/software/coreutils/manual/html_node/cat-invocation.html
 // https://man.freebsd.org/cgi/man.cgi?query=cat&sektion=1
 // https://keith.github.io/xcode-man-pages/cat.1.html
-const CAT: &[OptionSpec] = &[
+pub(super) const CAT: &[OptionSpec] = &[
     flag(&["-b", "--number-nonblank"]),
     flag(&["-n", "--number"]),
     flag(&["-s", "--squeeze-blank"]),
@@ -40,7 +44,7 @@ const CAT: &[OptionSpec] = &[
 // https://www.gnu.org/software/coreutils/manual/html_node/ls-invocation.html
 // https://man.freebsd.org/cgi/man.cgi?query=ls&sektion=1
 // https://keith.github.io/xcode-man-pages/ls.1.html
-const LS: &[OptionSpec] = &[
+pub(super) const LS: &[OptionSpec] = &[
     flag(&["-a", "--all"]),
     flag(&["-A", "--almost-all"]),
     flag(&["-l"]),
@@ -76,7 +80,7 @@ const LS: &[OptionSpec] = &[
 // https://man.freebsd.org/cgi/man.cgi?query=head&sektion=1
 // https://keith.github.io/xcode-man-pages/head.1.html
 // First-argument digits-only -N is recognized as -n by parse_options.
-const HEAD: &[OptionSpec] = &[
+pub(super) const HEAD: &[OptionSpec] = &[
     required(&["-n", "--lines"]),
     required(&["-c", "--bytes"]),
     flag(&["-q", "--quiet", "--silent"]),
@@ -91,7 +95,7 @@ const HEAD: &[OptionSpec] = &[
 // GNU -f has an optional attached value, BSD -f does not: only the
 // unambiguous long --follow spelling is admitted.
 // First-argument digits-only -N is recognized as -n by parse_options.
-const TAIL: &[OptionSpec] = &[
+pub(super) const TAIL: &[OptionSpec] = &[
     required(&["-n", "--lines"]),
     required(&["-c", "--bytes"]),
     optional(&["--follow"]),
@@ -108,7 +112,7 @@ const TAIL: &[OptionSpec] = &[
 // https://www.gnu.org/software/coreutils/manual/html_node/wc-invocation.html
 // https://man.freebsd.org/cgi/man.cgi?query=wc&sektion=1
 // https://keith.github.io/xcode-man-pages/wc.1.html
-const WC: &[OptionSpec] = &[
+pub(super) const WC: &[OptionSpec] = &[
     flag(&["-c", "--bytes"]),
     flag(&["-m", "--chars"]),
     flag(&["-l", "--lines"]),
@@ -122,7 +126,7 @@ const WC: &[OptionSpec] = &[
 // https://www.gnu.org/software/grep/manual/html_node/Command_002dline-Options.html
 // https://man.freebsd.org/cgi/man.cgi?query=grep&sektion=1
 // https://keith.github.io/xcode-man-pages/grep.1.html
-const GREP: &[OptionSpec] = &[
+pub(super) const GREP: &[OptionSpec] = &[
     flag(&["-E", "--extended-regexp"]),
     flag(&["-F", "--fixed-strings"]),
     flag(&["-G", "--basic-regexp"]),
@@ -161,7 +165,7 @@ const GREP: &[OptionSpec] = &[
 // ripgrep 14.1.1; unlike BSD getopt, its parser accepts interspersed options.
 // https://github.com/BurntSushi/ripgrep/blob/14.1.1/crates/core/flags/defs.rs
 // https://github.com/BurntSushi/ripgrep/blob/14.1.1/crates/core/flags/parse.rs
-const RIPGREP: &[OptionSpec] = &[
+pub(super) const RIPGREP: &[OptionSpec] = &[
     flag(&["-i", "--ignore-case"]),
     flag(&["-s", "--case-sensitive"]),
     flag(&["-S", "--smart-case"]),
@@ -221,7 +225,7 @@ const RIPGREP: &[OptionSpec] = &[
 // https://www.gnu.org/software/coreutils/manual/html_node/sort-invocation.html
 // https://man.freebsd.org/cgi/man.cgi?query=sort&sektion=1
 // https://keith.github.io/xcode-man-pages/sort.1.html
-const SORT: &[OptionSpec] = &[
+pub(super) const SORT: &[OptionSpec] = &[
     flag(&["-b", "--ignore-leading-blanks"]),
     flag(&["-d", "--dictionary-order"]),
     flag(&["-f", "--ignore-case"]),
@@ -245,17 +249,3 @@ const SORT: &[OptionSpec] = &[
     flag(&["--help"]),
     flag(&["--version"]),
 ];
-
-pub(super) fn options(name: &str) -> Option<&'static [OptionSpec]> {
-    match name {
-        "cat" => Some(CAT),
-        "ls" => Some(LS),
-        "head" => Some(HEAD),
-        "tail" => Some(TAIL),
-        "wc" => Some(WC),
-        "grep" => Some(GREP),
-        "rg" => Some(RIPGREP),
-        "sort" => Some(SORT),
-        _ => None,
-    }
-}

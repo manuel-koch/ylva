@@ -145,6 +145,7 @@ fn path_and_command_rules_never_match_network_calls() {
             SandboxRuleConfig::CommandGlob {
                 with_arguments: None,
                 only_arguments: None,
+                allowed_scripts: None,
                 command: vec!["git".to_string()],
                 verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,

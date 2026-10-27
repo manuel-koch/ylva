@@ -124,14 +124,9 @@ extending grammars or suggesting persistent rules.
 ## Grammar coverage and adversarial validation
 
 Extend the grammar roster only when repeated approvals demonstrate a useful
-read-only subset. `sed` and `awk` remain potential narrowly scoped additions;
-their program operands need dedicated validation, not just option allow-lists.
+read-only subset. `awk` remains a potential narrowly scoped addition;
+its program operands need dedicated validation, not just option allow-lists.
 User-defined grammars are a possible later extension, not a prerequisite.
-
-Grammar enhancement for commands like
-
-- `sed -n 825,845p <path>`
-- `grep -n "some text" -A40 <path>`
 
 Further validation could include:
 

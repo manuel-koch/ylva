@@ -258,6 +258,20 @@ See [configuration](./configuration.md#sandbox-tool-approval-rules).
   Git's dedicated `check-ignore` option scope recognizes `-v`/`--verbose`,
   honors `--`, and requires an explicit path; stdin and other reporting modes
   remain incomplete.
+- A single registry (`grammar_for` in `command_arguments.rs`) maps command names
+  to a `Grammar`; `supports_command` and `parse` both derive from it. Option-table
+  grammars carry a `permutes_options` flag (true for `grep`, `rg`) that lets
+  `parse_options` accept options after operands. `sed`, `printf` and `cd` have
+  dedicated parsers. `command_arguments/sed.rs` holds the pure script validator
+  (a fixed floor of non-writing commands with simple addresses) that exposes the
+  trimmed commands as `ArgumentAnalysis::script_commands`; `-e` values are
+  validated, otherwise the first operand. `ArgumentConditions` compiles the
+  required `allowed_scripts` regexes (anchored, `regex` crate) and requires every
+  script command to match one; `requires_allowed_scripts` flags such grammars.
+  `printf` rejects any option as first argument; `cd` needs
+  exactly one operand other than `-`.
+- `git.rs` has one `SUBCOMMANDS` table (name, identity, option scopes, optional
+  nested subcommands). `stash` nests `list`/`show`, producing two identities.
 - `sandbox/rules.rs` compiles condition globs and validates the shared semantic
   contract used by profile loading and direct construction. Conditions are
   command-only; the selector's literal first token chooses the grammar.

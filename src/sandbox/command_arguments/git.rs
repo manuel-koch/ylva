@@ -174,6 +174,136 @@ const HISTORY: &[OptionSpec] = &[
     required(&["--min-parents"]),
 ];
 
+// https://git-scm.com/docs/git-ls-files (reviewed 2026-10-21)
+// Omitted: -x/--exclude, -X/--exclude-from, --exclude-per-directory (read
+// files), --recurse-submodules, --sparse.
+const LS_FILES: &[OptionSpec] = &[
+    flag(&["-c", "--cached"]),
+    flag(&["-o", "--others"]),
+    flag(&["-i", "--ignored"]),
+    flag(&["-m", "--modified"]),
+    flag(&["-d", "--deleted"]),
+    flag(&["-s", "--stage"]),
+    flag(&["-u", "--unmerged"]),
+    flag(&["-z"]),
+    flag(&["-t"]),
+    flag(&["-v"]),
+    flag(&["--exclude-standard"]),
+    flag(&["--full-name"]),
+    flag(&["--error-unmatch"]),
+    flag(&["--deduplicate"]),
+    flag(&["--eol"]),
+    optional(&["--abbrev"]),
+];
+
+// https://git-scm.com/docs/git-blame (reviewed 2026-10-21)
+// Omitted: --contents, -S, --ignore-revs-file (read files); -M/-C stay
+// unsupported like for diff.
+const BLAME: &[OptionSpec] = &[
+    required(&["-L"]),
+    flag(&["-l"]),
+    flag(&["-t"]),
+    flag(&["-s"]),
+    flag(&["-e", "--show-email"]),
+    flag(&["-w"]),
+    flag(&["-p", "--porcelain"]),
+    flag(&["--line-porcelain"]),
+    flag(&["--incremental"]),
+    flag(&["-f", "--show-name"]),
+    flag(&["-n", "--show-number"]),
+];
+
+// https://git-scm.com/docs/git-rev-parse (reviewed 2026-10-21)
+// Omitted: --parseopt, --sq-quote and other stdin modes.
+const REV_PARSE: &[OptionSpec] = &[
+    flag(&["--git-dir"]),
+    flag(&["--show-toplevel"]),
+    flag(&["--show-cdup"]),
+    flag(&["--show-prefix"]),
+    flag(&["--is-inside-work-tree"]),
+    flag(&["--is-bare-repository"]),
+    optional(&["--abbrev-ref"]),
+    optional(&["--short"]),
+    flag(&["--verify"]),
+    flag(&["--quiet"]),
+    flag(&["--symbolic"]),
+    flag(&["--symbolic-full-name"]),
+];
+
+// https://git-scm.com/docs/git-grep (reviewed 2026-10-21)
+// Omitted: -O/--open-files-in-pager (runs a program), -f (reads a file).
+const GREP: &[OptionSpec] = &[
+    flag(&["-n", "--line-number"]),
+    flag(&["-i", "--ignore-case"]),
+    flag(&["-v", "--invert-match"]),
+    flag(&["-w", "--word-regexp"]),
+    flag(&["-F", "--fixed-strings"]),
+    flag(&["-E", "--extended-regexp"]),
+    required(&["-e"]),
+    flag(&["-l", "--files-with-matches"]),
+    flag(&["-L", "--files-without-match"]),
+    flag(&["-c", "--count"]),
+    required(&["-A", "--after-context"]),
+    required(&["-B", "--before-context"]),
+    required(&["-C", "--context"]),
+    flag(&["--no-index"]),
+    flag(&["--untracked"]),
+    flag(&["--cached"]),
+    flag(&["-I"]),
+    flag(&["-a", "--text"]),
+    flag(&["-h"]),
+    flag(&["-H"]),
+    required(&["--max-depth"]),
+    flag(&["-q", "--quiet"]),
+    flag(&["-o", "--only-matching"]),
+    flag(&["--heading"]),
+    flag(&["--break"]),
+    flag(&["-p", "--show-function"]),
+];
+
+struct Subcommand {
+    name: &'static str,
+    identity: &'static [&'static str],
+    scopes: &'static [&'static [OptionSpec]],
+    /// Required nested subcommands (e.g. `stash list`); `None` when not nested.
+    nested: Option<&'static [Subcommand]>,
+}
+
+const fn subcommand(
+    name: &'static str,
+    identity: &'static [&'static str],
+    scopes: &'static [&'static [OptionSpec]],
+) -> Subcommand {
+    Subcommand {
+        name,
+        identity,
+        scopes,
+        nested: None,
+    }
+}
+
+// Single table of supported subcommands: identity and option scopes.
+const SUBCOMMANDS: &[Subcommand] = &[
+    subcommand("check-ignore", &["check-ignore"], &[CHECK_IGNORE]),
+    subcommand("status", &["status"], &[STATUS]),
+    subcommand("log", &["log"], &[HISTORY, DIFF_OUTPUT]),
+    subcommand("diff", &["diff"], &[DIFF, DIFF_OUTPUT]),
+    subcommand("show", &["show"], &[HISTORY, DIFF_OUTPUT]),
+    subcommand("ls-files", &["ls-files"], &[LS_FILES]),
+    subcommand("blame", &["blame"], &[BLAME]),
+    subcommand("rev-parse", &["rev-parse"], &[REV_PARSE]),
+    subcommand("grep", &["grep"], &[GREP]),
+    Subcommand {
+        name: "stash",
+        identity: &["stash"],
+        scopes: &[],
+        nested: Some(&[
+            subcommand("list", &["list"], &[HISTORY, DIFF_OUTPUT]),
+            subcommand("show", &["show"], &[DIFF_OUTPUT]),
+        ]),
+    },
+];
+
 pub(super) fn parse(arguments: &[ArgvToken], analysis: &mut ArgumentAnalysis) {
     let mut position = 1;
     while position < arguments.len() && arguments[position].text.starts_with('-') {
@@ -190,31 +320,42 @@ pub(super) fn parse(arguments: &[ArgvToken], analysis: &mut ArgumentAnalysis) {
         analysis.complete = false;
         return;
     };
-    let subcommand = match token.text.as_str() {
-        "check-ignore" => &["check-ignore"][..],
-        "status" => &["status"][..],
-        "log" => &["log"][..],
-        "diff" => &["diff"][..],
-        "show" => &["show"][..],
-        _ => {
+    let Some(subcommand) = SUBCOMMANDS
+        .iter()
+        .find(|subcommand| subcommand.name == token.text)
+    else {
+        analysis.complete = false;
+        return;
+    };
+    analysis.identify(subcommand.identity);
+    position += 1;
+    let mut scopes = subcommand.scopes;
+    if let Some(nested) = subcommand.nested {
+        // Bare `git stash` is `push`; only read-only nested forms are known.
+        let nested_name = arguments.get(position).map(|nested| nested.text.as_str());
+        let Some(nested_subcommand) = nested
+            .iter()
+            .find(|candidate| Some(candidate.name) == nested_name)
+        else {
             analysis.complete = false;
             return;
-        }
-    };
-    analysis.identify(subcommand);
-    position += 1;
+        };
+        analysis.identify(nested_subcommand.identity);
+        scopes = nested_subcommand.scopes;
+        position += 1;
+    }
     let mut terminated = false;
     while position < arguments.len() {
         let text = arguments[position].text.as_str();
         if !terminated && text == "--" {
             terminated = true;
             position += 1;
-        } else if !terminated && subcommand[0] == "log" && is_numeric_count_option(text) {
+        } else if !terminated && subcommand.identity[0] == "log" && is_numeric_count_option(text) {
             analysis.identify(&["-n", "--max-count"]);
             analysis.option_values.push(position);
             position += 1;
         } else if !terminated && text.starts_with('-') && text != "-" {
-            let Some(options) = scoped_options(subcommand[0], text) else {
+            let Some(options) = scoped_options(scopes, text) else {
                 analysis.complete = false;
                 return;
             };
@@ -227,7 +368,7 @@ pub(super) fn parse(arguments: &[ArgvToken], analysis: &mut ArgumentAnalysis) {
             position += 1;
         }
     }
-    if subcommand[0] == "check-ignore" && analysis.operands.is_empty() {
+    if subcommand.identity[0] == "check-ignore" && analysis.operands.is_empty() {
         analysis.complete = false;
     }
 }
@@ -238,15 +379,9 @@ fn valid_global_spelling(text: &str) -> bool {
         || (text.len() > 2 && (text.starts_with("-c") || text.starts_with("-C")))
 }
 
-fn scoped_options(subcommand: &str, text: &str) -> Option<&'static [OptionSpec]> {
+fn scoped_options(scopes: &[&'static [OptionSpec]], text: &str) -> Option<&'static [OptionSpec]> {
     let spelling = text.split_once('=').map_or(text, |(name, _)| name);
-    let candidates = match subcommand {
-        "check-ignore" => &[CHECK_IGNORE][..],
-        "status" => &[STATUS][..],
-        "diff" => &[DIFF, DIFF_OUTPUT][..],
-        "log" | "show" => &[HISTORY, DIFF_OUTPUT][..],
-        _ => return None,
-    };
+    let candidates = scopes;
     candidates.iter().copied().find(|options| {
         options
             .iter()

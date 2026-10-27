@@ -58,6 +58,7 @@ fn rule_replacement_preserves_appended_precedence_across_policy_owners() {
             SandboxRuleConfig::CommandGlob {
                 with_arguments: None,
                 only_arguments: None,
+                allowed_scripts: None,
                 command: vec!["git".to_string(), "status".to_string()],
                 verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,

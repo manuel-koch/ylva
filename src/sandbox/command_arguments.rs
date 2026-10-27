@@ -20,6 +20,7 @@ use super::bash_command_extractor::{ArgvToken, ExtractedCommand};
 
 mod find;
 mod git;
+mod sed;
 mod utility_options;
 
 #[cfg(test)]
@@ -31,6 +32,9 @@ pub(super) struct ArgumentAnalysis {
     pub(super) complete: bool,
     operands: Vec<usize>,
     option_values: Vec<usize>,
+    /// Trimmed script commands of `sed` (empty for other grammars), matched by
+    /// the `allowed_scripts` rule condition.
+    pub(super) script_commands: Vec<String>,
 }
 
 impl ArgumentAnalysis {
@@ -40,6 +44,7 @@ impl ArgumentAnalysis {
             complete: true,
             operands: Vec::new(),
             option_values: Vec::new(),
+            script_commands: Vec::new(),
         }
     }
 
@@ -94,11 +99,60 @@ const fn optional(aliases: &'static [&'static str]) -> OptionSpec {
     }
 }
 
+/// How a command's arguments are analyzed. Single registry: adding a command
+/// to [`grammar_for`] is the only step needed to make it analyzable.
+#[derive(Clone, Copy)]
+enum Grammar {
+    Find,
+    Git,
+    Sed,
+    ChangeDirectory,
+    Printf,
+    /// A plain option table. `permutes_options` allows options after operands.
+    Options {
+        options: &'static [OptionSpec],
+        permutes_options: bool,
+    },
+}
+
+const fn options_grammar(options: &'static [OptionSpec], permutes_options: bool) -> Grammar {
+    Grammar::Options {
+        options,
+        permutes_options,
+    }
+}
+
+fn grammar_for(name: &str) -> Option<Grammar> {
+    use utility_options as tables;
+    Some(match name {
+        "find" => Grammar::Find,
+        "git" => Grammar::Git,
+        "sed" => Grammar::Sed,
+        "cd" => Grammar::ChangeDirectory,
+        "cat" => options_grammar(tables::CAT, false),
+        "ls" => options_grammar(tables::LS, false),
+        "head" => options_grammar(tables::HEAD, false),
+        "tail" => options_grammar(tables::TAIL, false),
+        "wc" => options_grammar(tables::WC, false),
+        "sort" => options_grammar(tables::SORT, false),
+        // GNU grep permutes via getopt_long and BSD/macOS grep was verified to
+        // do so; see the comment above `GREP` in utility_options.rs.
+        "grep" => options_grammar(tables::GREP, true),
+        // ripgrep documents interspersed options.
+        "rg" => options_grammar(tables::RIPGREP, true),
+        // Only the first argument can be an option (`-v var` assigns shell state).
+        "printf" => Grammar::Printf,
+        _ => return None,
+    })
+}
+
+/// Grammars with script operands; their rules must list `allowed_scripts`.
+pub(super) fn requires_allowed_scripts(name: &str) -> bool {
+    matches!(grammar_for(name), Some(Grammar::Sed))
+}
+
 pub(super) fn supports_command(name: &str) -> bool {
-    matches!(
-        name,
-        "cat" | "ls" | "head" | "tail" | "wc" | "grep" | "rg" | "sort" | "find" | "git"
-    )
+    grammar_for(name).is_some()
 }
 
 pub(super) fn parse(command: &ExtractedCommand) -> ArgumentAnalysis {
@@ -107,15 +161,65 @@ pub(super) fn parse(command: &ExtractedCommand) -> ArgumentAnalysis {
         analysis.complete = false;
         return analysis;
     };
-    match executable.text.as_str() {
-        "find" => find::parse(&command.argv, &mut analysis),
-        "git" => git::parse(&command.argv, &mut analysis),
-        name => match utility_options::options(name) {
-            Some(options) => parse_options(name, &command.argv, options, &mut analysis),
-            None => analysis.complete = false,
-        },
+    let name = executable.text.as_str();
+    match grammar_for(name) {
+        Some(Grammar::Find) => find::parse(&command.argv, &mut analysis),
+        Some(Grammar::Git) => git::parse(&command.argv, &mut analysis),
+        Some(Grammar::Sed) => sed::parse(&command.argv, &mut analysis),
+        Some(Grammar::Printf) => parse_printf(&command.argv, &mut analysis),
+        Some(Grammar::ChangeDirectory) => parse_change_directory(&command.argv, &mut analysis),
+        Some(Grammar::Options {
+            options,
+            permutes_options,
+        }) => parse_options(
+            name,
+            &command.argv,
+            options,
+            permutes_options,
+            &mut analysis,
+        ),
+        None => analysis.complete = false,
     }
     analysis
+}
+
+/// `printf [--] FORMAT [ARGUMENT...]`: only the first argument may be an option,
+/// and none is accepted (`-v var` assigns a shell variable). Every later token,
+/// including ones starting with `-`, is a format argument.
+fn parse_printf(arguments: &[ArgvToken], analysis: &mut ArgumentAnalysis) {
+    let mut position = 1;
+    if arguments
+        .get(position)
+        .is_some_and(|token| token.text == "--")
+    {
+        position += 1;
+    } else if arguments
+        .get(position)
+        .is_some_and(|token| token.text.starts_with('-') && token.text != "-")
+    {
+        analysis.complete = false;
+        return;
+    }
+    analysis.operands.extend(position..arguments.len());
+}
+
+/// `cd [--] DIR`: no options and exactly one literal operand. Bare `cd`
+/// (`$HOME`) and `cd -` (`$OLDPWD`) resolve through the environment and stay
+/// incomplete; `CDPATH` resolution is the shell's and equals a path operand.
+fn parse_change_directory(arguments: &[ArgvToken], analysis: &mut ArgumentAnalysis) {
+    let mut position = 1;
+    if arguments
+        .get(position)
+        .is_some_and(|token| token.text == "--")
+    {
+        position += 1;
+    }
+    match &arguments[position..] {
+        [operand] if operand.text != "-" && (position == 2 || !operand.text.starts_with('-')) => {
+            analysis.operands.push(position);
+        }
+        _ => analysis.complete = false,
+    }
 }
 
 fn is_numeric_count_option(text: &str) -> bool {
@@ -127,6 +231,7 @@ fn parse_options(
     name: &str,
     arguments: &[ArgvToken],
     options: &'static [OptionSpec],
+    permutes_options: bool,
     analysis: &mut ArgumentAnalysis,
 ) {
     let mut position = 1;
@@ -146,8 +251,9 @@ fn parse_options(
             position += 1;
         } else if !terminated && text.starts_with('-') && text != "-" {
             // BSD utilities can stop getopt at the first operand, unlike GNU
-            // permutation. Do not guess whether a later token is an option.
-            if (saw_operand && name != "rg")
+            // permutation. Do not guess whether a later token is an option
+            // unless the grammar is known to permute.
+            if (saw_operand && !permutes_options)
                 || !consume_option(arguments, &mut position, options, analysis)
             {
                 analysis.complete = false;

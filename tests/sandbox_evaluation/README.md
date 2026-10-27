@@ -61,6 +61,9 @@ contain credentials, private paths and command payloads. The local corpus is not
 distributed with a fresh checkout; export one before evaluating it there.
 Only small, reviewed fixtures should be committed.
 
+`grammar-expectations.json` is a committed fixture with verdict expectations for
+the grammar rules in `sample.config.toml`; run it with `--rules sample.config.toml`.
+
 ## Extend a collection or add expectations
 
 Append command entries with unique, nonblank IDs and nonblank command strings:

@@ -1155,17 +1155,19 @@ For example, `find . -name -exec` has a `-name` predicate whose value is
 
 Conditional rules require a literal **bare executable name** with a built-in
 grammar. The roster is `cat`, `ls`, `head`, `tail`, `wc`, `grep`, `rg`, `sort`,
-`find`, and `git` with `check-ignore`, `status`, `log`, `diff`, or `show`.
+`find`, `sed`, `printf`, `cd`, and `git` with `check-ignore`, `status`, `log`,
+`diff`, `show`, `ls-files`, `blame`, `rev-parse`, `grep`, or `stash list`/`stash show`.
 This is a conservative subset of BSD/macOS and GNU forms plus Git/ripgrep, not every option those
 tools implement. Tables record documentation provenance and review dates in
 the source. GNU long options, supported short bundles/attached values, and
 `--` termination are recognized where applicable. Cross-variant conflicts,
 unknown options, missing values and ambiguous bundles make parsing incomplete.
-For `grep`, options must precede the first positional pattern or file operand:
-`grep -A8 needle file` is recognized, but `grep needle -A8 file` is incomplete.
-With `-e PATTERN`, the pattern is an option value, so `grep -e needle -n file`
-is also recognized. This restriction avoids assuming GNU-style option
-permutation across platforms; `rg` supports interspersed options.
+`grep` and `rg` accept options after operands: `grep -n "text" -A40 path` and
+`grep needle -A8 file` are recognized. GNU grep permutes options unless
+`POSIXLY_CORRECT` is set, in which case a trailing `-A8` would be a file name;
+this is a residual risk of the recognition (it is not approval). BSD/macOS grep
+permutes as well (verified on Darwin). All other utilities stop option parsing
+at the first operand, so `cat file -n` is incomplete.
 Partly quoted tokens such as `--include='*.rs'` or `--format='%h %s'` are
 joined as the shell does (`--include=*.rs`) and matched as one argument.
 Glob and brace-expansion checks look only at the bare pieces, so a `*` inside
@@ -1184,7 +1186,37 @@ count may follow other options or revisions, but not the `--` terminator.
 This shorthand recognition is limited to `git log`; other Git subcommands
 are unchanged. Option values such as `git log --grep -5` are not counts.
 Git global options and subcommand options have separate scopes; find predicates
-have their own operand/value rules. `sed` and `awk` have no conditional grammar.
+have their own operand/value rules. `awk` has no conditional grammar.
+`sed` recognizes `-n`/`--quiet`/`--silent`, `-E`/`-r`, `-s`, `-u`, `--posix`,
+`--help`, `--version` and `-e`/`--expression`. `-i`, `-f`, `-l`, `-z`,
+`--sandbox` and other options are unknown, so the analysis is incomplete.
+Without `-e` the first operand is the script; with `-e` every `-e` value is a
+script and all operands are files. The script is not an option identity, so
+every conditional `sed` rule **must** set `allowed_scripts` (and the field is
+invalid on other commands): a list of regular expressions (Rust `regex` syntax,
+implicitly anchored to the whole command). The script is split at `;` and
+newlines, and every command, trimmed, must fully match one pattern. Example:
+
+```toml
+{ command = ["sed", "**"], verdict = "auto_approved",
+  only_arguments = ["-n", "-e"], allowed_scripts = ['\d+(,\d+)?p', '\$p'] }
+```
+
+A fixed safety floor applies to all `sed` rules and cannot be widened: only
+`[addr[,addr]][!]cmd` with simple addresses (number, `$`, `first~step`,
+`/regex/` without `/`, `\\`, `[`) and `cmd` in `p d q Q = n N x g G h H D P l z F`
+is analyzable. `w W e r R s y a i c`, blocks and everything else make the
+command incomplete, so no rule matches it, whatever the patterns say.
+Patterns can only narrow the floor; invalid or empty patterns fail loading.
+`printf` accepts only `--` as option; `printf -v var` (assigns shell state) is
+incomplete. `cd` accepts one literal operand, optionally after `--`; bare `cd`
+(`$HOME`) and `cd -` (`$OLDPWD`) are incomplete. Every bash call is a new shell,
+so with a `cd` rule `cd dir; cmd` is equivalent to `cmd dir/...`.
+Git `ls-files`, `blame`, `rev-parse` and `grep` have scoped option tables.
+Options that read files or run programs (`ls-files -x/-X`, `blame --contents/-S/
+--ignore-revs-file`, `rev-parse --parseopt`, `grep -O/-f`) are unrecognized.
+`git stash` requires a nested `list` or `show` (identities `stash` and `list`/
+`show`); bare `git stash` (a push) and other nested commands are incomplete.
 `git check-ignore` recognizes `-v`/`--verbose` and requires at least one
 explicit path, optionally after `--`; quoted paths remain operands.
 Other reporting/input modes, including `--stdin`, `--no-index`, `-q`, `-z`,
@@ -1207,7 +1239,7 @@ Assignment-prefixed invocations (`FOO=bar cat file`), executable paths
 ineligible for conditional rules. Wrappers are not unwrapped; shell variables
 are not expanded. Existing explicit unconditional rules retain their behavior,
 including broad approvals for commands without grammars. Shell-state commands
-such as `cd`, `export`, `set`, and `alias` are not in the grammar roster.
+such as `export`, `set`, and `alias` are not in the grammar roster.
 
 **Conservative migration example.** Replace a broad
 `{ command = ["cat", "**"], verdict = "auto_approved" }` with a conditional

@@ -327,6 +327,10 @@ pub enum SandboxRuleConfig {
         /// Every option/subcommand must match, and parsing must be complete.
         #[serde(default)]
         only_arguments: Option<Vec<String>>,
+        /// `sed` only (required there): every script command must fully match
+        /// one of these regular expressions. Can only narrow the built-in floor.
+        #[serde(default)]
+        allowed_scripts: Option<Vec<String>>,
         verdict: ApprovalVerdictConfig,
         #[serde(default)]
         reason: Option<String>,
@@ -346,6 +350,7 @@ struct RawSandboxRuleConfig {
     target: Option<String>,
     with_arguments: Option<Vec<String>>,
     only_arguments: Option<Vec<String>>,
+    allowed_scripts: Option<Vec<String>>,
 }
 
 impl TryFrom<RawSandboxRuleConfig> for SandboxRuleConfig {
@@ -361,10 +366,13 @@ impl TryFrom<RawSandboxRuleConfig> for SandboxRuleConfig {
             target,
             with_arguments,
             only_arguments,
+            allowed_scripts,
         } = raw;
-        if command.is_none() && (with_arguments.is_some() || only_arguments.is_some()) {
+        if command.is_none()
+            && (with_arguments.is_some() || only_arguments.is_some() || allowed_scripts.is_some())
+        {
             return Err(
-                "`with_arguments` and `only_arguments` are only valid on `command` entries".into(),
+                "`with_arguments`, `only_arguments` and `allowed_scripts` are only valid on `command` entries".into(),
             );
         }
         match (rule, pattern, command) {
@@ -383,6 +391,7 @@ impl TryFrom<RawSandboxRuleConfig> for SandboxRuleConfig {
                 command,
                 with_arguments,
                 only_arguments,
+                allowed_scripts,
                 verdict,
                 reason,
             }),
@@ -554,6 +563,7 @@ pub(super) enum ResolvedRule {
 pub(super) struct ArgumentConditions {
     with_arguments: Option<Vec<Pattern>>,
     only_arguments: Option<Vec<Pattern>>,
+    allowed_scripts: Option<Vec<regex::Regex>>,
 }
 
 impl ArgumentConditions {
@@ -561,8 +571,9 @@ impl ArgumentConditions {
         command: &[String],
         with_arguments: Option<Vec<String>>,
         only_arguments: Option<Vec<String>>,
+        allowed_scripts: Option<Vec<String>>,
     ) -> Result<Option<Self>, ResolvedRuleError> {
-        if with_arguments.is_none() && only_arguments.is_none() {
+        if with_arguments.is_none() && only_arguments.is_none() && allowed_scripts.is_none() {
             return Ok(None);
         }
         if !command
@@ -574,6 +585,35 @@ impl ArgumentConditions {
                     .into(),
             ));
         }
+        let command_name = command.first().map_or("", String::as_str);
+        if allowed_scripts.is_some() != command_arguments::requires_allowed_scripts(command_name) {
+            return Err(ResolvedRuleError::InvalidArgumentCondition(
+                if allowed_scripts.is_some() {
+                    format!("`allowed_scripts` is not valid for `{command_name}`")
+                } else {
+                    format!("conditional `{command_name}` rules require `allowed_scripts`")
+                },
+            ));
+        }
+        let allowed_scripts = allowed_scripts
+            .map(|patterns| {
+                if patterns.is_empty() || patterns.iter().any(String::is_empty) {
+                    return Err(ResolvedRuleError::InvalidArgumentCondition(
+                        "`allowed_scripts` needs at least one non-empty pattern".into(),
+                    ));
+                }
+                patterns
+                    .iter()
+                    .map(|pattern| {
+                        regex::Regex::new(&format!("^(?:{pattern})$")).map_err(|error| {
+                            ResolvedRuleError::InvalidArgumentCondition(format!(
+                                "invalid `allowed_scripts` pattern '{pattern}': {error}"
+                            ))
+                        })
+                    })
+                    .collect()
+            })
+            .transpose()?;
         if with_arguments.as_ref().is_some_and(Vec::is_empty) {
             return Err(ResolvedRuleError::InvalidArgumentCondition(
                 "`with_arguments` must not be empty".into(),
@@ -602,6 +642,7 @@ impl ArgumentConditions {
         Ok(Some(Self {
             with_arguments: compile_patterns(with_arguments)?,
             only_arguments: compile_patterns(only_arguments)?,
+            allowed_scripts,
         }))
     }
 
@@ -616,6 +657,13 @@ impl ArgumentConditions {
                 .identities
                 .iter()
                 .any(|identity| matches_identity(patterns, identity))
+        }) && self.allowed_scripts.as_ref().is_none_or(|patterns| {
+            analysis.complete
+                && !analysis.script_commands.is_empty()
+                && analysis
+                    .script_commands
+                    .iter()
+                    .all(|script| patterns.iter().any(|pattern| pattern.is_match(script)))
         }) && self.only_arguments.as_ref().is_none_or(|patterns| {
             analysis.complete
                 && analysis
@@ -700,10 +748,16 @@ impl ResolvedRule {
                 command,
                 with_arguments,
                 only_arguments,
+                allowed_scripts,
                 verdict,
                 reason,
             } => ResolvedRule::CommandGlob {
-                conditions: ArgumentConditions::compile(&command, with_arguments, only_arguments)?,
+                conditions: ArgumentConditions::compile(
+                    &command,
+                    with_arguments,
+                    only_arguments,
+                    allowed_scripts,
+                )?,
                 command: CommandGlobPattern::from_tokens(&command),
                 verdict: verdict
                     .to_approval_check(reason.as_deref(), CONFIGURED_COMMAND_GLOB_REASON),

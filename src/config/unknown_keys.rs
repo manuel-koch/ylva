@@ -30,6 +30,7 @@ use crate::home_relative_path::display_path;
 /// suggestion.
 const KNOWN_KEYS: &[&str] = &[
     "agents",
+    "allowed_scripts",
     "allowed_skills",
     "allowed_tools",
     "api_base_url",
