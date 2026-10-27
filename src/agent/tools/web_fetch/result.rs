@@ -39,6 +39,10 @@ pub struct WebFetchResultMetadata {
     /// The response's Content-Type header value as sent (may carry
     /// parameters like `charset`), `null` when the server sent none.
     pub content_type: Option<String>,
+    /// Text type autodetected from the body (`text/html` or `text/plain`);
+    /// only present when the server sent no Content-Type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected_content_type: Option<String>,
     /// Magic-number-sniffed media type of the returned Base64 attachment
     /// (PNG/JPEG/WebP/GIF/PDF); absent for text bodies.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +64,8 @@ pub struct WebFetchResult {
     status: u16,
     /// The response's Content-Type header value as sent, when present.
     content_type: Option<String>,
+    /// Text type autodetected when no Content-Type was sent.
+    detected_content_type: Option<String>,
     /// Model-facing content: converted/verbatim text, or standard padded
     /// Base64 of a complete media body.
     text: String,
@@ -83,6 +89,7 @@ impl WebFetchResult {
             final_url,
             status,
             content_type,
+            detected_content_type,
             body,
             truncated,
         } = response;
@@ -92,6 +99,7 @@ impl WebFetchResult {
                 final_url,
                 status,
                 content_type,
+                detected_content_type,
                 text,
                 text_preview: None,
                 media_type: None,
@@ -102,6 +110,7 @@ impl WebFetchResult {
                 final_url,
                 status,
                 content_type,
+                detected_content_type,
                 text: STANDARD_BASE64.encode(&bytes),
                 text_preview: utf8_text_preview(&bytes),
                 media_type: Some(media_type),
@@ -149,6 +158,9 @@ impl WebFetchResult {
         if let Some(content_type) = &self.content_type {
             facts.push(format!("content_type={content_type}"));
         }
+        if let Some(detected) = &self.detected_content_type {
+            facts.push(format!("detected_content_type={detected} (autodetected)"));
+        }
         if let Some(media_type) = &self.media_type {
             let sent_type_matches = self.content_type.as_deref().is_some_and(|sent| {
                 sent.split(';')
@@ -185,6 +197,7 @@ impl ToolCallResult for WebFetchResult {
             final_url: self.final_url.clone(),
             status: self.status,
             content_type: self.content_type.clone(),
+            detected_content_type: self.detected_content_type.clone(),
             media_type: self.media_type.clone(),
             truncated: self.truncated.then_some(true),
         })
@@ -194,6 +207,9 @@ impl ToolCallResult for WebFetchResult {
     fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
         let mut schema = serde_json::to_value(schema_for!(WebFetchResultMetadata)).ok()?;
         let properties = schema.get_mut("properties")?.as_object_mut()?;
+        if self.detected_content_type.is_none() {
+            properties.remove("detected_content_type");
+        }
         if self.media_type.is_none() {
             properties.remove("media_type");
         }

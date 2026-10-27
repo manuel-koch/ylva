@@ -67,6 +67,7 @@ fn text_response(text: &str, truncated: bool) -> WebFetchResponse {
         final_url: "https://docs.rs/page".to_string(),
         status: 200,
         content_type: Some("text/html".to_string()),
+        detected_content_type: None,
         body: WebFetchBody::Text {
             text: text.to_string(),
         },
@@ -85,6 +86,7 @@ fn media_response() -> WebFetchResponse {
         final_url: "https://example.com/image.png".to_string(),
         status: 200,
         content_type: Some("image/png".to_string()),
+        detected_content_type: None,
         body: WebFetchBody::Media {
             bytes: png_bytes(),
             media_type: "image/png".to_string(),
@@ -548,4 +550,27 @@ fn metadata_schema_prunes_absent_fields() {
 #[test]
 fn output_cap_constant_matches_the_documented_value() {
     assert_eq!(OUTPUT_CAP, 64 * 1024);
+}
+
+#[test]
+fn response_section_shows_detected_content_type_when_header_is_absent() {
+    let mut response = text_response("Suite: focal", false);
+    response.content_type = None;
+    response.detected_content_type = Some("text/plain".to_string());
+    let tool = tool_with(StubBackend::returning(response), default_sandbox_context());
+    let result = run_call(&tool, arguments("https://example.com/page")).expect("fetch succeeds");
+    match &result.content_sections()[0] {
+        Section::Content(section) => assert!(
+            section
+                .content
+                .contains("detected_content_type=text/plain (autodetected)"),
+            "{}",
+            section.content
+        ),
+        other => panic!("expected a content section, got {other:?}"),
+    }
+    assert_eq!(
+        result.metadata().expect("metadata")["detected_content_type"],
+        "text/plain"
+    );
 }
