@@ -133,6 +133,9 @@ pub struct WebFetchResponse {
     /// The response's Content-Type header value as sent (may carry
     /// parameters like `charset`), when present.
     pub content_type: Option<String>,
+    /// Text type autodetected from the body (`text/html` or `text/plain`)
+    /// when the server sent no Content-Type; `None` otherwise.
+    pub detected_content_type: Option<String>,
     /// The classified body.
     pub body: WebFetchBody,
     /// `true` when [`WebFetchBody::Text`] was cut (raw-read limit or output
@@ -281,8 +284,9 @@ fn convert_html_to_markdown(text: &str) -> Result<String, WebFetchError> {
 /// Text handling: `text/html` is converted to markdown via
 /// [`convert_html_to_markdown`]; `text/*`, `application/json`,
 /// `application/xml`, and `+json`/`+xml` suffixed types pass through verbatim
-/// as UTF-8. Anything else — other content types (including a missing one) or
-/// non-UTF-8 bodies — is [`WebFetchError::UnsupportedContentType`] naming what
+/// as UTF-8. A missing content type is autodetected from the body (see
+/// [`sniff_text_body_kind`]). Anything else — other content types or
+/// binary/non-UTF-8 bodies — is [`WebFetchError::UnsupportedContentType`] naming what
 /// stood in the way.
 pub fn convert_body_to_result(
     content_type: Option<&str>,
@@ -295,7 +299,11 @@ pub fn convert_body_to_result(
         });
     }
     let mime_type = normalized_mime_type(content_type);
-    match text_body_kind(mime_type.as_deref()) {
+    let body_kind = match mime_type.as_deref() {
+        None => sniff_text_body_kind(raw_body),
+        known => text_body_kind(known),
+    };
+    match body_kind {
         Some(TextBodyKind::Html) => {
             let text = utf8_text_or_unsupported(mime_type.as_deref(), raw_body)?;
             let markdown = convert_html_to_markdown(text)?;
@@ -332,6 +340,40 @@ pub fn truncate_text_output(text: &str) -> (String, bool) {
 fn normalized_mime_type(content_type: Option<&str>) -> Option<String> {
     let mime_type = content_type?.split(';').next()?.trim().to_ascii_lowercase();
     (!mime_type.is_empty()).then_some(mime_type)
+}
+
+/// The text type autodetected for a text body served without a Content-Type
+/// header; `None` when a header was sent, the body is media, or it is not text.
+pub fn detect_missing_content_type(content_type: Option<&str>, raw_body: &[u8]) -> Option<String> {
+    if normalized_mime_type(content_type).is_some() || supported_media_type(raw_body).is_some() {
+        return None;
+    }
+    let detected = match sniff_text_body_kind(raw_body)? {
+        TextBodyKind::Html => "text/html",
+        TextBodyKind::Plain => "text/plain",
+    };
+    Some(detected.to_string())
+}
+
+/// Autodetect the text kind of a body served without a content type: valid
+/// UTF-8 without NUL bytes is text, and an HTML doctype or `<html` root tag
+/// makes it HTML. Anything else stays unsupported.
+fn sniff_text_body_kind(raw_body: &[u8]) -> Option<TextBodyKind> {
+    if raw_body.contains(&0) {
+        return None;
+    }
+    let text = std::str::from_utf8(raw_body).ok()?;
+    let head: String = text
+        .trim_start()
+        .chars()
+        .take(256)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if head.starts_with("<!doctype html") || head.starts_with("<html") {
+        Some(TextBodyKind::Html)
+    } else {
+        Some(TextBodyKind::Plain)
+    }
 }
 
 /// The text kind for a normalized mime type, or `None` for content that is
@@ -585,6 +627,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn missing_content_type_is_autodetected_from_the_body() {
+        let plain = convert_body_to_result(None, b"Origin: Launchpad\nSuite: focal\n")
+            .expect("plain text is detected");
+        assert!(matches!(plain, WebFetchBody::Text { ref text } if text.contains("Suite: focal")));
+        let html = convert_body_to_result(
+            None,
+            b"<!DOCTYPE html><html><body><h1>Hi</h1></body></html>",
+        )
+        .expect("html is detected");
+        assert!(matches!(html, WebFetchBody::Text { ref text } if text.contains("# Hi")));
+    }
+
+    #[test]
+    fn detected_content_type_is_reported_only_for_headerless_text() {
+        let detect = detect_missing_content_type;
+        assert_eq!(detect(None, b"Suite: focal"), Some("text/plain".into()));
+        assert_eq!(detect(None, b"<html></html>"), Some("text/html".into()));
+        assert_eq!(detect(Some("text/plain"), b"Suite: focal"), None);
+        assert_eq!(detect(None, &png_bytes()), None);
+        assert_eq!(detect(None, &[0x00, 0x01]), None);
     }
 
     #[test]

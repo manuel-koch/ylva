@@ -777,7 +777,10 @@ reading: `<script>`/`<style>` payloads (inline JavaScript, JSON config
 blobs, CSS) are dropped and `<noscript>` fallback text is kept as visible
 content. Text/JSON/XML bodies (`text/*`, `application/json`,
 `application/xml`, and
-`+json`/`+xml` suffixes) pass through verbatim; the magic-number-sniffed
+`+json`/`+xml` suffixes) pass through verbatim; a response without a
+content type is autodetected (UTF-8 without NUL bytes is text, HTML when it
+starts with a doctype or `<html`) and the detected type is reported as
+`detected_content_type` in the result metadata and `Response` section; the magic-number-sniffed
 media types PNG/JPEG/WebP/GIF/PDF are returned as a Base64 result with a
 typed attachment exactly like a whole-file `read` — complete response only,
 up to 8388608 bytes (8 MiB); a larger response fails with an explicit size

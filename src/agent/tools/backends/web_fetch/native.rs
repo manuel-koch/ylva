@@ -22,8 +22,8 @@ use futures::future::BoxFuture;
 use futures::StreamExt;
 
 use super::{
-    convert_body_to_result, network_target, truncate_text_output, HopPolicy, WebFetchBackend,
-    WebFetchBody, WebFetchError, WebFetchResponse,
+    convert_body_to_result, detect_missing_content_type, network_target, truncate_text_output,
+    HopPolicy, WebFetchBackend, WebFetchBody, WebFetchError, WebFetchResponse,
 };
 use crate::agent::tools::read::{supported_media_type, READ_MEDIA_MAX_BYTES};
 use crate::bounded_buffer::BoundedBuffer;
@@ -394,6 +394,8 @@ impl WebFetchBackend for HttpFetchBackend {
             crate::http::dump_buffered_response(&raw_body, response_dump_path.as_deref());
 
             let body = convert_body_to_result(content_type.as_deref(), &raw_body)?;
+            let detected_content_type =
+                detect_missing_content_type(content_type.as_deref(), &raw_body);
             let (body, truncated) = match body {
                 WebFetchBody::Media { .. } if truncated_raw => {
                     return Err(WebFetchError::TooLarge {
@@ -414,6 +416,7 @@ impl WebFetchBackend for HttpFetchBackend {
                 final_url,
                 status: status.as_u16(),
                 content_type,
+                detected_content_type,
                 body,
                 truncated,
             })
