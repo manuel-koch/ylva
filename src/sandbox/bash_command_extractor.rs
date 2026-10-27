@@ -82,7 +82,16 @@ pub(super) struct ArgvToken {
     pub text: String,
     /// Whether the token was entirely quoted (`"..."`/`'...'`) in source.
     pub quoted: bool,
+    /// The token as the shell sees it before quote removal, with every quoted
+    /// piece replaced by a neutral placeholder. Glob and brace-expansion
+    /// checks inspect only this, so quoted pieces of a partly quoted token
+    /// (`--format='%h*'`) are never mistaken for expansions while bare pieces
+    /// still are (`a*'b'`).
+    pub unquoted_text: String,
 }
+
+/// Stands in for a quoted piece in [`ArgvToken::unquoted_text`].
+const QUOTED_PIECE_PLACEHOLDER: char = 'q';
 
 /// One statically-extracted `command` node, ready for rule evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -238,6 +247,7 @@ fn extract_argv_token(node: Node, source: &str) -> Option<ArgvToken> {
         "word" | "number" => Some(ArgvToken {
             text: node_text(node, source).to_string(),
             quoted: false,
+            unquoted_text: node_text(node, source).to_string(),
         }),
         "raw_string" => {
             let text = node_text(node, source);
@@ -248,6 +258,7 @@ fn extract_argv_token(node: Node, source: &str) -> Option<ArgvToken> {
             Some(ArgvToken {
                 text: inner.to_string(),
                 quoted: true,
+                unquoted_text: QUOTED_PIECE_PLACEHOLDER.to_string(),
             })
         }
         "string" => {
@@ -266,6 +277,7 @@ fn extract_argv_token(node: Node, source: &str) -> Option<ArgvToken> {
             Some(ArgvToken {
                 text: content,
                 quoted: true,
+                unquoted_text: QUOTED_PIECE_PLACEHOLDER.to_string(),
             })
         }
         "concatenation" => {
@@ -274,47 +286,44 @@ fn extract_argv_token(node: Node, source: &str) -> Option<ArgvToken> {
             if children.is_empty() {
                 return None;
             }
-            if children.iter().all(|child| child.kind() == "word") {
-                // Unquoted brace expansion (`{a,b}`) or adjacent bare words;
-                // keep the raw, unquoted text as-is.
-                return Some(ArgvToken {
-                    text: node_text(node, source).to_string(),
-                    quoted: false,
-                });
-            }
-            if children
-                .iter()
-                .all(|child| matches!(child.kind(), "string" | "raw_string"))
-            {
-                let mut text = String::new();
-                for child in &children {
-                    text.push_str(&extract_argv_token(*child, source)?.text);
+            // Bare words, `"..."` and `'...'` pieces are joined as the shell
+            // does (`--format='%h %s'` is the one argument `--format=%h %s`).
+            // Any other piece (an expansion, ...) is un-analysable. Quote
+            // removal never splits the token, so pieces stay one argument.
+            let mut text = String::new();
+            let mut unquoted_text = String::new();
+            let mut quoted = true;
+            for child in &children {
+                let piece = extract_argv_token(*child, source)?;
+                if !piece.quoted {
+                    quoted = false;
                 }
-                return Some(ArgvToken { text, quoted: true });
+                text.push_str(&piece.text);
+                unquoted_text.push_str(&piece.unquoted_text);
             }
-            // Mixed quoted/unquoted (or otherwise unsupported) concatenation:
-            // ambiguous, un-analysable rather than guessed at.
-            None
+            Some(ArgvToken {
+                text,
+                quoted,
+                unquoted_text,
+            })
         }
         _ => None,
     }
 }
 
-/// Unquoted glob metacharacters: `*`, `?`, or
-/// a `[...]` bracket expression. Only meaningful for an unquoted token —
-/// callers must check [`ArgvToken::quoted`] first.
+/// Unquoted glob metacharacters: `*`, `?`, or a `[...]` bracket expression,
+/// judged on the token's unquoted pieces only.
 pub(super) fn token_has_unquoted_glob(token: &ArgvToken) -> bool {
-    !token.quoted && token.text.contains(['*', '?', '['])
+    token.unquoted_text.contains(['*', '?', '['])
 }
 
 static UNQUOTED_BRACE_EXPANSION_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{[^{}]*,[^{}]*\}").expect("valid brace-expansion regex"));
 
-/// Unquoted brace expansion (`{a,b}`). Only
-/// meaningful for an unquoted token — callers must check
-/// [`ArgvToken::quoted`] first.
+/// Unquoted brace expansion (`{a,b}`), judged on the token's unquoted pieces
+/// only.
 pub(super) fn token_has_unquoted_brace_expansion(token: &ArgvToken) -> bool {
-    !token.quoted && UNQUOTED_BRACE_EXPANSION_PATTERN.is_match(&token.text)
+    UNQUOTED_BRACE_EXPANSION_PATTERN.is_match(&token.unquoted_text)
 }
 
 #[cfg(test)]
@@ -603,6 +612,43 @@ mod tests {
     fn quoted_brace_expansion_text_is_not_flagged() {
         let command = extract_single_command(r#"echo "{a,b}""#);
         assert!(!token_has_unquoted_brace_expansion(&command.argv[1]));
+    }
+
+    #[test]
+    fn partly_quoted_token_joins_its_pieces_into_one_argument() {
+        let command = extract_single_command("git log --format='%h %s' \"a\"b'c'");
+        assert_eq!(command.argv[2].text, "--format=%h %s");
+        assert!(!command.argv[2].quoted);
+        assert_eq!(command.argv[3].text, "abc");
+    }
+
+    #[test]
+    fn glob_in_quoted_piece_of_partly_quoted_token_is_not_flagged() {
+        let command = extract_single_command("grep --include='*.rs' x");
+        assert_eq!(command.argv[1].text, "--include=*.rs");
+        assert!(!token_has_unquoted_glob(&command.argv[1]));
+    }
+
+    #[test]
+    fn glob_or_brace_in_bare_piece_of_partly_quoted_token_is_flagged() {
+        let command = extract_single_command("ls a*'b' {a,'b'}");
+        assert!(token_has_unquoted_glob(&command.argv[1]));
+        assert!(token_has_unquoted_brace_expansion(&command.argv[2]));
+    }
+
+    #[test]
+    fn partly_quoted_token_with_expansion_is_unanalysable() {
+        for source in ["echo --x='a'$Y", "echo a\"$Y\"b"] {
+            let statements = match extract(source) {
+                ExtractionResult::Statements(statements) => statements,
+                ExtractionResult::ParseFailed => panic!("expected a parse"),
+            };
+            assert_eq!(
+                statements,
+                vec![ExtractedStatement::Unanalysable],
+                "{source}"
+            );
+        }
     }
 
     #[test]

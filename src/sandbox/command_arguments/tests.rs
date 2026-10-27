@@ -22,6 +22,7 @@ fn command(arguments: &[&str]) -> ExtractedCommand {
             .map(|text| ArgvToken {
                 text: (*text).to_owned(),
                 quoted: false,
+                unquoted_text: (*text).to_owned(),
             })
             .collect(),
         ..ExtractedCommand::default()
