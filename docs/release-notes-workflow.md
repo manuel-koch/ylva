@@ -38,11 +38,12 @@ The trailing blank line inside each entry is the only allowed spacing.
 
 Breaking changes are never mixed into ordinary entries. A commit is breaking when its
 type is followed by `!` (e.g. `feat!:`) or its message has a `BREAKING CHANGE:` footer.
-When there are any, put them first, under one `## Breaking changes` heading placed
-directly after the title (the only allowed extra heading). Give each entry the
-title prefix `Breaking:` and state in its text what users must change or lose. Omit
-the heading when there are none. A breaking commit is included even if it looks like
-a refactor.
+When there are any, put them first, under a `## Breaking changes` heading placed
+directly after the title, and put all remaining entries under a following `## Changes`
+heading so the two groups stay distinct (these are the only allowed extra headings).
+Give each breaking entry the title prefix `Breaking:` and state in its text what users
+must change or lose. Omit both headings when there are no breaking changes.
+A breaking commit is included even if it looks like a refactor.
 
 ```markdown
 **{change title}**
@@ -78,6 +79,8 @@ Example with a breaking change:
 
 Persisted session files use new content-section labels; sessions saved by older
 versions may display their previous labels.
+
+## Changes
 
 **Tool `read` introduced**
 
