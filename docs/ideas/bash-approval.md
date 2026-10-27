@@ -128,6 +128,9 @@ read-only subset. `sed` and `awk` remain potential narrowly scoped additions;
 their program operands need dedicated validation, not just option allow-lists.
 User-defined grammars are a possible later extension, not a prerequisite.
 
+- Grammar enhancement for commands like `sed -n 825,845p <path>`
+- etc.
+
 Further validation could include:
 
 - A curated GTFOBins/LOOBins bypass corpus covering execution, writes and

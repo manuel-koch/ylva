@@ -841,6 +841,31 @@ fn huge_paste_completes_quickly_and_is_collapsed_to_a_marker() {
 }
 
 #[test]
+fn paste_over_the_limit_is_rejected_with_a_toast() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    paste_text(
+        &mut state,
+        &mut textarea,
+        &"a".repeat(crate::tui_driver::input::MAX_PASTE_BYTES + 1),
+    );
+    assert_eq!(textarea.lines(), &[""]);
+    assert!(state.pasted_blobs.is_empty());
+    assert!(state.has_active_toast());
+}
+
+#[test]
+fn paste_at_the_limit_is_accepted() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    paste_text(
+        &mut state,
+        &mut textarea,
+        &"a".repeat(crate::tui_driver::input::MAX_PASTE_BYTES),
+    );
+    assert!(!state.pasted_blobs.is_empty());
+    assert!(!state.has_active_toast());
+}
+
+#[test]
 fn small_paste_is_inserted_verbatim_with_crlf_and_dedent() {
     let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
     paste_text(&mut state, &mut textarea, "  one\r\n    two\r\n  three");

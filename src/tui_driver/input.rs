@@ -165,7 +165,18 @@ pub(super) fn set_input_text(textarea: &mut TextArea<'_>, text: &str) {
     textarea.move_cursor(ratatui_textarea::CursorMove::End);
 }
 
+/// Hard upper bound on a single paste. Anything larger exceeds the context of
+/// most LLMs anyway and is rejected to protect against memory blow-ups.
+pub(super) const MAX_PASTE_BYTES: usize = 1024 * 1024;
+
 pub(super) fn paste_text(state: &mut AppState, textarea: &mut TextArea<'_>, text: &str) {
+    if text.len() > MAX_PASTE_BYTES {
+        state.set_toast(format!(
+            "Paste rejected: larger than {} MB",
+            MAX_PASTE_BYTES / (1024 * 1024)
+        ));
+        return;
+    }
     state.exit_input_history_browsing(&textarea.lines().join("\n"));
     let dedented_text = dedent(text);
     // One chunk insert refreshes the textarea's screen map once; per-key

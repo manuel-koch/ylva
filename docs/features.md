@@ -1127,7 +1127,8 @@ for the full mechanics.
   placeholder such as `[Pasted text #1: 3,200 lines, 120,000 chars]`; on send
   every placeholder still present verbatim is replaced by the pasted text. A
   placeholder the user edited is sent as plain text. Large pastes insert
-  instantly and never block the TUI.
+  instantly and never block the TUI. A paste larger than 1 MiB is rejected with
+  a toast and leaves the input unchanged.
 - **Terminal restore:** the terminal (alternate screen, mouse capture,
   bracketed paste, raw mode) is restored on every exit path, including a panic
   in any thread or task and SIGHUP (exit `129`).

@@ -642,6 +642,10 @@ terminal teardown and title restoration keep a fixed order.
   map, not a `textwrap` approximation. The real viewport top is read after
   rendering from an origin cursor clamped with `CursorMove::InViewport` on a
   clone, so recalled/replaced drafts cannot inherit a stale offset.
+- `paste_text` first rejects any paste over `MAX_PASTE_BYTES` (1 MiB) with a
+  toast, before dedenting. crossterm buffers the whole bracketed paste before
+  emitting the event, so the cap bounds Ylva's copies and blob storage, not
+  that first allocation.
 - `tui_driver::terminal::restore_terminal` is the single restore routine,
   called by `TerminalGuard::drop`, a panic hook installed by
   `initialize_terminal` (restores before the previous hook prints), and a
