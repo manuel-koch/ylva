@@ -37,6 +37,7 @@ mod input_history;
 mod layout;
 mod model_picker;
 mod panels;
+mod pasted_blobs;
 mod selection;
 mod session_picker;
 
@@ -63,6 +64,7 @@ pub use model_picker::{
     SlashOverlay,
 };
 pub use panels::{ClarifyBannerState, HelpPopupState, QueuedClarify, TuiDisplayMetadata};
+pub use pasted_blobs::{PastedBlob, PastedBlobs, LARGE_PASTE_CHAR_THRESHOLD};
 pub use selection::{BannerDragSelection, ChatSelection};
 pub use session_picker::{SessionAction, SessionChoice, SessionPicker, SessionPickerPhase};
 

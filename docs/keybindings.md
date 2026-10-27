@@ -139,7 +139,8 @@ double-press rules above, whatever the focus:
 | SIGINT / SIGTERM | Root idle, subagent still running | Stop the agent and its subagents; quit when idle | `130` |
 
 Every signal quit prints the resume hint after the terminal is restored. A second
-signal has no special handling. SIGHUP is not handled.
+signal has no special handling. SIGHUP restores the terminal and exits `129`
+immediately, without the graceful stop path.
 
 ## Build info
 

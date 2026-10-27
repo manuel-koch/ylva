@@ -65,6 +65,7 @@ fn has_misplaced_command_glob_wildcard_detects_non_trailing_single_wildcard() {
     let rule = SandboxRuleConfig::CommandGlob {
         with_arguments: None,
         only_arguments: None,
+        allowed_scripts: None,
         command: vec!["git".to_string(), "*".to_string(), "status".to_string()],
         verdict: ApprovalVerdictConfig::AutoApproved,
         reason: None,
@@ -77,6 +78,7 @@ fn has_misplaced_command_glob_wildcard_detects_non_trailing_multi_wildcard() {
     let rule = SandboxRuleConfig::CommandGlob {
         with_arguments: None,
         only_arguments: None,
+        allowed_scripts: None,
         command: vec!["git".to_string(), "**".to_string(), "status".to_string()],
         verdict: ApprovalVerdictConfig::AutoApproved,
         reason: None,
@@ -89,6 +91,7 @@ fn has_misplaced_command_glob_wildcard_abstains_on_trailing_wildcard() {
     let single = SandboxRuleConfig::CommandGlob {
         with_arguments: None,
         only_arguments: None,
+        allowed_scripts: None,
         command: vec!["git".to_string(), "status".to_string(), "*".to_string()],
         verdict: ApprovalVerdictConfig::AutoApproved,
         reason: None,
@@ -96,6 +99,7 @@ fn has_misplaced_command_glob_wildcard_abstains_on_trailing_wildcard() {
     let multi = SandboxRuleConfig::CommandGlob {
         with_arguments: None,
         only_arguments: None,
+        allowed_scripts: None,
         command: vec!["git".to_string(), "status".to_string(), "**".to_string()],
         verdict: ApprovalVerdictConfig::AutoApproved,
         reason: None,
@@ -135,7 +139,7 @@ fn approval_verdict_config_auto_denied_defaults_reason_when_omitted() {
 #[test]
 fn argument_conditions_reject_invalid_selectors_and_patterns() {
     for source in [
-        r#"command = ["sed", "**"]
+        r#"command = ["awk", "**"]
         only_arguments = ["-n"]"#,
         r#"command = ["awk", "**"]
         only_arguments = []"#,
@@ -157,6 +161,18 @@ fn argument_conditions_reject_invalid_selectors_and_patterns() {
         with_arguments = ["--output=file"]"#,
         r#"command = ["git", "**"]
         with_arguments = ["log --oneline"]"#,
+        r#"command = ["sed", "**"]
+        only_arguments = ["-n"]"#,
+        r#"command = ["sed", "**"]
+        only_arguments = ["-n"]
+        allowed_scripts = []"#,
+        r#"command = ["sed", "**"]
+        allowed_scripts = ["("]"#,
+        r#"command = ["sed", "**"]
+        allowed_scripts = [""]"#,
+        r#"command = ["cat", "**"]
+        only_arguments = ["-n"]
+        allowed_scripts = ["p"]"#,
     ] {
         let rule: SandboxRuleConfig =
             toml::from_str(&format!("{source}\nverdict = \"auto_denied\"")).unwrap();

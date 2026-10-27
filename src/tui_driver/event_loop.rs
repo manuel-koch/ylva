@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use crossterm::event::MouseEventKind;
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 use ratatui_textarea::TextArea;
@@ -153,9 +154,16 @@ where
         }
     }
 
+    // Set after continuous mouse motion (wheel scroll, drag, hover) while more
+    // actions are queued: a burst then costs one frame instead of one per
+    // event, so scrolling or selecting in a huge draft does not lag behind
+    // the mouse.
+    let mut skip_frame = false;
     loop {
         replay_store = agent.store();
-        draw_frame(terminal, &mut state, &mut textarea, &agent, mouse_pos)?;
+        if !std::mem::take(&mut skip_frame) {
+            draw_frame(terminal, &mut state, &mut textarea, &agent, mouse_pos)?;
+        }
 
         let textarea_ctx = TextareaContext {
             is_empty: textarea.lines() == [""],
@@ -314,7 +322,17 @@ where
                 // (it returns vec![] for that case); the Driver applies it
                 // directly to the textarea; rendering syncs its viewport.
                 if let AppAction::MouseInput(mouse) = action {
+                    // Presses and releases always draw; continuous motion
+                    // (wheel, drag, hover) only needs the last frame of a burst.
+                    let continuous_motion = matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::Drag(_)
+                            | MouseEventKind::Moved
+                    );
                     if scroll_input_at_mouse(&state, &mut textarea, mouse) {
+                        skip_frame = !action_rx.is_empty();
                         continue;
                     }
 
@@ -344,6 +362,7 @@ where
                         &textarea.lines().join("\n"),
                     );
                     state.refresh_slash_overlay(&textarea.lines().join("\n"));
+                    skip_frame = continuous_motion && !action_rx.is_empty();
                     continue;
                 }
 

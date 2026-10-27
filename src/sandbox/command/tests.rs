@@ -119,6 +119,7 @@ fn check_command_aggregates_worst_case_across_multiple_commands() {
         .with_configured_rules(vec![SandboxRuleConfig::CommandGlob {
             with_arguments: None,
             only_arguments: None,
+            allowed_scripts: None,
             command: vec!["git".to_string(), "status".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
@@ -141,6 +142,7 @@ fn check_command_unmatched_command_in_list_blocks_auto_approval() {
         .with_configured_rules(vec![SandboxRuleConfig::CommandGlob {
             with_arguments: None,
             only_arguments: None,
+            allowed_scripts: None,
             command: vec!["cat".to_string(), "**".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
@@ -164,6 +166,7 @@ fn check_command_all_commands_auto_approved_list_is_auto_approved() {
         .with_configured_rules(vec![SandboxRuleConfig::CommandGlob {
             with_arguments: None,
             only_arguments: None,
+            allowed_scripts: None,
             command: vec!["cat".to_string(), "**".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
@@ -202,6 +205,7 @@ fn check_command_configured_rules_lose_default_floor_protection() {
         .with_configured_rules(vec![SandboxRuleConfig::CommandGlob {
             with_arguments: None,
             only_arguments: None,
+            allowed_scripts: None,
             command: vec!["git".to_string(), "*".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
@@ -257,6 +261,7 @@ fn check_command_glob_rule_matches_trailing_single_wildcard() {
         .with_configured_rules(vec![SandboxRuleConfig::CommandGlob {
             with_arguments: None,
             only_arguments: None,
+            allowed_scripts: None,
             command: vec!["git".to_string(), "reflog".to_string(), "*".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
@@ -287,6 +292,7 @@ fn with_configured_rules_rejects_a_command_glob_rule_with_a_misplaced_wildcard()
         SandboxRuleConfig::CommandGlob {
             with_arguments: None,
             only_arguments: None,
+            allowed_scripts: None,
             command: vec!["git".to_string(), "*".to_string(), "status".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
@@ -373,7 +379,21 @@ fn migrated_sample_uses_argument_filters_and_explicit_structural_protection() {
         "cut --unknown file",
         "tr --unknown value",
         "echo --unknown",
-        "printf --unknown",
+        "printf -- '%s' x",
+        "sed -n 20,150p file",
+        "sed -n -e 1,5p file",
+        "sed -n -e 1,5p -e '$p' file",
+        "sed -n '1,5p;/needle/p;$p' file",
+        "git ls-files --others --exclude-standard",
+        "git blame -L 1,5 file",
+        "git rev-parse --show-toplevel",
+        "git grep -n -e needle",
+        "git stash list",
+        "git stash show --stat",
+        "grep needle -A8 file",
+        "grep -r needle --exclude-dir=target .",
+        "cd foo",
+        "cd -- foo",
         "test --unknown",
     ] {
         assert_eq!(
@@ -396,9 +416,20 @@ fn migrated_sample_uses_argument_filters_and_explicit_structural_protection() {
         "find . -fprint output",
         "find . -fprint0 output",
         "find . -fprintf output '%p'",
-        "grep needle -A8 file",
-        "grep needle file -n",
-        "grep -r needle --exclude-dir=target .",
+        "printf -v var x",
+        "printf --unknown",
+        "sed -i 1p file",
+        "sed -n 'w out' file",
+        "sed -n '1e id' file",
+        "sed -f script file",
+        "sed -n -e 1,5p -e 'w out' file",
+        "sed -n '1,5p;7d' file",
+        "git grep -O needle",
+        "git stash",
+        "git stash push",
+        "git ls-files -x pattern",
+        "git blame --contents f file",
+        "grep needle file -z",
         "grep -A",
         "git diff --output=output",
         "git log -5 --output=output",
@@ -428,7 +459,9 @@ fn migrated_sample_uses_argument_filters_and_explicit_structural_protection() {
         "git -C workspace check-ignore file",
         "git status -v",
         "cat --unknown",
-        "cd somewhere",
+        "cd",
+        "cd -",
+        "cd -P somewhere",
         "head -20c file",
         "tail -20f file",
         "head -q -20 file",
@@ -779,6 +812,7 @@ fn check_command_glob_rule_trailing_single_wildcard_abstains_on_unquoted_glob_ta
         .with_configured_rules(vec![SandboxRuleConfig::CommandGlob {
             with_arguments: None,
             only_arguments: None,
+            allowed_scripts: None,
             command: vec!["cat".to_string(), "*".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
@@ -803,6 +837,7 @@ fn check_command_glob_rule_trailing_double_wildcard_matches_multiple_tokens() {
         .with_configured_rules(vec![SandboxRuleConfig::CommandGlob {
             with_arguments: None,
             only_arguments: None,
+            allowed_scripts: None,
             command: vec!["find".to_string(), "**".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
@@ -822,5 +857,48 @@ fn check_command_glob_rule_trailing_double_wildcard_matches_multiple_tokens() {
         context.check_command("find"),
         None,
         "** requires at least one extra token"
+    );
+}
+
+#[test]
+fn sed_rules_require_allowed_scripts_and_match_each_script_command() {
+    let rules = |condition: &str| {
+        format!(
+            "rules = [{{ command = [\"sed\", \"**\"], only_arguments = [\"-n\", \"-e\"], {condition}verdict = \"auto_approved\" }}]"
+        )
+    };
+    let narrow = conditional_context(&rules(r"allowed_scripts = ['\d+p'], "));
+    for (command, approved) in [
+        ("sed -n 5p file", true),
+        ("sed -n -e 5p -e 7p file", true),
+        ("sed -n '5p;7p' file", true),
+        ("sed -n 5,7p file", false),
+        ("sed -n '5p;7d' file", false),
+        ("sed -n 'w out' file", false),
+        ("sed -n -e 5p -e 'w out' file", false),
+    ] {
+        assert_eq!(
+            narrow.check_command(command) == Some(ApprovalCheck::AutoApproved),
+            approved,
+            "{command}"
+        );
+    }
+    // A permissive pattern cannot widen the built-in floor.
+    let permissive = conditional_context(&rules("allowed_scripts = ['.*'], "));
+    for command in [
+        "sed -n 'w out' f",
+        "sed -n '1e id' f",
+        "sed 's/a/b/e' f",
+        "sed -n -f s f",
+    ] {
+        assert_ne!(
+            permissive.check_command(command),
+            Some(ApprovalCheck::AutoApproved),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        permissive.check_command("sed -n 1p f"),
+        Some(ApprovalCheck::AutoApproved)
     );
 }

@@ -2088,7 +2088,7 @@ fn wide_footer_keeps_status_and_label_on_the_first_row() {
 }
 
 #[test]
-fn narrow_approval_footer_puts_buttons_on_the_third_row() {
+fn narrow_approval_footer_orders_meta_title_buttons() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -2127,11 +2127,11 @@ fn narrow_approval_footer_puts_buttons_on_the_third_row() {
             .collect()
     };
 
-    let title_row = buttons.approve.y - 2;
-    assert!(row_text(title_row).contains("requests your approval"));
-    assert!(row_text(title_row + 1).contains("64.2K (45%)"));
+    let meta_row = buttons.approve.y - 2;
+    assert!(row_text(meta_row).contains("64.2K (45%)"));
+    assert!(row_text(meta_row + 1).contains("requests your approval"));
     assert!(row_text(buttons.approve.y).contains("Approve"));
-    assert!(!row_text(title_row + 1).contains("Approve"));
+    assert!(!row_text(meta_row + 1).contains("Approve"));
 }
 
 #[test]

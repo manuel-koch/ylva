@@ -1,17 +1,21 @@
-[tools.read]
-rules = [
-    { rule = "skill_sidecar", verdict = "auto_approved" },
-]
-
-[tools.web_search]
-rules = [
-    { rule = "network_request", verdict = "auto_approved" },
-]
-
 [tools.bash]
 rules = [
+    # Broad rules for read-only tools
     { command = ["true"],         verdict = "auto_approved" },
     { command = ["false"],        verdict = "auto_approved" },
+    { command = ["nl", "**"],     verdict = "auto_approved" },
+    { command = ["cut", "**"],    verdict = "auto_approved" },
+    { command = ["tr", "**"],     verdict = "auto_approved" },
+    { command = ["echo", "**"],   verdict = "auto_approved" },
+    { command = ["test", "**"],   verdict = "auto_approved" },
+
+    # printf has a grammar without options, so `only_arguments = []` matches only plain
+    # forms; `printf -v var` (assigns shell state) is incomplete and never matches.
+    { command = ["printf", "**"], verdict = "auto_approved", only_arguments = [] },
+
+    # cd has a grammar: one literal operand only; bare `cd` and `cd -` use the environment.
+    # Each bash call is a fresh shell, so `cd dir; cmd` equals `cmd dir/...`.
+    { command = ["cd", "**"],     verdict = "auto_approved", only_arguments = [] },
 
     { command = ["cat", "**"],    verdict = "auto_approved", only_arguments = ["-n", "-b", "-s"] },
 
@@ -25,6 +29,25 @@ rules = [
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["log", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["show", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },
 
+    # The rules below only pick which options are allowed. Git option tables omit
+    # options that read files or run programs (grep -O, ls-files -x/-X, blame
+    # --contents/-S), so those are unknown and never match any rule.
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["ls-files", "--no-pager", "--cached", "--others", "--exclude-standard", "--full-name"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["blame", "--no-pager", "-L", "-w", "-e", "--porcelain"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["rev-parse", "--no-pager", "--show-toplevel", "--git-dir", "--abbrev-ref", "--short", "--verify", "--is-inside-work-tree"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["grep", "--no-pager", "-n", "-i", "-e", "-F", "-E", "-l", "-c", "-A", "-B", "-C", "--no-index", "--untracked", "--cached"] },
+    # The grammar requires a nested `list` or `show`; bare `git stash` (a push) and
+    # other nested commands are never matched, whatever this list contains.
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["stash", "list", "show", "--no-pager", "--oneline", "--stat"] },
+
+    # sed rules must set `allowed_scripts`: regexes, each script command (split at `;` and
+    # newlines) must fully match one of them. Independent of this list, the sed grammar never
+    # recognizes writing, executing, file-reading or nesting commands (w e r s y a i c {}),
+    # -i or -f, so no rule matches them, even with `allowed_scripts = ['.*']`.
+    # `allowed_scripts` can only narrow what the grammar recognizes, never widen it.
+    { command = ["sed", "**"],    verdict = "auto_approved", only_arguments = ["-n", "-e", "-E", "-s"], allowed_scripts = ['\d+(,\d+)?p', '\$p', '/[^/]+/p'] },
+
+    # grep options may follow the pattern (GNU and BSD/macOS grep permute).
     { command = ["grep", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-i", "-e", "-F", "-E", "-r", "-v", "-A", "-B", "-l", "-c", "-o", "-H", "-m", "--include", "--exclude", "--exclude-dir"] },
 
     # First-argument head -N (ASCII digits only) is covered by -n below.
@@ -43,14 +66,6 @@ rules = [
     { command = ["tail", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-c"] },
 
     { command = ["wc", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-w", "-c", "-m"] },
-
-    # Grammarless broad rules below are deliberate user-owned opt-outs.
-    { command = ["nl", "**"],     verdict = "auto_approved" },
-    { command = ["cut", "**"],    verdict = "auto_approved" },
-    { command = ["tr", "**"],     verdict = "auto_approved" },
-    { command = ["echo", "**"],   verdict = "auto_approved" },
-    { command = ["printf", "**"], verdict = "auto_approved" },
-    { command = ["test", "**"],   verdict = "auto_approved" },
 
     # need to use the default rules to avoid unwanted auto-approvals
     { rule = "unquoted_glob",              verdict = "user_approval_required" },

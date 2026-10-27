@@ -437,6 +437,8 @@ pub struct InputSnapshot {
     pub input_lines: Option<Vec<String>>,
     /// The slash overlay as it was when the input was parked.
     pub slash_overlay: SlashOverlay,
+    /// The collapsed pastes the parked draft's markers refer to.
+    pub pasted_blobs: super::PastedBlobs,
 }
 
 /// Indices into `choices` whose engine name and `provider_connection/model` identity

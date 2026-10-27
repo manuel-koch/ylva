@@ -78,7 +78,7 @@ process before a run starts, so it never competes with them.
 Headless Ctrl+C (SIGINT) and SIGTERM are cooperative. The first signal stops the
 agent, the run ends through the normal path, the resume hint is printed, and the
 process exits `130`. Later signals during that shutdown do not force an exit.
-SIGHUP is not handled.
+The CLI does not handle SIGHUP.
 
 In the TUI, only the latest turn counts. A new prompt starts a fresh outcome, and a
 steer joins the running turn. Ctrl+C and Esc stop a turn without setting `130`,

@@ -588,6 +588,7 @@ async fn save_and_restore_textarea_for_approval() {
         Some(InputSnapshot {
             input_lines: Some(vec!["hello world".to_string()]),
             slash_overlay: SlashOverlay::Hidden,
+            pasted_blobs: Default::default(),
         })
     );
     assert_eq!(textarea.lines(), &[""]);

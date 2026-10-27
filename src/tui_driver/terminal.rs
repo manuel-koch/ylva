@@ -110,6 +110,7 @@ impl Drop for TerminalTitleGuard {
 
 #[cfg(test)]
 thread_local! {
+    static RESTORE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static GUARD_DROP_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -119,6 +120,7 @@ pub(super) struct TerminalGuard;
 pub(super) fn initialize_terminal(
 ) -> io::Result<(TerminalGuard, Terminal<CrosstermBackend<io::Stdout>>)> {
     initialize_with_guard(enable_raw_mode, || {
+        install_restoring_panic_hook();
         let mut stdout = io::stdout();
         execute!(
             stdout,
@@ -149,21 +151,58 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         #[cfg(test)]
         GUARD_DROP_COUNT.with(|count| count.set(count.get() + 1));
-        let _ = execute!(
-            io::stdout(),
-            LeaveAlternateScreen,
-            Show,
-            DisableMouseCapture,
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste,
-        );
-        let _ = disable_raw_mode();
+        restore_terminal();
     }
+}
+
+/// Undo every terminal mode the TUI enabled. Idempotent and best-effort, so it
+/// is safe to call from the guard, a panic hook and a signal handler alike.
+fn restore_terminal() {
+    #[cfg(test)]
+    RESTORE_COUNT.with(|count| count.set(count.get() + 1));
+    let _ = execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        Show,
+        DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+    );
+    let _ = disable_raw_mode();
+}
+
+/// Restore the terminal before the previous panic hook prints its message, so
+/// the message lands on the normal screen and a panic in any thread or task
+/// (which the guard never sees) cannot leave mouse capture enabled.
+fn install_restoring_panic_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        restore_terminal();
+        previous_hook(panic_info);
+    }));
+}
+
+/// Exit code for termination by SIGHUP (128 + signal number 1).
+const SIGHUP_EXIT_CODE: i32 = 129;
+
+/// On SIGHUP restore the terminal and exit immediately. SIGHUP is not a stop
+/// request, so it bypasses the graceful stop path. Must run inside a Tokio
+/// runtime.
+fn install_hangup_restore() -> io::Result<()> {
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    tokio::spawn(async move {
+        if hangup.recv().await.is_some() {
+            restore_terminal();
+            std::process::exit(SIGHUP_EXIT_CODE);
+        }
+    });
+    Ok(())
 }
 
 /// Bridge external SIGINT/SIGTERM to `AppAction::StopSignal`. Must run inside a Tokio runtime.
 pub(super) fn install_stop_signal_relay(action_tx: mpsc::Sender<AppAction>) -> anyhow::Result<()> {
     let mut stop_signals = StopSignals::install()?;
+    install_hangup_restore()?;
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -182,6 +221,21 @@ pub(super) fn install_stop_signal_relay(action_tx: mpsc::Sender<AppAction>) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_the_guard_restores_the_terminal() {
+        RESTORE_COUNT.with(|count| count.set(0));
+
+        drop(TerminalGuard);
+
+        assert_eq!(RESTORE_COUNT.with(std::cell::Cell::get), 1);
+    }
+
+    #[test]
+    fn restoring_twice_does_not_fail() {
+        restore_terminal();
+        restore_terminal();
+    }
 
     #[test]
     fn failed_setup_after_raw_mode_drops_the_guard() {

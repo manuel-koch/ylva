@@ -659,6 +659,7 @@ fn default_registry_wires_configured_command_glob_rules_for_bash() {
         vec![crate::sandbox::SandboxRuleConfig::CommandGlob {
             with_arguments: None,
             only_arguments: None,
+            allowed_scripts: None,
             command: vec!["git".to_string(), "status".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,

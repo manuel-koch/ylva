@@ -652,7 +652,6 @@ fn bsd_gnu_operand_order_ambiguity_stops_later_option_evidence() {
         vec!["cat", "-n", "file", "-b"],
         vec!["ls", ".", "-l"],
         vec!["head", "file", "-n", "3"],
-        vec!["grep", "pattern", "-e", "other"],
         vec!["sort", "file", "-o", "out"],
     ] {
         let analysis = parse(&command(&arguments));
@@ -740,7 +739,8 @@ fn grep_and_ripgrep_require_a_pattern_except_standalone_modes() {
 #[test]
 fn generated_unknown_arity_never_completes_or_exposes_later_evidence() {
     let commands = [
-        "cat", "ls", "head", "tail", "wc", "grep", "rg", "sort", "find", "git",
+        "cat", "ls", "head", "tail", "wc", "grep", "rg", "sort", "find", "git", "sed", "printf",
+        "cd",
     ];
     let suffixes = [
         "",
@@ -783,5 +783,192 @@ fn generated_bundles_do_not_panic_or_admit_unknown_flag_suffixes() {
                 "{bundle:?}: {analysis:?}"
             );
         }
+    }
+}
+
+fn analyze(arguments: &[&str]) -> (bool, Vec<&'static str>) {
+    let analysis = parse(&command(arguments));
+    (analysis.complete, canonical(&analysis))
+}
+
+#[test]
+fn sed_read_only_forms_are_complete() {
+    let cases: &[(&[&str], &[&str])] = &[
+        (&["sed", "-n", "20,150p", "f"], &["-n"]),
+        (&["sed", "-n", "-e", "1,5p", "f"], &["-n", "-e"]),
+        (&["sed", "-ne", "$p", "f"], &["-n", "-e"]),
+        (&["sed", "-ne1p", "f"], &["-n", "-e"]),
+        (&["sed", "--quiet", "--expression=2~3p", "f"], &["-n", "-e"]),
+        (&["sed", "-E", "-n", "/foo/p", "f"], &["-E", "-n"]),
+        (&["sed", "-n", "-s", "1p", "a", "b"], &["-n", "-s"]),
+        (&["sed", "-n", "1p"], &["-n"]),
+        (&["sed", "-n", "--", "1p", "f"], &["-n"]),
+        (&["sed", "--version"], &["--version"]),
+    ];
+    for (arguments, expected) in cases {
+        assert_eq!(
+            analyze(arguments),
+            (true, expected.to_vec()),
+            "{arguments:?}"
+        );
+    }
+}
+
+#[test]
+fn sed_writing_executing_or_unknown_forms_are_incomplete() {
+    for arguments in [
+        vec!["sed", "-i", "1p", "f"],
+        vec!["sed", "-i.bak", "1p", "f"],
+        vec!["sed", "--in-place", "1p", "f"],
+        vec!["sed", "-f", "script", "f"],
+        vec!["sed", "--file=script", "f"],
+        vec!["sed", "-z", "1p", "f"],
+        vec!["sed", "-n", "w out", "f"],
+        vec!["sed", "-n", "1p;w out", "f"],
+        vec!["sed", "-n", "1p\nw out", "f"],
+        vec!["sed", "-n", "1e id", "f"],
+        vec!["sed", "-n", "r x", "f"],
+        vec!["sed", "s/a/b/e", "f"],
+        vec!["sed", "s/a/b/", "f"],
+        vec!["sed", "-e", "w out", "f"],
+        vec!["sed", "-n", "-e", "1p", "-e", "w out", "f"],
+        vec!["sed", "-n", "{p}", "f"],
+        vec!["sed", "y/a/b/", "f"],
+        vec!["sed", "-n"],
+        vec!["sed"],
+        vec!["sed", "-e"],
+        vec!["sed", "1p", "f", "-n"],
+        vec!["sed", "-n", "garbage", "f"],
+    ] {
+        assert!(!parse(&command(&arguments)).complete, "{arguments:?}");
+    }
+}
+
+#[test]
+fn git_read_only_subcommands_are_recognized() {
+    let cases: &[(&[&str], &[&str])] = &[
+        (
+            &["git", "ls-files", "--others", "--exclude-standard"],
+            &["ls-files", "-o", "--exclude-standard"],
+        ),
+        (&["git", "ls-files", "--", "src"], &["ls-files"]),
+        (
+            &["git", "-C", "dir", "blame", "-L", "1,5", "f"],
+            &["-C", "blame", "-L"],
+        ),
+        (&["git", "blame", "-L1,5", "--", "f"], &["blame", "-L"]),
+        (
+            &["git", "rev-parse", "--show-toplevel"],
+            &["rev-parse", "--show-toplevel"],
+        ),
+        (
+            &["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            &["rev-parse", "--abbrev-ref"],
+        ),
+        (
+            &["git", "grep", "-n", "-e", "needle", "--", "src"],
+            &["grep", "-n", "-e"],
+        ),
+        (&["git", "grep", "-A3", "needle"], &["grep", "-A"]),
+        (&["git", "stash", "list"], &["stash", "list"]),
+        (
+            &["git", "stash", "list", "--oneline"],
+            &["stash", "list", "--oneline"],
+        ),
+        (
+            &["git", "stash", "show", "--stat", "stash@{0}"],
+            &["stash", "show", "--stat"],
+        ),
+    ];
+    for (arguments, expected) in cases {
+        assert_eq!(
+            analyze(arguments),
+            (true, expected.to_vec()),
+            "{arguments:?}"
+        );
+    }
+}
+
+#[test]
+fn git_dangerous_or_unknown_forms_stay_incomplete() {
+    for arguments in [
+        vec!["git", "grep", "-O", "needle"],
+        vec!["git", "grep", "--open-files-in-pager=vim", "needle"],
+        vec!["git", "stash"],
+        vec!["git", "stash", "push"],
+        vec!["git", "stash", "pop"],
+        vec!["git", "stash", "drop"],
+        vec!["git", "stash", "--", "list"],
+        vec!["git", "ls-files", "-x", "pattern"],
+        vec!["git", "ls-files", "--exclude-from=file"],
+        vec!["git", "blame", "--contents", "file", "f"],
+        vec!["git", "blame", "--ignore-revs-file", "f", "x"],
+        vec!["git", "blame", "-S", "revs", "x"],
+        vec!["git", "rev-parse", "--parseopt"],
+        vec!["git", "stash", "list", "--ylva-unknown"],
+    ] {
+        assert!(!parse(&command(&arguments)).complete, "{arguments:?}");
+    }
+}
+
+#[test]
+fn git_values_do_not_impersonate_stash_subcommands() {
+    let analysis = parse(&command(&["git", "log", "stash", "list"]));
+    assert_eq!(canonical(&analysis), vec!["log"]);
+}
+
+#[test]
+fn only_grep_and_ripgrep_permute_options() {
+    assert_eq!(
+        analyze(&["grep", "needle", "-A8", "file"]),
+        (true, vec!["-A"])
+    );
+    assert_eq!(
+        analyze(&["grep", "-n", "some text", "-A40", "path"]),
+        (true, vec!["-n", "-A"])
+    );
+    for name in ["cat", "ls", "sort", "head", "tail", "wc"] {
+        assert!(!parse(&command(&[name, "file", "-n"])).complete, "{name}");
+    }
+}
+
+#[test]
+fn printf_accepts_only_the_option_terminator() {
+    assert_eq!(analyze(&["printf", "%s\\n", "x"]), (true, vec![]));
+    assert_eq!(analyze(&["printf", "--", "%s", "x"]), (true, vec![]));
+    assert_eq!(
+        analyze(&["printf", "%s\\n", "--- title ---"]),
+        (true, vec![])
+    );
+    for arguments in [
+        vec!["printf", "-v", "var", "%s", "x"],
+        vec!["printf", "-x"],
+        vec!["printf", "-v"],
+    ] {
+        assert!(!parse(&command(&arguments)).complete, "{arguments:?}");
+    }
+}
+
+#[test]
+fn cd_accepts_one_literal_operand_only() {
+    for arguments in [
+        vec!["cd", "foo"],
+        vec!["cd", "--", "foo"],
+        vec!["cd", "--", "-x"],
+    ] {
+        assert_eq!(analyze(&arguments), (true, vec![]), "{arguments:?}");
+    }
+    for arguments in [
+        vec!["cd"],
+        vec!["cd", "--"],
+        vec!["cd", "-"],
+        vec!["cd", "--", "-"],
+        vec!["cd", "-P", "foo"],
+        vec!["cd", "-L", "foo"],
+        vec!["cd", "-x"],
+        vec!["cd", "a", "b"],
+        vec!["cd", "--", "a", "b"],
+    ] {
+        assert!(!parse(&command(&arguments)).complete, "{arguments:?}");
     }
 }

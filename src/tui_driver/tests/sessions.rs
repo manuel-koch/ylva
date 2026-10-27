@@ -197,6 +197,7 @@ fn picker_results_reach_parked_approval_input_but_ignore_dismissed_or_reopened_p
     state.pending_input_snapshot = Some(crate::tui_reducer_state::InputSnapshot {
         input_lines: None,
         slash_overlay: SlashOverlay::SessionPicker(picker),
+        pasted_blobs: Default::default(),
     });
     let picker = picker_mut(&mut state, identity).unwrap();
     picker
@@ -926,4 +927,73 @@ fn assembled_session_picker_switches_resume_and_clone_and_exit_identity() {
             drop(reopened);
         }
     });
+}
+
+#[test]
+fn queued_continuous_mouse_motion_is_drawn_as_one_frame() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    for kind in [
+        MouseEventKind::ScrollUp,
+        MouseEventKind::Drag(MouseButton::Left),
+    ] {
+        crate::test_support::run_locked(async {
+            let (agent, updates) = session_factory()
+                .create(&ProfileConfig::default(), "default", Role::Root)
+                .unwrap();
+            let (_title_update_tx, title_update_rx) = mpsc::unbounded_channel();
+            let (frame_sender, mut frames) = mpsc::unbounded_channel();
+            let mut terminal = Terminal::new(SessionTestBackend {
+                backend: TestBackend::new(60, 30),
+                frames: frame_sender,
+            })
+            .unwrap();
+            let (actions, action_rx) = mpsc::channel(64);
+            let draft = (0..200)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            actions.send(AppAction::Paste(draft)).await.unwrap();
+            // Row of the one-line collapsed draft in the 30-row terminal.
+            let wheel_row = 26;
+            for _ in 0..40 {
+                actions
+                    .send(AppAction::MouseInput(MouseEvent {
+                        kind,
+                        column: 5,
+                        row: wheel_row,
+                        modifiers: KeyModifiers::NONE,
+                    }))
+                    .await
+                    .unwrap();
+            }
+            actions.send(AppAction::CtrlC).await.unwrap();
+            actions.send(AppAction::CtrlC).await.unwrap();
+            let mut clipboard = NoopClipboard;
+            run_tui_with_title(
+                &mut terminal,
+                agent,
+                updates,
+                None,
+                action_rx,
+                &mut clipboard,
+                TuiRuntime {
+                    driver: None,
+                    update_rx: title_update_rx,
+                    display_metadata: TuiDisplayMetadata::default(),
+                    input_history_limit: 50,
+                    exit_snapshot: None,
+                    unactivated_clones: Arc::new(std::sync::Mutex::new(Vec::new())),
+                    startup_notice: None,
+                },
+            )
+            .await
+            .unwrap();
+            let mut frame_count = 0;
+            while frames.try_recv().is_ok() {
+                frame_count += 1;
+            }
+            assert!(frame_count < 10, "drew {frame_count} frames");
+        });
+    }
 }

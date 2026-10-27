@@ -109,12 +109,14 @@ pub(super) async fn execute_effects(
                 if !steer {
                     pending_run_ids.run_outcome = RunOutcome::default();
                 }
-                let raw_text = textarea.lines().join("\n");
+                let raw_text = state.pasted_blobs.expand(&textarea.lines().join("\n"));
+                state.pasted_blobs.clear();
                 let text = dedent(&raw_text);
                 let _ = cmd_tx.try_send(AgentCommand::Prompt(text));
             }
             Effect::ClearTextarea => {
                 clear_textarea(textarea);
+                state.pasted_blobs.clear();
                 *mouse_drag = MouseDrag::default();
             }
             Effect::SaveInputStateAndClear => {

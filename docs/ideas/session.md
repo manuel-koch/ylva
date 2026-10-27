@@ -1,5 +1,15 @@
 # Session
 
+## Export session
+
+Add a new command `ylva session export` to save a given session in another human readable
+format like HTML (html,htm), Markdown (md) or PDF (pdf).
+
+- Export a given session in markdown format and save it at selected path:
+  `ylva session export -f md -o <PATH> <UUID>`
+- Export a given session in markdown format and output it to stdout:
+  `ylva session export -f md <UUID>`
+
 ## Whole-file schema migrations
 
 **Deferred**, conditional future infrastructure, not a migration currently required:

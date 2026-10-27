@@ -272,6 +272,24 @@ fn compaction_switch_notices_explain_engine_selection_effects() {
         model: "model-b".to_string(),
         context_length: 65_536,
     };
+    let option = crate::llm::ProviderModelOption {
+        provider_connection: "mock".to_string(),
+        model: crate::llm::ModelInfo {
+            id: "model-b".to_string(),
+            context_length: None,
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+        context_length_override: None,
+    };
+    let named = ModelSelection::NamedEngine {
+        engine_name: "engine-b".to_string(),
+        option: option.clone(),
+        reasoning_effort: crate::llm::engine::ReasoningEffortChange::Unchanged,
+    };
+    let provider_model = ModelSelection::ProviderModel(option);
     let mut display = EngineDisplayInfo {
         engine_name: "engine-a".to_string(),
         provider_connection: "mock".to_string(),
@@ -288,8 +306,12 @@ fn compaction_switch_notices_explain_engine_selection_effects() {
         inherits_parent_runtime: false,
     };
     assert_eq!(
-        compaction_switch_notice(&display, &target).as_deref(),
+        compaction_switch_notice(&display, &target, &named).as_deref(),
         Some("Compaction now uses selected engine 'engine-b'.")
+    );
+    assert_eq!(
+        compaction_switch_notice(&display, &target, &provider_model).as_deref(),
+        Some("Compaction now uses selected model 'mock/model-b'.")
     );
 
     let compaction = display
@@ -299,7 +321,7 @@ fn compaction_switch_notices_explain_engine_selection_effects() {
     compaction.follows_conversation = false;
     compaction.engine_name = "engine-a".to_string();
     assert_eq!(
-        compaction_switch_notice(&display, &target).as_deref(),
+        compaction_switch_notice(&display, &target, &named).as_deref(),
         Some("Compaction remains on 'engine-a'.")
     );
 
@@ -310,7 +332,7 @@ fn compaction_switch_notices_explain_engine_selection_effects() {
         context_length: 131_072,
     };
     assert_eq!(
-        compaction_switch_notice(&display, &shared_target).as_deref(),
+        compaction_switch_notice(&display, &shared_target, &named).as_deref(),
         Some("Compaction uses 'engine-a', shared with the conversation.")
     );
 }

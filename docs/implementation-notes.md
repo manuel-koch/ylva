@@ -258,6 +258,20 @@ See [configuration](./configuration.md#sandbox-tool-approval-rules).
   Git's dedicated `check-ignore` option scope recognizes `-v`/`--verbose`,
   honors `--`, and requires an explicit path; stdin and other reporting modes
   remain incomplete.
+- A single registry (`grammar_for` in `command_arguments.rs`) maps command names
+  to a `Grammar`; `supports_command` and `parse` both derive from it. Option-table
+  grammars carry a `permutes_options` flag (true for `grep`, `rg`) that lets
+  `parse_options` accept options after operands. `sed`, `printf` and `cd` have
+  dedicated parsers. `command_arguments/sed.rs` holds the pure script validator
+  (a fixed floor of non-writing commands with simple addresses) that exposes the
+  trimmed commands as `ArgumentAnalysis::script_commands`; `-e` values are
+  validated, otherwise the first operand. `ArgumentConditions` compiles the
+  required `allowed_scripts` regexes (anchored, `regex` crate) and requires every
+  script command to match one; `requires_allowed_scripts` flags such grammars.
+  `printf` rejects any option as first argument; `cd` needs
+  exactly one operand other than `-`.
+- `git.rs` has one `SUBCOMMANDS` table (name, identity, option scopes, optional
+  nested subcommands). `stash` nests `list`/`show`, producing two identities.
 - `sandbox/rules.rs` compiles condition globs and validates the shared semantic
   contract used by profile loading and direct construction. Conditions are
   command-only; the selector's literal first token chooses the grammar.
@@ -642,6 +656,34 @@ terminal teardown and title restoration keep a fixed order.
   map, not a `textwrap` approximation. The real viewport top is read after
   rendering from an origin cursor clamped with `CursorMove::InViewport` on a
   clone, so recalled/replaced drafts cannot inherit a stale offset.
+- `paste_text` first rejects any paste over `MAX_PASTE_BYTES` (1 MiB) with a
+  toast, before dedenting. crossterm buffers the whole bracketed paste before
+  emitting the event, so the cap bounds Ylva's copies and blob storage, not
+  that first allocation.
+- `tui_driver::terminal::restore_terminal` is the single restore routine,
+  called by `TerminalGuard::drop`, a panic hook installed by
+  `initialize_terminal` (restores before the previous hook prints), and a
+  SIGHUP task that restores and exits `129`.
+- `paste_text` inserts the dedented text with one `TextArea::insert_str` call.
+  Per-character `input` re-wrapped the whole draft for every key
+  (`push_history` → `screen_map_load`), making a paste O(n²) and freezing the
+  single-threaded event loop (including Ctrl-C) for large pastes.
+- Pastes above `LARGE_PASTE_CHAR_THRESHOLD` (1,000 chars, measured on the
+  dedented text) insert a one-line marker instead. `PastedBlobs`
+  (`tui_reducer_state/pasted_blobs.rs`, held in `AppState::pasted_blobs`)
+  stores marker → text; markers are numbered per draft. `Effect::SubmitPrompt`
+  expands markers still present verbatim before `dedent` and sends, then
+  clears the store; `ClearTextarea` clears it too and
+  `InputSnapshot::pasted_blobs` parks/restores it with the draft around
+  approvals. History recall (`set_input_text`) never creates markers; history
+  entries are the expanded sent text.
+- Continuous mouse motion (wheel scroll, drag, hover) is coalesced: when more
+  actions are queued after such an event, the event loop skips the next frame
+  (`skip_frame`), so a burst over a long draft, e.g. drag-selecting text,
+  costs one frame instead of one per event. Presses and releases always draw.
+- Measured (release build, 100x40 terminal): a frame with a ~1 MB / 28,000
+  line draft in the textarea takes ~27 ms, below the 50 ms budget, so the
+  per-frame `lines().join("\n")` and measurement clones are left as is.
 
 ### Conversation layout cache
 

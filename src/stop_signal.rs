@@ -14,8 +14,9 @@
 
 //! External stop signals for the CLI and the TUI.
 //!
-//! SIGINT and SIGTERM both ask the run to stop. SIGHUP is deliberately not
-//! handled: it has no meaning for either interface.
+//! SIGINT and SIGTERM both ask the run to stop. SIGHUP is not a stop
+//! request: the TUI restores the terminal and exits on it (see
+//! `tui_driver::terminal`); the CLI does not handle it.
 
 use tokio::signal::unix::{signal, Signal, SignalKind};
 

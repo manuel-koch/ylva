@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::super::input::{load_history_into_textarea, scroll_input_at_mouse};
+use super::super::input::{
+    load_history_into_textarea, paste_text, restore_input_state, save_input_state_and_clear,
+    scroll_input_at_mouse,
+};
 use super::*;
 use crate::tui_reducer_state::HistoryDirection;
 
@@ -802,4 +805,195 @@ fn tab_completes_the_only_matching_command_and_is_normal_input_without_suggestio
         normal_input,
         vec![Effect::ExitBrowsing, Effect::TextareaKey(tab)]
     );
+}
+
+async fn run_effects(
+    state: &mut AppState,
+    textarea: &mut TextArea<'static>,
+    cmd_tx: &mpsc::Sender<AgentCommand>,
+    effects: Vec<Effect>,
+) {
+    execute_effects(
+        state,
+        textarea,
+        cmd_tx,
+        effects,
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut PendingRunIds::default(),
+    )
+    .await;
+}
+
+#[test]
+fn huge_paste_completes_quickly_and_is_collapsed_to_a_marker() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    let huge = "some pasted line of text\n".repeat(20_000);
+    let started = Instant::now();
+    paste_text(&mut state, &mut textarea, &huge);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(textarea.lines().len(), 1);
+    assert!(textarea.lines()[0].starts_with("[Pasted text #1: 20,000 lines, "));
+    assert_eq!(
+        state.pasted_blobs.expand(&textarea.lines()[0]),
+        huge.trim_end()
+    );
+}
+
+#[test]
+fn paste_over_the_limit_is_rejected_with_a_toast() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    paste_text(
+        &mut state,
+        &mut textarea,
+        &"a".repeat(crate::tui_driver::input::MAX_PASTE_BYTES + 1),
+    );
+    assert_eq!(textarea.lines(), &[""]);
+    assert!(state.pasted_blobs.is_empty());
+    assert!(state.has_active_toast());
+}
+
+#[test]
+fn paste_at_the_limit_is_accepted() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    paste_text(
+        &mut state,
+        &mut textarea,
+        &"a".repeat(crate::tui_driver::input::MAX_PASTE_BYTES),
+    );
+    assert!(!state.pasted_blobs.is_empty());
+    assert!(!state.has_active_toast());
+}
+
+#[test]
+fn small_paste_is_inserted_verbatim_with_crlf_and_dedent() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    paste_text(&mut state, &mut textarea, "  one\r\n    two\r\n  three");
+    assert_eq!(textarea.lines(), &["one", "  two", "three"]);
+    assert!(state.pasted_blobs.is_empty());
+}
+
+#[test]
+fn large_paste_at_the_cursor_keeps_surrounding_text() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    textarea.insert_str("before ");
+    paste_text(&mut state, &mut textarea, &"x".repeat(1_001));
+    textarea.insert_str(" after");
+    assert_eq!(
+        textarea.lines(),
+        &["before [Pasted text #1: 1 lines, 1,001 chars] after"]
+    );
+    let exactly_threshold = "y".repeat(1_000);
+    paste_text(&mut state, &mut textarea, &exactly_threshold);
+    assert!(textarea.lines()[0].ends_with(&exactly_threshold));
+}
+
+#[tokio::test]
+async fn submit_expands_markers_dedents_and_edited_markers_stay_plain() {
+    let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+    let first = format!("  {}\n  {}", "a".repeat(600), "b".repeat(600));
+    paste_text(&mut state, &mut textarea, &first);
+    paste_text(&mut state, &mut textarea, &"c".repeat(1_200));
+    assert!(textarea.lines()[0].contains("#1:") && textarea.lines()[0].contains("#2:"));
+
+    run_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        vec![Effect::SubmitPrompt { steer: false }],
+    )
+    .await;
+    let expected = format!(
+        "{}\n{}{}",
+        "a".repeat(600),
+        "b".repeat(600),
+        "c".repeat(1_200)
+    );
+    assert_eq!(cmd_rx.try_recv(), Ok(AgentCommand::Prompt(expected)));
+
+    run_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        vec![Effect::ClearTextarea],
+    )
+    .await;
+    assert!(state.pasted_blobs.is_empty());
+
+    paste_text(&mut state, &mut textarea, &"d".repeat(1_200));
+    textarea.insert_str("!");
+    textarea.move_cursor(ratatui_textarea::CursorMove::Head);
+    textarea.move_cursor(ratatui_textarea::CursorMove::Forward);
+    textarea.delete_next_char();
+    let edited = textarea.lines().join("\n");
+    run_effects(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        vec![Effect::SubmitPrompt { steer: false }],
+    )
+    .await;
+    assert_eq!(cmd_rx.try_recv(), Ok(AgentCommand::Prompt(edited)));
+}
+
+#[test]
+fn history_recall_of_a_huge_entry_loads_verbatim_without_marker() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    let huge = "history line\n".repeat(5_000);
+    state.input_history = vec![huge.clone()];
+    assert!(load_history_into_textarea(
+        HistoryDirection::Up,
+        &mut state,
+        &mut textarea,
+    ));
+    assert_eq!(textarea.lines().join("\n"), huge);
+    assert!(state.pasted_blobs.is_empty());
+}
+
+#[test]
+fn approval_save_and_restore_keep_blobs_with_the_draft() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    paste_text(&mut state, &mut textarea, &"z".repeat(2_000));
+    let marker_line = textarea.lines().to_vec();
+    save_input_state_and_clear(&mut state, &mut textarea);
+    assert!(state.pasted_blobs.is_empty());
+    restore_input_state(&mut state, &mut textarea);
+    assert_eq!(textarea.lines(), marker_line.as_slice());
+    assert_eq!(
+        state.pasted_blobs.expand(&marker_line[0]),
+        "z".repeat(2_000)
+    );
+}
+
+#[test]
+fn paste_exits_history_browsing() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    state.input_history = vec!["old".to_string()];
+    assert!(load_history_into_textarea(
+        HistoryDirection::Up,
+        &mut state,
+        &mut textarea,
+    ));
+    paste_text(&mut state, &mut textarea, "new");
+    assert_eq!(state.history_index, None);
+}
+
+#[test]
+fn submitted_bubble_and_history_hold_the_expanded_paste() {
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    textarea.insert_str("explain:\n");
+    let pasted = "pasted body\n".repeat(200);
+    paste_text(&mut state, &mut textarea, &pasted);
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &textarea_ctx_from(&textarea),
+    );
+    assert!(effects.contains(&Effect::SubmitPrompt { steer: false }));
+    let expected = format!("explain:\n{}", pasted.trim_end());
+    assert_eq!(state.input_history, vec![expected.clone()]);
+    assert!(matches!(
+        state.chat_entries.last(),
+        Some(ChatEntry::UserMessage { text, .. }) if *text == expected
+    ));
 }
