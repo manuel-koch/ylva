@@ -30,4 +30,5 @@ export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
 export YLVA_TOKEN_USAGE_DUMP_PATH=${LOG_DIR}/token_stats.jsonl
 ${YLVA} --log-file ${LOG_PATH} \
         --log-level DEBUG --log-format ${LOG_FORMAT} \
+        --strict-config \
         --auto-approve-spawn "$@"
