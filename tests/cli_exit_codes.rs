@@ -79,6 +79,20 @@ impl HeadlessRun {
         .unwrap_or_else(|_| panic!("stdout never showed {marker:?}"));
     }
 
+    /// Wait until `name` exists in the run's working directory, proving a tool
+    /// is running (CLI mode prints no line before a tool has finished).
+    #[cfg(unix)]
+    async fn wait_for_file(&self, name: &str) {
+        let path = self._home.path().join(name);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !path.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{name:?} never appeared"));
+    }
+
     #[cfg(unix)]
     fn send_signal(&self, signal: nix::sys::signal::Signal) {
         use nix::sys::signal::kill;
@@ -269,13 +283,13 @@ async fn interrupt_during_a_tool_run_exits_with_interrupted() {
         vec![vec![tool_call_frame(
             0,
             "bash",
-            r#"{"command":"sleep 30"}"#,
+            r#"{"command":"touch tool-started && sleep 30"}"#,
         )]],
     )
     .await;
 
     let run = HeadlessRun::spawn(&server.base_url(), &["--auto-approve-bash"]);
-    run.wait_for_stdout("sleep 30").await;
+    run.wait_for_file("tool-started").await;
     run.send_interrupt();
     let (code, stdout, stderr) = run.finish().await;
 

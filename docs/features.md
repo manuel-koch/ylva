@@ -158,6 +158,13 @@ trailing `…` once they pass their display budget (80 and 40 characters)
 instead of being replaced by a length placeholder, so a long query or command
 still shows its head and the status line never wraps.
 
+In CLI mode a tool line is printed once the outcome is known
+(`done`, `error`, `killed`, or `denied`); there is no line when the tool
+starts, so its content is not printed twice. A tool still running after
+2 seconds gets a single `[tool] <title> running…` line so long calls
+(`bash`, `web_fetch`, `web_search`) show they are alive. Lines from a subagent are
+prefixed with `[subagent <run_id>]` so concurrent subagents can be told apart.
+
 `--auto-approve-spawn` lets a spawned subagent (see
 [Subagent delegation](#subagent-delegation)) run to completion before
 the one-shot CLI process exits, instead of exiting as soon as the parent

@@ -1032,6 +1032,52 @@ async fn run_cli_auto_approves_read_and_runs_it() {
         "tool output should have a spacer line: {output}"
     );
     assert!(output.contains("done"), "output: {output}");
+    assert_eq!(
+        output.matches("[tool] Read").count(),
+        1,
+        "no tool line before the tool has run: {output}"
+    );
+}
+
+#[tokio::test]
+async fn run_cli_announces_tool_still_running_after_the_notice_delay() {
+    let provider = Arc::new(MockProviderWithScript {
+        phase_one: vec![tool_call(
+            "bash",
+            serde_json::json!({ "command": "sleep 1", "label": "Wait" }),
+        )],
+        phase_two: vec![MockEvent::Text("ok".into())],
+        interval: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let registry = Arc::new(
+        default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            ToolRegistryConfig {
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Bash]),
+                ..ToolRegistryConfig::default()
+            },
+        )
+        .expect("valid sandbox fixture"),
+    );
+    let mut output = Vec::new();
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    ylva::run_cli_to_with_options(
+        agent,
+        ui_rx,
+        registry,
+        "run a command".to_string(),
+        &mut output,
+        ylva::CliOutputOptions::plain().with_slow_tool_notice_delay(Duration::from_millis(100)),
+    )
+    .await
+    .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+
+    let running_at = output.find("running…").expect("slow tool is announced");
+    let done_at = output.find("done (").expect("tool finishes");
+    assert!(running_at < done_at, "output: {output}");
 }
 
 #[tokio::test]

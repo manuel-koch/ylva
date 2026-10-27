@@ -40,6 +40,12 @@ use crate::theme::{
 };
 use crate::ToolRegistry;
 
+/// Line prefix attributing output to a subagent, matching the notice/error
+/// format; empty for the root's own output.
+fn subagent_line_tag(run_id: Option<uuid::Uuid>) -> String {
+    run_id.map_or_else(String::new, |run_id| format!("[subagent {run_id}] "))
+}
+
 /// Wraps `command` in `AgentCommand::ForSubagent { run_id, .. }` when `run_id`
 /// is `Some` — i.e. when the pending tool/clarify call that produced
 /// `command` was forwarded up from a subagent (`UiUpdate::ToolPending`/
@@ -169,6 +175,14 @@ pub(super) async fn run_cli_to_with_title(
         std::collections::HashSet::new();
     let mut pending_invocations: std::collections::HashMap<uuid::Uuid, String> =
         std::collections::HashMap::new();
+    // Tools that started but have not finished yet and whose "still running"
+    // line has not been printed; mapped to the announcement deadline and the
+    // owning subagent run. CLI mode prints nothing for a tool that finishes
+    // quickly, so only slow tools get a start line.
+    let mut unannounced_tools: std::collections::HashMap<
+        uuid::Uuid,
+        (tokio::time::Instant, Option<uuid::Uuid>),
+    > = std::collections::HashMap::new();
     let mut response_finished = false;
     // Tracks whether the assistant is currently emitting thinking/reasoning
     // output or its final reply, so switches between the two (and switches
@@ -204,8 +218,49 @@ pub(super) async fn run_cli_to_with_title(
     // the agent reports idle; see the `AgentIdle` and `ToolKilled` arms.
     let mut interrupt_requested = false;
     while !response_finished {
+        let next_announcement = unannounced_tools
+            .values()
+            .map(|(deadline, _)| *deadline)
+            .min();
         let next_update = tokio::select! {
             update = ui_rx.recv() => update,
+            () = async {
+                match next_announcement {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let now = tokio::time::Instant::now();
+                let mut due_tool_ids: Vec<(tokio::time::Instant, uuid::Uuid)> = unannounced_tools
+                    .iter()
+                    .filter(|(_, (deadline, _))| *deadline <= now)
+                    .map(|(id, (deadline, _))| (*deadline, *id))
+                    .collect();
+                due_tool_ids.sort();
+                for (_, id) in due_tool_ids {
+                    let Some((_, run_id)) = unannounced_tools.remove(&id) else {
+                        continue;
+                    };
+                    let Some(invocation) = pending_invocations.get(&id) else {
+                        continue;
+                    };
+                    flush_stream_section(
+                        out,
+                        &mut current_section,
+                        &mut thinking_started_at,
+                        output_options,
+                    )?;
+                    writeln!(out)?;
+                    write_cli_styled_line(
+                        out,
+                        &format!("{}[tool] {invocation} running…", subagent_line_tag(run_id)),
+                        tool_bubble_border_color(),
+                        false,
+                        output_options,
+                    )?;
+                }
+                continue;
+            }
             Some(()) = stop_signals.recv(), if !interrupt_requested => {
                 interrupt_requested = true;
                 outcome.record_interruption();
@@ -301,21 +356,18 @@ pub(super) async fn run_cli_to_with_title(
                 let (title, title_arguments) =
                     display_title_for(&registry, &name, &title_arguments);
                 let invocation = render_invocation_from_title_arguments(&title, &title_arguments);
-                pending_invocations.insert(id, invocation.clone());
+                pending_invocations.insert(id, invocation);
+                let subagent_tag = subagent_line_tag(run_id);
                 let approval_check = registry
                     .get(&name)
                     .map(|tool| tool.needs_approval(&arguments))
                     .unwrap_or(ApprovalCheck::UserApprovalRequired);
                 match approval_check {
                     ApprovalCheck::AutoApproved => {
-                        write_cli_styled_line(
-                            out,
-                            &format!("[tool] {invocation}"),
-                            tool_bubble_border_color(),
-                            false,
-                            output_options,
-                        )?;
-                        render_content_sections(out, &content_sections)?;
+                        unannounced_tools.entry(id).or_insert((
+                            tokio::time::Instant::now() + output_options.slow_tool_notice_delay(),
+                            run_id,
+                        ));
                         agent
                             .send_command(route_command(run_id, AgentCommand::ApproveTool { id }))
                             .await;
@@ -324,7 +376,9 @@ pub(super) async fn run_cli_to_with_title(
                         let denied_invocation = render_denied_invocation(&title, &title_arguments);
                         write_cli_styled_line(
                             out,
-                            &format!("[tool] {denied_invocation} → auto-denied: {reason}"),
+                            &format!(
+                                "{subagent_tag}[tool] {denied_invocation} → auto-denied: {reason}"
+                            ),
                             error_color(),
                             false,
                             output_options,
@@ -344,7 +398,7 @@ pub(super) async fn run_cli_to_with_title(
                         let denied_invocation = render_denied_invocation(&title, &title_arguments);
                         write_cli_styled_line(
                             out,
-                            &format!("[tool] {denied_invocation} → denied: {reason}"),
+                            &format!("{subagent_tag}[tool] {denied_invocation} → denied: {reason}"),
                             error_color(),
                             false,
                             output_options,
@@ -401,9 +455,13 @@ pub(super) async fn run_cli_to_with_title(
                 name,
                 id,
                 title_arguments,
-                content_sections,
+                run_id,
                 ..
             }) => {
+                unannounced_tools.entry(id).or_insert((
+                    tokio::time::Instant::now() + output_options.slow_tool_notice_delay(),
+                    run_id,
+                ));
                 // First appearance of this tool call (auto-run tool with no
                 // approval step, so no prior `ToolPending`): flush any
                 // thinking/response text accumulated before it, mirroring
@@ -419,15 +477,7 @@ pub(super) async fn run_cli_to_with_title(
                 let (title, title_arguments) =
                     display_title_for(&registry, &name, &title_arguments);
                 let invocation = render_invocation_from_title_arguments(&title, &title_arguments);
-                pending_invocations.insert(id, invocation.clone());
-                write_cli_styled_line(
-                    out,
-                    &format!("[tool] {invocation}"),
-                    tool_bubble_border_color(),
-                    false,
-                    output_options,
-                )?;
-                render_content_sections(out, &content_sections)?;
+                pending_invocations.insert(id, invocation);
                 if name == SpawnSubagentTool::NAME {
                     pending_spawn_call_ids.insert(id);
                     tracing::debug!(
@@ -443,8 +493,11 @@ pub(super) async fn run_cli_to_with_title(
                 summary,
                 duration,
                 content_sections,
+                run_id,
                 ..
             }) => {
+                unannounced_tools.remove(&id);
+                let subagent_tag = subagent_line_tag(run_id);
                 let title = pending_invocations.remove(&id).unwrap_or_else(|| {
                     registry
                         .get(&name)
@@ -461,7 +514,7 @@ pub(super) async fn run_cli_to_with_title(
                 };
                 write_cli_styled_line(
                     out,
-                    &format!("[tool] {title} done ({duration_s:.3}s){summary_str}"),
+                    &format!("{subagent_tag}[tool] {title} done ({duration_s:.3}s){summary_str}"),
                     tool_bubble_border_color(),
                     false,
                     output_options,
@@ -475,11 +528,14 @@ pub(super) async fn run_cli_to_with_title(
                     );
                 }
             }
-            Some(UiUpdate::ToolError { id, error, .. }) => {
+            Some(UiUpdate::ToolError {
+                id, error, run_id, ..
+            }) => {
+                unannounced_tools.remove(&id);
                 if !denied_tool_ids.remove(&id) {
                     write_cli_styled_line(
                         out,
-                        &format!("[tool] error: {error}"),
+                        &format!("{}[tool] error: {error}", subagent_line_tag(run_id)),
                         error_color(),
                         false,
                         output_options,
@@ -493,7 +549,12 @@ pub(super) async fn run_cli_to_with_title(
                     );
                 }
             }
-            Some(UiUpdate::ToolAutoDenied { name, reason, .. }) => {
+            Some(UiUpdate::ToolAutoDenied {
+                name,
+                reason,
+                run_id,
+                ..
+            }) => {
                 flush_stream_section(
                     out,
                     &mut current_section,
@@ -504,16 +565,20 @@ pub(super) async fn run_cli_to_with_title(
                 current_section = StreamSection::None;
                 write_cli_styled_line(
                     out,
-                    &format!("[tool] auto-denied '{name}': {reason}"),
+                    &format!(
+                        "{}[tool] auto-denied '{name}': {reason}",
+                        subagent_line_tag(run_id)
+                    ),
                     error_color(),
                     false,
                     output_options,
                 )?;
             }
             Some(UiUpdate::ToolKilled { id, run_id }) => {
+                unannounced_tools.remove(&id);
                 write_cli_styled_line(
                     out,
-                    "[tool] killed",
+                    &format!("{}[tool] killed", subagent_line_tag(run_id)),
                     interrupted_color(),
                     false,
                     output_options,
