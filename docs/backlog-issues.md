@@ -7,7 +7,7 @@
 - [x] Add a hard upper bound (e.g. 50 MB) on pasted content, rejecting larger
       pastes with a toast, to protect against memory blow-ups.
 
-- [ ] Wide terminal: Bash approval dialog is rendered like:
+- [x] Wide terminal: Bash approval dialog is rendered like:
       ```text
       Tool 'bash' requests your approval:    <provider/model/reasoning>
       [ Approve ]   [ Deny ]                 <costs> <context-usage>
@@ -27,3 +27,6 @@
       [ Approve ]   [ Deny ]                 
       <input field for denial>
       ```
+
+- [ ] Why does `edit` of a file in the workspace (`src/tui_widgets/footer.rs`) need user-approval ?
+      See log at tmp/tui_20261027172301.log.

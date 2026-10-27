@@ -790,8 +790,10 @@ pub(super) fn draw_approval_footer(
             meta,
             controls,
         } => {
-            draw_footer_status(frame, status, &row_1_text, footer_status_color());
-            draw_footer_meta(frame, meta, state);
+            // Meta (engine/costs/context) first, then the approval title,
+            // then the buttons.
+            draw_footer_meta(frame, status, state);
+            draw_footer_status(frame, meta, &row_1_text, footer_status_color());
             controls
         }
     };
