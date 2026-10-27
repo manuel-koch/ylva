@@ -75,6 +75,11 @@ pub struct AppState {
     /// `None` when no pause is in progress or the input was empty.
     pub pending_input_snapshot: Option<InputSnapshot>,
 
+    // ── pasted blobs ────────────────────────────────────────────────────────
+    /// Large pastes collapsed to markers in the current draft; expanded on
+    /// submit. History recall never creates entries here.
+    pub pasted_blobs: PastedBlobs,
+
     // ── input history ───────────────────────────────────────────────────────
     /// All `UserMessage` texts, oldest → newest.
     pub input_history: Vec<String>,
@@ -299,6 +304,8 @@ impl AppState {
             conversation: ConversationListState::default(),
 
             pending_input_snapshot: None,
+
+            pasted_blobs: PastedBlobs::default(),
 
             input_history: Vec::new(),
             history_index: None,

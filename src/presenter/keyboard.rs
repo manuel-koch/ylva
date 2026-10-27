@@ -655,7 +655,8 @@ fn handle_key_main(
                 state.slash_overlay = SlashOverlay::Hidden;
                 return slash_command_effects(state, invocation);
             }
-            let text = dedent(raw_text);
+            // Bubble and input history must hold the real text, not markers.
+            let text = dedent(&state.pasted_blobs.expand(raw_text));
             let mode_is_idle = matches!(state.mode, TuiMode::Idle);
             if mode_is_idle {
                 state.push_user_bubble(text.clone(), UserMessageState::Sent);

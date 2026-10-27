@@ -17,6 +17,7 @@ use crate::events::AppAction;
 use crate::presenter::TuiEvent;
 use crate::tui_reducer_state::{
     AppState, Focus, HistoryDirection, InputEvent, InputSnapshot, SlashOverlay,
+    LARGE_PASTE_CHAR_THRESHOLD,
 };
 use ratatui::style::Style;
 use ratatui_textarea::TextArea;
@@ -125,9 +126,11 @@ pub(super) fn save_input_state_and_clear(state: &mut AppState, textarea: &mut Te
     clear_textarea(textarea);
     // Park the draft and overlay together before approval controls hide them.
     let slash_overlay = state.slash_overlay.clone();
+    let pasted_blobs = std::mem::take(&mut state.pasted_blobs);
     state.pending_input_snapshot.get_or_insert(InputSnapshot {
         input_lines,
         slash_overlay,
+        pasted_blobs,
     });
     state.slash_overlay = SlashOverlay::Hidden;
 }
@@ -135,6 +138,7 @@ pub(super) fn save_input_state_and_clear(state: &mut AppState, textarea: &mut Te
 pub(super) fn restore_input_state(state: &mut AppState, textarea: &mut TextArea<'_>) {
     if state.is_approval_pending() {
         clear_textarea(textarea);
+        state.pasted_blobs.clear();
         return;
     }
     let snapshot = state.pending_input_snapshot.take();
@@ -150,6 +154,7 @@ pub(super) fn restore_input_state(state: &mut AppState, textarea: &mut TextArea<
     configure_textarea(textarea);
     if let Some(snapshot) = snapshot {
         state.slash_overlay = snapshot.slash_overlay;
+        state.pasted_blobs = snapshot.pasted_blobs;
     }
 }
 
@@ -163,21 +168,15 @@ pub(super) fn set_input_text(textarea: &mut TextArea<'_>, text: &str) {
 pub(super) fn paste_text(state: &mut AppState, textarea: &mut TextArea<'_>, text: &str) {
     state.exit_input_history_browsing(&textarea.lines().join("\n"));
     let dedented_text = dedent(text);
-    let paste_lines: Vec<&str> = dedented_text.split('\n').collect();
-    for (index, line) in paste_lines.iter().enumerate() {
-        for character in line.chars() {
-            textarea.input(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(character),
-                crossterm::event::KeyModifiers::NONE,
-            ));
-        }
-        if index + 1 < paste_lines.len() {
-            textarea.input(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Enter,
-                crossterm::event::KeyModifiers::SHIFT,
-            ));
-        }
-    }
+    // One chunk insert refreshes the textarea's screen map once; per-key
+    // input would re-wrap the whole draft for every character.
+    match state
+        .pasted_blobs
+        .collapse(&dedented_text, LARGE_PASTE_CHAR_THRESHOLD)
+    {
+        Some(marker) => textarea.insert_str(marker),
+        None => textarea.insert_str(dedented_text),
+    };
 }
 
 pub(super) fn scroll_input_at_mouse(

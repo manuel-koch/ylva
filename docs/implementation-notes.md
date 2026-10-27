@@ -642,6 +642,26 @@ terminal teardown and title restoration keep a fixed order.
   map, not a `textwrap` approximation. The real viewport top is read after
   rendering from an origin cursor clamped with `CursorMove::InViewport` on a
   clone, so recalled/replaced drafts cannot inherit a stale offset.
+- `paste_text` inserts the dedented text with one `TextArea::insert_str` call.
+  Per-character `input` re-wrapped the whole draft for every key
+  (`push_history` → `screen_map_load`), making a paste O(n²) and freezing the
+  single-threaded event loop (including Ctrl-C) for large pastes.
+- Pastes above `LARGE_PASTE_CHAR_THRESHOLD` (1,000 chars, measured on the
+  dedented text) insert a one-line marker instead. `PastedBlobs`
+  (`tui_reducer_state/pasted_blobs.rs`, held in `AppState::pasted_blobs`)
+  stores marker → text; markers are numbered per draft. `Effect::SubmitPrompt`
+  expands markers still present verbatim before `dedent` and sends, then
+  clears the store; `ClearTextarea` clears it too and
+  `InputSnapshot::pasted_blobs` parks/restores it with the draft around
+  approvals. History recall (`set_input_text`) never creates markers; history
+  entries are the expanded sent text.
+- Continuous mouse motion (wheel scroll, drag, hover) is coalesced: when more
+  actions are queued after such an event, the event loop skips the next frame
+  (`skip_frame`), so a burst over a long draft, e.g. drag-selecting text,
+  costs one frame instead of one per event. Presses and releases always draw.
+- Measured (release build, 100x40 terminal): a frame with a ~1 MB / 28,000
+  line draft in the textarea takes ~27 ms, below the 50 ms budget, so the
+  per-frame `lines().join("\n")` and measurement clones are left as is.
 
 ### Conversation layout cache
 

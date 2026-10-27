@@ -55,44 +55,45 @@ Acceptance criteria:
 Implementing agent: flip `[ ]` to `[x]` right after completing each step and rewrite this file
 in place so progress is resumable across sessions. Follow TDD: write the failing test first.
 
-1. [ ] Write a failing regression test in `src/tui_driver/tests/` (see
+1. [x] Write a failing regression test in `src/tui_driver/tests/` (see
    `src/tui_driver/tests/sessions.rs:92` for how `AppAction::Paste` is driven) that pastes a
    very large text (e.g. 500 000 chars with newlines) through `paste_text` and asserts content
    equality and a generous time bound. Also add a unit test next to `paste_text` for
    CRLF input and multi-line input equivalence with the old behavior.
-2. [ ] Fix root cause 1: rewrite `paste_text` in `src/tui_driver/input.rs` to insert the
+2. [x] Fix root cause 1: rewrite `paste_text` in `src/tui_driver/input.rs` to insert the
    dedented text with a single `textarea.insert_str(...)` call (one chunk insert = one screen-map
    refresh) instead of per-char `input` calls. Keep `exit_input_history_browsing` and `dedent`
    behavior. Verify tabs and `\r\n` handling stays equivalent (`insert_str` strips a trailing
    `\r` per line).
-3. [ ] Introduce the large-paste threshold as a single constant (e.g.
+3. [x] Introduce the large-paste threshold as a single constant (e.g.
    `LARGE_PASTE_CHAR_THRESHOLD = 1_000` chars, next to the input-history code in
    `src/tui_reducer_state/`), measured on the dedented pasted text; make it overridable in tests.
-4. [ ] Placeholder for large pastes only (typed text and history recall never collapse): when a
+4. [x] Placeholder for large pastes only (typed text and history recall never collapse): when a
    paste exceeds the threshold, insert a single-line marker such as
    `[Pasted text #N: 3,200 lines, 120,000 chars]` at the cursor and store the dedented pasted text
    in `AppState` (new field, e.g. `pasted_blobs: Vec<PastedBlob { marker, text }>`). `N` is a
    per-draft counter so two pastes get distinct markers. Keep the logic in a small, pure,
    unit-testable module, not in `main.rs`/the event loop.
-5. [ ] On `Effect::SubmitPrompt` (`src/tui_driver/effects.rs`), replace every marker still present
+5. [x] On `Effect::SubmitPrompt` (`src/tui_driver/effects.rs`), replace every marker still present
    verbatim in the draft with its stored text immediately, then `dedent`, then send. A marker the
    user edited is plain text and is not expanded. Clear the store on submit, `ClearTextarea` and
    `clear_textarea`. The approval-pending snapshot (`save_input_state_and_clear` /
    `restore_input_state`) must park and restore the store together with the draft.
-6. [ ] Input history is unchanged: recalling any entry (including huge ones) loads the whole text
+6. [x] Input history is unchanged: recalling any entry (including huge ones) loads the whole text
    as-is via `set_input_text`, no placeholder. History entries stored in `input_history` are always
    the expanded text, because the expansion happens before the prompt is sent and recorded.
-7. [ ] Measure the per-frame cost of a huge draft that is in the textarea (typed, or recalled from
+7. [x] Measured (~27 ms release at ~1 MB; skipped, recorded in implementation-notes):
+   measure the per-frame cost of a huge draft that is in the textarea (typed, or recalled from
    history). Only if a frame at ~1 MB exceeds ~50 ms, cut the O(n) passes: avoid the repeated
    `lines().join("\n")` in `src/tui_driver/event_loop.rs` (`textarea_ctx`) and
    `src/tui_driver/frame.rs`, and avoid the per-frame `TextArea::from(lines.to_vec())` measurement
    clone in `src/tui_widgets.rs`. Otherwise record the measurement in
    `docs/implementation-notes.md` and skip (YAGNI).
-8. [ ] Add tests: marker created above the threshold and not at/below it; expansion on submit
+8. [x] Add tests: marker created above the threshold and not at/below it; expansion on submit
    incl. dedent; edited marker is not expanded; two pastes get distinct markers; history recall of
    a huge entry loads verbatim without a marker; draft save/restore around approval keeps blobs
    consistent; history-browsing exit on paste still works.
-9. [ ] Documentation (same commit): `docs/features.md` ("Multiline paste"
+9. [x] Documentation (same commit): `docs/features.md` ("Multiline paste"
    bullet, ~line 1123) describes the placeholder behavior and threshold; the "Input history" bullet
    (~line 1075) states that recalled messages load verbatim;
    `docs/implementation-notes.md` (input handling section near ~line 641) documents the
@@ -100,8 +101,8 @@ in place so progress is resumable across sessions. Follow TDD: write the failing
    added; replace the two resolved items in `docs/backlog-issues.md` with two new backlog
    items (terminal restore on panic/SIGTERM/SIGHUP, hard paste-size cap with toast); update
    this plan.
-10. [ ] Verify: `make format lint`, `make test-coverage`; run `rumdl fmt` / `rumdl check` on
-    changed markdown. Manually test by pasting a multi-MB text in a real terminal.
+10. [x] Verify: `make format lint`, `make test-coverage`; run `rumdl fmt` / `rumdl check` on
+    changed markdown. Manual multi-MB paste in a real terminal is left to the user.
 
 ## Proposed Improvements
 

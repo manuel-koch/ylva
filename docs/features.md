@@ -1078,7 +1078,8 @@ for the full mechanics.
   root sessions in the same project, ordered oldest to newest, up to the
   configured `input_history_limit` (default `50`); subagent prompts are
   excluded, and duplicate prompts are collapsed by exact text with the newest
-  occurrence retained.
+  occurrence retained. Recalled messages are loaded verbatim, never collapsed
+  into a placeholder.
 - **Line navigation:** `Fn+Left`/`Fn+Right` move the input cursor to the
   start/end of the current line, wrapping to the previous/next line.
 - **Starts empty:** the TUI launches with an empty input box and no auto-sent
@@ -1122,7 +1123,11 @@ for the full mechanics.
   cleanly.
 - **Multiline paste:** the TUI supports pasting multiline text via the
   terminal's bracketed-paste protocol. Pasted text is dedented before
-  insertion.
+  insertion. A paste longer than 1,000 characters is shown as a one-line
+  placeholder such as `[Pasted text #1: 3,200 lines, 120,000 chars]`; on send
+  every placeholder still present verbatim is replaced by the pasted text. A
+  placeholder the user edited is sent as plain text. Large pastes insert
+  instantly and never block the TUI.
 - **Tool bubble titles:** a bubble's title line is the tool's own display
   label (`Tool::title()`) rather than a re-derivation from its name, so
   `web_search` and `web_fetch` name the backend the profile selects — e.g.
