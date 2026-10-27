@@ -642,6 +642,10 @@ terminal teardown and title restoration keep a fixed order.
   map, not a `textwrap` approximation. The real viewport top is read after
   rendering from an origin cursor clamped with `CursorMove::InViewport` on a
   clone, so recalled/replaced drafts cannot inherit a stale offset.
+- `tui_driver::terminal::restore_terminal` is the single restore routine,
+  called by `TerminalGuard::drop`, a panic hook installed by
+  `initialize_terminal` (restores before the previous hook prints), and a
+  SIGHUP task that restores and exits `129`.
 - `paste_text` inserts the dedented text with one `TextArea::insert_str` call.
   Per-character `input` re-wrapped the whole draft for every key
   (`push_history` → `screen_map_load`), making a paste O(n²) and freezing the

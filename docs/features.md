@@ -1128,6 +1128,9 @@ for the full mechanics.
   every placeholder still present verbatim is replaced by the pasted text. A
   placeholder the user edited is sent as plain text. Large pastes insert
   instantly and never block the TUI.
+- **Terminal restore:** the terminal (alternate screen, mouse capture,
+  bracketed paste, raw mode) is restored on every exit path, including a panic
+  in any thread or task and SIGHUP (exit `129`).
 - **Tool bubble titles:** a bubble's title line is the tool's own display
   label (`Tool::title()`) rather than a re-derivation from its name, so
   `web_search` and `web_fetch` name the backend the profile selects — e.g.
