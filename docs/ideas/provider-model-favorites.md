@@ -15,7 +15,7 @@ session exclusively.
 When reading past sessions we need to ensure that we don't reuse a provider/engine
 that is currently not available/configured anymore !
 
-For example define favorites on the provider connection
+For example define favorites and list of allowed model patterns on the provider connection
 configuration:
 
 ```toml
@@ -25,5 +25,9 @@ provider = "openrouter"
 favorite_models = [
     "anthropic/claude-haiku-5.5",
     "openai/gpt-6-luna",
+]
+allowed_models = [
+    "anthropic/*haiku*",
+    "openai/gpt-6*",
 ]
 ```
