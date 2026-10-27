@@ -21,6 +21,14 @@ with `BREAKING CHANGES:` or `BREAKING-CHANGES:` as a breaking-change marker.
 When either marker is present, make the breaking change and its compatibility impact
 clear in the release-note entry; use the commit body and diff to describe the impact.
 
+Keep inspection output small: start with the commit list, `git show --stat <hash>`
+or `git show --name-only <hash>`. Read a full patch only when the stat and the
+commit message do not explain the change, and then limit it to the relevant paths
+(`git show --format= <hash> -- <path>`) or pipe it through `head -n <N>`.
+Avoid `git show --format= <hash>` without a path; it prints the whole diff
+(often tens of kilobytes). Use the commit body (`git log -1 --format=%B <hash>`)
+for the intent of a change.
+
 Write the release notes to `docs/release-notes-<FROM>-to-<TO>.md`,
 e.g. `docs/release-notes-v0.2-to-v0.3.md` (overwrite if it already exists).
 Do not print the content to the conversation — only confirm the file was written.

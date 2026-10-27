@@ -1166,9 +1166,11 @@ For `grep`, options must precede the first positional pattern or file operand:
 With `-e PATTERN`, the pattern is an option value, so `grep -e needle -n file`
 is also recognized. This restriction avoids assuming GNU-style option
 permutation across platforms; `rg` supports interspersed options.
-Pass glob option values as separate quoted arguments, for example,
-`grep --include '*.rs' -e needle .`; mixed quoted/unquoted tokens such as
-`--include='*.rs'` remain unsupported by the shell extractor.
+Partly quoted tokens such as `--include='*.rs'` or `--format='%h %s'` are
+joined as the shell does (`--include=*.rs`) and matched as one argument.
+Glob and brace-expansion checks look only at the bare pieces, so a `*` inside
+the quotes is literal while `a*'b'` still counts as an unquoted glob. A piece
+containing an expansion (`'a'$VAR`, `a"$VAR"b`) keeps the command un-analysable.
 For `head` and `tail`, a first-argument legacy `-N` containing only ASCII
 digits (for example, `head -20 file` or `tail -5`) shares the `-n`/`--lines`
 identity. An allow-list containing `-n` therefore covers these forms without

@@ -34,16 +34,33 @@ pub(super) enum StreamSection {
     Response,
 }
 
+/// How long a tool runs before the CLI prints a "running…" line for it.
+const DEFAULT_SLOW_TOOL_NOTICE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Presentation options for the headless CLI output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CliOutputOptions {
     color: bool,
+    slow_tool_notice_delay: std::time::Duration,
 }
 
 impl CliOutputOptions {
     /// Create output options with or without ANSI colors.
     pub const fn new(color: bool) -> Self {
-        Self { color }
+        Self {
+            color,
+            slow_tool_notice_delay: DEFAULT_SLOW_TOOL_NOTICE_DELAY,
+        }
+    }
+
+    /// Set how long a tool must run before a "running…" line is printed for it.
+    pub const fn with_slow_tool_notice_delay(mut self, delay: std::time::Duration) -> Self {
+        self.slow_tool_notice_delay = delay;
+        self
+    }
+
+    pub(super) const fn slow_tool_notice_delay(self) -> std::time::Duration {
+        self.slow_tool_notice_delay
     }
 
     /// Disable ANSI colors. This is the default for the explicit-writer
