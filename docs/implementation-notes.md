@@ -130,6 +130,10 @@ See [configuration](./configuration.md),
 - `EngineImpl::configured_copy` gives explicit summarizers their original
   settings with independent request handles but shared HTTP clients and
   concurrency limits. Equal engine names do *not* imply shared settings.
+- Allowed-model policy is owned by the provider connection and travels with
+  every engine built from it (including `configured_copy`), so subagent,
+  utility and compaction engines inherit it. Checks must run before any state
+  mutation (`apply_model_option` edits reasoning before switching).
 - One semaphore per provider connection bounds concurrency. Catalog calls hold
   a permit until the body is read; streamed chat until the stream closes.
   Retries of `429`/`5xx` (honoring `Retry-After`) stay under the same permit.
@@ -715,6 +719,22 @@ terminal teardown and title restoration keep a fixed order.
   resident memory) counting shared allocations once. Over-budget optional
   layouts are not retained; others evict least-recently-retained. Required
   current layouts stay resident even if oversized.
+
+### Favorites
+
+- Picker display order is derived from each row's group and `favorite_rank`,
+  never stored: the choice vector is not reordered because a parameter popup
+  holds an index into it. Favorited named-engine shortcuts stay in the engine
+  group; only catalog rows move to the favorites group.
+- `FavoriteSaveOwner` lives in the event loop's locals, outside `AppState`
+  (which `/clear` and `/session` replace), so saves and membership survive
+  popup closure and session changes. The write capability is captured from the
+  document actually loaded, not from a guessed path.
+- `Effect::SetFavoriteModel` carries the desired membership, not a toggle, so a
+  replayed request cannot flip state. It is driver-owned and never an agent
+  command.
+- Membership is published only after a confirmed save and is applied to the
+  open picker and the overlay parked in `pending_input_snapshot`.
 
 ## Slash commands
 

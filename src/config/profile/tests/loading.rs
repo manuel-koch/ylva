@@ -985,3 +985,317 @@ fn max_concurrent_subagents_rejects_a_non_integer_string() {
         "{error}"
     );
 }
+
+// ── provider-connection favorites and allowed models ─────────────────────
+
+fn load_with_environment(
+    root: &Path,
+    name: &str,
+    environment: &HashMap<String, String>,
+) -> Result<ProfileConfig, ConfigError> {
+    ProfileConfig::load_with_environment_at_workspace_root(root, name, environment, None)
+}
+
+#[test]
+fn provider_connection_favorites_and_allowed_models_load_in_order() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "prefs",
+        r#"
+[provider_connections.openrouter]
+provider = "openrouter"
+api_base_url = "https://openrouter.ai"
+favorite_models = ["openai/gpt-6-luna", "Anthropic/Claude-Haiku", "openai/gpt-6-luna"]
+allowed_models = ["anthropic/*haiku*", "openai/gpt-6*"]
+"#,
+    );
+
+    let profile = load_with_environment(temp.path(), "prefs", &HashMap::new()).expect("loads");
+    let connection = &profile.provider_connections["openrouter"];
+
+    assert_eq!(
+        connection.favorite_models,
+        vec![
+            "openai/gpt-6-luna",
+            "Anthropic/Claude-Haiku",
+            "openai/gpt-6-luna"
+        ],
+        "favorites keep exact spelling, order, and duplicates"
+    );
+    let policy = connection.model_policy().expect("policy compiles");
+    assert!(policy.allows("anthropic/claude-HAIKU-5"));
+    assert!(policy.allows("OPENAI/gpt-6-luna"));
+    assert!(!policy.allows("openai/gpt-5"));
+}
+
+#[test]
+fn omitted_preferences_mean_no_favorites_and_unrestricted_models() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "old",
+        "[provider_connections.local]\nprovider = \"ollama\"\napi_base_url = \"http://localhost:11434\"\n",
+    );
+
+    let profile = load_with_environment(temp.path(), "old", &HashMap::new()).expect("loads");
+    let connection = &profile.provider_connections["local"];
+
+    assert!(connection.favorite_models.is_empty());
+    assert_eq!(connection.allowed_models, None);
+    assert!(connection
+        .model_policy()
+        .expect("policy")
+        .allows("anything/at-all"));
+}
+
+#[test]
+fn explicit_empty_allowed_models_is_a_configuration_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "empty",
+        "[provider_connections.local]\nprovider = \"ollama\"\nallowed_models = []\n",
+    );
+
+    let error = load_with_environment(temp.path(), "empty", &HashMap::new())
+        .expect_err("an explicit empty allow list is rejected");
+
+    assert!(error.to_string().contains("allowed_models"), "{error}");
+}
+
+#[test]
+fn malformed_allowed_model_pattern_is_a_configuration_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "malformed",
+        "[provider_connections.local]\nprovider = \"ollama\"\nallowed_models = [\"ok*\", \"bad[\"]\n",
+    );
+
+    let error = load_with_environment(temp.path(), "malformed", &HashMap::new())
+        .expect_err("a malformed pattern is rejected");
+
+    assert!(error.to_string().contains("bad["), "{error}");
+}
+
+#[test]
+fn allowed_models_and_favorites_expand_environment_references() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "interpolated",
+        "[provider_connections.local]\nprovider = \"ollama\"\nfavorite_models = [\"${FAVORITE}\"]\nallowed_models = [\"${FAMILY}*\"]\n",
+    );
+    let environment = HashMap::from([
+        ("FAVORITE".to_string(), "llama3:8b".to_string()),
+        ("FAMILY".to_string(), "llama".to_string()),
+    ]);
+
+    let profile = load_with_environment(temp.path(), "interpolated", &environment).expect("loads");
+    let connection = &profile.provider_connections["local"];
+
+    assert_eq!(connection.favorite_models, vec!["llama3:8b"]);
+    assert!(connection
+        .model_policy()
+        .expect("policy")
+        .allows("llama3:8b"));
+}
+
+#[test]
+fn configured_engine_model_outside_its_connection_allow_list_is_rejected() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "conflict",
+        r#"
+default_engine = "main"
+[provider_connections.cloud]
+provider = "openrouter"
+allowed_models = ["anthropic/*"]
+[engines.main]
+provider_connection = "cloud"
+model = "openai/gpt-6"
+"#,
+    );
+
+    let error = load_with_environment(temp.path(), "conflict", &HashMap::new())
+        .expect_err("a disallowed configured model is rejected");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("openai/gpt-6") && message.contains("cloud"),
+        "{message}"
+    );
+}
+
+#[test]
+fn default_model_inherited_by_an_engine_is_checked_against_the_allow_list() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "inherited",
+        r#"
+default_engine = "main"
+default_model = "openai/gpt-6"
+[provider_connections.cloud]
+provider = "openrouter"
+allowed_models = ["anthropic/*"]
+[engines.main]
+provider_connection = "cloud"
+"#,
+    );
+
+    let error = load_with_environment(temp.path(), "inherited", &HashMap::new())
+        .expect_err("the inherited default model is checked");
+
+    assert!(error.to_string().contains("openai/gpt-6"), "{error}");
+}
+
+#[test]
+fn default_model_applied_to_an_implicit_engine_is_checked_against_the_allow_list() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "implicit",
+        r#"
+default_model = "openai/gpt-6"
+[provider_connections.cloud]
+provider = "openrouter"
+allowed_models = ["anthropic/*"]
+"#,
+    );
+
+    let error = load_with_environment(temp.path(), "implicit", &HashMap::new())
+        .expect_err("the implicit engine's default model is checked");
+
+    assert!(error.to_string().contains("openai/gpt-6"), "{error}");
+}
+
+#[test]
+fn implicit_engine_without_a_model_is_discovery_only_and_loads() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "discovery",
+        "[provider_connections.cloud]\nprovider = \"openrouter\"\nallowed_models = [\"anthropic/*\"]\n",
+    );
+
+    load_with_environment(temp.path(), "discovery", &HashMap::new())
+        .expect("an empty implicit engine needs no model up front");
+}
+
+#[test]
+fn configured_favorite_outside_the_allow_list_is_rejected() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "favorite-conflict",
+        r#"
+[provider_connections.cloud]
+provider = "openrouter"
+favorite_models = ["anthropic/claude-haiku", "openai/gpt-6"]
+allowed_models = ["anthropic/*"]
+"#,
+    );
+
+    let error = load_with_environment(temp.path(), "favorite-conflict", &HashMap::new())
+        .expect_err("a disallowed favorite is rejected");
+
+    assert!(error.to_string().contains("openai/gpt-6"), "{error}");
+}
+
+#[test]
+fn favorites_are_exact_and_never_treated_as_patterns() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "exact",
+        "[provider_connections.cloud]\nprovider = \"openrouter\"\nfavorite_models = [\"vendor/model-*\"]\n",
+    );
+
+    let profile = load_with_environment(temp.path(), "exact", &HashMap::new()).expect("loads");
+
+    assert_eq!(
+        profile.provider_connections["cloud"].favorite_models,
+        vec!["vendor/model-*"]
+    );
+}
+
+#[test]
+fn workspace_profile_replaces_home_preferences_as_a_whole_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+    let workspace_root = temp.path().join("project");
+    write_profile_config(
+        &home_root,
+        "shared",
+        "[provider_connections.cloud]\nprovider = \"openrouter\"\nfavorite_models = [\"home/model\"]\nallowed_models = [\"home/*\"]\n",
+    );
+    write_profile_config(
+        &workspace_root
+            .join(crate::ylva_home::YLVA_DIR_NAME)
+            .join(PROFILES_DIRECTORY_NAME),
+        "shared",
+        "[provider_connections.cloud]\nprovider = \"openrouter\"\n",
+    );
+
+    let profile = ProfileConfig::load_with_environment_at_workspace_root(
+        &home_root,
+        "shared",
+        &HashMap::new(),
+        Some(&workspace_root),
+    )
+    .expect("loads");
+
+    let connection = &profile.provider_connections["cloud"];
+    assert!(connection.favorite_models.is_empty());
+    assert_eq!(connection.allowed_models, None);
+}
+
+#[test]
+fn load_with_favorite_writer_captures_the_loaded_document() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home_profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+    let workspace_root = temp.path().join("project");
+    write_profile_config(
+        &home_profiles_root,
+        DEFAULT_PROFILE_NAME,
+        "[provider_connections.local]\nprovider = \"ollama\"\n",
+    );
+    let environment = HashMap::new();
+
+    let (profile, writer) = ProfileConfig::load_with_favorite_writer(
+        &home_profiles_root,
+        DEFAULT_PROFILE_NAME,
+        &environment,
+        Some(&workspace_root),
+        false,
+    )
+    .expect("home profile loads");
+    assert!(profile.provider_connections.contains_key("local"));
+    let mut writer = writer.expect("a home profile file backs the writer");
+    let outcome = writer
+        .set_favorite("local", "llama3", true)
+        .expect("save through the captured writer");
+    assert_eq!(outcome.layer, crate::config::FavoriteSourceLayer::Home);
+
+    let missing_root = temp.path().join("missing");
+    let (_, no_writer) = ProfileConfig::load_with_favorite_writer(
+        &missing_root,
+        DEFAULT_PROFILE_NAME,
+        &environment,
+        None,
+        true,
+    )
+    .expect("built-in defaults load");
+    assert!(no_writer.is_none());
+    assert!(ProfileConfig::load_with_favorite_writer(
+        &missing_root,
+        DEFAULT_PROFILE_NAME,
+        &environment,
+        None,
+        false,
+    )
+    .is_err());
+}

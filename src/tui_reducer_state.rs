@@ -33,6 +33,7 @@ mod app_state;
 mod context_usage;
 mod conversation;
 mod events;
+mod favorites;
 mod input_history;
 mod layout;
 mod model_picker;
@@ -57,7 +58,7 @@ pub use layout::{
 pub(crate) use model_picker::{
     engine_choice_parts, extract_models_filter, matching_model_indices, model_choice_parts,
     model_picker_row_entries, model_picker_row_is_details, model_picker_row_layout,
-    slash_overlay_text_rows, visible_model_choices,
+    slash_overlay_text_rows, visible_model_choices, PickerRow,
 };
 pub use model_picker::{
     ChoiceLabel, InputSnapshot, ModelChoice, ModelParameterEdit, ParameterField, PickerRowLayout,

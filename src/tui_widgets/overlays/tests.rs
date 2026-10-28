@@ -51,6 +51,7 @@ fn model_choice(context_length: usize) -> ModelChoice {
             context_length,
         }),
         selection_preview_error: None,
+        favorite_rank: None,
     }
 }
 

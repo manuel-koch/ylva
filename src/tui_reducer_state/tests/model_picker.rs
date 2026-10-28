@@ -49,6 +49,7 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
             catalog_context_length: None,
             selection_target: None,
             selection_preview_error: None,
+            favorite_rank: None,
         };
     let mut choices = vec![
         choice("openrouter", "deepseek-v3", Some("Remote-Dense")),
@@ -125,7 +126,7 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
     ));
     assert_eq!(
         slash_overlay_text_rows(&state.slash_overlay, PickerRowLayout::SingleRow),
-        vec![selected_choice.label.single_line()]
+        vec!["Engines".to_string(), selected_choice.label.single_line()]
     );
     state.refresh_slash_overlay("/models remote");
     state.move_slash_selection(1);
@@ -240,7 +241,7 @@ fn refresh_slash_overlay_keeps_the_selection_while_the_choices_are_unchanged() {
 }
 
 #[test]
-fn slash_overlay_text_rows_preserves_filtered_model_labels_and_divider() {
+fn slash_overlay_text_rows_preserves_filtered_model_labels_and_headers() {
     let choice = |label: &str, provider_connection: &str, engine_name: Option<&str>| ModelChoice {
         label: ChoiceLabel {
             identity: label.to_string(),
@@ -264,6 +265,7 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_divider() {
         engine_name: engine_name.map(str::to_string),
         selection_target: None,
         selection_preview_error: None,
+        favorite_rank: None,
     };
     let choices = vec![
         choice("engine/model", "engine", Some("engine")),
@@ -278,7 +280,7 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_divider() {
     };
     assert_eq!(
         slash_overlay_text_rows(&filtered_overlay, PickerRowLayout::SingleRow),
-        vec!["provider/model".to_string()],
+        vec!["Models".to_string(), "provider/model".to_string()],
         "filtering must keep labels tied to the matching choice index"
     );
 
@@ -291,11 +293,12 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_divider() {
     assert_eq!(
         slash_overlay_text_rows(&all_choices_overlay, PickerRowLayout::SingleRow),
         vec![
+            "Engines".to_string(),
             "engine/model".to_string(),
-            String::new(),
+            "Models".to_string(),
             "provider/model".to_string()
         ],
-        "the divider must remain an empty non-selectable row"
+        "group headers contribute their title as non-selectable rows"
     );
 }
 
@@ -353,6 +356,7 @@ fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
         catalog_context_length: None,
         selection_target: None,
         selection_preview_error: None,
+        favorite_rank: None,
     };
 
     assert_eq!(
@@ -458,6 +462,7 @@ fn two_row_fixture_choices() -> Vec<ModelChoice> {
         engine_name: engine_name.map(str::to_string),
         selection_target: None,
         selection_preview_error: None,
+        favorite_rank: None,
     };
     vec![
         choice(
@@ -546,17 +551,33 @@ fn choice_label_keeps_identity_and_details_as_separate_parts() {
 }
 
 #[test]
-fn two_row_layout_repeats_each_entry_and_keeps_the_divider_single() {
+fn two_row_layout_repeats_each_entry_and_keeps_the_header_single() {
+    use crate::tui_reducer_state::model_picker::PickerGroup::{Engines, Models};
+    use crate::tui_reducer_state::model_picker::PickerRow::{Entry, Header};
     let choices = two_row_fixture_choices();
 
     let single = model_picker_row_entries(&choices, "", PickerRowLayout::SingleRow);
-    assert_eq!(single, vec![Some(0), None, Some(1)]);
+    assert_eq!(
+        single,
+        vec![Header(Engines), Entry(0), Header(Models), Entry(1)]
+    );
 
     let two_rows = model_picker_row_entries(&choices, "", PickerRowLayout::TwoRows);
-    assert_eq!(two_rows, vec![Some(0), Some(0), None, Some(1), Some(1)]);
-    assert!(model_picker_row_is_details(&two_rows, 1));
-    assert!(!model_picker_row_is_details(&two_rows, 0));
+    assert_eq!(
+        two_rows,
+        vec![
+            Header(Engines),
+            Entry(0),
+            Entry(0),
+            Header(Models),
+            Entry(1),
+            Entry(1)
+        ]
+    );
+    assert!(model_picker_row_is_details(&two_rows, 2));
+    assert!(!model_picker_row_is_details(&two_rows, 1));
     assert!(!model_picker_row_is_details(&two_rows, 3));
+    assert!(!model_picker_row_is_details(&two_rows, 0));
 }
 
 #[test]
@@ -571,9 +592,10 @@ fn two_row_layout_text_is_identity_then_details_per_entry() {
     assert_eq!(
         slash_overlay_text_rows(&overlay, PickerRowLayout::TwoRows),
         vec![
+            "Engines".to_string(),
             "engine → provider/model".to_string(),
             "context: 65.5K  reasoning: unavailable".to_string(),
-            String::new(),
+            "Models".to_string(),
             "provider/other".to_string(),
             "reasoning: unavailable".to_string(),
         ]
@@ -581,8 +603,9 @@ fn two_row_layout_text_is_identity_then_details_per_entry() {
     assert_eq!(
         slash_overlay_text_rows(&overlay, PickerRowLayout::SingleRow),
         vec![
+            "Engines".to_string(),
             "engine → provider/model  context: 65.5K  reasoning: unavailable".to_string(),
-            String::new(),
+            "Models".to_string(),
             "provider/other  reasoning: unavailable".to_string(),
         ]
     );
@@ -821,6 +844,7 @@ fn parameter_fixture(
             is_active: false,
             engine_name: None,
             selection_preview_error: None,
+            favorite_rank: None,
         }],
         filter: String::new(),
         selected: 0,
@@ -863,6 +887,7 @@ fn engine_parameter_fixture(
             is_active: false,
             engine_name: Some("engine".to_string()),
             selection_preview_error: None,
+            favorite_rank: None,
         }],
         filter: String::new(),
         selected: 0,
@@ -1161,4 +1186,151 @@ fn reasoning_row_marks_each_direction_that_can_still_move() {
         "Reasoning effort:  ◂ high",
         "the last advertised effort can only move smaller"
     );
+}
+
+fn plain_choice(provider_connection: &str, model_id: &str) -> ModelChoice {
+    let selection = ProviderModelOption {
+        context_length_override: None,
+        provider_connection: provider_connection.to_string(),
+        model: crate::llm::ModelInfo {
+            id: model_id.to_string(),
+            context_length: None,
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+    };
+    ModelChoice {
+        label: model_choice_parts(&selection),
+        initial_reasoning_effort: None,
+        selection,
+        is_active: false,
+        engine_name: None,
+        catalog_context_length: None,
+        selection_target: None,
+        selection_preview_error: None,
+        favorite_rank: None,
+    }
+}
+
+fn highlighted_pair(state: &AppState) -> (String, String) {
+    let (connection, model_id, _) = state
+        .highlighted_model_identity()
+        .expect("a highlighted model");
+    (connection, model_id)
+}
+
+#[test]
+fn marking_a_favorite_regroups_rows_and_keeps_the_highlighted_identity() {
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: vec![
+            plain_choice("alpha", "one"),
+            plain_choice("alpha", "two"),
+            plain_choice("beta", "three"),
+        ],
+        filter: String::new(),
+        selected: 2,
+        parameters: None,
+    };
+    assert_eq!(highlighted_pair(&state), ("beta".into(), "three".into()));
+
+    state.apply_favorite_membership("beta", "three", true);
+
+    assert_eq!(
+        highlighted_pair(&state),
+        ("beta".into(), "three".into()),
+        "the favorite moved to the top group, the highlight followed it"
+    );
+    let SlashOverlay::ModelPicker {
+        choices, selected, ..
+    } = &state.slash_overlay
+    else {
+        panic!("expected a picker");
+    };
+    assert_eq!(*selected, 0);
+    assert!(choices[2].is_favorite());
+    assert!(choices[2].label.identity.starts_with("⚑ "));
+
+    state.apply_favorite_membership("alpha", "two", true);
+    state.apply_favorite_membership("beta", "three", false);
+    let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+        panic!("expected a picker");
+    };
+    assert!(!choices[2].is_favorite());
+    assert!(!choices[2].label.identity.starts_with('⚑'));
+    assert!(choices[1].is_favorite());
+}
+
+#[test]
+fn regrouping_keeps_the_parameter_popup_bound_to_its_model() {
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: vec![plain_choice("stub", "other"), plain_choice("stub", "model")],
+        filter: String::new(),
+        selected: 1,
+        parameters: None,
+    };
+    let before = highlighted_pair(&state);
+    assert_eq!(before, ("stub".into(), "model".into()));
+    let SlashOverlay::ModelPicker {
+        choices,
+        selected,
+        parameters,
+        ..
+    } = &mut state.slash_overlay
+    else {
+        panic!("expected a picker");
+    };
+    let index = matching_model_indices(choices, "")[*selected];
+    *parameters = Some(crate::tui_reducer_state::ModelParameterEdit {
+        choice_index: index,
+        fields: Vec::new(),
+        cursor: 0,
+        context_length: None,
+        context_length_maximum: None,
+        context_length_edited: false,
+        reasoning_effort: None,
+    });
+
+    state.apply_favorite_membership("stub", "model", true);
+
+    assert_eq!(highlighted_pair(&state), before);
+    let SlashOverlay::ModelPicker {
+        choices,
+        parameters: Some(edit),
+        ..
+    } = &state.slash_overlay
+    else {
+        panic!("the popup stays open");
+    };
+    assert_eq!(choices[edit.choice_index].selection.model.id, "model");
+}
+
+#[test]
+fn favorites_follow_configured_rank_within_sorted_connections_and_filters_apply() {
+    let mut choices = vec![
+        plain_choice("beta", "b-late"),
+        plain_choice("alpha", "a-second"),
+        plain_choice("alpha", "a-first"),
+        plain_choice("alpha", "plain"),
+    ];
+    choices[0].favorite_rank = Some(0);
+    choices[1].favorite_rank = Some(1);
+    choices[2].favorite_rank = Some(0);
+
+    let ordered: Vec<&str> = matching_model_indices(&choices, "")
+        .into_iter()
+        .map(|index| choices[index].selection.model.id.as_str())
+        .collect();
+    assert_eq!(ordered, vec!["a-first", "a-second", "b-late", "plain"]);
+
+    let filtered: Vec<&str> = matching_model_indices(&choices, "plain")
+        .into_iter()
+        .map(|index| choices[index].selection.model.id.as_str())
+        .collect();
+    assert_eq!(filtered, vec!["plain"]);
+    let rows = model_picker_row_entries(&choices, "plain", PickerRowLayout::SingleRow);
+    assert_eq!(rows.len(), 2, "only the non-empty group keeps its header");
 }

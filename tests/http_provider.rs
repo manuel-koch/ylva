@@ -650,6 +650,8 @@ async fn named_ollama_connection_uses_native_model_discovery() {
         provider: ylva::config::ProviderKind::Ollama,
         api_base_url: Some(server.base_url()),
         api_key: None,
+        favorite_models: Vec::new(),
+        allowed_models: None,
     };
     let engine_config = EngineConfig {
         provider_connection: "ollama-local".to_string(),

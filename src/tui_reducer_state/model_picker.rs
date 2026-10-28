@@ -52,9 +52,40 @@ pub struct ModelChoice {
     pub selection_target: Option<ModelSelectionTarget>,
     /// Reason a selection target could not be resolved for preview.
     pub selection_preview_error: Option<String>,
+    /// Position of this row's `(connection, model id)` pair in its provider
+    /// connection's configured favorite list, when the pair is a favorite.
+    /// Set on every row naming the pair, including named-engine shortcuts, so
+    /// they all show the favorite marker; only provider/model catalog rows are
+    /// grouped under the favorites header and ordered by this rank.
+    pub favorite_rank: Option<usize>,
 }
 
+/// Marker prefixed to the identity of a favorite row.
+const FAVORITE_MARKER: &str = "⚑ ";
+
 impl ModelChoice {
+    /// Whether this row's connection/model pair is a favorite.
+    pub fn is_favorite(&self) -> bool {
+        self.favorite_rank.is_some()
+    }
+
+    /// Whether this row names the given provider connection and model ID.
+    fn names_pair(&self, provider_connection: &str, model_id: &str) -> bool {
+        self.selection.provider_connection == provider_connection
+            && self.selection.model.id == model_id
+    }
+
+    /// The group this row is listed under.
+    pub(crate) fn picker_group(&self) -> PickerGroup {
+        if self.engine_name.is_some() {
+            PickerGroup::Engines
+        } else if self.is_favorite() {
+            PickerGroup::Favorites
+        } else {
+            PickerGroup::Models
+        }
+    }
+
     /// Convert the highlighted row into an Engine runtime selection without losing
     /// named-engine identity or treating an untouched effort as an override.
     pub fn to_model_selection(&self) -> ModelSelection {
@@ -80,6 +111,9 @@ impl ModelChoice {
             Some(engine_name) => engine_choice_parts(engine_name, &self.selection),
             None => model_choice_parts(&self.selection),
         };
+        if self.is_favorite() {
+            self.label.identity.insert_str(0, FAVORITE_MARKER);
+        }
     }
 }
 
@@ -212,6 +246,40 @@ impl PickerRowLayout {
     }
 }
 
+/// Group of `/models` rows. Declaration order is display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PickerGroup {
+    /// Named-engine shortcuts.
+    Engines,
+    /// Provider/model catalog rows marked as favorites.
+    Favorites,
+    /// Every other provider/model catalog row.
+    Models,
+}
+
+impl PickerGroup {
+    /// Header text shown above the group's rows.
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            PickerGroup::Engines => "Engines",
+            PickerGroup::Favorites => "Favorites",
+            PickerGroup::Models => "Models",
+        }
+    }
+}
+
+/// One rendered row of a slash overlay's list. Headers are presentation
+/// rows: they are never selectable and carry no choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickerRow {
+    /// Non-selectable header introducing a group.
+    Header(PickerGroup),
+    /// Entry at this position of the filtered choice list. Under
+    /// [`PickerRowLayout::TwoRows`] an entry occupies two consecutive rows
+    /// carrying the same index.
+    Entry(usize),
+}
+
 /// Overlay rendered above the input while a slash command is being composed
 /// or resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -246,6 +314,101 @@ impl SlashOverlay {
     /// Whether the overlay currently captures navigation keys.
     pub fn is_visible(&self) -> bool {
         !matches!(self, SlashOverlay::Hidden)
+    }
+
+    /// The `(provider connection, model id, currently favorite)` identity the
+    /// model picker highlights: the open parameter popup's model, otherwise
+    /// the filtered list's selection. `None` for any other overlay or when
+    /// nothing matches.
+    pub fn highlighted_model_identity(&self) -> Option<(String, String, bool)> {
+        let SlashOverlay::ModelPicker {
+            choices,
+            filter,
+            selected,
+            parameters,
+        } = self
+        else {
+            return None;
+        };
+        let choice_index = match parameters {
+            Some(edit) => edit.choice_index,
+            None => *matching_model_indices(choices, filter).get(*selected)?,
+        };
+        let choice = choices.get(choice_index)?;
+        Some((
+            choice.selection.provider_connection.clone(),
+            choice.selection.model.id.clone(),
+            choice.is_favorite(),
+        ))
+    }
+
+    /// Update favorite membership of one connection/model pair on every row
+    /// naming it (catalog row and named-engine shortcuts alike) and regroup.
+    ///
+    /// The choice vector is never reordered — display order is derived from
+    /// each row's group and [`ModelChoice::favorite_rank`] — so a parameter
+    /// popup's `choice_index` stays valid. `selected` is rebound to the
+    /// position the previously highlighted choice now has in the filtered
+    /// list, so the highlighted identity, an open draft and a later Enter
+    /// keep naming the same model. A newly added favorite ranks last among
+    /// its connection's favorites; re-adding keeps its rank. Does nothing for
+    /// other overlays.
+    pub fn apply_favorite_membership(
+        &mut self,
+        provider_connection: &str,
+        model_id: &str,
+        favorite: bool,
+    ) {
+        let SlashOverlay::ModelPicker {
+            choices,
+            filter,
+            selected,
+            parameters,
+        } = self
+        else {
+            return;
+        };
+        let highlighted_choice_index = match parameters {
+            Some(edit) => Some(edit.choice_index),
+            None => matching_model_indices(choices, filter)
+                .get(*selected)
+                .copied(),
+        };
+        let new_rank = favorite.then(|| {
+            choices
+                .iter()
+                .find_map(|choice| {
+                    choice
+                        .names_pair(provider_connection, model_id)
+                        .then_some(choice.favorite_rank)
+                        .flatten()
+                })
+                .unwrap_or_else(|| {
+                    choices
+                        .iter()
+                        .filter(|choice| {
+                            choice.selection.provider_connection == provider_connection
+                        })
+                        .filter_map(|choice| choice.favorite_rank)
+                        .max()
+                        .map_or(0, |highest_rank| highest_rank + 1)
+                })
+        });
+        for choice in choices
+            .iter_mut()
+            .filter(|choice| choice.names_pair(provider_connection, model_id))
+            .filter(|choice| choice.favorite_rank != new_rank)
+        {
+            choice.favorite_rank = new_rank;
+            choice.refresh_label();
+        }
+        if let Some(position) = highlighted_choice_index.and_then(|choice_index| {
+            matching_model_indices(choices, filter)
+                .iter()
+                .position(|&index| index == choice_index)
+        }) {
+            *selected = position;
+        }
     }
 }
 
@@ -446,9 +609,14 @@ pub struct InputSnapshot {
 /// (in any order — e.g. `"deepseek v3"` matches `stub/deepseek-v3` and
 /// `"v3 deepseek"` matches it too). An empty (or all-whitespace) filter
 /// matches every choice.
+///
+/// The indices are in display order: named engines, then favorites (by
+/// connection name, then configured order), then the remaining models, each
+/// keeping its position in `choices` otherwise. The choice list itself is
+/// never reordered, so indices into it stay stable.
 pub(crate) fn matching_model_indices(choices: &[ModelChoice], filter: &str) -> Vec<usize> {
     let filter_words: Vec<String> = filter.split_whitespace().map(str::to_lowercase).collect();
-    choices
+    let mut indices: Vec<usize> = choices
         .iter()
         .enumerate()
         .filter(|(_, choice)| {
@@ -462,38 +630,57 @@ pub(crate) fn matching_model_indices(choices: &[ModelChoice], filter: &str) -> V
             filter_words.iter().all(|word| identity.contains(word))
         })
         .map(|(index, _)| index)
-        .collect()
+        .collect();
+    indices.sort_by(|&left, &right| {
+        model_choice_display_key(&choices[left]).cmp(&model_choice_display_key(&choices[right]))
+    });
+    indices
 }
 
-/// Render-row mapping for the `/models` picker. `Some(index)` identifies an
-/// entry in the filtered choice list; `None` identifies the divider between
-/// configured engines and provider models. Under [`PickerRowLayout::TwoRows`]
-/// an entry occupies two consecutive rows carrying the same index.
+/// Sort key placing a row in display order. Only favorite catalog rows are
+/// ordered beyond their group, by connection name then favorite rank.
+pub(crate) fn model_choice_display_key(choice: &ModelChoice) -> (PickerGroup, &str, usize) {
+    match choice.picker_group() {
+        PickerGroup::Favorites => (
+            PickerGroup::Favorites,
+            choice.selection.provider_connection.as_str(),
+            choice.favorite_rank.unwrap_or_default(),
+        ),
+        group => (group, "", 0),
+    }
+}
+
+/// Render-row mapping for the `/models` picker. A header introduces each
+/// group that is non-empty under the filter. Under
+/// [`PickerRowLayout::TwoRows`] an entry occupies two consecutive rows
+/// carrying the same index.
 pub(crate) fn model_picker_row_entries(
     choices: &[ModelChoice],
     filter: &str,
     row_layout: PickerRowLayout,
-) -> Vec<Option<usize>> {
-    let visible_indices = matching_model_indices(choices, filter);
-    let separator_before = visible_indices
-        .iter()
-        .position(|&index| choices[index].engine_name.is_none())
-        .filter(|&boundary| boundary > 0);
+) -> Vec<PickerRow> {
+    let groups: Vec<PickerGroup> = matching_model_indices(choices, filter)
+        .into_iter()
+        .map(|index| choices[index].picker_group())
+        .collect();
     let rows_per_entry = row_layout.rows_per_entry();
-    (0..visible_indices.len())
-        .flat_map(|index| {
-            let separator = (separator_before == Some(index)).then_some(None);
-            separator
-                .into_iter()
-                .chain(std::iter::repeat_n(Some(index), rows_per_entry))
-        })
-        .collect()
+    let mut rows = Vec::new();
+    for (index, group) in groups.iter().enumerate() {
+        let starts_group = index == 0 || groups[index - 1] != *group;
+        if starts_group {
+            rows.push(PickerRow::Header(*group));
+        }
+        rows.extend(std::iter::repeat_n(PickerRow::Entry(index), rows_per_entry));
+    }
+    rows
 }
 
 /// Whether `rows[row_index]` is the details row of a two-row entry, i.e. it
 /// repeats the entry of the row directly above it.
-pub(crate) fn model_picker_row_is_details(rows: &[Option<usize>], row_index: usize) -> bool {
-    row_index > 0 && rows[row_index].is_some() && rows[row_index - 1] == rows[row_index]
+pub(crate) fn model_picker_row_is_details(rows: &[PickerRow], row_index: usize) -> bool {
+    row_index > 0
+        && matches!(rows[row_index], PickerRow::Entry(_))
+        && rows[row_index - 1] == rows[row_index]
 }
 
 /// The choices visible under `filter`, in display order.
@@ -569,8 +756,7 @@ pub(crate) fn model_parameter_rows(edit: &ModelParameterEdit, choice: &ModelChoi
 
 /// Return the plain text represented by each row in a slash overlay. Under
 /// [`PickerRowLayout::TwoRows`] a model entry contributes its identity row and
-/// then its details row. Model-picker divider rows are represented by an
-/// empty string because they have no selectable text.
+/// then its details row. Model-picker group headers contribute their title.
 pub(crate) fn slash_overlay_text_rows(
     overlay: &SlashOverlay,
     row_layout: PickerRowLayout,
@@ -611,10 +797,12 @@ pub(crate) fn slash_overlay_text_rows(
                 let rows = model_picker_row_entries(choices, filter, row_layout);
                 rows.iter()
                     .enumerate()
-                    .map(|(row_index, entry)| {
-                        let Some(choice) =
-                            entry.and_then(|visible_index| visible_choices.get(visible_index))
-                        else {
+                    .map(|(row_index, row)| {
+                        let visible_index = match row {
+                            PickerRow::Header(group) => return group.title().to_string(),
+                            PickerRow::Entry(visible_index) => *visible_index,
+                        };
+                        let Some(choice) = visible_choices.get(visible_index) else {
                             return String::new();
                         };
                         match row_layout {
@@ -943,6 +1131,12 @@ impl AppState {
             SlashOverlay::Suggestions { choices, selected } => choices.get(*selected).copied(),
             _ => None,
         }
+    }
+
+    /// The `(provider connection, model id, currently favorite)` identity
+    /// the picker highlights. See [`SlashOverlay::highlighted_model_identity`].
+    pub fn highlighted_model_identity(&self) -> Option<(String, String, bool)> {
+        self.slash_overlay.highlighted_model_identity()
     }
 
     /// The model the picker currently highlights, if it is open.

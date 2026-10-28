@@ -619,6 +619,8 @@ fn from_profile_resolves_multiple_connections_using_one_provider_kind() {
                     provider: crate::config::ProviderKind::Ollama,
                     api_base_url: Some("http://localhost:11434".to_string()),
                     api_key: None,
+                    favorite_models: Vec::new(),
+                    allowed_models: None,
                 },
             ),
             (
@@ -627,6 +629,8 @@ fn from_profile_resolves_multiple_connections_using_one_provider_kind() {
                     provider: crate::config::ProviderKind::Ollama,
                     api_base_url: Some("https://ollama.com".to_string()),
                     api_key: Some("cloud-secret".to_string()),
+                    favorite_models: Vec::new(),
+                    allowed_models: None,
                 },
             ),
         ]),
@@ -872,5 +876,62 @@ fn create_uses_agent_config_engine_when_present() {
         agent.compaction_timeout(),
         Duration::from_secs(123),
         "an independent timeout override applies without binding a summarizer engine"
+    );
+}
+
+#[test]
+fn from_profile_enforces_connection_allowed_models_on_every_engine() {
+    let restricted_connection = || crate::ProviderConnectionConfig {
+        provider: crate::config::ProviderKind::Mock,
+        api_base_url: None,
+        api_key: None,
+        favorite_models: Vec::new(),
+        allowed_models: Some(vec!["fast-*".to_string()]),
+    };
+    let engine_with_model = |model: &str| EngineConfig {
+        provider_connection: "guarded".to_string(),
+        model: model.to_string(),
+        temperature: None,
+        context_length: None,
+        api_base_url: None,
+        api_key: None,
+        reasoning: None,
+        compact_target_ratio: 0.5,
+        soft_compaction_threshold: 0.7,
+        hard_compaction_threshold: 0.9,
+    };
+    let profile_with = |model: &str| ProfileConfig {
+        default_engine: "main".to_string(),
+        provider_connections: HashMap::from([("guarded".to_string(), restricted_connection())]),
+        engines: HashMap::from([("main".to_string(), engine_with_model(model))]),
+        ..ProfileConfig::default()
+    };
+
+    let error = AgentFactory::from_profile(&profile_with("slow-model"))
+        .err()
+        .expect("a disallowed configured model fails construction");
+    assert!(error.to_string().contains("slow-model"), "{error}");
+
+    let factory = AgentFactory::from_profile(&profile_with("fast-one")).expect("builds");
+    let engine = factory.engine("main").expect("engine");
+    assert!(engine.switch_model("slow-model").is_err());
+    assert!(engine.ensure_model_allowed("FAST-two").is_ok());
+
+    let implicit = ProfileConfig {
+        default_model: Some("slow-model".to_string()),
+        provider_connections: HashMap::from([("guarded".to_string(), restricted_connection())]),
+        ..ProfileConfig::default()
+    };
+    assert!(AgentFactory::from_profile(&implicit).is_err());
+
+    let discovery_only = ProfileConfig {
+        provider_connections: HashMap::from([("guarded".to_string(), restricted_connection())]),
+        ..ProfileConfig::default()
+    };
+    let factory = AgentFactory::from_profile(&discovery_only).expect("discovery-only builds");
+    let engine = factory.engine("default").expect("implicit engine");
+    assert!(
+        engine.ensure_active_model_allowed().is_err(),
+        "cannot chat until bound"
     );
 }

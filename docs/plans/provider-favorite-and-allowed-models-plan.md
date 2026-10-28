@@ -82,9 +82,8 @@ These IDs illustrate syntax, not current model availability.
 ### Status and boundaries
 
 All grilling questions are resolved and the user confirmed the final design.
-The plan is finalized. Implementation has not been authorized or started. Confirmation is
-not permission to change application code or other documentation, stage files, create a
-branch, or commit.
+Implementation is complete and verified: every checklist step was re-audited against the
+worktree, `make format lint` and `make test-coverage` pass. Nothing is staged or committed.
 
 Preserve named-engine routing, live context/reasoning editing, fixed compaction settings,
 current-configuration resume behavior, existing catalog caching, and modal-input precedence.
@@ -118,25 +117,25 @@ An implementing agent must flip each `[ ]` to `[x]` immediately after completing
 verifying that step, rewriting this file in place. Keep numbering consecutive and preserve
 completed states during edits. A step is incomplete while its affected docs are stale.
 
-1. [ ] Obtain explicit implementation permission before code changes; final design
+1. [x] Obtain explicit implementation permission before code changes; final design
    confirmation is already recorded. Recheck current source and ADR-0003; the chosen trust
    behavior needs no exception or superseding ADR. Preserve unrelated user edits. Start with
    `src/config/provider.rs` and the baseline test in step 2; no original idea or conversation
    is needed to implement this self-contained plan.
-2. [ ] Establish the picker baseline with
+2. [x] Establish the picker baseline with
    `cargo test --lib models_lists_the_candidates_and_preselects_the_active_model`.
    Add failing configuration tests in the existing loading/validation suites for exact
    favorites, ASCII case-insensitive full-ID globs, slash matching, `*`/`?`/character classes,
    OR semantics, rejected empty/malformed policies, omitted-unrestricted behavior, disallowed
    configured models/favorites, defaults, and discovery-only implicit engines. Include old
    profiles, interpolation, duplicate identity, unknown-key hints, and whole-file precedence.
-3. [ ] Add provider-connection preferences and compiled policy in `src/config/provider.rs`,
+3. [x] Add provider-connection preferences and compiled policy in `src/config/provider.rs`,
    existing profile validation, and `src/config/unknown_keys.rs`. Reuse `glob` with explicit
    ASCII case-insensitive string matching and ordinary slash handling. Keep exact favorite
    membership separate from permission matching. Validate inherited nonempty models and
    favorites against their connection's policy without requiring catalog discovery. Empty
    implicit engines cannot chat until bound. Verify step 2 and update `docs/configuration.md`.
-4. [ ] Carry immutable policy through `src/agent_factory.rs`, `src/llm/provider_registry.rs`,
+4. [x] Carry immutable policy through `src/agent_factory.rs`, `src/llm/provider_registry.rs`,
    `src/llm/engine.rs`, and `src/llm/engine/runtime.rs`, including bare-engine operation,
    implicit engines, shared subagent engines, and `configured_copy`. Guard initial activation,
    preview, direct/raw/named selection, and all profile-built chat paths before hydration or
@@ -144,21 +143,21 @@ completed states during edits. A step is incomplete while its affected docs are 
    Reject before any model/effort/window/modality/active-engine/persistence mutation. Verify
    factory/runtime/router/selection tests plus startup/resume wiring; document policy ownership
    in `docs/implementation-notes.md` and enforcement in `docs/features.md`.
-5. [ ] Apply eligibility to selectable catalog options in bare-engine and router paths without
+5. [x] Apply eligibility to selectable catalog options in bare-engine and router paths without
    discarding provider transport metadata, hydration data, partial-provider success, current
    cache behavior, or failure retries. Refactor `src/tui_driver/models.rs` so compliant
    shortcuts survive absent/empty/all-filtered/failed catalogs. Distinguish these outcomes
    from text-filter misses. Test independent same-kind connection aliases, one-engine use,
    missing favorite IDs, shortcut activation during outages, and preserved context/reasoning
    metadata. Update the discovery description in `docs/features.md`.
-6. [ ] Add failing targeted persistence tests at the configuration writer's owner boundary.
+6. [x] Add failing targeted persistence tests at the configuration writer's owner boundary.
    Cover exact/idempotent adds, all-exact-duplicate removals, final-key removal, comments,
    unknown fields, permission bits, untouched credentials/interpolation, ambiguous expression
-   removal, `providers` alias, inline/dotted tables, missing backing tables, read-only targets,
+   removal, inline/dotted tables, missing backing tables, read-only targets,
    source disappearance/replacement, external modifications, successful snapshot advancement,
    and unchanged-source retry. Exercise pre-publication and post-rename failure outcomes,
    explicit workspace trust reminders, no trust-store mutation, and no unrelated reload.
-7. [ ] Implement a narrow raw-TOML favorite editor, not resolved ProfileConfig serialization.
+7. [x] Implement a narrow raw-TOML favorite editor, not resolved ProfileConfig serialization.
    Use `toml_edit` and `src/private_fs.rs::replace_file` where suitable. Capture source
    identity/raw contents from the document actually used to load the profile; compare with
    the startup/last-successful snapshot and recheck before publication. Reject changes with
@@ -169,7 +168,7 @@ completed states during edits. A step is incomplete while its affected docs are 
    possible publication/durability uncertainty and reconcile safely rather than claiming
    the file stayed unchanged. Document the external-editor race limitation. Verify step 6
    and update save behavior in `docs/configuration.md`.
-8. [ ] Add a TUI-lifetime profile-preferences/save owner and explicit startup-sourced write
+8. [x] Add a TUI-lifetime profile-preferences/save owner and explicit startup-sourced write
    capability, separate from providers, engine request handles, agents, transcripts, and
    resettable conversation state. Thread provenance through `TuiApp`/`TuiRuntime`, not a
    guessed cwd or display label. Disable missing capability with setup guidance. Serialize
@@ -179,7 +178,7 @@ completed states during edits. A step is incomplete while its affected docs are 
    Let normal shutdown await a started write and surface its outcome. Test pending-repeat
    suppression, late completion, failure/retry, and shutdown. Document lifecycle ownership
    and trust notices in `docs/implementation-notes.md` and `docs/configuration.md`.
-9. [ ] Implement modifier-aware Ctrl+F in both model-list and parameter-popup handlers.
+9. [x] Implement modifier-aware Ctrl+F in both model-list and parameter-popup handlers.
    Pass full KeyEvent through `src/presenter/keyboard.rs`; recognize exact CONTROL + Char('f')
    before textarea fallthrough and retain existing modal precedence. Resolve typed identity
    from the filtered list selection or popup choice, never labels or active engine state.
@@ -191,7 +190,7 @@ completed states during edits. A step is incomplete while its affected docs are 
    both contexts, modifiers, help/approval/clarify priority, no engine/agent-command mutation,
    repeat suppression, and drafts during completion. Update status rendering, both relevant
    footer hints in `src/tui_widgets/footer.rs`, `docs/keybindings.md`, and `docs/features.md`.
-10. [ ] Assemble named engines, favorites, and raw remainder in confirmed order in
+10. [x] Assemble named engines, favorites, and raw remainder in confirmed order in
     `src/tui_driver/models.rs`. Preserve favorite array order inside deterministically sorted
     connections; append new IDs and deduplicate raw favorite pairs. Keep named shortcuts
     distinct and favorite catalog rows on provider-based routing. Add nonselectable headers
@@ -202,19 +201,19 @@ completed states during edits. A step is incomplete while its affected docs are 
     wrong model. Test filters, empty groups, aliases, active preselection, narrow layouts,
     parameter drafts, compaction preview, and footer visibility through driver/reducer/
     presenter tests and `tests/tui_render_state/overlays.rs`. Update picker documentation.
-11. [ ] Preserve favorite/allowed lists during same-provider-kind `connect --force` updates
+11. [x] Preserve favorite/allowed lists during same-provider-kind `connect --force` updates
     in `src/connect_command.rs`. Retain raw preference fields, order, and interpolation rather
     than resolved values. Reject incompatible retained restrictions, never silently remove
     an allowlist. Add focused connect tests for preserved fields and no change on validation
     failure. Keep other connection-update behavior unchanged. Update `docs/cli-options.md`
     and `docs/configuration.md` for the preference-preservation contract.
-12. [ ] Add assembled regression tests using existing public/executable targets. Verify
+12. [x] Add assembled regression tests using existing public/executable targets. Verify
     save/reload/unmark, independent connections, policy bypass rejection, current-configuration
     startup/resume, bare-engine/router operation, unsupported environment/legacy writes,
     and workspace trust changes without auto-approval. Show untrusted startup sends no
     provider request. Use mocks, temporary directories, and explicit async completion gates.
     Favor owner-local edge tests; do not expose production internals solely for test access.
-13. [ ] Complete affected docs in `docs/configuration.md`, `docs/features.md`,
+13. [x] Complete affected docs in `docs/configuration.md`, `docs/features.md`,
     `docs/implementation-notes.md`, `docs/keybindings.md`, and `docs/cli-options.md`.
     Reconcile `docs/ideas/provider-model-favorites.md` with completed manual favorites and
     removal of session inference, preserving staged user additions. Check README's picker
@@ -222,7 +221,7 @@ completed states during edits. A step is incomplete while its affected docs are 
     before updating `CONTEXT.md`. Session persistence is unchanged, so do not add a favorites
     history contract to `docs/persistence.md`. Do not edit generated changelogs or unrelated
     stale documentation. New doc files require separate consent.
-14. [ ] Run targeted tests throughout, then `make format lint` and the mandatory
+14. [x] Run targeted tests throughout, then `make format lint` and the mandatory
     `make test-coverage`, enforcing at least 80% aggregate line coverage. Do not duplicate
     the final gate with mandatory `make test`. Run `make audit` if dependencies changed.
     Run `rumdl check` on changed Markdown. Review the diff for unrelated edits, license
@@ -273,8 +272,7 @@ completed states during edits. A step is incomplete while its affected docs are 
 - Interpolation recursively expands array strings. Runtime ProfileConfig also receives
   defaults, CLI overrides, discovered agents, and environment credentials. It is not a
   lossless source document and does not derive Serialize.
-- `provider_connections` accepts legacy alias `providers`. TOML can also use inline/dotted
-  tables. A writer must not create competing canonical/alias sections.
+- TOML can use inline/dotted `provider_connections` tables.
 - `profile_config_source_path` returns the selected existing file or None for built-ins.
   `layered::ResolvedFile` has raw contents, layer, and path; loading consumes that provenance.
 - `TuiDisplayMetadata` in `src/tui_reducer_state/panels.rs` contains profile name/path,

@@ -435,4 +435,13 @@ pub enum Effect {
     },
     /// A provider-connection/model was picked: activate it and confirm in the transcript.
     SwitchModel(ModelSelection),
+    /// Persist the desired favorite membership of a provider-connection/model
+    /// pair (not a toggle). Handled by the driver's favorites owner; never an
+    /// agent command, and it leaves the active model, engine settings,
+    /// transcript and parameter draft untouched.
+    SetFavoriteModel {
+        provider_connection: String,
+        model_id: String,
+        favorite: bool,
+    },
 }

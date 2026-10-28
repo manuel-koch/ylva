@@ -13,6 +13,65 @@
 // limitations under the License.
 
 use super::*;
+use crate::llm::ModelInfo;
+use crate::tui_reducer_state::{ChoiceLabel, ModelChoice};
+
+fn picker_choice(connection: &str, model: &str, favorite_rank: Option<usize>) -> ModelChoice {
+    let mut choice = ModelChoice {
+        label: ChoiceLabel {
+            identity: format!("{connection}/{model}"),
+            details: Vec::new(),
+        },
+        initial_reasoning_effort: Some("medium".to_string()),
+        selection: ProviderModelOption {
+            context_length_override: None,
+            provider_connection: connection.to_string(),
+            model: ModelInfo {
+                id: model.to_string(),
+                context_length: Some(65_536),
+                reasoning_efforts: Some(vec!["low".to_string(), "medium".to_string()]),
+                reasoning_default: Some("medium".to_string()),
+                input_modalities: None,
+            },
+            reasoning_effort: Some("medium".to_string()),
+        },
+        is_active: true,
+        engine_name: None,
+        catalog_context_length: Some(65_536),
+        selection_target: None,
+        selection_preview_error: None,
+        favorite_rank,
+    };
+    choice.refresh_label();
+    choice
+}
+
+fn model_picker_state(parameters_open: bool) -> AppState {
+    let mut state = AppState::new();
+    let mut choices = vec![picker_choice("connection", "first", None)];
+    if parameters_open {
+        state.slash_overlay = SlashOverlay::ModelPicker {
+            parameters: None,
+            choices,
+            filter: String::new(),
+            selected: 0,
+        };
+        state.open_model_parameters();
+    } else {
+        choices.push(picker_choice("connection", "second", None));
+        state.slash_overlay = SlashOverlay::ModelPicker {
+            parameters: None,
+            choices,
+            filter: "connection".to_string(),
+            selected: 1,
+        };
+    }
+    state
+}
+
+fn key_event_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(code, modifiers)
+}
 
 #[test]
 fn session_and_compact_commands_never_submit_prompts_in_either_view() {
@@ -149,6 +208,171 @@ fn session_picker_owns_keyboard_action_selection_confirmation_and_cancellation()
 }
 
 #[test]
+fn control_f_toggles_the_filtered_model_pair_and_preserves_input_state() {
+    let mut state = model_picker_state(false);
+    let textarea = textarea_with("/models connection");
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))),
+        &textarea,
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::SetFavoriteModel {
+            provider_connection: "connection".to_string(),
+            model_id: "second".to_string(),
+            favorite: true,
+        }]
+    );
+    assert_eq!(textarea.text, "/models connection");
+    assert_eq!(state.selected_model().unwrap().selection.model.id, "second");
+    assert_eq!(state.engine_display.model, "");
+    assert!(state.queued_steer_texts.is_empty());
+}
+
+#[test]
+fn control_f_toggles_the_parameter_popup_choice_without_editing_its_draft() {
+    let mut state = model_picker_state(true);
+    let SlashOverlay::ModelPicker {
+        parameters: Some(edit_before),
+        ..
+    } = &state.slash_overlay
+    else {
+        panic!("expected parameter popup");
+    };
+    let edit_before = edit_before.clone();
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))),
+        &textarea_with("/models first"),
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::SetFavoriteModel {
+            provider_connection: "connection".to_string(),
+            model_id: "first".to_string(),
+            favorite: true,
+        }]
+    );
+    let SlashOverlay::ModelPicker {
+        parameters: Some(edit_after),
+        ..
+    } = &state.slash_overlay
+    else {
+        panic!("parameter popup should remain open");
+    };
+    assert_eq!(edit_after, &edit_before);
+}
+
+#[test]
+fn control_f_requires_the_exact_control_modifier() {
+    for (character, modifiers) in [
+        ('f', KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        ('f', KeyModifiers::CONTROL | KeyModifiers::ALT),
+        ('F', KeyModifiers::CONTROL),
+        ('f', KeyModifiers::NONE),
+        ('F', KeyModifiers::NONE),
+    ] {
+        let mut state = model_picker_state(false);
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
+                KeyCode::Char(character),
+                modifiers,
+            ))),
+            &textarea_with("/models connection"),
+        );
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SetFavoriteModel { .. })));
+        assert!(!effects.contains(&Effect::SubmitPrompt { steer: false }));
+    }
+}
+
+#[test]
+fn control_f_is_consumed_when_no_model_matches() {
+    let mut state = model_picker_state(false);
+    if let SlashOverlay::ModelPicker {
+        filter, selected, ..
+    } = &mut state.slash_overlay
+    {
+        *filter = "missing".to_string();
+        *selected = 0;
+    }
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))),
+        &textarea_with("/models missing"),
+    );
+    assert!(effects.is_empty());
+    assert!(matches!(
+        state.slash_overlay,
+        SlashOverlay::ModelPicker { .. }
+    ));
+}
+
+#[test]
+fn control_f_remains_owned_by_help_approval_and_clarify_modes() {
+    let event = TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
+        KeyCode::Char('f'),
+        KeyModifiers::CONTROL,
+    )));
+
+    let mut help = model_picker_state(false);
+    help.focus = Focus::HelpPopup;
+    assert!(update(&mut help, event.clone(), &empty_textarea()).is_empty());
+    assert!(matches!(
+        help.slash_overlay,
+        SlashOverlay::ModelPicker { .. }
+    ));
+
+    let mut approval = model_picker_state(false);
+    approval.focus = Focus::ToolApproval {
+        tool_id: Uuid::new_v4(),
+        tool_name: "bash".to_string(),
+    };
+    assert_eq!(
+        update(&mut approval, event.clone(), &empty_textarea()),
+        vec![Effect::TextareaKey(key_event_with_modifiers(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))]
+    );
+    assert!(matches!(
+        approval.slash_overlay,
+        SlashOverlay::ModelPicker { .. }
+    ));
+
+    let mut clarify = model_picker_state(false);
+    clarify.mode = TuiMode::ClarifyPending {
+        id: Uuid::new_v4(),
+        question: "choose".to_string(),
+        context: None,
+        choices: None,
+    };
+    assert_eq!(
+        update(&mut clarify, event, &empty_textarea()),
+        vec![Effect::TextareaKey(key_event_with_modifiers(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))]
+    );
+    assert!(matches!(
+        clarify.slash_overlay,
+        SlashOverlay::ModelPicker { .. }
+    ));
+}
+
+#[test]
 fn model_picker_pages_selection_with_page_keys() {
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
@@ -177,6 +401,7 @@ fn model_picker_pages_selection_with_page_keys() {
                 catalog_context_length: None,
                 selection_target: None,
                 selection_preview_error: None,
+                favorite_rank: None,
             })
             .collect(),
         filter: String::new(),

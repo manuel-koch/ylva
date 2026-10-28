@@ -410,6 +410,7 @@ fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
                 catalog_context_length: None,
                 selection_target: None,
                 selection_preview_error: None,
+                favorite_rank: None,
             })
             .collect(),
         filter: String::new(),
@@ -463,6 +464,7 @@ fn mouse_click_on_model_picker_entry_selects_without_switching() {
         engine_name: None,
         selection_target: None,
         selection_preview_error: None,
+        favorite_rank: None,
     };
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
@@ -471,10 +473,10 @@ fn mouse_click_on_model_picker_entry_selects_without_switching() {
         filter: String::new(),
         selected: 0,
     };
-    // With the input at row 10, the two-row picker renders its entries at
-    // rows 7 and 8.
+    // With the input at row 10, the picker renders the "Models" header at
+    // row 6 and its entries at rows 7 and 8.
     state.layout.input_area.rect = ratatui::layout::Rect::new(0, 10, 40, 2);
-    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 7, 37, 2);
+    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 6, 37, 3);
     let mouse = crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
         column: 5,
@@ -521,6 +523,7 @@ fn slash_overlay_model_drag_copies_the_filtered_model_label() {
         engine_name: None,
         selection_target: None,
         selection_preview_error: None,
+        favorite_rank: None,
     };
     let expected_text = "provider/provider-model";
     let mut state = AppState::new();
@@ -533,7 +536,7 @@ fn slash_overlay_model_drag_copies_the_filtered_model_label() {
         filter: "provider".to_string(),
         selected: 0,
     };
-    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 7, 37, 1);
+    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 6, 37, 2);
 
     update(
         &mut state,

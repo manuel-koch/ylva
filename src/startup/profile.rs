@@ -17,10 +17,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::config::FavoriteModelsWriter;
 use crate::home_relative_path::display_path;
 use crate::{Cli, ProfileConfig};
 
-/// Load the selected profile, or return exit-worthy error text.
+/// Load the selected profile together with the favorite-save capability
+/// captured from the same document, or return exit-worthy error text.
 ///
 /// An explicitly named profile (`--profile <name>`) with no config file is a
 /// hard error: the user asked for that specific profile, so silently
@@ -31,16 +33,17 @@ pub(super) fn load_profile(
     explicit_profile_name: Option<&str>,
     environment: &HashMap<String, String>,
     workspace_root: Option<&Path>,
-) -> Result<ProfileConfig, String> {
+) -> Result<(ProfileConfig, Option<FavoriteModelsWriter>), String> {
     match explicit_profile_name {
         Some(profile_name) => {
             let profiles_root =
                 crate::default_profiles_root().map_err(|error| error.to_string())?;
-            ProfileConfig::load_with_environment_at_workspace_root(
+            ProfileConfig::load_with_favorite_writer(
                 &profiles_root,
                 profile_name,
                 environment,
                 workspace_root,
+                false,
             )
             .map_err(|error| error.to_string())
         }
@@ -49,14 +52,15 @@ pub(super) fn load_profile(
                 Ok(profiles_root) => profiles_root,
                 Err(error) => {
                     tracing::warn!(%error, "no home directory; using the default profile");
-                    return Ok(ProfileConfig::default());
+                    return Ok((ProfileConfig::default(), None));
                 }
             };
-            ProfileConfig::load_or_default_with_environment_at_workspace_root(
+            ProfileConfig::load_with_favorite_writer(
                 &profiles_root,
                 crate::DEFAULT_PROFILE_NAME,
                 environment,
                 workspace_root,
+                true,
             )
             .map_err(|error| error.to_string())
         }

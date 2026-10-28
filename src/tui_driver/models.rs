@@ -18,6 +18,7 @@ use crate::tui_reducer_state::{
     engine_choice_parts, extract_models_filter, matching_model_indices, model_choice_parts,
     AppState, ModelChoice, SlashOverlay,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -29,6 +30,10 @@ const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 /// distinct user-facing messages.
 pub(super) enum ModelListResult {
     Models(Vec<crate::llm::ProviderModelOption>),
+    PartialFailure {
+        models: Vec<crate::llm::ProviderModelOption>,
+        failures: Vec<String>,
+    },
     ProviderError(anyhow::Error),
     Timeout,
 }
@@ -42,8 +47,16 @@ pub(super) struct PendingModelList {
 /// Query one provider catalog without tying the request to the driver's event
 /// loop.
 pub(super) async fn fetch_model_list(engine: Arc<dyn Engine>) -> ModelListResult {
-    match tokio::time::timeout(MODEL_LIST_TIMEOUT, engine.list_model_options()).await {
-        Ok(Ok(models)) => ModelListResult::Models(models),
+    match tokio::time::timeout(
+        MODEL_LIST_TIMEOUT,
+        engine.list_model_options_with_failures(),
+    )
+    .await
+    {
+        Ok(Ok((models, failures))) if !failures.is_empty() => {
+            ModelListResult::PartialFailure { models, failures }
+        }
+        Ok(Ok((models, _))) => ModelListResult::Models(models),
         Ok(Err(error)) => ModelListResult::ProviderError(error),
         Err(_) => ModelListResult::Timeout,
     }
@@ -114,152 +127,246 @@ pub(super) async fn wait_for_model_list(
     Some((filter, result))
 }
 
+/// Why some or all provider catalogs did not contribute models.
+enum CatalogOutage {
+    ProviderError(String),
+    PartialFailure(Vec<String>),
+    Timeout,
+}
+
+impl CatalogOutage {
+    fn notice(&self, has_catalog_choices: bool, has_named_engines: bool) -> String {
+        let source_summary = match (has_catalog_choices, has_named_engines) {
+            (true, _) => "Available catalog choices are retained.",
+            (false, true) => "Only configured engines are listed.",
+            (false, false) => "No selectable models are available.",
+        };
+        match self {
+            CatalogOutage::ProviderError(error) => {
+                format!("Could not list models: {error}. {source_summary}")
+            }
+            CatalogOutage::PartialFailure(failures) => format!(
+                "Some provider connections could not list models: {}. {source_summary}",
+                failures.join("; ")
+            ),
+            CatalogOutage::Timeout => format!(
+                "Could not list models: the provider did not answer within {} s. {source_summary}",
+                MODEL_LIST_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
 /// Apply a completed model catalog request to the visible picker.
+///
+/// Named-engine shortcuts do not depend on catalog discovery: every shortcut
+/// whose model is nonempty and permitted by its connection's allow list stays
+/// selectable when the catalog is empty, filtered down to nothing, or
+/// unavailable. The picker is only skipped when no shortcut and no catalog
+/// model remains, with a notice that tells an outage from a lack of eligible
+/// models. A text filter that matches nothing is a separate outcome shown
+/// inside the open picker.
 pub(super) fn apply_model_list_result(
     state: &mut AppState,
     filter: Option<String>,
     result: ModelListResult,
     engine: &Arc<dyn Engine>,
 ) {
-    match result {
-        ModelListResult::Models(models) if models.is_empty() => {
-            state.slash_overlay = SlashOverlay::Hidden;
-            state.push_notice("No configured provider connection reported any models.".to_string());
+    let (models, outage) = match result {
+        ModelListResult::Models(models) => (models, None),
+        ModelListResult::PartialFailure { models, failures } => {
+            (models, Some(CatalogOutage::PartialFailure(failures)))
         }
-        ModelListResult::Models(models) => {
-            let active_config = engine.config();
-            let active_reasoning_effort = engine.reasoning_effort();
-            let active_engine_name = engine.active_engine_name();
-            let is_active_option = |provider_connection: &str, model_id: &str| {
-                provider_connection == active_config.provider_connection
-                    && model_id == active_config.model
-            };
-            // Looked up so an engine shortcut can show the real context
-            // length and advertised reasoning efforts of the model it names,
-            // rather than reporting "unavailable" for a model the catalog
-            // does list.
-            let catalog_by_identity: std::collections::HashMap<
-                (String, String),
-                crate::llm::ModelInfo,
-            > = models
-                .iter()
-                .map(|option| {
-                    (
-                        (option.provider_connection.clone(), option.model.id.clone()),
-                        option.model.clone(),
-                    )
-                })
-                .collect();
-            // Named engines (explicit `[engines.*]` tables, or their
-            // implicit one-per-connection equivalent) come first as
-            // shortcuts to the provider/model/config they name, ahead of the
-            // raw catalog below.
-            let engine_choices: Vec<ModelChoice> = engine
-                .named_engine_info()
-                .into_iter()
-                // An implicit engine without a default model names nothing to select.
-                .filter(|named_engine| !named_engine.config.model.is_empty())
-                .map(|named_engine| {
-                    let engine_name = named_engine.name;
-                    let engine_config = named_engine.config;
-                    let initial_reasoning_effort = named_engine.reasoning_effort;
-                    let is_active = active_engine_name.as_deref() == Some(&engine_name);
-                    let catalog_model = catalog_by_identity.get(&(
-                        engine_config.provider_connection.clone(),
-                        engine_config.model.clone(),
-                    ));
-                    let model = crate::llm::ModelInfo {
-                        id: engine_config.model.clone(),
-                        context_length: engine_config
-                            .context_length
-                            .or_else(|| catalog_model.and_then(|model| model.context_length)),
-                        reasoning_efforts: catalog_model
-                            .and_then(|model| model.reasoning_efforts.clone()),
-                        reasoning_default: catalog_model
-                            .and_then(|model| model.reasoning_default.clone()),
-                        input_modalities: catalog_model
-                            .and_then(|model| model.input_modalities.clone()),
-                    };
-                    let selection = crate::llm::ProviderModelOption {
-                        context_length_override: None,
-                        provider_connection: engine_config.provider_connection,
-                        model,
-                        reasoning_effort: initial_reasoning_effort.clone(),
-                    };
-                    ModelChoice {
-                        label: engine_choice_parts(&engine_name, &selection),
-                        initial_reasoning_effort,
-                        selection,
-                        is_active,
-                        engine_name: Some(engine_name),
-                        catalog_context_length: catalog_model
-                            .and_then(|model| model.context_length),
-                        selection_target: None,
-                        selection_preview_error: None,
-                    }
-                })
-                .collect();
-            let model_choices: Vec<ModelChoice> = models
-                .into_iter()
-                .map(|mut option| {
-                    let is_active = is_active_option(&option.provider_connection, &option.model.id);
-                    if is_active {
-                        option.reasoning_effort = active_reasoning_effort.clone();
-                    }
-                    ModelChoice {
-                        label: model_choice_parts(&option),
-                        initial_reasoning_effort: option.reasoning_effort.clone(),
-                        catalog_context_length: option.model.context_length,
-                        selection: option,
-                        is_active,
-                        engine_name: None,
-                        selection_target: None,
-                        selection_preview_error: None,
-                    }
-                })
-                .collect();
-            let mut choices: Vec<ModelChoice> =
-                engine_choices.into_iter().chain(model_choices).collect();
-            for choice in &mut choices {
-                match engine.preview_model_selection(&choice.to_model_selection()) {
-                    Ok(target) => choice.selection_target = Some(target),
-                    Err(error) => choice.selection_preview_error = Some(error.to_string()),
+        ModelListResult::ProviderError(error) => (
+            Vec::new(),
+            Some(CatalogOutage::ProviderError(error.to_string())),
+        ),
+        ModelListResult::Timeout => (Vec::new(), Some(CatalogOutage::Timeout)),
+    };
+    let choices = assemble_model_choices(engine, models);
+    if choices.is_empty() {
+        state.slash_overlay = SlashOverlay::Hidden;
+        state.push_notice(match &outage {
+            Some(outage) => outage.notice(false, false),
+            None => "No eligible models: no configured provider connection reported a model \
+                     that its allowed_models setting permits."
+                .to_string(),
+        });
+        return;
+    }
+    if let Some(outage) = &outage {
+        let has_catalog_choices = choices.iter().any(|choice| choice.engine_name.is_none());
+        let has_named_engines = choices.iter().any(|choice| choice.engine_name.is_some());
+        state.push_notice(outage.notice(has_catalog_choices, has_named_engines));
+    }
+
+    let active_config = engine.config();
+    let active_engine_name = engine.active_engine_name();
+    let filter = filter.unwrap_or_default();
+    let selected = matching_model_indices(&choices, &filter)
+        .into_iter()
+        .position(|index| {
+            let choice = &choices[index];
+            match choice.engine_name.as_deref() {
+                Some(engine_name) => active_engine_name.as_deref() == Some(engine_name),
+                None => {
+                    choice.selection.provider_connection == active_config.provider_connection
+                        && choice.selection.model.id == active_config.model
                 }
             }
-            let filter = filter.unwrap_or_default();
-            let selected = matching_model_indices(&choices, &filter)
-                .into_iter()
-                .position(|index| {
-                    let choice = &choices[index];
-                    match choice.engine_name.as_deref() {
-                        Some(engine_name) => active_engine_name.as_deref() == Some(engine_name),
-                        None => {
-                            choice.selection.provider_connection
-                                == active_config.provider_connection
-                                && choice.selection.model.id == active_config.model
-                        }
-                    }
-                })
-                .unwrap_or(0);
-            state.slash_overlay = SlashOverlay::ModelPicker {
-                parameters: None,
-                choices,
-                filter,
-                selected,
-            };
-        }
-        ModelListResult::ProviderError(error) => {
-            state.slash_overlay = SlashOverlay::Hidden;
-            state.push_notice(format!("Could not list models: {error}"));
-        }
-        ModelListResult::Timeout => {
-            state.slash_overlay = SlashOverlay::Hidden;
-            state.push_notice(format!(
-                "Could not list models: the provider did not answer within {} s.",
-                MODEL_LIST_TIMEOUT.as_secs()
-            ));
+        })
+        .unwrap_or(0);
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices,
+        filter,
+        selected,
+    };
+}
+
+/// Favorite rank of every `(connection, model id)` pair the engine reports,
+/// in configured order per connection. Exact duplicates keep their first
+/// position; pairs the allow list forbids are not favorites of any row.
+fn favorite_ranks(engine: &Arc<dyn Engine>) -> HashMap<(String, String), usize> {
+    let mut favorite_models = engine.favorite_models();
+    favorite_models.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut ranks = HashMap::new();
+    let mut next_rank_by_connection: HashMap<String, usize> = HashMap::new();
+    for (provider_connection, model_ids) in favorite_models {
+        for model_id in model_ids {
+            if engine
+                .ensure_provider_model_allowed(&provider_connection, &model_id)
+                .is_err()
+            {
+                continue;
+            }
+            let identity = (provider_connection.clone(), model_id);
+            if ranks.contains_key(&identity) {
+                continue;
+            }
+            let next_rank = next_rank_by_connection
+                .entry(provider_connection.clone())
+                .or_default();
+            ranks.insert(identity, *next_rank);
+            *next_rank += 1;
         }
     }
+    ranks
+}
+
+/// Build every picker row: named-engine shortcuts, then the catalog rows.
+/// Display grouping (engines, favorites, remainder) is derived from each
+/// row's data by the picker state, so the vector keeps catalog order.
+fn assemble_model_choices(
+    engine: &Arc<dyn Engine>,
+    models: Vec<crate::llm::ProviderModelOption>,
+) -> Vec<ModelChoice> {
+    let active_config = engine.config();
+    let active_reasoning_effort = engine.reasoning_effort();
+    let active_engine_name = engine.active_engine_name();
+    let favorite_ranks = favorite_ranks(engine);
+    let favorite_rank_of = |provider_connection: &str, model_id: &str| {
+        favorite_ranks
+            .get(&(provider_connection.to_string(), model_id.to_string()))
+            .copied()
+    };
+    // Looked up so an engine shortcut can show the real context length and
+    // advertised reasoning efforts of the model it names, rather than
+    // reporting "unavailable" for a model the catalog does list.
+    let catalog_by_identity: HashMap<(String, String), crate::llm::ModelInfo> = models
+        .iter()
+        .map(|option| {
+            (
+                (option.provider_connection.clone(), option.model.id.clone()),
+                option.model.clone(),
+            )
+        })
+        .collect();
+    // Named engines (explicit `[engines.*]` tables, or their implicit
+    // one-per-connection equivalent) are shortcuts to the provider/model/
+    // config they name. They stay selectable independent of catalog
+    // discovery as long as they name an allowed model.
+    let engine_choices = engine
+        .named_engine_info()
+        .into_iter()
+        // An implicit engine without a default model names nothing to select.
+        .filter(|named_engine| !named_engine.config.model.is_empty())
+        .filter(|named_engine| {
+            engine
+                .ensure_provider_model_allowed(
+                    &named_engine.config.provider_connection,
+                    &named_engine.config.model,
+                )
+                .is_ok()
+        })
+        .map(|named_engine| {
+            let engine_name = named_engine.name;
+            let engine_config = named_engine.config;
+            let initial_reasoning_effort = named_engine.reasoning_effort;
+            let is_active = active_engine_name.as_deref() == Some(&engine_name);
+            let catalog_model = catalog_by_identity.get(&(
+                engine_config.provider_connection.clone(),
+                engine_config.model.clone(),
+            ));
+            let model = crate::llm::ModelInfo {
+                id: engine_config.model.clone(),
+                context_length: engine_config
+                    .context_length
+                    .or_else(|| catalog_model.and_then(|model| model.context_length)),
+                reasoning_efforts: catalog_model.and_then(|model| model.reasoning_efforts.clone()),
+                reasoning_default: catalog_model.and_then(|model| model.reasoning_default.clone()),
+                input_modalities: catalog_model.and_then(|model| model.input_modalities.clone()),
+            };
+            let favorite_rank = favorite_rank_of(&engine_config.provider_connection, &model.id);
+            let selection = crate::llm::ProviderModelOption {
+                context_length_override: None,
+                provider_connection: engine_config.provider_connection,
+                model,
+                reasoning_effort: initial_reasoning_effort.clone(),
+            };
+            let mut choice = ModelChoice {
+                label: engine_choice_parts(&engine_name, &selection),
+                initial_reasoning_effort,
+                selection,
+                is_active,
+                engine_name: Some(engine_name),
+                catalog_context_length: catalog_model.and_then(|model| model.context_length),
+                selection_target: None,
+                selection_preview_error: None,
+                favorite_rank,
+            };
+            choice.refresh_label();
+            choice
+        });
+    let model_choices = models.into_iter().map(|mut option| {
+        let is_active = option.provider_connection == active_config.provider_connection
+            && option.model.id == active_config.model;
+        if is_active {
+            option.reasoning_effort = active_reasoning_effort.clone();
+        }
+        let favorite_rank = favorite_rank_of(&option.provider_connection, &option.model.id);
+        let mut choice = ModelChoice {
+            label: model_choice_parts(&option),
+            initial_reasoning_effort: option.reasoning_effort.clone(),
+            catalog_context_length: option.model.context_length,
+            selection: option,
+            is_active,
+            engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
+            favorite_rank,
+        };
+        choice.refresh_label();
+        choice
+    });
+    let mut choices: Vec<ModelChoice> = engine_choices.chain(model_choices).collect();
+    for choice in &mut choices {
+        match engine.preview_model_selection(&choice.to_model_selection()) {
+            Ok(target) => choice.selection_target = Some(target),
+            Err(error) => choice.selection_preview_error = Some(error.to_string()),
+        }
+    }
+    choices
 }
 
 fn refresh_engine_display_after_selection(

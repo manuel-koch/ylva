@@ -158,6 +158,7 @@ impl Engine for EngineRouter {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
             let (engine_name, engine) = self.active_engine_entry();
+            engine.ensure_active_model_allowed()?;
             // Discover the active model's catalog metadata (modalities and
             // the profile reasoning effort) before the selection is logged
             // and before the request is serialized, so both log lines and
@@ -194,6 +195,7 @@ impl Engine for EngineRouter {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
             let (engine_name, engine) = self.active_engine_entry();
+            engine.ensure_active_model_allowed()?;
             engine.hydrate_catalog_metadata().await;
             let config = engine.config();
             tracing::debug!(
@@ -230,6 +232,7 @@ impl Engine for EngineRouter {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
             let (_engine_name, engine) = self.active_engine_entry();
+            engine.ensure_active_model_allowed()?;
             engine
                 .chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
                 .await
@@ -247,6 +250,7 @@ impl Engine for EngineRouter {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
             let (_engine_name, engine) = self.active_engine_entry();
+            engine.ensure_active_model_allowed()?;
             engine
                 .chat_with_session_id_and_diagnostics(
                     messages,
@@ -262,6 +266,40 @@ impl Engine for EngineRouter {
 
     fn config(&self) -> EngineConfig {
         self.active_engine().config()
+    }
+
+    fn ensure_model_allowed(&self, model_id: &str) -> anyhow::Result<()> {
+        self.active_engine().ensure_model_allowed(model_id)
+    }
+
+    fn favorite_models(&self) -> Vec<(String, Vec<String>)> {
+        // `provider_engines` yields one representative engine per connection,
+        // sorted by connection name.
+        self.provider_engines()
+            .into_iter()
+            .flat_map(|(_provider_connection, _engine_name, engine)| engine.favorite_models())
+            .collect()
+    }
+
+    fn record_favorite_membership(
+        &self,
+        provider_connection: &str,
+        model_id: &str,
+        favorite: bool,
+    ) {
+        // Every named engine on the connection keeps its own copy.
+        for engine in self.engines.values() {
+            engine.record_favorite_membership(provider_connection, model_id, favorite);
+        }
+    }
+
+    fn ensure_provider_model_allowed(
+        &self,
+        provider_connection: &str,
+        model_id: &str,
+    ) -> anyhow::Result<()> {
+        let (_engine_name, engine) = self.provider_engine_for(provider_connection)?;
+        engine.ensure_model_allowed(model_id)
     }
 
     fn effective_context_length(&self) -> usize {
@@ -301,7 +339,20 @@ impl Engine for EngineRouter {
     }
 
     fn list_model_options(&self) -> BoxFuture<'_, anyhow::Result<Vec<ProviderModelOption>>> {
+        let result = self.list_model_options_with_failures();
+        Box::pin(async move { result.await.map(|(options, _failures)| options) })
+    }
+
+    fn list_model_options_with_failures(
+        &self,
+    ) -> BoxFuture<'_, anyhow::Result<(Vec<ProviderModelOption>, Vec<String>)>> {
         let providers = self.provider_engines();
+        let allowed_engines: HashMap<String, Arc<dyn Engine>> = providers
+            .iter()
+            .map(|(provider_connection, _engine_name, engine)| {
+                (provider_connection.clone(), Arc::clone(engine))
+            })
+            .collect();
         let catalog_cache = Arc::clone(&self.catalog_cache);
         let lifetime = self.catalog_cache_lifetime;
 
@@ -340,12 +391,19 @@ impl Engine for EngineRouter {
             for (provider_connection, result) in results {
                 match result {
                     Ok(models) => {
-                        options.extend(models.into_iter().map(|model| ProviderModelOption {
-                            context_length_override: None,
-                            provider_connection: provider_connection.clone(),
-                            model,
-                            reasoning_effort: None,
-                        }))
+                        // The cache keeps the provider's full catalog; the
+                        // connection's allow list filters what is selectable.
+                        let engine = allowed_engines.get(&provider_connection);
+                        options.extend(models.into_iter().filter_map(|model| {
+                            engine
+                                .is_none_or(|engine| engine.ensure_model_allowed(&model.id).is_ok())
+                                .then_some(ProviderModelOption {
+                                    context_length_override: None,
+                                    provider_connection: provider_connection.clone(),
+                                    model,
+                                    reasoning_effort: None,
+                                })
+                        }));
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -368,7 +426,7 @@ impl Engine for EngineRouter {
                     failures.join("; ")
                 );
             }
-            Ok(options)
+            Ok((options, failures))
         })
     }
 
@@ -402,6 +460,7 @@ impl Engine for EngineRouter {
 
     fn switch_model_option(&self, option: &ProviderModelOption) -> anyhow::Result<()> {
         let (engine_name, engine) = self.provider_engine_for(&option.provider_connection)?;
+        engine.ensure_model_allowed(&option.model.id)?;
         engine.switch_model_option(option)?;
         *self
             .active_engine
@@ -424,10 +483,13 @@ impl Engine for EngineRouter {
                     anyhow::anyhow!("named engine '{engine_name}' is not configured")
                 })?;
                 validate_named_engine_option(&target_engine.config(), option, reasoning_effort)?;
+                target_engine.ensure_model_allowed(&option.model.id)?;
                 (engine_name.clone(), target_engine.clone())
             }
             ModelSelection::ProviderModel(option) => {
-                self.provider_engine_for(&option.provider_connection)?
+                let target = self.provider_engine_for(&option.provider_connection)?;
+                target.1.ensure_model_allowed(&option.model.id)?;
+                target
             }
         };
         let config = target_engine.config();
@@ -462,6 +524,7 @@ impl Engine for EngineRouter {
                     anyhow::anyhow!("named engine '{engine_name}' is not configured")
                 })?;
                 validate_named_engine_option(&engine.config(), option, reasoning_effort)?;
+                engine.ensure_model_allowed(&option.model.id)?;
                 let mut active_engine = self
                     .active_engine
                     .write()

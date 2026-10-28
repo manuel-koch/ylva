@@ -82,12 +82,14 @@ const LOADING_MODELS_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("F1", "help"),
 ];
 const MODEL_PICKER_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("ctrl-f", "favorite"),
     FooterHint::key("↑/↓", "select"),
     FooterHint::key("enter", "parameters"),
     FooterHint::key("esc", "cancel"),
     FooterHint::key("F1", "help"),
 ];
 const MODEL_PARAMETER_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("ctrl-f", "favorite"),
     FooterHint::key("↑/↓", "parameter"),
     FooterHint::key("←/→", "adjust"),
     FooterHint::key("enter", "switch"),

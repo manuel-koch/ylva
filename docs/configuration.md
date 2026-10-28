@@ -364,6 +364,88 @@ Global, profile-scoped, and project-scoped `agents/*.md` and `agents/*.toml` fil
 resolving profiles; richer examples are documented below rather than shipped as
 repository templates.
 
+### Favorite and allowed models
+
+Each `[provider_connections.<name>]` table may carry two optional model lists:
+
+```toml
+[provider_connections.openrouter]
+provider = "openrouter"
+api_base_url = "https://openrouter.ai"
+api_key = "${OPENROUTER_API_KEY}"
+favorite_models = [
+    "anthropic/claude-haiku-5.5",
+    "openai/gpt-6-luna",
+]
+allowed_models = [
+    "anthropic/*haiku*",
+    "openai/gpt-6*",
+]
+```
+
+The IDs illustrate syntax, not current model availability.
+
+- `favorite_models`: exact, case-sensitive model IDs, never patterns. Order is
+  the order shown in the picker. Entries are not checked against any provider
+  catalog, so an ID the catalog does not currently list stays configured.
+- `allowed_models`: glob patterns matched against the full model ID with ASCII
+  case-insensitivity (`*`, `?`, character classes; `/` is ordinary ID content,
+  and there is no Unicode case folding). A model is allowed when any pattern
+  matches. Omitting the key means unrestricted. An explicit empty list or a
+  malformed pattern fails profile loading. A provider's actual model ID is
+  never rewritten.
+- `ylva connect <provider> --force` retains both lists of the replaced
+  connection verbatim for the same provider kind and rejects incompatible
+  retained settings (another provider kind, an empty or malformed
+  `allowed_models`, favorites it does not permit); see
+  [Connect commands](./cli-options.md#connect-commands).
+- Loading fails when a nonempty configured engine model (including one
+  inherited from `default_model`, also for the implicit engine of a connection
+  no `[engines.*]` table references) or a configured favorite is not allowed by
+  its connection. An implicit engine without a model stays discovery-only.
+  Validation never contacts the provider.
+
+#### Saving favorites
+
+The model picker saves favorites by editing the raw profile text, never by
+serializing the resolved configuration:
+
+- Only the exact active profile file that was loaded (home or workspace) and the
+  existing backing connection table (`provider_connections`; standard, inline
+  and dotted-key tables) are written. Nothing is ever created: no profile,
+  connection or table, and `.env` is not touched. Environment-only and legacy connections
+  without a backing table cannot be persisted.
+- Adding is idempotent, exact and case-sensitive, and appends to the existing
+  order. Removing deletes every exact duplicate; removing the last entry removes
+  the `favorite_models` key.
+- Comments, unknown fields, credentials, `${...}` expressions, other settings
+  and the file's permission bits are preserved. Entries containing `${...}` are
+  never materialized. Removing a model ID that only an interpolation expression
+  could expand to is refused with an explanation; edit the file by hand.
+- Before writing, the file is compared with what Ylva loaded (or last saved):
+  identity (replacement, symlink, disappearance) and raw contents. If it changed
+  externally, nothing is written and Ylva asks you to restart; it does not merge.
+  Failures that leave the file unchanged (for example a read-only file) can be
+  retried. If an error occurs after the file was replaced, Ylva re-reads it to
+  reconcile and reports that the outcome may not be durable.
+- The final write is an atomic rename, which is not a compare-and-swap: an
+  editor that does not cooperate with Ylva and saves between the final check and
+  the rename can lose its edit. This narrow race is a known limitation.
+- A save to a workspace profile succeeds but changes content covered by
+  workspace trust. The transcript notice says the next launch needs
+  `ylva trust` (with `--profile <name>` for a named profile); Ylva never
+  approves the change automatically, and the running session keeps working.
+- The write target is the profile file Ylva loaded at startup. Built-in
+  defaults (no profile file), environment-only providers and legacy flat
+  `[engines.*]` connections without a `[provider_connections.<name>]` table
+  cannot be persisted: the request is refused with a transcript notice
+  explaining what to add; nothing is created.
+- Saves are serialized: while one is in progress, further favorite requests are
+  ignored with a brief notice. A started save finishes even if you close the
+  picker, run `/clear` or `/session`, and Ylva waits for it on normal exit.
+  Only the favorite list changes: the active model, engine settings and other
+  profile values are not reloaded.
+
 ### GitHub Copilot connection
 
 `ylva connect copilot` creates this table and stores the token for you (see

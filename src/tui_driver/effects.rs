@@ -188,7 +188,9 @@ pub(super) async fn execute_effects(
             // Slash-command effects need the engine, which this function
             // deliberately does not own; `execute_slash_effects` runs them
             // (they are split out of the batch by `split_slash_effects`
-            // before this function ever sees them).
+            // before this function ever sees them). The favorite save
+            // effect likewise belongs to the driver's favorites owner and is
+            // never an agent command.
             Effect::ClearConversation
             | Effect::ListSessions
             | Effect::SelectSession { .. }
@@ -196,7 +198,8 @@ pub(super) async fn execute_effects(
             | Effect::Compact
             | Effect::LoadSubagentTranscript { .. }
             | Effect::ListModels { .. }
-            | Effect::SwitchModel(_) => {}
+            | Effect::SwitchModel(_)
+            | Effect::SetFavoriteModel { .. } => {}
         }
     }
     ActionOutcome::Continue
@@ -215,6 +218,7 @@ pub(super) fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Eff
                 | Effect::Compact
                 | Effect::ListModels { .. }
                 | Effect::SwitchModel(_)
+                | Effect::SetFavoriteModel { .. }
         )
     })
 }

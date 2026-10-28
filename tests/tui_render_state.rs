@@ -353,6 +353,7 @@ fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::Mod
             engine_name: None,
             selection_target: None,
             selection_preview_error: None,
+            favorite_rank: None,
         })
         .collect()
 }

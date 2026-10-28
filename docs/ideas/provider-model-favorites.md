@@ -1,27 +1,25 @@
 # Provider Model Favorites
 
-The `/models` picker is implemented and lists models from configured provider
-connections. It does not yet group or rank favorites. This remains a separate,
-deferred picker enhancement.
+Manual provider-connection favorites and allowed-model policies are implemented;
+see [favorite and allowed models](../configuration.md#favorite-and-allowed-models)
+and the [`/models` picker](../features.md#slash-commands).
 
-We could scan thru recent sessions on startup and find out
-what provider/models where used in the past
-and put them in a new "favorite" section in the `/models` slash-command
-popup.
-Sorting the "favorites" by the number of conversation-rounds it was used.
-I.e. one time trying a model has less prio than using a model in multiple
-session exclusively.
+Favorites are exact model IDs stored in the active profile's provider-connection
+table. Ctrl+F marks or unmarks the highlighted row in either picker context.
+Allowed-model patterns restrict which models can be selected and used. Discovery
+may hide configured favorites that are not currently present in a provider catalog.
 
-When reading past sessions we need to ensure that we don't reuse a provider/engine
-that is currently not available/configured anymore !
+Session scanning, inferred favorites, and usage-based ranking are not part of this
+feature and remain out of scope. The historical proposal below is retained only
+as context, not as implementation guidance.
 
-For example define favorites and list of allowed model patterns on the provider connection
-configuration:
+For example, provider connections can define favorites and allowed patterns:
 
 ```toml
 [provider_connections.openrouter]
 provider = "openrouter"
-....
+api_base_url = "https://openrouter.ai"
+api_key = "${OPENROUTER_API_KEY}"
 favorite_models = [
     "anthropic/claude-haiku-5.5",
     "openai/gpt-6-luna",

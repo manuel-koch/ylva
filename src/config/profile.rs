@@ -29,8 +29,8 @@ use super::{
     deserialize_reporting_unknown_keys,
     layered::{current_workspace_root, resolve_file_at_paths, ConfigLayer, ResolvedFile},
     load_profile_environment_at_workspace_root, AgentConfig, ConfigError, ConfigWarning,
-    ProviderConnectionConfig, WebFetchConfig, WebSearchConfig, DEFAULT_PROFILE_NAME,
-    PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
+    FavoriteModelsWriter, FavoriteSourceLayer, ProviderConnectionConfig, WebFetchConfig,
+    WebSearchConfig, DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
 };
 
 /// Top-level Ylva profile that groups engine selection and per-agent settings.
@@ -53,7 +53,6 @@ pub struct ProfileConfig {
     /// Named provider connections, keyed by the connection name referenced by
     /// an engine's `provider_connection` field.
     #[serde(default)]
-    #[serde(alias = "providers")]
     pub provider_connections: HashMap<String, ProviderConnectionConfig>,
     /// Named engine definitions this profile provides, keyed by engine name.
     /// `AgentFactory::from_profile` turns each entry into a live engine. Empty
@@ -411,6 +410,77 @@ fn validate_agent_compaction_settings(
     Ok(())
 }
 
+/// Validate every provider connection's `favorite_models`/`allowed_models`
+/// and every nonempty configured model against its connection's policy.
+///
+/// Covers explicit `[engines.*]` models (including those inherited from
+/// `default_model`) and the implicit engines the factory derives from
+/// `default_model` for connections no explicit engine references. An implicit
+/// engine without a model stays discovery-only and is not checked. No provider
+/// catalog is consulted.
+fn validate_provider_connection_models(
+    profile: &ProfileConfig,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    let invalid = |connection: &str, detail: String| ConfigError::InvalidProviderConnectionModels {
+        path: path.to_path_buf(),
+        connection: connection.to_string(),
+        detail,
+    };
+    let mut connection_names: Vec<_> = profile.provider_connections.keys().collect();
+    connection_names.sort();
+    for name in connection_names {
+        let connection = &profile.provider_connections[name];
+        let policy = connection
+            .validate_preferences()
+            .map_err(|detail| invalid(name, detail))?;
+        let referenced_by_engine = profile
+            .engines
+            .values()
+            .any(|engine| &engine.provider_connection == name);
+        if !referenced_by_engine {
+            if let Some(default_model) = profile.default_model.as_deref() {
+                policy.ensure_allowed(name, default_model).map_err(|_| {
+                    invalid(
+                        name,
+                        format!(
+                            "default_model '{default_model}' used by its implicit engine is not \
+                             permitted by allowed_models"
+                        ),
+                    )
+                })?;
+            }
+        }
+    }
+    let mut engine_names: Vec<_> = profile.engines.keys().collect();
+    engine_names.sort();
+    for engine_name in engine_names {
+        let engine = &profile.engines[engine_name];
+        let Some(connection) = profile
+            .provider_connections
+            .get(&engine.provider_connection)
+        else {
+            continue;
+        };
+        if engine.model.is_empty() {
+            continue;
+        }
+        let policy = connection
+            .model_policy()
+            .map_err(|error| invalid(&engine.provider_connection, error.to_string()))?;
+        if !policy.allows(&engine.model) {
+            return Err(invalid(
+                &engine.provider_connection,
+                format!(
+                    "model '{}' of engine '{engine_name}' is not permitted by allowed_models",
+                    engine.model
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn default_engine_name() -> String {
     DEFAULT_PROFILE_NAME.to_string()
 }
@@ -636,6 +706,51 @@ impl ProfileConfig {
         environment: &HashMap<String, String>,
         workspace_root: Option<&Path>,
     ) -> Result<ProfileConfig, ConfigError> {
+        Self::load_file_with_source(profiles_root, profile_name, environment, workspace_root)
+            .map(|(profile, _source)| profile)
+    }
+
+    /// Load a profile like [`ProfileConfig::load_with_environment_at_workspace_root`]
+    /// (or, when `fall_back_to_default` is set, like
+    /// [`ProfileConfig::load_or_default_with_environment_at_workspace_root`]) and
+    /// also return a [`FavoriteModelsWriter`] captured from the very document
+    /// that was parsed. The writer is `None` for built-in defaults, which have
+    /// no file to save to.
+    pub fn load_with_favorite_writer(
+        profiles_root: &Path,
+        profile_name: &str,
+        environment: &HashMap<String, String>,
+        workspace_root: Option<&Path>,
+        fall_back_to_default: bool,
+    ) -> Result<(ProfileConfig, Option<FavoriteModelsWriter>), ConfigError> {
+        match Self::load_file_with_source(profiles_root, profile_name, environment, workspace_root)
+        {
+            Ok((profile, source)) => {
+                let writer = FavoriteSourceLayer::from_config_layer(source.layer).map(|layer| {
+                    FavoriteModelsWriter::from_loaded_source(source.path, source.contents, layer)
+                });
+                Ok((profile, writer))
+            }
+            Err(ConfigError::ProfileNotFound { path, .. }) if fall_back_to_default => {
+                tracing::debug!(path = %path.display(), "no profile config; using defaults");
+                Self::load_agent_types_into_profile(
+                    ProfileConfig::default(),
+                    profiles_root,
+                    profile_name,
+                    workspace_root,
+                )
+                .map(|profile| (profile, None))
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    fn load_file_with_source(
+        profiles_root: &Path,
+        profile_name: &str,
+        environment: &HashMap<String, String>,
+        workspace_root: Option<&Path>,
+    ) -> Result<(ProfileConfig, ResolvedFile), ConfigError> {
         let path = super::profile_config_path(profiles_root, profile_name);
         let resolved = resolve_profile_config_file(profiles_root, profile_name, workspace_root)?
             .ok_or_else(|| ConfigError::ProfileNotFound {
@@ -677,6 +792,7 @@ impl ProfileConfig {
             &mut warnings,
         )?;
         profile.config_warnings = warnings;
+        validate_provider_connection_models(&profile, &path)?;
         validate_tool_sandbox_rules(&profile.tools, &path)?;
         profile.web_search.validate(&path)?;
         profile.web_fetch.validate(&path)?;
@@ -695,7 +811,14 @@ impl ProfileConfig {
             agents = profile.agents.len(),
             "profile config loaded"
         );
-        Ok(profile)
+        Ok((
+            profile,
+            ResolvedFile {
+                contents,
+                layer,
+                path,
+            },
+        ))
     }
 
     fn load_agent_types_into_profile(
@@ -991,7 +1114,7 @@ pub fn profile_config_source_path(
     )
 }
 
-fn resolve_profile_config_file(
+pub(crate) fn resolve_profile_config_file(
     profiles_root: &Path,
     profile_name: &str,
     workspace_root: Option<&Path>,

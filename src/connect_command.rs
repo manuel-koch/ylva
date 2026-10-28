@@ -276,6 +276,129 @@ pub fn run(
 struct ConnectionPlan {
     config_document: toml_edit::DocumentMut,
     env_text: String,
+    /// Raw `favorite_models` / `allowed_models` entries (key with its
+    /// decoration, value untouched) of the connection being replaced, carried
+    /// over so a forced update never drops them.
+    retained_preferences: Vec<(toml_edit::Key, toml_edit::Item)>,
+}
+
+/// Keys of a connection table that connect never writes and a forced update
+/// therefore retains verbatim.
+const RETAINED_PROVIDER_CONNECTION_KEYS: [&str; 2] = ["favorite_models", "allowed_models"];
+
+/// Raw string entries of a retained preference array, or an error when the
+/// value is not an array of strings.
+fn raw_string_entries(
+    config_path: &Path,
+    connection_name: &str,
+    key: &str,
+    item: &toml_edit::Item,
+) -> anyhow::Result<Vec<String>> {
+    item.as_array()
+        .and_then(|array| {
+            array
+                .iter()
+                .map(|entry| entry.as_str().map(str::to_string))
+                .collect::<Option<Vec<String>>>()
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} [provider_connections.{connection_name}] has a retained `{key}` that is not an array of strings; fix or remove it before running connect --force",
+                display_path(config_path)
+            )
+        })
+}
+
+/// Select the retained preference entries of the connection that `--force`
+/// replaces. A different provider kind cannot carry them over; retained
+/// settings that the profile loader would reject are refused up front.
+/// Entries containing `${` cannot be validated because their value depends on the
+/// runtime environment.
+fn retained_preferences(
+    config_path: &Path,
+    connection_name: &str,
+    existing: &toml_edit::Item,
+    kind: &str,
+) -> anyhow::Result<Vec<(toml_edit::Key, toml_edit::Item)>> {
+    let Some(existing_table) = existing.as_table_like() else {
+        return Ok(Vec::new());
+    };
+    let mut retained = Vec::new();
+    for (key, item) in existing_table.iter() {
+        if RETAINED_PROVIDER_CONNECTION_KEYS.contains(&key) {
+            if let Some((key_with_decor, _)) = existing_table.get_key_value(key) {
+                let mut key_with_decor = key_with_decor.clone();
+                let mut item = item.clone();
+                if !existing.is_table() {
+                    // Inline-table spacing does not fit a standard table.
+                    key_with_decor.leaf_decor_mut().clear();
+                    if let Some(value) = item.as_value_mut() {
+                        value.decor_mut().clear();
+                    }
+                }
+                retained.push((key_with_decor, item));
+            }
+        }
+    }
+    if retained.is_empty() {
+        return Ok(retained);
+    }
+    let existing_kind = existing_table
+        .get("provider")
+        .and_then(toml_edit::Item::as_str)
+        .unwrap_or("unknown");
+    if existing_kind != kind {
+        anyhow::bail!(
+            "{} [provider_connections.{connection_name}] is a '{existing_kind}' connection with favorite_models/allowed_models; these restrictions cannot be carried over to a '{kind}' connection. You must remove or move favorite_models and allowed_models first (or choose another --name), then run connect --force again",
+            display_path(config_path)
+        );
+    }
+
+    let mut favorites = Vec::new();
+    let mut allowed_patterns: Option<Vec<String>> = None;
+    for (key, item) in &retained {
+        let entries = raw_string_entries(config_path, connection_name, key.get(), item)?;
+        if key.get() == "favorite_models" {
+            favorites = entries;
+        } else {
+            allowed_patterns = Some(entries);
+        }
+    }
+    let reject = |detail: String| {
+        anyhow::anyhow!(
+            "{} [provider_connections.{connection_name}] has retained settings incompatible with connect --force: {detail}",
+            display_path(config_path)
+        )
+    };
+    let Some(allowed_patterns) = allowed_patterns else {
+        return Ok(retained);
+    };
+    let has_interpolated_pattern = allowed_patterns
+        .iter()
+        .any(|pattern| pattern.contains("${"));
+    let checkable_patterns: Vec<String> = allowed_patterns
+        .iter()
+        .filter(|pattern| !pattern.contains("${"))
+        .cloned()
+        .collect();
+    let policy = if allowed_patterns.is_empty() {
+        crate::config::ModelPolicy::compile(Some(&allowed_patterns))
+    } else if checkable_patterns.is_empty() {
+        Ok(crate::config::ModelPolicy::unrestricted())
+    } else {
+        crate::config::ModelPolicy::compile(Some(&checkable_patterns))
+    }
+    .map_err(|error| reject(error.to_string()))?;
+    if !has_interpolated_pattern {
+        for favorite in favorites.iter().filter(|favorite| !favorite.contains("${")) {
+            if !policy.allows(favorite) {
+                return Err(reject(format!(
+                    "favorite_models entry '{favorite}' is not permitted by allowed_models"
+                )));
+            }
+        }
+    }
+    Ok(retained)
 }
 
 /// Validate that `connection_name` is free in `config.toml` and that none of
@@ -299,17 +422,19 @@ fn plan_connection(
     let config_document: toml_edit::DocumentMut = config_text
         .parse()
         .map_err(|error| anyhow::anyhow!("cannot parse {}: {error}", display_path(config_path)))?;
-    if !force
-        && config_document
-            .get("provider_connections")
-            .and_then(|connections| connections.get(connection_name))
-            .is_some()
-    {
+    let existing_connection = config_document
+        .get("provider_connections")
+        .and_then(|connections| connections.get(connection_name));
+    if !force && existing_connection.is_some() {
         anyhow::bail!(
             "{} already defines [provider_connections.{connection_name}]; choose another --name or pass --force to replace it",
             display_path(config_path)
         );
     }
+    let retained_preferences = match existing_connection {
+        Some(existing) => retained_preferences(config_path, connection_name, existing, kind)?,
+        None => Vec::new(),
+    };
     let env_text = match std::fs::read_to_string(env_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -328,6 +453,7 @@ fn plan_connection(
     Ok(ConnectionPlan {
         config_document,
         env_text,
+        retained_preferences,
     })
 }
 
@@ -378,6 +504,7 @@ fn persist_connection(
     let ConnectionPlan {
         mut config_document,
         mut env_text,
+        retained_preferences,
     } = plan_connection(
         config_path,
         env_path,
@@ -400,6 +527,9 @@ fn persist_connection(
     table["provider"] = toml_edit::value(kind);
     for (key, item) in &connection.settings {
         table.insert(key, item.clone());
+    }
+    for (key, item) in retained_preferences {
+        table.insert_formatted(&key, item);
     }
     connections.insert(connection_name, toml_edit::Item::Table(table));
 
@@ -717,5 +847,178 @@ mod tests {
         assert!(config.contains("api_base_url = \"http://gpu:11434\""));
         assert!(!config.contains("api_key"));
         assert_eq!(std::fs::read_to_string(&env_path).unwrap(), "A=b\n");
+    }
+
+    const RETAINED_CONNECTION: &str = "# header\ndefault_engine = \"x\"\n\n[provider_connections.work]\nprovider = \"copilot\"\napi_key = \"${OLD}\"\n# keep my favorites\nfavorite_models = [\n    \"b-model\",   # second first\n    \"${EXTRA_MODEL}\",\n    \"a-model\",\n]\nallowed_models = [ \"B-*\", \"a-model\", \"${EXTRA_MODEL}\" ]\n\n[other]\nx = 1\n";
+
+    fn raw_item_text(config: &str, key: &str) -> String {
+        let document: toml_edit::DocumentMut = config.parse().expect("parse");
+        let item = &document["provider_connections"]["work"][key];
+        let value = item.as_value().expect("value");
+        value.to_string().trim().to_string()
+    }
+
+    #[test]
+    fn force_same_kind_preserves_raw_favorite_and_allowed_models() {
+        let (_directory, config_path, env_path) = profile_files(RETAINED_CONNECTION, None);
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        persist_secret_with_force(&config_path, &env_path, "work", "TOKEN_WORK", "new", true)
+            .expect("forced");
+
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(
+            raw_item_text(&config, "favorite_models"),
+            raw_item_text(&before, "favorite_models")
+        );
+        assert_eq!(
+            raw_item_text(&config, "allowed_models"),
+            raw_item_text(&before, "allowed_models")
+        );
+        assert!(config.contains("# keep my favorites\nfavorite_models = [\n    \"b-model\",   # second first\n    \"${EXTRA_MODEL}\",\n    \"a-model\",\n]\n"));
+        assert!(config.contains("allowed_models = [ \"B-*\", \"a-model\", \"${EXTRA_MODEL}\" ]\n"));
+        assert!(config.contains("api_key = \"${TOKEN_WORK}\""));
+        assert!(!config.contains("${OLD}"));
+        assert!(config.contains("# header"));
+        assert!(config.contains("[other]\nx = 1\n"));
+        assert_eq!(config.matches("[provider_connections.work]").count(), 1);
+    }
+
+    #[test]
+    fn force_same_kind_preserves_lists_of_an_inline_connection_table() {
+        let (_directory, config_path, env_path) = profile_files(
+            "[provider_connections]\nwork = { provider = \"copilot\", favorite_models = [\"a\"], allowed_models = [\"a*\"] }\n",
+            None,
+        );
+
+        persist_secret_with_force(&config_path, &env_path, "work", "TOKEN_WORK", "new", true)
+            .expect("forced");
+
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(raw_item_text(&config, "favorite_models"), "[\"a\"]");
+        assert_eq!(raw_item_text(&config, "allowed_models"), "[\"a*\"]");
+        assert!(config.parse::<toml::Table>().is_ok());
+    }
+
+    #[test]
+    fn force_without_retained_lists_writes_the_same_table_as_before() {
+        let (_directory, config_path, env_path) = profile_files(
+            "[provider_connections.work]\nprovider = \"copilot\"\napi_key = \"${OLD}\"\n",
+            None,
+        );
+
+        persist_secret_with_force(&config_path, &env_path, "work", "TOKEN_WORK", "new", true)
+            .expect("forced");
+
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!config.contains("favorite_models"));
+        assert!(!config.contains("allowed_models"));
+        assert!(config.contains("api_key = \"${TOKEN_WORK}\""));
+    }
+
+    fn persist_endpoint_with_force(
+        config_path: &Path,
+        env_path: &Path,
+        kind: &str,
+    ) -> anyhow::Result<()> {
+        let mut settings = toml_edit::Table::new();
+        settings["api_base_url"] = toml_edit::value("http://gpu:11434");
+        persist_connection(
+            config_path,
+            env_path,
+            kind,
+            "work",
+            &NewConnection {
+                settings,
+                env_entries: vec![("TOKEN_WORK".to_string(), "new".to_string())],
+            },
+            true,
+        )
+    }
+
+    #[test]
+    fn force_with_a_different_kind_rejects_retained_lists_and_changes_no_file() {
+        for retained in ["favorite_models = [\"a\"]\n", "allowed_models = [\"a*\"]\n"] {
+            let config = format!("[provider_connections.work]\nprovider = \"copilot\"\n{retained}");
+            let (_directory, config_path, env_path) = profile_files(&config, Some("A=b\n"));
+
+            let error = persist_endpoint_with_force(&config_path, &env_path, "ollama")
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains("copilot"), "{error}");
+            assert!(error.contains("ollama"), "{error}");
+            assert!(error.contains("favorite_models"), "{error}");
+            assert!(error.contains("allowed_models"), "{error}");
+            assert!(error.contains("remove or move"), "{error}");
+            assert_eq!(std::fs::read_to_string(&config_path).unwrap(), config);
+            assert_eq!(std::fs::read_to_string(&env_path).unwrap(), "A=b\n");
+        }
+    }
+
+    #[test]
+    fn plan_rejects_a_different_kind_with_retained_lists_before_the_flow_runs() {
+        let (_directory, config_path, env_path) = profile_files(RETAINED_CONNECTION, None);
+
+        let error = plan_connection(&config_path, &env_path, "ollama", "work", &[], true)
+            .err()
+            .expect("rejected")
+            .to_string();
+
+        assert!(error.contains("remove or move"));
+    }
+
+    #[test]
+    fn force_with_a_different_kind_without_lists_still_replaces_the_connection() {
+        let (_directory, config_path, env_path) = profile_files(
+            "[provider_connections.work]\nprovider = \"copilot\"\n",
+            None,
+        );
+
+        persist_endpoint_with_force(&config_path, &env_path, "ollama").expect("forced");
+
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("provider = \"ollama\""));
+    }
+
+    #[test]
+    fn force_rejects_incompatible_retained_settings_and_changes_no_file() {
+        let cases = [
+            ("allowed_models = []\n", "must not be empty"),
+            ("allowed_models = [\"[\"]\n", "malformed"),
+            (
+                "favorite_models = [\"zzz\"]\nallowed_models = [\"a*\"]\n",
+                "'zzz' is not permitted",
+            ),
+            ("allowed_models = \"a*\"\n", "array of strings"),
+            ("favorite_models = [1]\n", "array of strings"),
+        ];
+        for (retained, expected) in cases {
+            let config = format!("[provider_connections.work]\nprovider = \"copilot\"\n{retained}");
+            let (_directory, config_path, env_path) = profile_files(&config, Some("A=b\n"));
+
+            let error =
+                persist_secret_with_force(&config_path, &env_path, "work", "TOKEN_WORK", "n", true)
+                    .unwrap_err()
+                    .to_string();
+
+            assert!(error.contains(expected), "{retained}: {error}");
+            assert_eq!(std::fs::read_to_string(&config_path).unwrap(), config);
+            assert_eq!(std::fs::read_to_string(&env_path).unwrap(), "A=b\n");
+        }
+    }
+
+    #[test]
+    fn force_skips_validation_of_interpolated_retained_entries() {
+        let (_directory, config_path, env_path) = profile_files(
+            "[provider_connections.work]\nprovider = \"copilot\"\nfavorite_models = [\"${FAVORITE}\", \"a\"]\nallowed_models = [\"a\", \"${PATTERN}\"]\n",
+            None,
+        );
+
+        persist_secret_with_force(&config_path, &env_path, "work", "TOKEN_WORK", "n", true)
+            .expect("forced");
+
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("favorite_models = [\"${FAVORITE}\", \"a\"]"));
     }
 }

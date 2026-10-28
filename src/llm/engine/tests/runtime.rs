@@ -14,6 +14,37 @@
 
 use super::*;
 
+#[tokio::test]
+async fn engine_catalog_filters_disallowed_models_without_losing_allowed_metadata() {
+    let mut allowed = model_info_with_reasoning_efforts(
+        "team/allowed",
+        Some(vec!["low".to_string(), "high".to_string()]),
+    );
+    allowed.context_length = Some(128_000);
+    allowed.input_modalities = Some(vec![InputModality::Image]);
+    let mut denied = model_info_with_reasoning_efforts("other/denied", None);
+    denied.context_length = Some(64_000);
+    let provider = Arc::new(CatalogProvider::new(vec![denied, allowed]));
+    let patterns = vec!["team/*".to_string()];
+    let engine = EngineImpl::new(provider, make_engine_config())
+        .with_model_policy(crate::config::ModelPolicy::compile(Some(&patterns)).expect("policy"));
+
+    let options = engine.list_model_options().await.expect("catalog");
+
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].provider_connection, "mock");
+    assert_eq!(options[0].model.id, "team/allowed");
+    assert_eq!(options[0].model.context_length, Some(128_000));
+    assert_eq!(
+        options[0].model.reasoning_efforts.as_deref(),
+        Some(["low".to_string(), "high".to_string()].as_slice())
+    );
+    assert_eq!(
+        options[0].model.input_modalities,
+        Some(vec![InputModality::Image])
+    );
+}
+
 #[test]
 fn configured_copies_keep_provider_runtimes_independent_and_restore_original_settings() {
     for (provider, reasoning_effort) in [
@@ -470,4 +501,147 @@ fn context_length_override_survives_catalog_adoption_until_a_plain_selection_cle
             "a selection without an override returns to the catalog window"
         );
     });
+}
+
+// ── allowed-model policy ──────────────────────────────────────────────────
+
+fn restricted_engine(patterns: &[&str], model: &str) -> EngineImpl {
+    restricted_engine_with_provider(patterns, model, Arc::new(CatalogProvider::new(vec![])))
+}
+
+fn restricted_engine_with_provider(
+    patterns: &[&str],
+    model: &str,
+    provider: Arc<dyn Provider>,
+) -> EngineImpl {
+    let patterns: Vec<String> = patterns.iter().map(ToString::to_string).collect();
+    let mut config = make_engine_config();
+    config.model = model.to_string();
+    EngineImpl::new(provider, config)
+        .with_model_policy(crate::config::ModelPolicy::compile(Some(&patterns)).expect("compiles"))
+}
+
+fn option_for(model: &str, reasoning_effort: Option<&str>) -> ProviderModelOption {
+    ProviderModelOption {
+        context_length_override: Some(4_096),
+        provider_connection: "mock".to_string(),
+        model: model_info_with_reasoning_efforts(model, Some(vec!["low".to_string()])),
+        reasoning_effort: reasoning_effort.map(str::to_string),
+    }
+}
+
+#[test]
+fn disallowed_model_selection_is_rejected_without_mutating_any_runtime_state() {
+    let engine = restricted_engine(&["test-*"], "test-model");
+
+    let error = engine
+        .switch_model_option(&option_for("other-model", Some("low")))
+        .expect_err("a disallowed model is rejected");
+
+    assert!(error.to_string().contains("other-model"), "{error}");
+    assert_eq!(engine.config().model, "test-model");
+    assert_eq!(engine.reasoning_effort(), None, "effort untouched");
+    assert_eq!(engine.effective_context_length(), DEFAULT_CONTEXT_LENGTH);
+    assert_eq!(engine.input_modalities(), None);
+    assert!(engine.switch_model("other-model").is_err());
+    assert_eq!(engine.config().model, "test-model");
+}
+
+#[test]
+fn allowed_model_selection_still_applies_with_original_spelling() {
+    let engine = restricted_engine(&["TEST-*"], "test-model");
+
+    engine
+        .switch_model_option(&option_for("test-Large", None))
+        .expect("an allowed model is selected");
+
+    assert_eq!(engine.config().model, "test-Large");
+}
+
+#[tokio::test]
+async fn chat_with_a_disallowed_or_unbound_model_fails_before_any_dispatch() {
+    let unbound = restricted_engine_with_provider(
+        &["test-*"],
+        "",
+        Arc::new(MockProvider::new(vec![], Duration::from_millis(0))),
+    );
+    let error = unbound
+        .chat(vec![], vec![], CancellationToken::new())
+        .await
+        .expect_err("an unbound restricted engine cannot chat");
+    assert!(
+        error.to_string().contains("no model is selected"),
+        "{error}"
+    );
+
+    let disallowed = restricted_engine_with_provider(
+        &["test-*"],
+        "other",
+        Arc::new(MockProvider::new(vec![], Duration::from_millis(0))),
+    );
+    assert!(disallowed
+        .chat_with_session_id(vec![], vec![], CancellationToken::new(), None)
+        .await
+        .is_err());
+    assert!(disallowed
+        .chat_with_session_id_and_estimate(
+            vec![],
+            vec![],
+            CancellationToken::new(),
+            None,
+            Box::new(|_, _| Box::pin(async {})),
+        )
+        .await
+        .is_err());
+    assert!(disallowed
+        .chat_with_session_id_and_diagnostics(
+            vec![],
+            vec![],
+            CancellationToken::new(),
+            None,
+            Box::new(|_, _| Box::pin(async {})),
+            None,
+        )
+        .await
+        .is_err());
+
+    let allowed = restricted_engine_with_provider(
+        &["test-*"],
+        "test-ok",
+        Arc::new(MockProvider::new(vec![], Duration::from_millis(0))),
+    );
+    assert!(allowed
+        .chat(vec![], vec![], CancellationToken::new())
+        .await
+        .is_ok());
+}
+
+#[test]
+fn configured_copies_keep_the_model_policy() {
+    let engine = restricted_engine_with_provider(
+        &["test-*"],
+        "test-model",
+        Arc::new(OpenAiCompatibleProvider::new(
+            "test".to_string(),
+            "http://127.0.0.1:9/v1".to_string(),
+            "test-model".to_string(),
+            None,
+        )),
+    );
+
+    let copy = engine.configured_copy().expect("copy");
+
+    assert!(copy.switch_model("other").is_err());
+    assert!(copy.ensure_model_allowed("test-x").is_ok());
+}
+
+#[test]
+fn unrestricted_empty_engine_stays_chat_capable_for_existing_behavior() {
+    let engine = EngineImpl::new(
+        Arc::new(MockProvider::new(vec![], Duration::from_millis(0))),
+        make_engine_config(),
+    );
+
+    assert!(engine.ensure_model_allowed("anything").is_ok());
+    assert!(engine.ensure_model_allowed("").is_ok());
 }

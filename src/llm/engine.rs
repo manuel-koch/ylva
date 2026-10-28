@@ -103,6 +103,61 @@ pub trait Engine: Send + Sync {
         self.chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
     }
 
+    /// Fail when `model_id` is not permitted by the allowed-model policy of
+    /// this engine's provider connection. Engines without a policy allow
+    /// every model.
+    fn ensure_model_allowed(&self, _model_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Fail when `model_id` is not permitted on the named provider
+    /// connection. A bare engine only knows its own connection; routers
+    /// resolve the connection's engine first.
+    fn ensure_provider_model_allowed(
+        &self,
+        provider_connection: &str,
+        model_id: &str,
+    ) -> anyhow::Result<()> {
+        if self.config().provider_connection == provider_connection {
+            self.ensure_model_allowed(model_id)?;
+        }
+        Ok(())
+    }
+
+    /// Exact model IDs marked as favorites per provider connection, in
+    /// configured order. Connections without favorites are omitted; routers
+    /// report one entry per connection, sorted by connection name. Engines
+    /// without favorites report none.
+    fn favorite_models(&self) -> Vec<(String, Vec<String>)> {
+        Vec::new()
+    }
+
+    /// Record the current favorite membership of one `(connection, model)`
+    /// pair so later picker listings reflect a completed save. Adding keeps
+    /// the existing entries and appends a new ID last; removing drops every
+    /// exact duplicate. Engines without favorite state ignore the call.
+    fn record_favorite_membership(
+        &self,
+        _provider_connection: &str,
+        _model_id: &str,
+        _favorite: bool,
+    ) {
+    }
+
+    /// Discover optional provider-catalog failures while retaining any successful
+    /// results. Routers override this so the picker can report partial outages.
+    fn list_model_options_with_failures(
+        &self,
+    ) -> BoxFuture<'_, anyhow::Result<(Vec<ProviderModelOption>, Vec<String>)>> {
+        let options = self.list_model_options();
+        Box::pin(async move { options.await.map(|options| (options, Vec::new())) })
+    }
+
+    /// Fail when the model a chat request would use is not allowed.
+    fn ensure_active_model_allowed(&self) -> anyhow::Result<()> {
+        self.ensure_model_allowed(&self.config().model)
+    }
+
     /// A snapshot of the engine's configuration.
     ///
     /// Returned by value rather than by reference because `/models` mutates
@@ -134,6 +189,9 @@ pub trait Engine: Send + Sync {
             models.await.map(|models| {
                 models
                     .into_iter()
+                    // Only models the connection's allow list permits are
+                    // selectable; the transport metadata stays untouched.
+                    .filter(|model| self.ensure_model_allowed(&model.id).is_ok())
                     .map(|model| ProviderModelOption {
                         context_length_override: None,
                         provider_connection: provider_connection.clone(),
@@ -283,6 +341,7 @@ pub trait Engine: Send + Sync {
                     "engine '{engine_name}' is not available for named selection"
                 );
                 validate_named_engine_option(&self.config(), option, reasoning_effort)?;
+                self.ensure_model_allowed(&option.model.id)?;
                 if let ReasoningEffortChange::Set(reasoning_effort) = reasoning_effort {
                     self.set_reasoning_effort(reasoning_effort.as_deref())?;
                 }
@@ -313,6 +372,7 @@ pub trait Engine: Send + Sync {
                     "engine '{engine_name}' is not available for named selection"
                 );
                 validate_named_engine_option(&config, option, reasoning_effort)?;
+                self.ensure_model_allowed(&option.model.id)?;
                 Some(engine_name.clone())
             }
             ModelSelection::ProviderModel(option) => {
@@ -322,6 +382,7 @@ pub trait Engine: Send + Sync {
                     config.provider_connection,
                     option.provider_connection
                 );
+                self.ensure_model_allowed(&option.model.id)?;
                 self.active_engine_name()
             }
         };
@@ -355,6 +416,8 @@ pub(super) fn apply_model_option(
         config.provider_connection,
         option.provider_connection
     );
+    // Policy is checked before any reasoning/model/window mutation.
+    engine.ensure_model_allowed(&option.model.id)?;
     if let Some(reasoning_effort) = option.reasoning_effort.as_deref() {
         anyhow::ensure!(
             option.model.advertises_reasoning_effort(reasoning_effort),

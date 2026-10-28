@@ -847,15 +847,21 @@ fn engine_from_profile_config(
     if resolved_config.api_key.is_none() {
         resolved_config.api_key = provider_config.api_key.clone();
     }
+    let model_policy = provider_config.model_policy()?;
+    if !resolved_config.model.is_empty() {
+        model_policy
+            .ensure_allowed(&resolved_config.provider_connection, &resolved_config.model)?;
+    }
     let provider = ProviderRegistry::provider_from_provider_config(
         &resolved_config.provider_connection,
         provider_config,
         &resolved_config,
     )?;
-    Ok(Arc::new(crate::llm::engine::EngineImpl::new(
-        provider,
-        resolved_config,
-    )))
+    Ok(Arc::new(
+        crate::llm::engine::EngineImpl::new(provider, resolved_config)
+            .with_model_policy(model_policy)
+            .with_favorite_models(provider_config.favorite_models.clone()),
+    ))
 }
 
 fn validate_profile_agent_engines(

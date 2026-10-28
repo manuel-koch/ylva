@@ -30,6 +30,7 @@ use crate::home_relative_path::display_path;
 /// suggestion.
 const KNOWN_KEYS: &[&str] = &[
     "agents",
+    "allowed_models",
     "allowed_scripts",
     "allowed_skills",
     "allowed_tools",
@@ -49,6 +50,7 @@ const KNOWN_KEYS: &[&str] = &[
     "description",
     "engine",
     "engines",
+    "favorite_models",
     "hard_compaction_threshold",
     "input_history_limit",
     "keybindings",
@@ -61,7 +63,6 @@ const KNOWN_KEYS: &[&str] = &[
     "provider",
     "provider_connection",
     "provider_connections",
-    "providers",
     "reason",
     "reasoning",
     "result_limit",

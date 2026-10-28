@@ -18,7 +18,7 @@ use super::TextareaContext;
 use crate::markdown::{render_markdown, slice_by_display_columns};
 use crate::tui_reducer_state::{
     model_picker_row_entries, slash_overlay_text_rows, AppState, ChatEntry, ChatSelection, Effect,
-    Focus, SlashOverlay, TuiMode,
+    Focus, PickerRow, SlashOverlay, TuiMode,
 };
 use crossterm::event::MouseEventKind;
 
@@ -339,11 +339,12 @@ pub(super) fn route_mouse(
                         parameters: None,
                     } = &mut state.slash_overlay
                     {
-                        if let Some(entry_index) =
+                        // Group header rows are not selectable: a click on one
+                        // keeps the current highlight.
+                        if let Some(PickerRow::Entry(entry_index)) =
                             model_picker_row_entries(choices, filter, row_layout)
                                 .get(overlay_row)
                                 .copied()
-                                .flatten()
                         {
                             *selected = entry_index;
                         }

@@ -278,6 +278,7 @@ async fn tui_triggers_title_generation_when_stream_done_is_drained() {
             exit_snapshot: None,
             unactivated_clones: Arc::default(),
             startup_notice: None,
+            ..TuiRuntime::disabled()
         },
     )
     .await;
@@ -457,6 +458,7 @@ async fn tui_loads_prior_session_user_messages_into_input_history() {
             exit_snapshot: None,
             unactivated_clones: Arc::default(),
             startup_notice: None,
+            ..TuiRuntime::disabled()
         },
     )
     .await
@@ -550,6 +552,8 @@ struct StubEngine {
     switched_to: std::sync::Mutex<Vec<String>>,
     config: std::sync::Mutex<EngineConfig>,
     named_engines: Vec<(String, EngineConfig)>,
+    favorite_models: Vec<(String, Vec<String>)>,
+    model_policy: Option<crate::config::ModelPolicy>,
 }
 
 impl StubEngine {
@@ -580,6 +584,8 @@ impl StubEngine {
                 hard_compaction_threshold: 0.9,
             }),
             named_engines: Vec::new(),
+            favorite_models: Vec::new(),
+            model_policy: None,
         })
     }
 
@@ -655,6 +661,8 @@ impl StubEngine {
                     hard_compaction_threshold: 0.9,
                 },
             )],
+            favorite_models: Vec::new(),
+            model_policy: None,
         })
     }
 }
@@ -692,6 +700,28 @@ impl Engine for StubEngine {
 
     fn named_engines(&self) -> Vec<(String, EngineConfig)> {
         self.named_engines.clone()
+    }
+
+    fn favorite_models(&self) -> Vec<(String, Vec<String>)> {
+        self.favorite_models.clone()
+    }
+
+    fn ensure_model_allowed(&self, model_id: &str) -> anyhow::Result<()> {
+        match &self.model_policy {
+            Some(policy) => policy.ensure_allowed("stub", model_id),
+            None => Ok(()),
+        }
+    }
+
+    fn ensure_provider_model_allowed(
+        &self,
+        provider_connection: &str,
+        model_id: &str,
+    ) -> anyhow::Result<()> {
+        if provider_connection != "stub" {
+            anyhow::bail!("unknown provider connection '{provider_connection}'");
+        }
+        self.ensure_model_allowed(model_id)
     }
 }
 

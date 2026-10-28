@@ -757,6 +757,7 @@ fn cancelling_after_clone_creation_keeps_clone_visible_and_old_root_usable() {
                 exit_snapshot: Some(exit_snapshot.clone()),
                 unactivated_clones: notices.clone(),
                 startup_notice: None,
+                ..TuiRuntime::disabled()
             },
         );
         let (state, ()) = tokio::join!(run, controller);
@@ -878,6 +879,7 @@ fn assembled_session_picker_switches_resume_and_clone_and_exit_identity() {
                     exit_snapshot: Some(exit_snapshot.clone()),
                     unactivated_clones: Arc::default(),
                     startup_notice: None,
+                    ..TuiRuntime::disabled()
                 },
             );
             let (state, ()) = tokio::join!(run, controller);
@@ -985,6 +987,7 @@ fn queued_continuous_mouse_motion_is_drawn_as_one_frame() {
                     exit_snapshot: None,
                     unactivated_clones: Arc::new(std::sync::Mutex::new(Vec::new())),
                     startup_notice: None,
+                    ..TuiRuntime::disabled()
                 },
             )
             .await

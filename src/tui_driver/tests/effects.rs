@@ -843,6 +843,7 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
             catalog_context_length: None,
             selection_target: None,
             selection_preview_error: None,
+            favorite_rank: None,
         }],
         filter: "deep".to_string(),
         selected: 0,

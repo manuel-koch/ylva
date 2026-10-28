@@ -412,6 +412,14 @@ device-flow login, Ollama and OpenRouter by asking for the base URL and API
 key. It updates the profile's `config.toml` and `.env`; see
 [connect commands](./cli-options.md#connect-commands).
 
+A provider connection's `allowed_models` list (see
+[favorite and allowed models](./configuration.md#favorite-and-allowed-models))
+is enforced for every profile-built engine: initial, default, agent, named, raw
+and direct selections, subagents, utility requests and compaction. A disallowed
+selection is rejected before any model, reasoning, window, modality or active
+engine state changes, and a chat request with a disallowed (or, under a
+restriction, unbound) model fails before anything is sent.
+
 Named provider connections are constructed independently, so multiple
 connections can use the same implementation (for example, local Ollama and
 Ollama Cloud). The conversation footer shows the active named engine and model
@@ -419,8 +427,17 @@ when a profile engine name is available; direct unnamed engines show only the
 model. `/models` queries each connection once, reuses a successful result
 for 30 minutes within the run (failures are retried on the next `/models`),
 and lists configured named
-engine shortcuts before raw `provider_connection/model` catalog entries.
-Selecting a shortcut activates that exact engine's current Engine runtime settings,
+engine shortcuts before favorite models and the remaining raw
+`provider_connection/model` catalog entries. Favorite membership is an exact,
+case-sensitive provider-connection preference saved with Ctrl+F from the
+highlighted row in either the list or parameter popup; it does not switch the
+model or alter parameter drafts. Favorites not currently returned by discovery
+remain configured but are hidden. Groups are introduced by non-selectable
+`Engines`, `Favorites` and `Models` headers; favorites keep their configured
+order within each connection. Partial catalog outages retain available
+choices and add a notice naming failed connections; total outages continue to
+show available named-engine shortcuts. Selecting a shortcut activates that
+exact engine's current Engine runtime settings,
 even when another engine uses the same connection and model. A raw catalog
 entry keeps provider-based routing: it changes the active engine for its
 connection, or the deterministic representative engine for another connection.
