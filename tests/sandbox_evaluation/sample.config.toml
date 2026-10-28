@@ -8,6 +8,8 @@ rules = [
     { command = ["tr", "**"],     verdict = "auto_approved" },
     { command = ["echo", "**"],   verdict = "auto_approved" },
     { command = ["test", "**"],   verdict = "auto_approved" },
+    { command = ["uname"],        verdict = "auto_approved" },
+    { command = ["uname", "**"],  verdict = "auto_approved" },
 
     # printf has a grammar without options, so `only_arguments = []` matches only plain
     # forms; `printf -v var` (assigns shell state) is incomplete and never matches.
