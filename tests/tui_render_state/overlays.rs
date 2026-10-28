@@ -963,6 +963,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                 engine_name: None,
                 selection_target: None,
                 selection_preview_error: None,
+                favorite_rank: None,
             }],
             filter: String::new(),
             selected: 0,
@@ -1061,6 +1062,7 @@ fn model_picker_details_show_highlighted_compaction_effect() {
                     context_length,
                 }),
                 selection_preview_error: None,
+                favorite_rank: None,
             }
         };
     let mut state = TuiState {
@@ -1351,15 +1353,16 @@ fn model_picker_click_uses_rendered_row_geometry_without_switching() {
         state
             .layout
             .slash_overlay
-            .row_at(content_area.x, content_area.y + 1),
-        Some(1)
+            .row_at(content_area.x, content_area.y + 2),
+        Some(2),
+        "row indices count the `Models` header row before the first entry"
     );
     let effects = ylva::presenter::update(
         &mut state,
         TuiEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: content_area.x,
-            row: content_area.y + 1,
+            row: content_area.y + 2,
             modifiers: KeyModifiers::NONE,
         }),
         &empty_textarea_context(),
@@ -1451,7 +1454,8 @@ fn model_picker_click_uses_absolute_row_after_scrolling() {
         state
             .selected_model()
             .map(|choice| choice.selection.model.id.as_str()),
-        Some(format!("model-{first_visible_row}").as_str())
+        // One `Models` header row precedes the entries.
+        Some(format!("model-{}", first_visible_row - 1).as_str())
     );
     assert!(
         effects.is_empty(),
@@ -1536,7 +1540,9 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
         .and_then(|choice| choice.selection.model.id.strip_prefix("model-"))
         .and_then(|index| index.parse::<usize>().ok())
         .expect("selected model index");
-    let moves_inside_window = current_model_index - first_visible_row;
+    // One `Models` header row precedes the entries.
+    let first_visible_model = first_visible_row - 1;
+    let moves_inside_window = current_model_index - first_visible_model;
     for step in 1..=moves_inside_window {
         ylva::presenter::update(
             &mut state,
@@ -1595,7 +1601,7 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
             .selected_model()
             .and_then(|choice| choice.selection.model.id.strip_prefix("model-"))
             .and_then(|index| index.parse::<usize>().ok()),
-        Some(first_visible_row - 1)
+        Some(first_visible_model - 1)
     );
     assert_eq!(
         state.layout.slash_overlay.first_visible_row,
@@ -1695,6 +1701,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
                 engine_name: None,
                 selection_target: None,
                 selection_preview_error: None,
+                favorite_rank: None,
             }],
             filter: "no-such-model".to_string(),
             selected: 0,
@@ -1978,6 +1985,7 @@ fn long_model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state
             engine_name: (index == 0).then(|| "shortcut".to_string()),
             selection_target: None,
             selection_preview_error: None,
+            favorite_rank: None,
         })
         .collect()
 }
@@ -2090,9 +2098,10 @@ fn model_picker_click_on_details_row_selects_its_model_on_narrow_terminals() {
     };
     let (_rows, _terminal) = draw_app_state_rows(&mut state, 50, 30);
 
-    // Rows: shortcut identity, shortcut details, catalog identity, catalog details.
+    // Rows: `Engines` header, shortcut identity, shortcut details, `Models`
+    // header, catalog identity, catalog details.
     let content_area = state.layout.slash_overlay.content_area;
-    let details_row_of_second_model = content_area.y + 3;
+    let details_row_of_second_model = content_area.y + 5;
     let effects = ylva::presenter::update(
         &mut state,
         TuiEvent::Mouse(MouseEvent {

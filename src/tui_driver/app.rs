@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::event_loop::run_tui_with_title;
+use super::favorites::{FavoriteSaveOwner, FavoriteSaveSetup};
 use super::runtime::TuiRuntime;
 use super::terminal::{
     initialize_terminal, install_stop_signal_relay, set_terminal_title, TerminalTitleGuard,
@@ -46,6 +47,7 @@ pub struct TuiApp {
     explicit_prompt: Option<String>,
     display_metadata: TuiDisplayMetadata,
     exit_snapshot: Option<crate::app::SessionExitHandle>,
+    favorite_save_setup: FavoriteSaveSetup,
 }
 
 impl TuiApp {
@@ -62,12 +64,20 @@ impl TuiApp {
             explicit_prompt,
             display_metadata: TuiDisplayMetadata::default(),
             exit_snapshot: None,
+            favorite_save_setup: FavoriteSaveSetup::default(),
         }
     }
 
     /// Set the active profile and workspace paths shown by the TUI.
     pub fn with_display_metadata(mut self, display_metadata: TuiDisplayMetadata) -> Self {
         self.display_metadata = display_metadata;
+        self
+    }
+
+    /// Provide the favorite-persistence capability captured at startup from
+    /// the loaded profile document. Without it, saving favorites is disabled.
+    pub fn with_favorite_save_setup(mut self, favorite_save_setup: FavoriteSaveSetup) -> Self {
+        self.favorite_save_setup = favorite_save_setup;
         self
     }
 
@@ -102,6 +112,7 @@ impl App for TuiApp {
         });
 
         let unactivated_clones = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let favorite_shutdown_reports = Arc::new(std::sync::Mutex::new(Vec::new()));
         let result = run_tui_with_title(
             &mut terminal,
             agent,
@@ -117,6 +128,8 @@ impl App for TuiApp {
                 exit_snapshot: self.exit_snapshot,
                 unactivated_clones: unactivated_clones.clone(),
                 startup_notice: self.profile.config_warnings_notice(),
+                favorite_owner: FavoriteSaveOwner::from_setup(self.favorite_save_setup),
+                favorite_shutdown_reports: favorite_shutdown_reports.clone(),
             },
         )
         .await;
@@ -129,6 +142,13 @@ impl App for TuiApp {
             .iter()
         {
             eprintln!("Clone created but not activated: {clone_id}");
+        }
+        for report in favorite_shutdown_reports
+            .lock()
+            .expect("favorite report mutex")
+            .iter()
+        {
+            eprintln!("{report}");
         }
         match result {
             Ok((_, outcome)) => Ok(u8::from(outcome.exit_code())),

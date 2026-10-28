@@ -131,6 +131,43 @@ async fn engine_router_lists_all_providers_and_switches_the_active_engine() {
     assert_eq!(router.config().model, "hosted");
 }
 
+#[tokio::test]
+async fn engine_router_preserves_successful_catalogs_and_reports_partial_failures() {
+    let healthy: Arc<dyn Engine> = Arc::new(CatalogEngine::new("healthy", "model", &["available"]));
+    let failed: Arc<dyn Engine> = Arc::new(CatalogEngine::failing("failed", "offline"));
+    let router = EngineRouter::new(
+        HashMap::from([
+            ("healthy-engine".to_string(), healthy),
+            ("failed-engine".to_string(), failed),
+        ]),
+        "healthy-engine",
+    )
+    .expect("router construction");
+
+    let (options, failures) = router
+        .list_model_options_with_failures()
+        .await
+        .expect("at least one provider should succeed");
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].model.id, "available");
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].contains("failed"));
+    assert!(failures[0].contains("offline"));
+
+    let complete_error = EngineRouter::new(
+        HashMap::from([(
+            "failed-engine".to_string(),
+            Arc::new(CatalogEngine::failing("failed", "offline")) as Arc<dyn Engine>,
+        )]),
+        "failed-engine",
+    )
+    .expect("router construction")
+    .list_model_options_with_failures()
+    .await
+    .expect_err("total outage remains an error");
+    assert!(complete_error.to_string().contains("offline"));
+}
+
 #[test]
 fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection() {
     let engine_a = CatalogEngine::new("ollama", "shared", &[]);
@@ -305,6 +342,55 @@ fn named_engine_selection_rejects_invalid_targets_without_switching() {
 }
 
 #[tokio::test]
+async fn router_catalog_filters_each_connection_by_its_own_policy_and_keeps_metadata() {
+    let mut allowed_a =
+        model_info_with_reasoning_efforts("team/a-good", Some(vec!["low".to_string()]));
+    allowed_a.context_length = Some(128_000);
+    allowed_a.input_modalities = Some(vec![InputModality::Image]);
+    let denied_a = model_info_with_reasoning_efforts("other/a-denied", None);
+    let allowed_b =
+        model_info_with_reasoning_efforts("team/b-good", Some(vec!["high".to_string()]));
+    let provider_a = Arc::new(CatalogProvider::new(vec![denied_a, allowed_a]));
+    let provider_b = Arc::new(CatalogProvider::new(vec![allowed_b]));
+    let mut config_a = make_engine_config();
+    config_a.provider_connection = "conn-a".to_string();
+    let mut config_b = make_engine_config();
+    config_b.provider_connection = "conn-b".to_string();
+    let engine_a: Arc<dyn Engine> =
+        Arc::new(EngineImpl::new(provider_a, config_a).with_model_policy(
+            crate::config::ModelPolicy::compile(Some(&["team/*".to_string()])).expect("policy"),
+        ));
+    let engine_b: Arc<dyn Engine> =
+        Arc::new(EngineImpl::new(provider_b, config_b).with_model_policy(
+            crate::config::ModelPolicy::compile(Some(&["team/b-*".to_string()])).expect("policy"),
+        ));
+    let router = EngineRouter::new(
+        HashMap::from([("a".to_string(), engine_a), ("b".to_string(), engine_b)]),
+        "a",
+    )
+    .expect("router");
+
+    let options = router.list_model_options().await.expect("filtered catalog");
+
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| format!("{}/{}", option.provider_connection, option.model.id))
+            .collect::<Vec<_>>(),
+        ["conn-a/team/a-good", "conn-b/team/b-good"]
+    );
+    assert_eq!(options[0].model.context_length, Some(128_000));
+    assert_eq!(
+        options[0].model.input_modalities,
+        Some(vec![InputModality::Image])
+    );
+    assert_eq!(
+        options[1].model.reasoning_efforts.as_deref(),
+        Some(["high".to_string()].as_slice())
+    );
+}
+
+#[tokio::test]
 async fn engine_router_lists_each_named_provider_connection_once() {
     let local_default: Arc<dyn Engine> =
         Arc::new(CatalogEngine::new("ollama-local", "local", &["local"]));
@@ -433,4 +519,132 @@ async fn engine_router_does_not_cache_a_failed_catalog() {
         .expect_err("second failure");
 
     assert_eq!(engine.model_list_calls.load(Ordering::SeqCst), 2);
+}
+
+// ── allowed-model policy across routed connections ────────────────────────
+
+fn policy_engine(connection: &str, model: &str, patterns: &[&str]) -> Arc<dyn Engine> {
+    let patterns: Vec<String> = patterns.iter().map(ToString::to_string).collect();
+    let mut config = make_engine_config();
+    config.provider_connection = connection.to_string();
+    config.model = model.to_string();
+    Arc::new(
+        EngineImpl::new(Arc::new(CatalogProvider::new(vec![])), config)
+            .with_model_policy(crate::config::ModelPolicy::compile(Some(&patterns)).expect("ok")),
+    )
+}
+
+fn option_on(connection: &str, model: &str) -> ProviderModelOption {
+    ProviderModelOption {
+        context_length_override: None,
+        provider_connection: connection.to_string(),
+        model: model_info_with_reasoning_efforts(model, None),
+        reasoning_effort: None,
+    }
+}
+
+#[test]
+fn router_rejects_disallowed_selection_and_preview_without_changing_the_active_engine() {
+    let router = EngineRouter::new(
+        HashMap::from([
+            ("a".to_string(), policy_engine("conn-a", "a-1", &["a-*"])),
+            ("b".to_string(), policy_engine("conn-b", "b-1", &["b-*"])),
+        ]),
+        "a",
+    )
+    .expect("router");
+
+    let option = option_on("conn-b", "a-1");
+    assert!(router.switch_model_option(&option).is_err());
+    assert!(router
+        .preview_model_selection(&ModelSelection::ProviderModel(option.clone()))
+        .is_err());
+    assert!(router
+        .select_model(&ModelSelection::ProviderModel(option))
+        .is_err());
+    assert_eq!(router.active_engine_name().as_deref(), Some("a"));
+    assert_eq!(router.config().model, "a-1");
+
+    router
+        .switch_model_option(&option_on("conn-b", "b-9"))
+        .expect("allowed on its own connection");
+    assert_eq!(router.active_engine_name().as_deref(), Some("b"));
+}
+
+#[test]
+fn router_checks_each_connections_policy_independently() {
+    let router = EngineRouter::new(
+        HashMap::from([
+            ("a".to_string(), policy_engine("conn-a", "a-1", &["a-*"])),
+            ("b".to_string(), policy_engine("conn-b", "b-1", &["b-*"])),
+        ]),
+        "a",
+    )
+    .expect("router");
+
+    assert!(router
+        .ensure_provider_model_allowed("conn-b", "b-2")
+        .is_ok());
+    assert!(router
+        .ensure_provider_model_allowed("conn-b", "a-2")
+        .is_err());
+    assert!(router
+        .ensure_provider_model_allowed("missing", "x")
+        .is_err());
+}
+
+#[tokio::test]
+async fn router_chat_fails_before_dispatch_for_a_disallowed_active_model() {
+    let router = EngineRouter::new(
+        HashMap::from([("a".to_string(), policy_engine("conn-a", "other", &["a-*"]))]),
+        "a",
+    )
+    .expect("router");
+
+    assert!(router
+        .chat(vec![], vec![], CancellationToken::new())
+        .await
+        .is_err());
+    assert!(router
+        .chat_with_session_id(vec![], vec![], CancellationToken::new(), None)
+        .await
+        .is_err());
+    assert!(router
+        .chat_with_session_id_and_estimate(
+            vec![],
+            vec![],
+            CancellationToken::new(),
+            None,
+            Box::new(|_, _| Box::pin(async {})),
+        )
+        .await
+        .is_err());
+    assert!(router
+        .chat_with_session_id_and_diagnostics(
+            vec![],
+            vec![],
+            CancellationToken::new(),
+            None,
+            Box::new(|_, _| Box::pin(async {})),
+            None,
+        )
+        .await
+        .is_err());
+}
+
+#[test]
+fn named_engine_selection_rechecks_policy() {
+    let router = EngineRouter::new(
+        HashMap::from([("a".to_string(), policy_engine("conn-a", "a-1", &["a-*"]))]),
+        "a",
+    )
+    .expect("router");
+    let selection = ModelSelection::NamedEngine {
+        engine_name: "a".to_string(),
+        option: option_on("conn-a", "a-1"),
+        reasoning_effort: ReasoningEffortChange::Unchanged,
+    };
+
+    assert!(router.preview_model_selection(&selection).is_ok());
+    assert!(router.select_model(&selection).is_ok());
 }

@@ -27,6 +27,7 @@ mod session;
 use std::io::IsTerminal;
 use std::sync::Arc;
 
+use crate::tui_driver::FavoriteSaveSetup;
 use crate::{AgentFactory, App, Cli, CliColorMode, ConsoleApp, TuiApp, DEFAULT_TUI_TOOLS};
 use engines::{apply_provider_env_to_profile, engines_from_environment, load_provider_env};
 use profile::{
@@ -205,7 +206,7 @@ pub fn run(
         explicit_profile_name,
         profile_workspace_root.as_deref(),
     )?;
-    let mut profile = load_profile(
+    let (mut profile, favorite_writer) = load_profile(
         explicit_profile_name,
         &profile_environment,
         profile_workspace_root.as_deref(),
@@ -349,6 +350,7 @@ pub fn run(
             // piped stdin) still auto-sends, but the hardcoded demo prompt is only
             // for the headless path — it must not pre-populate the interactive UI.
             let explicit_prompt = explicit_prompt(prompt_from_flag.clone());
+            let favorite_save_setup = FavoriteSaveSetup::from_profile(favorite_writer, &profile);
             TuiApp::new(
                 factory,
                 profile,
@@ -356,6 +358,7 @@ pub fn run(
                 explicit_prompt,
             )
             .with_exit_snapshot(Arc::clone(&session_hint))
+            .with_favorite_save_setup(favorite_save_setup)
             .with_display_metadata(crate::TuiDisplayMetadata {
                 profile_name: selected_profile_name.clone(),
                 profile_path: profile_path.clone(),

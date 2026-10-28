@@ -367,6 +367,74 @@ async fn interrupted_model_list_discovery_resumes_after_the_pause() {
     assert_eq!(filter, "deep");
     assert_eq!(choices.len(), 2);
 
+    let partial = ModelListResult::PartialFailure {
+        models: vec![crate::llm::ProviderModelOption {
+            context_length_override: None,
+            provider_connection: "healthy".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "available".to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
+            },
+            reasoning_effort: None,
+        }],
+        failures: vec!["offline: unavailable".to_string()],
+    };
+    apply_model_list_result(&mut state, None, partial, &engine);
+    assert!(matches!(
+        state.slash_overlay,
+        SlashOverlay::ModelPicker { .. }
+    ));
+    assert!(state.chat_entries.iter().any(|entry| matches!(
+        entry,
+        crate::tui_reducer_state::ChatEntry::Notice { text }
+            if text.contains("Some provider connections could not list models")
+                && text.contains("offline: unavailable")
+                && text.contains("Available catalog choices are retained.")
+    )));
+
+    let no_models_but_engine = ModelListResult::PartialFailure {
+        models: Vec::new(),
+        failures: vec!["offline: unavailable".to_string()],
+    };
+    let configured_engine: Arc<dyn Engine> = StubEngine::with_named_engine(
+        &[],
+        "configured-model",
+        "configured",
+        "configured-model",
+        &[],
+        None,
+        None,
+        None,
+    );
+    apply_model_list_result(&mut state, None, no_models_but_engine, &configured_engine);
+    assert!(matches!(
+        state.slash_overlay,
+        SlashOverlay::ModelPicker { .. }
+    ));
+    assert!(state.chat_entries.iter().any(|entry| matches!(
+        entry,
+        crate::tui_reducer_state::ChatEntry::Notice { text }
+            if text.contains("Some provider connections could not list models")
+                && text.contains("Only configured engines are listed.")
+    )));
+
+    let no_models_without_engine = ModelListResult::PartialFailure {
+        models: Vec::new(),
+        failures: vec!["offline: unavailable".to_string()],
+    };
+    let failing_engine: Arc<dyn Engine> = StubEngine::with_models(&[], "");
+    apply_model_list_result(&mut state, None, no_models_without_engine, &failing_engine);
+    assert!(matches!(state.slash_overlay, SlashOverlay::Hidden));
+    assert!(state.chat_entries.iter().any(|entry| matches!(
+        entry,
+        crate::tui_reducer_state::ChatEntry::Notice { text }
+            if text.contains("Some provider connections could not list models")
+                && text.contains("No selectable models are available.")
+    )));
+
     // While the original request is still in flight, its result will be
     // applied on arrival — the helper must not start a second one.
     state.slash_overlay = SlashOverlay::LoadingModels;
@@ -855,6 +923,7 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
             engine_name: None,
             selection_target: None,
             selection_preview_error: None,
+            favorite_rank: None,
         }],
         filter: String::new(),
         selected: 0,
@@ -949,6 +1018,7 @@ async fn model_picker_parameter_popup_esc_returns_to_the_list_and_discards_the_d
             engine_name: None,
             selection_target: None,
             selection_preview_error: None,
+            favorite_rank: None,
         }],
         filter: String::new(),
         selected: 0,
@@ -1214,4 +1284,170 @@ async fn escape_dismisses_the_model_picker_without_switching() {
         .lock()
         .expect("stub switch lock")
         .is_empty());
+}
+
+fn restricted_stub_with_favorites(
+    model_ids: &[&str],
+    engine_model: &str,
+    patterns: &[&str],
+    favorites: &[&str],
+) -> Arc<StubEngine> {
+    let base = StubEngine::with_named_engine(
+        model_ids,
+        engine_model,
+        "shortcut",
+        engine_model,
+        &[],
+        None,
+        None,
+        None,
+    );
+    let base = Arc::try_unwrap(base).unwrap_or_else(|_| panic!("the stub engine is unshared"));
+    let patterns: Vec<String> = patterns.iter().map(|pattern| pattern.to_string()).collect();
+    Arc::new(StubEngine {
+        favorite_models: vec![(
+            "stub".to_string(),
+            favorites.iter().map(|id| id.to_string()).collect(),
+        )],
+        model_policy: Some(
+            crate::config::ModelPolicy::compile(Some(&patterns)).expect("valid patterns"),
+        ),
+        ..base
+    })
+}
+
+fn picker_rows(state: &AppState) -> Vec<(Option<String>, String, bool)> {
+    let SlashOverlay::ModelPicker {
+        choices, filter, ..
+    } = &state.slash_overlay
+    else {
+        panic!("expected a model picker, got {:?}", state.slash_overlay);
+    };
+    crate::tui_reducer_state::matching_model_indices(choices, filter)
+        .into_iter()
+        .map(|index| {
+            let choice = &choices[index];
+            (
+                choice.engine_name.clone(),
+                choice.selection.model.id.clone(),
+                choice.is_favorite(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn picker_orders_engines_then_favorites_in_configured_order_then_the_rest() {
+    let engine: Arc<dyn Engine> = restricted_stub_with_favorites(
+        &["alpha", "bravo", "charlie", "delta"],
+        "alpha",
+        &["*"],
+        &["delta", "missing", "bravo", "delta", "charlie"],
+    );
+    let mut state = AppState::new();
+    let models = ModelListResult::Models(
+        ["alpha", "bravo", "charlie", "delta"]
+            .iter()
+            .map(|id| crate::llm::ProviderModelOption {
+                context_length_override: None,
+                provider_connection: "stub".to_string(),
+                model: crate::llm::ModelInfo {
+                    id: id.to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            })
+            .collect(),
+    );
+
+    apply_model_list_result(&mut state, None, models, &engine);
+
+    let rows = picker_rows(&state);
+    assert_eq!(
+        rows.iter()
+            .map(|(engine_name, id, favorite)| (engine_name.is_some(), id.as_str(), *favorite))
+            .collect::<Vec<_>>(),
+        vec![
+            (true, "alpha", false),
+            (false, "delta", true),
+            (false, "bravo", true),
+            (false, "charlie", true),
+            (false, "alpha", false),
+        ],
+        "named engine, favorites in array order (duplicates and absent IDs dropped), rest"
+    );
+}
+
+#[test]
+fn shortcuts_stay_selectable_when_the_catalog_is_unavailable_or_empty() {
+    let engine: Arc<dyn Engine> =
+        restricted_stub_with_favorites(&[], "openai/gpt-6-luna", &["openai/*"], &[]);
+    for result in [
+        ModelListResult::Timeout,
+        ModelListResult::ProviderError(anyhow::anyhow!("offline")),
+        ModelListResult::Models(Vec::new()),
+    ] {
+        let mut state = AppState::new();
+        apply_model_list_result(&mut state, None, result, &engine);
+        assert_eq!(
+            picker_rows(&state),
+            vec![(
+                Some("shortcut".to_string()),
+                "openai/gpt-6-luna".to_string(),
+                false
+            )]
+        );
+    }
+}
+
+#[test]
+fn disallowed_shortcuts_are_not_listed_and_outcomes_stay_distinguishable() {
+    let engine: Arc<dyn Engine> =
+        restricted_stub_with_favorites(&[], "legacy/model", &["openai/*"], &[]);
+
+    let mut outage_state = AppState::new();
+    apply_model_list_result(&mut outage_state, None, ModelListResult::Timeout, &engine);
+    assert!(matches!(outage_state.slash_overlay, SlashOverlay::Hidden));
+    assert!(outage_state.chat_entries.iter().any(|entry| matches!(
+        entry,
+        crate::tui_reducer_state::ChatEntry::Notice { text }
+            if text.contains("did not answer")
+    )));
+
+    let mut empty_state = AppState::new();
+    apply_model_list_result(
+        &mut empty_state,
+        None,
+        ModelListResult::Models(Vec::new()),
+        &engine,
+    );
+    assert!(matches!(empty_state.slash_overlay, SlashOverlay::Hidden));
+    assert!(empty_state.chat_entries.iter().any(|entry| matches!(
+        entry,
+        crate::tui_reducer_state::ChatEntry::Notice { text }
+            if text.contains("No eligible models")
+    )));
+}
+
+#[test]
+fn a_filter_matching_nothing_keeps_the_picker_open_with_favorites_intact() {
+    let engine: Arc<dyn Engine> =
+        restricted_stub_with_favorites(&[], "openai/gpt-6-luna", &["openai/*"], &[]);
+    let mut state = AppState::new();
+
+    apply_model_list_result(
+        &mut state,
+        Some("zzz".to_string()),
+        ModelListResult::Timeout,
+        &engine,
+    );
+
+    let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+        panic!("expected an open picker");
+    };
+    assert_eq!(choices.len(), 1);
+    assert!(picker_rows(&state).is_empty());
 }

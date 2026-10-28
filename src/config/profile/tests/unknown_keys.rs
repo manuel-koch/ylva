@@ -176,3 +176,35 @@ provider = "ollma"
     let error = load(temporary.path(), "typo").expect_err("typo in provider kind fails");
     assert!(error.to_string().contains("ollma"), "{error}");
 }
+
+#[test]
+fn favorite_and_allowed_model_keys_are_known_and_typos_get_hints() {
+    let temporary = tempfile::tempdir().unwrap();
+    write_profile_config(
+        temporary.path(),
+        "preferences",
+        r#"
+[provider_connections.local]
+provider = "ollama"
+favorite_models = ["a"]
+allowed_models = ["a"]
+favorite_model = ["b"]
+alowed_models = ["b"]
+"#,
+    );
+
+    let profile = load(temporary.path(), "preferences").expect("loads");
+    let rendered: Vec<String> = profile
+        .config_warnings
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
+    assert_eq!(rendered.len(), 2, "{rendered:?}");
+    assert!(rendered
+        .iter()
+        .any(|line| line.contains("favorite_model`") && line.contains("`favorite_models`")));
+    assert!(rendered
+        .iter()
+        .any(|line| line.contains("alowed_models") && line.contains("`allowed_models`")));
+}

@@ -32,6 +32,7 @@ use crate::tui_render_state::TuiState;
 mod app;
 mod effects;
 mod event_loop;
+mod favorites;
 mod frame;
 mod input;
 mod models;
@@ -44,6 +45,7 @@ mod updates;
 
 pub use app::TuiApp;
 use event_loop::run_tui_with_title;
+pub use favorites::FavoriteSaveSetup;
 use runtime::TuiRuntime;
 
 pub use terminal::{ArboardClipboard, ClipboardSink, NoopClipboard};

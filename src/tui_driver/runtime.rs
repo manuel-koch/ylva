@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use super::favorites::FavoriteSaveOwner;
 use super::title::TitleDriver;
 use crate::config::ProfileConfig;
 use crate::session_title::SessionTitleUpdate;
@@ -32,6 +33,12 @@ pub(super) struct TuiRuntime {
     pub(super) unactivated_clones: Arc<std::sync::Mutex<Vec<uuid::Uuid>>>,
     /// Shown once as a conversation notice when the TUI starts.
     pub(super) startup_notice: Option<String>,
+    /// Favorite-model persistence; lives for the whole TUI run, outside every
+    /// resettable conversation state.
+    pub(super) favorite_owner: FavoriteSaveOwner,
+    /// Outcome of a favorite save that finished during shutdown, printed by
+    /// the app after the terminal is restored.
+    pub(super) favorite_shutdown_reports: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl TuiRuntime {
@@ -45,6 +52,8 @@ impl TuiRuntime {
             exit_snapshot: None,
             unactivated_clones: Arc::default(),
             startup_notice: None,
+            favorite_owner: FavoriteSaveOwner::default(),
+            favorite_shutdown_reports: Arc::default(),
         }
     }
 }

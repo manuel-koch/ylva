@@ -16,6 +16,7 @@
 
 use super::{Engine, EngineConfig, EngineRuntimeConfig, EngineRuntimeConfigHandle};
 use crate::agent::{Message, StreamEvent};
+use crate::config::ModelPolicy;
 use crate::llm::{InputModality, ModelInfo, Provider, ToolSchema};
 use futures::future::BoxFuture;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +41,13 @@ pub struct EngineImpl {
     /// can surface them as transcript notices without the engine knowing
     /// anything about the UI.
     pending_notices: Mutex<Vec<String>>,
+    /// Immutable allowed-model restriction of this engine's provider
+    /// connection. Unrestricted unless set by [`EngineImpl::with_model_policy`].
+    model_policy: ModelPolicy,
+    /// Exact favorite model IDs of this engine's provider connection in
+    /// configured order. Display data for the model picker only; it never
+    /// restricts selection. Updated when a favorite save completes.
+    favorite_models: RwLock<Vec<String>>,
 }
 
 impl EngineImpl {
@@ -57,7 +65,28 @@ impl EngineImpl {
             runtime_config,
             catalog_hydrated: AtomicBool::new(false),
             pending_notices: Mutex::new(Vec::new()),
+            model_policy: ModelPolicy::unrestricted(),
+            favorite_models: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Seed the favorite model IDs of this engine's provider connection, in
+    /// configured order.
+    pub fn with_favorite_models(self, favorite_models: Vec<String>) -> Self {
+        *self
+            .favorite_models
+            .write()
+            .expect("the favorite models lock is poisoned") = favorite_models;
+        self
+    }
+
+    /// Restrict the models this engine may select or send chat requests to.
+    ///
+    /// The configured model must already satisfy the policy; the caller
+    /// validates it so construction fails before any request.
+    pub fn with_model_policy(mut self, model_policy: ModelPolicy) -> Self {
+        self.model_policy = model_policy;
+        self
     }
 
     /// Validate the current (profile-seeded) reasoning effort against the
@@ -120,7 +149,58 @@ impl EngineImpl {
     }
 }
 
+impl EngineImpl {
+    fn configured_favorite_models(&self) -> Vec<String> {
+        self.favorite_models
+            .read()
+            .expect("the favorite models lock is poisoned")
+            .clone()
+    }
+}
+
 impl Engine for EngineImpl {
+    fn favorite_models(&self) -> Vec<(String, Vec<String>)> {
+        let favorite_models = self.configured_favorite_models();
+        if favorite_models.is_empty() {
+            return Vec::new();
+        }
+        vec![(self.config.provider_connection.clone(), favorite_models)]
+    }
+
+    fn record_favorite_membership(
+        &self,
+        provider_connection: &str,
+        model_id: &str,
+        favorite: bool,
+    ) {
+        if provider_connection != self.config.provider_connection {
+            return;
+        }
+        let mut favorite_models = self
+            .favorite_models
+            .write()
+            .expect("the favorite models lock is poisoned");
+        if favorite {
+            if !favorite_models.iter().any(|existing| existing == model_id) {
+                favorite_models.push(model_id.to_string());
+            }
+        } else {
+            favorite_models.retain(|existing| existing != model_id);
+        }
+    }
+
+    fn ensure_model_allowed(&self, model_id: &str) -> anyhow::Result<()> {
+        if model_id.is_empty() && self.model_policy != ModelPolicy::unrestricted() {
+            anyhow::bail!(
+                "no model is selected for provider connection '{}'; choose one with {}",
+                self.config.provider_connection,
+                crate::slash_command::MODELS_COMMAND_NAME
+            );
+        }
+        self.model_policy
+            .ensure_allowed(&self.config.provider_connection, model_id)
+    }
+
     fn switch_model_option(&self, option: &super::ProviderModelOption) -> anyhow::Result<()> {
         super::apply_model_option(self, option)?;
         self.catalog_hydrated.store(true, Ordering::Release);
@@ -130,7 +210,11 @@ impl Engine for EngineImpl {
     fn configured_copy(&self) -> anyhow::Result<Arc<dyn Engine>> {
         let runtime_config = Arc::new(RwLock::new(EngineRuntimeConfig::from(&self.config)));
         let provider = self.provider.with_runtime_config(runtime_config)?;
-        Ok(Arc::new(Self::new(provider, self.config.clone())))
+        Ok(Arc::new(
+            Self::new(provider, self.config.clone())
+                .with_model_policy(self.model_policy.clone())
+                .with_favorite_models(self.configured_favorite_models()),
+        ))
     }
 
     fn context_length_for_model(
@@ -149,6 +233,7 @@ impl Engine for EngineImpl {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
+            self.ensure_active_model_allowed()?;
             self.hydrate_catalog_metadata().await;
             self.provider.chat(messages, tools, cancel).await
         })
@@ -162,6 +247,7 @@ impl Engine for EngineImpl {
         session_id: Option<uuid::Uuid>,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
+            self.ensure_active_model_allowed()?;
             self.hydrate_catalog_metadata().await;
             self.provider
                 .chat_with_session_id(messages, tools, cancel, session_id)
@@ -178,6 +264,7 @@ impl Engine for EngineImpl {
         on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
+            self.ensure_active_model_allowed()?;
             self.hydrate_catalog_metadata().await;
             self.provider
                 .chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
@@ -195,6 +282,7 @@ impl Engine for EngineImpl {
         on_failure: Option<crate::http::RequestDumpFailureHandler>,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
+            self.ensure_active_model_allowed()?;
             self.hydrate_catalog_metadata().await;
             self.provider
                 .chat_with_session_id_and_diagnostics(
@@ -236,6 +324,7 @@ impl Engine for EngineImpl {
     }
 
     fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        self.ensure_model_allowed(model)?;
         let model_changed = self.config().model != model;
         self.provider.set_model(model)?;
         let mut runtime_config = self

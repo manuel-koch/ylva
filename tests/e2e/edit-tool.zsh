@@ -38,6 +38,7 @@ __POEM__
     ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
             --log-level DEBUG --log-format ${LOG_FORMAT} \
+            --strict-config \
             --auto-approve-edit \
             | tee ${OUT_PATH}
 }

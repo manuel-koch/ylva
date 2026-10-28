@@ -509,7 +509,25 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
 /// parameter popup, and typing falls through to the draft so it narrows the
 /// list. The popup owns every key, so the filter cannot change under it.
 /// Returns `None` when the key is left to the normal draft handling.
-fn handle_model_picker_key(state: &mut AppState, code: KeyCode) -> Option<Vec<Effect>> {
+fn handle_model_picker_key(
+    state: &mut AppState,
+    key_event: crossterm::event::KeyEvent,
+) -> Option<Vec<Effect>> {
+    if key_event.modifiers == KeyModifiers::CONTROL && key_event.code == KeyCode::Char('f') {
+        return Some(
+            state
+                .highlighted_model_identity()
+                .map(|(provider_connection, model_id, is_favorite)| {
+                    vec![Effect::SetFavoriteModel {
+                        provider_connection,
+                        model_id,
+                        favorite: !is_favorite,
+                    }]
+                })
+                .unwrap_or_default(),
+        );
+    }
+    let code = key_event.code;
     let parameters_open = matches!(
         state.slash_overlay,
         SlashOverlay::ModelPicker {
@@ -609,7 +627,7 @@ fn handle_key_main(
     // confirmation while it is open; every other key (including plain
     // typing) falls through to the normal input handling.
     if matches!(state.slash_overlay, SlashOverlay::ModelPicker { .. }) {
-        if let Some(effects) = handle_model_picker_key(state, key_event.code) {
+        if let Some(effects) = handle_model_picker_key(state, key_event) {
             return effects;
         }
     }

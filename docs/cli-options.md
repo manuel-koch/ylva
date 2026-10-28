@@ -415,6 +415,21 @@ stays out of version control. Secrets are never printed.
   `.env` already defines its variable. `--force` replaces the connection and
   overwrites its variables, e.g. to refresh an expired Copilot token with
   `ylva connect copilot --force`.
+- `--force` keeps the replaced connection's `favorite_models` and `allowed_models`
+  (see [Favorite and allowed models](./configuration.md#favorite-and-allowed-models))
+  when its `provider` is the same kind as the one being connected: both keys
+  are retained verbatim from the raw `config.toml`, including order, comments,
+  formatting and `${...}` references; only the keys connect writes
+  (`provider`, `api_base_url`, `api_key`) are replaced. The command is
+  rejected, before any prompt or login and without changing `config.toml` or
+  `.env`, when
+  - the existing connection has another provider kind and carries either
+    list: the restrictions cannot be carried over, so remove or move them
+    first (or pick another `--name`); an allowlist is never dropped silently;
+  - a retained list is not an array of strings, `allowed_models` is empty or
+    has a malformed pattern, or a retained favorite is not permitted by the
+    retained `allowed_models`. Entries containing `${...}` cannot be checked
+    because their value depends on the runtime environment.
 
 ## Resuming a session
 

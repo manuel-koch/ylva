@@ -33,6 +33,7 @@ function ylva() {
             --log-file ${LOG_PATH} \
             --log-level DEBUG --log-format ${LOG_FORMAT} \
             --auto-approve-web-fetch \
+            --strict-config \
             | tee ${OUT_PATH}
 }
 

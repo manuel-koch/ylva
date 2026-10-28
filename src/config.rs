@@ -23,6 +23,7 @@ use crate::ylva_home::{ylva_home, YLVA_DIR_NAME};
 mod agent;
 pub mod agent_type_file;
 pub mod compaction_prompt;
+mod favorite_models;
 pub mod instructions;
 pub mod layered;
 mod profile;
@@ -35,11 +36,16 @@ pub(crate) mod workspace_trust;
 
 pub use agent::AgentConfig;
 pub use agent_type_file::AgentTypeDefinition;
+pub use favorite_models::{
+    FavoriteModelsWriter, FavoriteSaveError, FavoriteSaveOutcome, FavoriteSourceLayer,
+};
 pub use profile::{
     is_valid_profile_name, profile_config_source_path, AgentCompactionConfig, CompactionConfig,
     ProfileConfig, ToolSandboxConfig, MAX_PROFILE_NAME_LENGTH,
 };
-pub use provider::{ProviderConfig, ProviderConnectionConfig, ProviderKind};
+pub use provider::{
+    ModelPolicy, ModelPolicyError, ProviderConfig, ProviderConnectionConfig, ProviderKind,
+};
 pub(crate) use unknown_keys::deserialize_reporting_unknown_keys;
 pub use unknown_keys::ConfigWarning;
 pub use web_fetch::WebFetchConfig;
@@ -237,6 +243,16 @@ pub enum ConfigError {
     InvalidCompactionSetting {
         path: PathBuf,
         engine: String,
+        detail: String,
+    },
+    #[error(
+        "profile config at {} has invalid model preferences for provider connection \
+         '{connection}': {detail}",
+        display_path(path)
+    )]
+    InvalidProviderConnectionModels {
+        path: PathBuf,
+        connection: String,
         detail: String,
     },
     #[error("cannot resolve the home directory for ~/.ylva")]

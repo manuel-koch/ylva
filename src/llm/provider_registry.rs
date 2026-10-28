@@ -617,6 +617,8 @@ mod tests {
             provider: ProviderKind::Copilot,
             api_base_url: None,
             api_key: Some("ghu_token".to_string()),
+            favorite_models: Vec::new(),
+            allowed_models: None,
         };
         let engine_config = ProviderSelection::Mock.engine_config(Some("gpt-4o"));
         let selection =
@@ -633,6 +635,8 @@ mod tests {
                 provider: ProviderKind::Copilot,
                 api_base_url: None,
                 api_key,
+                favorite_models: Vec::new(),
+                allowed_models: None,
             };
             let engine_config = ProviderSelection::Mock.engine_config(Some("gpt-4o"));
             assert!(ProviderRegistry::provider_from_provider_config(
@@ -654,6 +658,8 @@ mod tests {
             provider: ProviderKind::Copilot,
             api_base_url: None,
             api_key: None,
+            favorite_models: Vec::new(),
+            allowed_models: None,
         };
         env.apply_missing_api_key_to_provider(&mut provider_config);
         assert_eq!(provider_config.api_key.as_deref(), Some("ghu_token"));
@@ -816,6 +822,8 @@ mod tests {
             provider: ProviderKind::Ollama,
             api_base_url: Some("http://localhost:11434".to_string()),
             api_key: None,
+            favorite_models: Vec::new(),
+            allowed_models: None,
         };
         let engine_config = EngineConfig {
             provider_connection: "ollama-local".to_string(),

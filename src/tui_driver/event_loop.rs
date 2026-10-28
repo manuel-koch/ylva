@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use super::effects::{execute_effects, execute_slash_effects, split_slash_effects, PendingRunIds};
+use super::favorites::{apply_favorite_completion, completion_notice, start_favorite_saves};
 use super::frame::draw_frame;
 use super::input::{app_action_to_tui_event, configure_textarea, scroll_input_at_mouse, MouseDrag};
 use super::models::{
@@ -71,6 +72,8 @@ where
         exit_snapshot,
         unactivated_clones,
         startup_notice,
+        mut favorite_owner,
+        favorite_shutdown_reports,
     } = tui_runtime;
     let mut exit_guard = agent.exit_guard(exit_snapshot);
     let mut state = AppState::new();
@@ -299,6 +302,12 @@ where
                 }
             }
 
+            favorite_completion = favorite_owner.next_completion() => {
+                // Applied whatever the popup or session currently shows: the
+                // owner and its membership outlive every AppState.
+                apply_favorite_completion(&mut state, &engine, &favorite_completion);
+            }
+
             model_list_result = wait_for_model_list(&mut pending_model_list) => {
                 let Some((filter, result)) = model_list_result else {
                     continue;
@@ -429,6 +438,11 @@ where
                             _ => {}
                         }
                     }
+                let (favorite_effects, immediate_slash_effects): (Vec<_>, Vec<_>) =
+                    immediate_slash_effects.into_iter().partition(|effect| {
+                        matches!(effect, Effect::SetFavoriteModel { .. })
+                    });
+                start_favorite_saves(&mut state, &mut favorite_owner, favorite_effects);
                 let clear_conversation_requested = immediate_slash_effects
                     .iter()
                     .any(|effect| matches!(effect, Effect::ClearConversation));
@@ -551,6 +565,16 @@ where
     }.await;
 
     abort_pending_model_list(&mut pending_model_list);
+    // A started favorite write is never cancelled: shutdown waits for it and
+    // reports its outcome.
+    if let Some(completion) = favorite_owner.finish().await {
+        apply_favorite_completion(&mut state, &engine, &completion);
+        let profile_name = state.display_metadata.profile_name.clone();
+        favorite_shutdown_reports
+            .lock()
+            .expect("favorite report mutex")
+            .push(completion_notice(&completion, &profile_name));
+    }
     // Updates drained during teardown are not recorded in the run outcome:
     // closing the agent cancels its streams, which is not a user interruption.
     {

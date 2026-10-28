@@ -32,7 +32,7 @@ use crate::theme::{
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, model_picker_row_is_details,
     model_picker_row_layout, slash_overlay_text_rows, visible_model_choices, BannerDragSelection,
-    PickerRowLayout, SlashOverlay, SlashOverlayLayout,
+    PickerRow, PickerRowLayout, SlashOverlay, SlashOverlayLayout,
 };
 
 use super::chat::{apply_selection_highlight_to_line, render_chat_scrollbar};
@@ -44,6 +44,8 @@ const SESSION_ACTION_BUTTON_GAP: &str = "  ";
 /// Indent of a `/models` details row, aligning it under the identity text
 /// (past the two-column selection marker).
 const MODEL_PICKER_DETAIL_INDENT: &str = "    ";
+/// Indent of a `/models` group header, aligning it with the selection marker.
+const MODEL_PICKER_HEADER_INDENT: &str = "  ";
 /// Panel columns a single-line `/models` label cannot use: both border
 /// columns, the scrollbar column and the two-column selection marker.
 const MODEL_PICKER_CHROME_WIDTH: usize = 5;
@@ -140,20 +142,19 @@ pub(super) fn draw_slash_overlay(
         return;
     }
 
-    // Map each rendered row to the entry it shows, or `None` for the
-    // divider row inserted between the engine-shortcut and provider/model
-    // sections.
-    let rows = match overlay {
+    // Map each rendered row to the entry it shows, or to the group header
+    // that precedes a group of model-picker entries.
+    let rows: Vec<PickerRow> = match overlay {
         SlashOverlay::ModelPicker {
             parameters: Some(_),
             ..
-        } => (0..entries.len()).map(Some).collect(),
+        } => (0..entries.len()).map(PickerRow::Entry).collect(),
         SlashOverlay::ModelPicker {
             choices, filter, ..
         } if !matching_model_indices(choices, filter).is_empty() => {
             model_picker_row_entries(choices, filter, row_layout)
         }
-        _ => (0..entries.len()).map(Some).collect(),
+        _ => (0..entries.len()).map(PickerRow::Entry).collect(),
     };
 
     // Cap the panel at two thirds of the space above the input so a provider
@@ -227,8 +228,12 @@ pub(super) fn draw_slash_overlay(
     // repositioning the popup unnecessarily.
     // A selected entry may span two rows; keep its whole span in view.
     let selected_span = selected.and_then(|selected| {
-        let first_row = rows.iter().position(|row| *row == Some(selected))?;
-        let last_row = rows.iter().rposition(|row| *row == Some(selected))?;
+        let first_row = rows
+            .iter()
+            .position(|row| *row == PickerRow::Entry(selected))?;
+        let last_row = rows
+            .iter()
+            .rposition(|row| *row == PickerRow::Entry(selected))?;
         Some((first_row, last_row))
     });
     let max_first_visible = rows.len().saturating_sub(content_height as usize);
@@ -249,15 +254,25 @@ pub(super) fn draw_slash_overlay(
         .enumerate()
         .skip(first_visible)
         .take(content_height as usize)
-        .map(|(row_index, entry_index)| {
-            let Some(_) = entry_index else {
-                return Line::styled(
-                    "─".repeat(content_width),
-                    Style::default().fg(muted_text_color()),
-                );
+        .map(|(row_index, row)| {
+            let entry_index = match row {
+                PickerRow::Header(_) => {
+                    // Group headers are presentation only: never highlighted.
+                    let header_text = truncate_with_ellipsis(
+                        &entries[row_index],
+                        content_width.saturating_sub(MODEL_PICKER_HEADER_INDENT.chars().count()),
+                    );
+                    return Line::styled(
+                        format!("{MODEL_PICKER_HEADER_INDENT}{header_text}"),
+                        Style::default()
+                            .fg(muted_text_color())
+                            .add_modifier(Modifier::BOLD),
+                    );
+                }
+                PickerRow::Entry(entry_index) => *entry_index,
             };
             let entry = &entries[row_index];
-            let is_selected = *entry_index == selected;
+            let is_selected = selected == Some(entry_index);
             let is_model_details_row = matches!(overlay, SlashOverlay::ModelPicker { .. })
                 && model_picker_row_is_details(&rows, row_index);
             let is_model_identity_row = matches!(overlay, SlashOverlay::ModelPicker { .. })
@@ -274,11 +289,9 @@ pub(super) fn draw_slash_overlay(
             );
             let is_active_model_row = list_is_shown
                 && !is_model_details_row
-                && entry_index.is_some_and(|entry| {
-                    visible_model_choices_in_overlay
-                        .get(entry)
-                        .is_some_and(|choice| choice.is_active)
-                });
+                && visible_model_choices_in_overlay
+                    .get(entry_index)
+                    .is_some_and(|choice| choice.is_active);
             let style = if is_selected {
                 Style::default()
                     .fg(list_selection_foreground_color())
