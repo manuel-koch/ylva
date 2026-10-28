@@ -726,15 +726,22 @@ pending approval —
 and the expanded bubble body leads with a `Label` section followed by a
 `Command` section in every state (then an `Output` section with the
 command output once completed — or `Partial output` when the output cap
-truncated the capture — and a `Partial output` section after them when
-the call fails with partial output). When those
-sections carry both arguments the expanded args line is hidden. An absent or blank `label` is omitted
-everywhere, and approval behavior does not depend on it. stdout
-and stderr are merged in true arrival order. Output is capped at 1000 whole
-output lines or 65536 bytes, whichever is hit first (`truncated` field
-present in result metadata when capped). Excess lines are discarded; a line
-that alone exceeds the remaining byte budget is kept as a UTF-8-safe prefix
-up to the byte cap so oversized first lines still yield non-empty output.
+truncated the capture). A non-zero exit fails the call with the one-line
+header `command exited with code N:` and the captured output as an `Output`
+section (`Partial output` when truncated); a timeout fails it with
+`command timed out after Ns` and any output captured before the kill, under
+the same section rules. Both headers are the only text shown when the bubble
+is collapsed; the output appears only when expanded, in the neutral content
+color rather than the error color. The LLM receives the header followed by
+`Output:` or `Output (truncated):` and the output. When those
+sections carry both arguments the expanded args line is hidden.
+An absent or blank `label` is omitted everywhere, and approval behavior
+does not depend on it. stdout and stderr are merged in true arrival order.
+Output is capped at 1000 whole output lines or 65536 bytes, whichever is
+hit first (`truncated` field present in result metadata when capped).
+Excess lines are discarded; a line that alone exceeds the remaining byte budget
+is kept as a UTF-8-safe prefix up to the byte cap so oversized first lines
+still yield non-empty output.
 Default timeout: 30 s. On timeout or cancellation the entire
 process (including any child processes it spawned) is killed. See
 [implementation notes](./implementation-notes.md#bash-tool-process-group-cleanup).

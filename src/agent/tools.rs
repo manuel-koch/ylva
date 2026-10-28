@@ -80,8 +80,11 @@ pub enum ToolError {
     Failed {
         name: String,
         message: String,
-        /// Output the tool produced before the error or timeout (if any).
-        partial_output: Option<String>,
+        /// Output the tool produced before failing (if any).
+        output: Option<String>,
+        /// `true` when `output` is incomplete: the capture hit its cap or
+        /// the process was killed before finishing.
+        is_output_truncated: bool,
     },
 }
 
@@ -90,30 +93,43 @@ impl ToolError {
         ToolError::Failed {
             name: name.into(),
             message: message.into(),
-            partial_output: None,
+            output: None,
+            is_output_truncated: false,
         }
     }
 
     pub fn failed_with_output(
         name: impl Into<String>,
         message: impl Into<String>,
-        partial_output: String,
+        output: String,
+        is_output_truncated: bool,
     ) -> Self {
         ToolError::Failed {
             name: name.into(),
             message: message.into(),
-            partial_output: if partial_output.is_empty() {
+            output: if output.is_empty() {
                 None
             } else {
-                Some(partial_output)
+                Some(output)
             },
+            is_output_truncated,
         }
     }
 
-    /// Returns the partial output carried by this error, if any.
-    pub fn partial_output(&self) -> Option<&str> {
+    /// Returns the output carried by this error, if any.
+    pub fn output(&self) -> Option<&str> {
         match self {
-            ToolError::Failed { partial_output, .. } => partial_output.as_deref(),
+            ToolError::Failed { output, .. } => output.as_deref(),
+        }
+    }
+
+    /// Whether [`ToolError::output`] is incomplete.
+    pub fn is_output_truncated(&self) -> bool {
+        match self {
+            ToolError::Failed {
+                is_output_truncated,
+                ..
+            } => *is_output_truncated,
         }
     }
 }

@@ -185,6 +185,18 @@ done
 
 Run `tests/e2e/heavy-output.bash`.
 
+Run `tests/e2e/long-running.bash`.
+
+Run the following command in bash:
+
+```shell
+date
+sleep 1
+uname -a
+sleep 1
+grep foo README.md
+```
+
 ---
 
 Use subagent to delegate discovering tool capabilities in

@@ -1,12 +1,8 @@
 # Backlog of issues discovered while testing
 
-- [x] Why was this `read` subject to user-approval-required ?
-      `~/.agents/skills/graphify/references/query.md`
-      Shouldn't have it been allowed by the read-rule `skill_sidecar` ?
-      See `/Users/manuelkoch/.ylva/profiles/default/config.toml`.
-      See logs at `tmp/tui_20261027221226.log`.
-      Ah, I guess it is because the dir has ".agents" which is matched by the
-      `dot_path` rule.
-      Would it be better to place the `skill_sidecar` rule last to avoid this
-      behaviour ?
-      Yes, that would allow the intended behavior.
+- [x] Exit code of non-zero on a bash tool run is not necessarily an error.
+      We should not render the whole output of the bash run in the collapsed
+      bash bubble in TUI. Rather just the first line that states the exitcode:
+      "Tool 'bash' failed: command exited with code 1:" and only show the output
+      when the bubble is expanded. And we should render the output in a neutral
+      color instead of red.

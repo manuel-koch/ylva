@@ -163,6 +163,7 @@ fn push_tool_result_and_error_append_messages() {
         "write".into(),
         "denied".into(),
         None,
+        false,
         std::time::Duration::ZERO,
         vec![],
     );

@@ -263,6 +263,7 @@ impl RunState {
                         name.clone(),
                         error.clone(),
                         None,
+                        false,
                         std::time::Duration::ZERO,
                         denied_content_sections.clone(),
                     );
@@ -356,6 +357,7 @@ impl RunState {
                         tools::clarify::ClarifyTool::NAME.to_string(),
                         error.clone(),
                         None,
+                        false,
                         std::time::Duration::ZERO,
                         vec![],
                     );
@@ -483,6 +485,7 @@ impl RunState {
                             name,
                             error.clone(),
                             None,
+                            false,
                             std::time::Duration::ZERO,
                             content_sections.clone(),
                         );
@@ -511,6 +514,7 @@ impl RunState {
                             name,
                             error,
                             None,
+                            false,
                             std::time::Duration::ZERO,
                             pending.call.pending_content_sections(),
                         );
@@ -539,6 +543,7 @@ impl RunState {
                             name,
                             error.clone(),
                             None,
+                            false,
                             std::time::Duration::ZERO,
                             content_sections.clone(),
                         );

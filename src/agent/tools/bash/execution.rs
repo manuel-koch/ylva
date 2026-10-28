@@ -106,16 +106,17 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
         // shown in the bubble and communicated to the LLM.
         stdout_reader_task.abort();
         stderr_reader_task.abort();
-        let (partial_output, _) = take_collected_output(&collector);
+        let (output, is_output_truncated) = take_collected_output(&collector);
         tracing::warn!(
             timeout_secs = effective_timeout_secs,
-            partial_bytes = partial_output.len(),
+            partial_bytes = output.len(),
             "bash command timed out; killing process group"
         );
         return Err(ToolError::failed_with_output(
             "bash",
             format!("command timed out after {effective_timeout_secs}s"),
-            partial_output,
+            output,
+            is_output_truncated,
         ));
     };
 
@@ -130,9 +131,12 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
 
     if !status.success() {
         let exit_code = status.code().unwrap_or(-1);
-        return Err(ToolError::failed(
+        // The one-line header is the error; the output is shown separately.
+        return Err(ToolError::failed_with_output(
             "bash",
-            format!("command exited with code {exit_code}:\n{output}"),
+            format!("command exited with code {exit_code}:"),
+            output,
+            truncated,
         ));
     }
 

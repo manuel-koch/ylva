@@ -580,6 +580,82 @@ fn tool_bubble_renders_execution_error_content_literally() {
 }
 
 #[test]
+fn bash_exit_error_collapsed_shows_header_only_and_expanded_output_is_neutral() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::agent::tools::{ContentSection, Section};
+    use crate::tui_reducer_state::ToolCallState;
+
+    let state = ToolCallState::Error {
+        error: "Tool 'bash' failed: command exited with code 1:".to_string(),
+        title_arguments: vec![],
+        duration: std::time::Duration::ZERO,
+        content_sections: vec![Section::Content(ContentSection {
+            label: Some("Output".to_string()),
+            content: "bash_output_marker".to_string(),
+            file_extension: None,
+            line_number_offset: None,
+        })],
+    };
+    let render = |collapsed: bool| {
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "bash",
+                state: &state,
+                collapsed,
+                spinner_frame: 0,
+                elapsed_seconds: None,
+                display_title_override: None,
+                subtype_argument: None,
+                path_like_arguments: &[],
+            },
+            &mut bubble_title_rows,
+            80,
+        );
+        lines
+    };
+    let text_of = |lines: &[Line<'static>]| -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+
+    let collapsed = render(true);
+    let collapsed_text = text_of(&collapsed);
+    assert!(
+        collapsed_text.contains("command exited with code 1:"),
+        "collapsed bubble must show the header, got: {collapsed_text:?}"
+    );
+    assert!(
+        !collapsed_text.contains("bash_output_marker"),
+        "collapsed bubble must hide the output, got: {collapsed_text:?}"
+    );
+
+    let expanded = render(false);
+    let expanded_text = text_of(&expanded);
+    assert!(
+        expanded_text.contains("bash_output_marker"),
+        "expanded bubble must show the output, got: {expanded_text:?}"
+    );
+    let output_in_error_color = expanded
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .any(|span| {
+            span.content.contains("bash_output_marker")
+                && span.style.fg == Some(crate::theme::error_color())
+        });
+    assert!(
+        !output_in_error_color,
+        "output must not be rendered in the error color"
+    );
+}
+
+#[test]
 fn failed_subagent_status_is_red_in_root_and_header_bubble_titles() {
     use super::{append_tool_bubble_lines, ToolBubbleArgs};
     use crate::theme::error_color;

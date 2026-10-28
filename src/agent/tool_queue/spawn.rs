@@ -89,6 +89,7 @@ pub(in crate::agent) async fn resolve_spawn_subagent(
                 name.clone(),
                 error.clone(),
                 None,
+                false,
                 std::time::Duration::ZERO,
                 content_sections.clone(),
             );

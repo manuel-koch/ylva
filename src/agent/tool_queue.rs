@@ -91,6 +91,7 @@ pub(super) async fn resolve_skipped_tool_call(
         name.clone(),
         reason.clone(),
         None,
+        false,
         std::time::Duration::ZERO,
         content_sections.clone(),
     );
@@ -440,6 +441,7 @@ pub(super) async fn advance_tool_queue(
                             name.clone(),
                             reason.clone(),
                             None,
+                            false,
                             std::time::Duration::ZERO,
                             content_sections.clone(),
                         );
@@ -604,6 +606,7 @@ pub(super) async fn admit_tool_batch(
             name,
             error.clone(),
             None,
+            false,
             std::time::Duration::ZERO,
             vec![],
         );

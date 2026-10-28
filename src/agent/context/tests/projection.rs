@@ -63,6 +63,7 @@ fn model_projections_restore_exactly_on_resume_and_clone_with_rebuilt_systems() 
             "read".to_string(),
             "long error ".repeat(4_000),
             Some(&"partial output ".repeat(4_000)),
+            false,
             Duration::ZERO,
             Vec::new(),
         );
@@ -138,6 +139,7 @@ fn invalid_projections_and_late_summaries_cannot_resurrect_or_break_tool_groups(
         "read".to_string(),
         "failure ".repeat(4_000),
         None,
+        false,
         Duration::ZERO,
         Vec::new(),
     );

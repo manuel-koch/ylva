@@ -100,15 +100,18 @@ impl PendingTool {
                             .await;
                     }
                     Ok((Err(error), duration)) => {
-                        let partial_output = error
-                            .partial_output()
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string);
+                        let output = error.output().filter(|s| !s.is_empty()).map(str::to_string);
+                        let is_output_truncated = error.is_output_truncated();
                         let mut content_sections = pending_content_sections;
-                        if let Some(output) = &partial_output {
+                        if let Some(output) = &output {
+                            let label = if is_output_truncated {
+                                "Partial output"
+                            } else {
+                                "Output"
+                            };
                             content_sections.push(crate::agent::tools::Section::Content(
                                 crate::agent::tools::ContentSection {
-                                    label: Some("Partial output".to_string()),
+                                    label: Some(label.to_string()),
                                     content: output.clone(),
                                     file_extension: None,
                                     line_number_offset: None,
@@ -122,7 +125,8 @@ impl PendingTool {
                                     id,
                                     name,
                                     error: error.to_string(),
-                                    partial_output,
+                                    output,
+                                    is_output_truncated,
                                     duration,
                                     content_sections,
                                 },
@@ -138,7 +142,8 @@ impl PendingTool {
                                     id,
                                     name,
                                     error: message,
-                                    partial_output: None,
+                                    output: None,
+                                    is_output_truncated: false,
                                     duration: Duration::from_secs(timeout_secs),
                                     content_sections: pending_content_sections,
                                 },

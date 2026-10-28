@@ -261,13 +261,43 @@ fn bash_non_zero_exit_returns_tool_error() {
 }
 
 #[test]
-fn bash_non_zero_exit_includes_output_in_error() {
+fn bash_non_zero_exit_keeps_header_single_line_and_output_separate() {
     run_locked(async {
         let result = run_bash(make_bash_args("echo before_exit; exit 1"), 5).await;
         let error = result.expect_err("non-zero exit must be an error");
+        assert_eq!(
+            error.to_string(),
+            "Tool 'bash' failed: command exited with code 1:",
+            "header must be a single line without output"
+        );
         assert!(
-            error.to_string().contains("before_exit"),
-            "output should be included in error message"
+            error
+                .output()
+                .is_some_and(|output| output.contains("before_exit")),
+            "output must be carried separately"
+        );
+        assert!(
+            !error.is_output_truncated(),
+            "uncapped output must not be flagged truncated"
+        );
+    });
+}
+
+#[test]
+fn bash_timeout_header_names_timeout_and_keeps_partial_output() {
+    run_locked(async {
+        let result = run_bash(make_bash_args("echo before_timeout; sleep 30"), 1).await;
+        let error = result.expect_err("timeout must be an error");
+        assert_eq!(
+            error.to_string(),
+            "Tool 'bash' failed: command timed out after 1s",
+            "timeout header must name the timeout"
+        );
+        assert!(
+            error
+                .output()
+                .is_some_and(|output| output.contains("before_timeout")),
+            "output produced before the timeout must be carried"
         );
     });
 }

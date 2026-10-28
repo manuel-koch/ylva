@@ -506,20 +506,22 @@ impl Context {
         self.commit(Message::ToolResult { value });
     }
 
+    #[expect(clippy::too_many_arguments)]
     pub fn push_tool_error(
         &mut self,
         id: Uuid,
         name: String,
         error: String,
-        partial_output: Option<&str>,
+        output: Option<&str>,
+        is_output_truncated: bool,
         duration: std::time::Duration,
         content_sections: Vec<crate::agent::tools::Section>,
     ) {
-        let llm_error = match partial_output.filter(|s| !s.is_empty()) {
-            Some(output) => format!(
-                "{error}\n\nThe tool produced the following output before being terminated:\n\
-                 {output}"
-            ),
+        let llm_error = match output.filter(|s| !s.is_empty()) {
+            Some(output) if is_output_truncated => {
+                format!("{error}\n\nOutput (truncated):\n{output}")
+            }
+            Some(output) => format!("{error}\n\nOutput:\n{output}"),
             None => error,
         };
         self.commit(Message::ToolError {

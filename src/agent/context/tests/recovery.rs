@@ -65,6 +65,7 @@ fn manual_boundary_never_splits_an_open_tool_group_even_across_a_new_task() {
         "read".to_string(),
         "completed".to_string(),
         None,
+        false,
         Duration::ZERO,
         vec![],
     );
@@ -135,6 +136,7 @@ fn recovery_budgets_markers_utf8_envelopes_and_a_shrunken_window() {
         "bash".to_string(),
         "失败 αβ \n\\\" ".repeat(4_000),
         Some(&"partial \nαβ ".repeat(4_000)),
+        false,
         Duration::ZERO,
         Vec::new(),
     );
@@ -192,6 +194,7 @@ fn each_recovery_stage_is_measured_without_shortening_a_ceiling_safe_task() {
             "read".to_string(),
             text,
             None,
+            false,
             Duration::ZERO,
             Vec::new(),
         );
