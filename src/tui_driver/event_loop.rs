@@ -71,6 +71,7 @@ where
         update_rx: mut title_update_rx,
         display_metadata,
         input_history_limit,
+        tui_config,
         exit_snapshot,
         unactivated_clones,
         startup_notice,
@@ -80,6 +81,7 @@ where
     let mut exit_guard = agent.exit_guard(exit_snapshot);
     let mut state = AppState::new();
     state.display_metadata = display_metadata;
+    state.tui_config = tui_config;
     state.enable_render_cache();
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
@@ -232,8 +234,10 @@ where
                                 engine = agent.engine();
                                 exit_guard.current_store = agent.current_store_handle();
                                 let display_metadata = state.display_metadata.clone();
+                                let tui_config = state.tui_config.clone();
                                 state = AppState::new();
                                 state.display_metadata = display_metadata;
+                                state.tui_config = tui_config;
                                 state.enable_render_cache();
                                 state.replay_compaction_boundary = prepared.transcript.compaction_transcript_boundary;
                                 state.replay_messages(&prepared.transcript.messages, &prepared.subagent_runs, state.replay_compaction_boundary);

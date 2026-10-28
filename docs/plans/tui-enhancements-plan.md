@@ -42,13 +42,13 @@ Implementing agents must flip `[ ]` to `[x]` immediately after completing each
 step and rewrite this file in place so progress is resumable across sessions.
 Follow TDD: write the failing test first per step.
 
-1. [ ] Add a `TuiConfig` struct (`[tui]` table) in `src/config/profile.rs` with
+1. [x] Add a `TuiConfig` struct (`[tui]` table) in `src/config/profile.rs` with
    `auto_expand_tool: Vec<String>` and `auto_expand_approval: bool`,
    `#[serde(default)]`; add a `tui` field to `ProfileConfig` and its `Default`
    (~line 577). Add `"tui"`, `"auto_expand_tool"` and `"auto_expand_approval"`
    to the known keys in `src/config/unknown_keys.rs`. Add loading tests in
    `src/config/profile/tests/loading.rs` (defaults, valid values, wrong types).
-2. [ ] Report `auto_expand_tool` entries that match no registered tool name
+2. [x] Report `auto_expand_tool` entries that match no registered tool name
    (case-sensitive) as a `ConfigWarning` on `ProfileConfig::config_warnings`
    when the profile loads. The existing `--strict-config` flag already turns
    every config warning into a startup error (exit code 2), so no CLI change is
@@ -56,35 +56,37 @@ Follow TDD: write the failing test first per step.
    `docs/cli-options.md` (line 33) to say "configuration warnings (unknown keys,
    unknown tool names)". Tests: warning for an unknown tool, none for known
    tools, and a strict-mode startup test in `src/startup.rs`'s tests
-   confirming the new warning aborts only with `--strict-config`.
-3. [ ] Thread the settings into the reducer state: store them in `AppState`
+   confirming the new warning aborts only with `--strict-config`
+   (implemented as a spawned-binary test in `tests/cli_profile.rs`, since
+   `startup::run` is only reachable through the binary).
+3. [x] Thread the settings into the reducer state: store them in `AppState`
    (`src/tui_reducer_state/app_state.rs`), populated from the profile via
    `src/tui_driver/app.rs` / `src/tui_driver/runtime.rs` (same path as
    `input_history_limit`).
-4. [ ] Apply arrival expansion: in `src/presenter/tool_bubbles.rs` create bubbles
+4. [x] Apply arrival expansion: in `src/presenter/tool_bubbles.rs` create bubbles
    with `collapsed: false` when the tool name is in `auto_expand_tool` (exact
    names, no wildcard), at all
    creation sites (Pending ~line 49, Running ~line 181, Done ~line 312, Killed
    ~line 334). Route through one helper so the rule lives once (SSOT). Do not
    set `pending_bubble_expansion` (no `Expanding…` feedback) and do not clear
    `scroll_locked`: a bottom-pinned view stays pinned.
-5. [ ] Apply approval expansion: when `push_tool_pending_bubble` arms
+5. [x] Apply approval expansion: when `push_tool_pending_bubble` arms
    `Focus::ToolApproval` and when a queued approval is promoted
    (`src/presenter/domain.rs`, `TypingSettled`), expand the bubble if enabled
    and record that the feature expanded it. When approval resolves (Pending →
    Running ~line 184, denial, killed ~line 337) collapse it only if it was
    expanded by this feature; any manual user toggle clears that record.
-6. [ ] Tests in `src/presenter/tests/` and `src/tui_reducer_state/tests/`:
+6. [x] Tests in `src/presenter/tests/` and `src/tui_reducer_state/tests/`:
    arrival expansion, non-listed tools, approval expand/collapse, queued
    approvals, subagent-owned bubbles, manual toggle during approval; add a
    render test in `tests/tui_render_state/bubbles.rs` if layout needs coverage.
-7. [ ] Documentation: `docs/configuration.md` (new `[tui]` rows/section next to
+7. [x] Documentation: `docs/configuration.md` (new `[tui]` rows/section next to
    the top-level fields), `docs/features.md` (tool bubble collapse/expand bullet
    ~line 1182), `docs/implementation-notes.md` (settings flow and approval
    expansion tracking), `docs/cli-options.md` (`--strict-config` row wording);
    update `docs/ideas/tui-enhancements.md` for the implemented section per
    project convention.
-8. [ ] Final verification: `make format lint`, `make test-coverage`, and `rumdl
+8. [x] Final verification: `make format lint`, `make test-coverage`, and `rumdl
    check` on edited markdown.
 
 ## Implementation Hints

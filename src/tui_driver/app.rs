@@ -125,6 +125,7 @@ impl App for TuiApp {
                 update_rx: title_update_rx,
                 display_metadata: self.display_metadata,
                 input_history_limit: self.profile.input_history_limit,
+                tui_config: self.profile.tui.clone(),
                 exit_snapshot: self.exit_snapshot,
                 unactivated_clones: unactivated_clones.clone(),
                 startup_notice: self.profile.config_warnings_notice(),

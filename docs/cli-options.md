@@ -30,7 +30,7 @@ surface.
 | `--auto-approve-web-search` | none | — | — | Skip the human-approval prompt for `web_search` tool calls. |
 | `--auto-approve-web-fetch` | none | — | — | Skip the human-approval prompt for `web_fetch` tool calls. |
 | `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Subagent delegation" in `docs/features.md`. |
-| `--strict-config` | none | — | — | Treat unknown configuration keys as a startup error (exit code 2) instead of a warning. |
+| `--strict-config` | none | — | — | Treat configuration warnings (unknown keys, unknown tool names) as a startup error (exit code 2) instead of a warning. |
 | `--max-concurrent-subagents <N>` | signed integer | any integer | profile setting | Override the profile's maximum number of simultaneously running subagents for this run. A value `<= 0` means unlimited. |
 
 An invalid `--color`, `--log-level`, `--log-format`, or `--conversation-id`

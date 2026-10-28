@@ -162,7 +162,7 @@ pub struct Cli {
     #[arg(long, value_name = "N", allow_negative_numbers = true)]
     pub max_concurrent_subagents: Option<i64>,
 
-    /// Treat unknown configuration keys as errors instead of warnings
+    /// Treat configuration warnings (unknown keys, unknown tool names) as errors
     #[arg(long)]
     pub strict_config: bool,
 

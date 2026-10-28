@@ -29,6 +29,8 @@ pub(super) struct TuiRuntime {
     pub(super) update_rx: mpsc::UnboundedReceiver<SessionTitleUpdate>,
     pub(super) display_metadata: TuiDisplayMetadata,
     pub(super) input_history_limit: usize,
+    /// Profile `[tui]` settings copied into every reducer state.
+    pub(super) tui_config: crate::config::TuiConfig,
     pub(super) exit_snapshot: Option<crate::app::SessionExitHandle>,
     pub(super) unactivated_clones: Arc<std::sync::Mutex<Vec<uuid::Uuid>>>,
     /// Shown once as a conversation notice when the TUI starts.
@@ -49,6 +51,7 @@ impl TuiRuntime {
             update_rx,
             display_metadata: TuiDisplayMetadata::default(),
             input_history_limit: ProfileConfig::default().input_history_limit,
+            tui_config: crate::config::TuiConfig::default(),
             exit_snapshot: None,
             unactivated_clones: Arc::default(),
             startup_notice: None,

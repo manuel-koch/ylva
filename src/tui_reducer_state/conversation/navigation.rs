@@ -74,6 +74,7 @@ impl AppState {
     /// `true`," generalized to cover an auto-switch into `Root` for a
     /// root-owned approval as well.
     pub(crate) fn resolve_possible_interactive_pause(&mut self, id: Uuid) {
+        self.collapse_resolved_approval_expansions();
         if !self.auto_switched_to_subagent {
             self.resume_pending_tool_approval();
             return;
@@ -186,6 +187,7 @@ impl AppState {
                     .then_some(*run_id)
             });
         self.focus = Focus::ToolApproval { tool_id, tool_name };
+        self.expand_bubble_for_approval(tool_id);
         self.prompt_button_focus = None;
         self.note_interactive_pause(run_id);
     }

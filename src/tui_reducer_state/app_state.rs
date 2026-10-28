@@ -49,6 +49,13 @@ pub struct AppState {
     /// Active profile and workspace paths shown by the TUI's startup logo
     /// and help popup.
     pub display_metadata: TuiDisplayMetadata,
+    /// Profile `[tui]` presentation settings (tool-bubble auto-expansion).
+    pub tui_config: crate::config::TuiConfig,
+    /// Tool bubbles that `[tui] auto_expand_approval` expanded while awaiting
+    /// approval and that must collapse once the approval resolves. A bubble
+    /// the user toggled by hand is removed, so the feature never overrides a
+    /// manual choice.
+    pub(crate) approval_auto_expanded: std::collections::HashSet<Uuid>,
     /// Provider/model identity for the root conversation. The Driver refreshes
     /// this from the live root engine before each frame so Engine runtime model
     /// switches are reflected immediately.
@@ -295,6 +302,8 @@ impl AppState {
             focus: Focus::MainInput,
             layout: AppLayout::default(),
             display_metadata: TuiDisplayMetadata::default(),
+            tui_config: crate::config::TuiConfig::default(),
+            approval_auto_expanded: std::collections::HashSet::new(),
             engine_display: EngineDisplayInfo::default(),
             context_usage: None,
             replay_compaction_boundary: None,

@@ -1185,7 +1185,11 @@ for the full mechanics.
   title line: the tool title, its main argument and optional label, with the
   running or final duration right-aligned (the left part is truncated with `…`
   before the duration is). Remaining arguments render only when expanded. This
-  also applies to the subagent drill-in header bubble. An expanded bubble is
+  also applies to the subagent drill-in header bubble. The profile's
+  `[tui] auto_expand_tool` makes listed tools' bubbles arrive expanded and
+  `[tui] auto_expand_approval` expands the bubble awaiting approval until the
+  approval resolves (see [TUI configuration](./configuration.md#tui-configuration)).
+  An expanded bubble is
   laid out as title, the main argument, an underlined `Arguments:` section
   listing the remaining arguments one `key=value` per line (e.g. `read`'s
   `mode=lines`, `offset=926`), an underlined `Result:` section listing the

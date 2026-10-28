@@ -729,6 +729,26 @@ terminal teardown and title restoration keep a fixed order.
   layouts are not retained; others evict least-recently-retained. Required
   current layouts stay resident even if oversized.
 
+### Tool bubble auto-expansion
+
+- `ProfileConfig::tui` (`TuiConfig`) reaches the reducer through
+  `TuiRuntime::tui_config` into `AppState::tui_config`; the `/new`-style state
+  reset in the event loop carries it over. `auto_expand_tool` names are checked
+  against `agent::tools::is_registered_tool_name` at profile load and reported
+  as `ConfigWarning`s of kind `UnknownToolName`, which `--strict-config`
+  escalates like unknown keys.
+- Arrival: every bubble creation site in `presenter/tool_bubbles.rs` takes its
+  `collapsed` value from `AppState::tool_bubble_arrives_collapsed` (the single
+  rule). It sets neither `pending_bubble_expansion` nor `scroll_locked`.
+- Approval: `expand_bubble_for_approval` runs where `Focus::ToolApproval` is
+  armed (`push_tool_pending_bubble`) and where a queued approval is promoted
+  (`show_tool_approval`). It records bubbles it expanded in
+  `AppState::approval_auto_expanded`.
+  `collapse_resolved_approval_expansions`, called first in
+  `resolve_possible_interactive_pause`, collapses recorded bubbles that are no
+  longer `Pending`; `toggle_tool_bubble_collapsed` drops the record so manual
+  toggles win.
+
 ### Favorites
 
 - Picker display order is derived from each row's group and `favorite_rank`,

@@ -1299,3 +1299,89 @@ fn load_with_favorite_writer_captures_the_loaded_document() {
     )
     .is_err());
 }
+
+#[test]
+fn tui_section_defaults_to_no_auto_expansion() {
+    let profile = ProfileConfig::default();
+    assert!(profile.tui.auto_expand_tool.is_empty());
+    assert!(!profile.tui.auto_expand_approval);
+
+    let temporary = tempfile::tempdir().unwrap();
+    write_profile_config(temporary.path(), "plain", "theme = \"dark\"");
+    let loaded = ProfileConfig::load_with_environment_at_workspace_root(
+        temporary.path(),
+        "plain",
+        &HashMap::new(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(loaded.tui, TuiConfig::default());
+    assert!(loaded.config_warnings.is_empty());
+}
+
+#[test]
+fn tui_section_reads_valid_values_without_warnings() {
+    let temporary = tempfile::tempdir().unwrap();
+    write_profile_config(
+        temporary.path(),
+        "expand",
+        "[tui]\nauto_expand_tool = [\"read\", \"write\", \"spawn_subagent\"]\nauto_expand_approval = true\n",
+    );
+    let profile = ProfileConfig::load_with_environment_at_workspace_root(
+        temporary.path(),
+        "expand",
+        &HashMap::new(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        profile.tui.auto_expand_tool,
+        ["read", "write", "spawn_subagent"]
+    );
+    assert!(profile.tui.auto_expand_approval);
+    assert!(profile.config_warnings.is_empty());
+}
+
+#[test]
+fn tui_section_rejects_wrong_types() {
+    for contents in [
+        "[tui]\nauto_expand_tool = \"read\"\n",
+        "[tui]\nauto_expand_tool = [1]\n",
+        "[tui]\nauto_expand_approval = \"yes\"\n",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        write_profile_config(temporary.path(), "bad", contents);
+        let result = ProfileConfig::load_with_environment_at_workspace_root(
+            temporary.path(),
+            "bad",
+            &HashMap::new(),
+            None,
+        );
+        assert!(
+            matches!(result, Err(ConfigError::Malformed { .. })),
+            "{contents}"
+        );
+    }
+}
+
+#[test]
+fn unknown_auto_expand_tool_names_are_reported_case_sensitively() {
+    let temporary = tempfile::tempdir().unwrap();
+    write_profile_config(
+        temporary.path(),
+        "typo",
+        "[tui]\nauto_expand_tool = [\"Read\", \"bash\", \"edti\"]\n",
+    );
+    let profile = ProfileConfig::load_with_environment_at_workspace_root(
+        temporary.path(),
+        "typo",
+        &HashMap::new(),
+        None,
+    )
+    .unwrap();
+    let notice = profile.config_warnings_notice().expect("warnings expected");
+    assert_eq!(profile.config_warnings.len(), 2);
+    assert!(notice.contains("unknown tool name `Read`"), "{notice}");
+    assert!(notice.contains("unknown tool name `edti`"), "{notice}");
+    assert!(!notice.contains("`bash`"), "{notice}");
+}

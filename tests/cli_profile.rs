@@ -734,3 +734,44 @@ fn retire_stored_agent_type(path: &Path, from: &str, to: &str) {
     lines[0] = serde_json::to_string(&header).expect("serialize meta line");
     fs::write(path, format!("{}\n", lines.join("\n"))).expect("write session file");
 }
+
+/// `--strict-config` escalates an unknown `[tui] auto_expand_tool` name to a
+/// startup error that names the tool.
+#[test]
+fn strict_config_rejects_an_unknown_auto_expand_tool_name() {
+    let ylva_home = TempDir::new().expect("tempdir");
+    let profile_directory = ylva_home
+        .path()
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join("tui");
+    fs::create_dir_all(&profile_directory).expect("create profile directory");
+    fs::write(
+        profile_directory.join("config.toml"),
+        "[tui]\nauto_expand_tool = [\"read\", \"no_such_tool\"]\n",
+    )
+    .expect("write profile config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
+        .current_dir(ylva_home.path())
+        .args([
+            "--no-tui",
+            "--prompt",
+            "hi",
+            "--profile",
+            "tui",
+            "--strict-config",
+        ])
+        .output()
+        .expect("spawn the ylva binary");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown tool name `no_such_tool`"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("unknown tool name `read`"), "{stderr}");
+}

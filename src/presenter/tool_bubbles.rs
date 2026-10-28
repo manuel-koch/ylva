@@ -36,6 +36,7 @@ pub(super) fn push_tool_pending_bubble(
     run_id: Option<Uuid>,
 ) -> Vec<Effect> {
     state.flush_target_partial_text(run_id);
+    let collapsed = state.tool_bubble_arrives_collapsed(&name);
     state
         .target_messages_mut(run_id)
         .push(ChatEntry::ToolBubble {
@@ -46,7 +47,7 @@ pub(super) fn push_tool_pending_bubble(
                 content_sections,
                 title_arguments,
             }),
-            collapsed: true,
+            collapsed,
         });
     let already_awaiting_approval = state.has_outstanding_interaction();
     state.pending_approval_order.push(id);
@@ -60,6 +61,7 @@ pub(super) fn push_tool_pending_bubble(
         tool_id: id,
         tool_name: name,
     };
+    state.expand_bubble_for_approval(id);
     // The approval footer occupies the rows directly above the input, the
     // same rows any slash overlay draws itself onto, and the approval also
     // takes over keyboard routing — so the park effect hides the open overlay
@@ -167,6 +169,7 @@ pub(super) fn update_tool_bubble_to_running(
         // stay merged into one bubble and get flushed only at `StreamDone`,
         // making it look like the tool ran before the model ever "thought".
         state.flush_target_partial_text(run_id);
+        let collapsed = state.tool_bubble_arrives_collapsed(&name);
         state
             .target_messages_mut(run_id)
             .push(ChatEntry::ToolBubble {
@@ -178,7 +181,7 @@ pub(super) fn update_tool_bubble_to_running(
                     title_arguments,
                     progress_arguments: vec![],
                 }),
-                collapsed: true,
+                collapsed,
             });
     }
     // Clear ToolApproval focus if it was for this tool.
@@ -296,6 +299,7 @@ pub(super) fn update_tool_bubble_to_done(state: &mut AppState, payload: ToolDone
             };
         }
     } else {
+        let collapsed = state.tool_bubble_arrives_collapsed(&name);
         state
             .target_messages_mut(run_id)
             .push(ChatEntry::ToolBubble {
@@ -309,7 +313,7 @@ pub(super) fn update_tool_bubble_to_done(state: &mut AppState, payload: ToolDone
                     duration,
                     title_arguments: vec![],
                 }),
-                collapsed: true,
+                collapsed,
             });
     }
     state.resolve_possible_interactive_pause(id);
@@ -325,13 +329,14 @@ pub(super) fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid, run_i
             **bubble_state = ToolCallState::Killed;
         }
     } else {
+        let collapsed = state.tool_bubble_arrives_collapsed("");
         state
             .target_messages_mut(run_id)
             .push(ChatEntry::ToolBubble {
                 id,
                 name: String::new(),
                 state: Box::new(ToolCallState::Killed),
-                collapsed: true,
+                collapsed,
             });
     }
     if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {

@@ -41,7 +41,7 @@ pub use favorite_models::{
 };
 pub use profile::{
     is_valid_profile_name, profile_config_source_path, AgentCompactionConfig, CompactionConfig,
-    ProfileConfig, ToolSandboxConfig, MAX_PROFILE_NAME_LENGTH,
+    ProfileConfig, ToolSandboxConfig, TuiConfig, MAX_PROFILE_NAME_LENGTH,
 };
 pub use provider::{
     ModelPolicy, ModelPolicyError, ProviderConfig, ProviderConnectionConfig, ProviderKind,

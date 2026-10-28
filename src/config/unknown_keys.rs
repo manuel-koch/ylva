@@ -36,6 +36,8 @@ const KNOWN_KEYS: &[&str] = &[
     "allowed_tools",
     "api_base_url",
     "api_key",
+    "auto_expand_approval",
+    "auto_expand_tool",
     "backend",
     "backends",
     "base_url",
@@ -76,6 +78,7 @@ const KNOWN_KEYS: &[&str] = &[
     "timeout_sec",
     "timeout_secs",
     "tools",
+    "tui",
     "utility_engine",
     "verdict",
     "web_fetch",
@@ -83,19 +86,57 @@ const KNOWN_KEYS: &[&str] = &[
     "with_arguments",
 ];
 
-/// One configuration key that no struct consumed.
+/// What a [`ConfigWarning`] reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigWarningKind {
+    /// A key no configuration struct consumed.
+    UnknownKey,
+    /// A tool name listed in a setting that matches no registered tool.
+    UnknownToolName {
+        /// The offending tool name as written.
+        tool_name: String,
+    },
+}
+
+/// One problem found in an otherwise loadable configuration: an unknown key
+/// or an unknown tool name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigWarning {
-    /// File the key was read from.
+    /// File the setting was read from.
     pub file: PathBuf,
     /// Dotted path of the key inside that file, e.g. `engines.main.modle`.
     pub key_path: String,
     /// Closest known key name, when one is similar enough.
     pub suggestion: Option<String>,
+    /// What this warning reports.
+    pub kind: ConfigWarningKind,
+}
+
+impl ConfigWarning {
+    /// Warning for `tool_name` listed under `key_path` that matches no
+    /// registered tool.
+    pub(crate) fn unknown_tool_name(file: &Path, key_path: &str, tool_name: &str) -> Self {
+        ConfigWarning {
+            file: file.to_path_buf(),
+            key_path: key_path.to_string(),
+            suggestion: None,
+            kind: ConfigWarningKind::UnknownToolName {
+                tool_name: tool_name.to_string(),
+            },
+        }
+    }
 }
 
 impl fmt::Display for ConfigWarning {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let ConfigWarningKind::UnknownToolName { tool_name } = &self.kind {
+            return write!(
+                formatter,
+                "{}: unknown tool name `{tool_name}` in `{}`",
+                display_path(&self.file),
+                self.key_path
+            );
+        }
         write!(
             formatter,
             "{}: unknown key `{}`",
@@ -133,6 +174,7 @@ where
         warnings.push(ConfigWarning {
             file: file.to_path_buf(),
             suggestion: suggest_key(last_segment),
+            kind: ConfigWarningKind::UnknownKey,
             key_path,
         });
     })
