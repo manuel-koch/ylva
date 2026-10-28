@@ -278,7 +278,7 @@ _Avoid_: copy, fork, duplicate
 The terminal result recorded while a run is active: interrupted, failed,
 approval denied, or successful. It maps to exactly one exit code. Tool results
 do not contribute to it. "Interrupted" means an external SIGINT or SIGTERM aborted the run; a
-user stop (Ctrl+C or Esc in the TUI) does not count. In the TUI the outcome
+user stop (ctrl-c or Esc in the TUI) does not count. In the TUI the outcome
 covers only the latest turn: a new prompt starts a fresh one, and a steer joins
 the running turn. An external signal sets it in any TUI state, including idle.
 _Avoid_: final status, result code

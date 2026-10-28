@@ -197,6 +197,8 @@ sleep 1
 grep foo README.md
 ```
 
+Run `grep foo README.md ; echo exit=$?` in bash.
+
 ---
 
 Use subagent to delegate discovering tool capabilities in

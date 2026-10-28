@@ -194,11 +194,7 @@ fn picker_results_reach_parked_approval_input_but_ignore_dismissed_or_reopened_p
     let mut picker = SessionPicker::loading();
     picker.action = SessionAction::Clone;
     let identity = picker.identity;
-    state.pending_input_snapshot = Some(crate::tui_reducer_state::InputSnapshot {
-        input_lines: None,
-        slash_overlay: SlashOverlay::SessionPicker(picker),
-        pasted_blobs: Default::default(),
-    });
+    state.parked_slash_overlay = Some(SlashOverlay::SessionPicker(picker));
     let picker = picker_mut(&mut state, identity).unwrap();
     picker
         .choices
@@ -209,8 +205,7 @@ fn picker_results_reach_parked_approval_input_but_ignore_dismissed_or_reopened_p
         });
     picker.phase = SessionPickerPhase::Ready;
     selection_error(&mut state, identity, "selection failure".into());
-    let parked = state.pending_input_snapshot.take().unwrap();
-    state.slash_overlay = parked.slash_overlay;
+    state.slash_overlay = state.parked_slash_overlay.take().unwrap();
     let picker = picker_mut(&mut state, identity).unwrap();
     assert_eq!(picker.action, SessionAction::Clone);
     assert_eq!(picker.choices.len(), 1);

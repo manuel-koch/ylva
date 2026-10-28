@@ -80,23 +80,33 @@ fn keyboard_and_mouse_approval_verdicts_preserve_effect_order() {
                     row: 10,
                     modifiers: KeyModifiers::NONE,
                 })
-            } else if approve {
+            } else {
+                state.prompt_button_focus = Some(if approve {
+                    crate::tui_reducer_state::PromptButton::Approve
+                } else {
+                    crate::tui_reducer_state::PromptButton::Deny
+                });
                 TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter)))
-            } else {
-                TuiEvent::Input(InputEvent::Escape)
             };
-            let expected_verdict = if approve {
-                Effect::ApproveTool { id: tool_id }
+            let expected_effects = if approve {
+                vec![
+                    Effect::ApproveTool { id: tool_id },
+                    Effect::RestoreSlashOverlay,
+                ]
             } else {
-                Effect::DenyTool {
-                    id: tool_id,
-                    reason: String::new(),
-                }
+                vec![
+                    Effect::DenyTool {
+                        id: tool_id,
+                        reason: String::new(),
+                    },
+                    Effect::ClearTextarea,
+                    Effect::RestoreSlashOverlay,
+                ]
             };
 
             assert_eq!(
                 update(&mut state, event, &empty_textarea()),
-                [expected_verdict, Effect::RestoreInputState]
+                expected_effects
             );
             assert_eq!(state.focus, Focus::MainInput);
         }
@@ -150,7 +160,7 @@ fn tracked_subagent(state: &mut AppState) -> Uuid {
     run_id
 }
 
-// ── Ctrl+C tests ──────────────────────────────────────────────────────────
+// ── ctrl-c tests ──────────────────────────────────────────────────────────
 
 // ── Escape tests ──────────────────────────────────────────────────────────
 

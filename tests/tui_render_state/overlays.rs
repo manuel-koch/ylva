@@ -1862,7 +1862,7 @@ fn help_popup_shows_profile_paths() {
     use std::path::PathBuf;
     use ylva::{tui_widgets, TuiDisplayMetadata, TuiState};
 
-    let backend = TestBackend::new(120, 80);
+    let backend = TestBackend::new(120, 100);
     let mut terminal = Terminal::new(backend).expect("terminal");
     let mut state = TuiState {
         display_metadata: TuiDisplayMetadata {

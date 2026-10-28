@@ -202,7 +202,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
     // (the user manually navigated back to the root conversation via Esc
     // (empty draft) while a subagent's own tool call is still awaiting
     // approval), in which case the approval footer needs to say so
-    // explicitly (see `tui_widgets::draw_approval_footer`), since the
+    // explicitly (see `tui_widgets::draw_approval_prompt`), since the
     // pending tool call is otherwise invisible from the root transcript.
     let pending_approval_is_subagent = matches!(state.focus, Focus::ToolApproval { tool_id, .. }
     if state.subagent_conversations.values().any(|conversation| conversation.messages.iter().any(
@@ -367,6 +367,8 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         steer_indicator: state.steer_indicator && showing_subagent_run_id.is_none(),
         pending_approval,
         pending_approval_is_subagent,
+        prompt_button_focus: state.focused_prompt_button(),
+        deferred_prompt_count: state.deferred_prompt_count(),
         input_history: if include_content {
             state.input_history.clone()
         } else {
@@ -428,11 +430,14 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
                 _ => None,
             },
             clarify_banner: ratatui::layout::Rect::default(),
+            ok_button: ratatui::layout::Rect::default(),
+            cancel_button: ratatui::layout::Rect::default(),
         },
         subagent_view: crate::tui_render_state::SubagentViewState {
             subagent_view_bubble,
             header_bubble_scroll_offset: state.subagent_view.header_bubble_scroll_offset,
             header_bubble_area: ratatui::layout::Rect::default(),
+            back_button_area: ratatui::layout::Rect::default(),
             header_rendered_lines: if include_content {
                 state.subagent_view.header_rendered_lines.clone()
             } else {
@@ -498,6 +503,9 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
         state.layout.approve_button = ratatui::layout::Rect::default();
         state.layout.deny_button = ratatui::layout::Rect::default();
     }
+    state.layout.clarify_ok_button = rendered.clarify_banner_state.ok_button;
+    state.layout.clarify_cancel_button = rendered.clarify_banner_state.cancel_button;
+    state.layout.subagent_back_button = rendered.subagent_view.back_button_area;
     state.input_scroll_top = rendered.input_scroll_top;
     state.conversation.scroll_offset = rendered.conversation.scroll_offset;
     state.conversation.scroll_locked = rendered.conversation.scroll_locked;

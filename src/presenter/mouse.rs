@@ -221,7 +221,7 @@ fn extract_slash_overlay_text(state: &AppState, start: (u16, u16), end: (u16, u1
 pub(super) fn route_mouse(
     state: &mut AppState,
     event: crossterm::event::MouseEvent,
-    _textarea: &TextareaContext,
+    textarea: &TextareaContext,
 ) -> Vec<Effect> {
     let column = event.column;
     let row = event.row;
@@ -369,6 +369,16 @@ pub(super) fn route_mouse(
                 return vec![];
             }
 
+            // The back button of the subagent header returns to the parent view.
+            if state
+                .layout
+                .subagent_back_button
+                .contains((column, row).into())
+            {
+                state.switch_to_parent_view();
+                return vec![];
+            }
+
             // A header click is held until mouse-up so a drag can select and
             // copy its rendered text instead of toggling the bubble.
             let hb = state.layout.header_bubble;
@@ -405,7 +415,7 @@ pub(super) fn route_mouse(
                     state.focus = Focus::MainInput;
                     return vec![
                         Effect::ApproveTool { id: tool_id },
-                        Effect::RestoreInputState,
+                        Effect::RestoreSlashOverlay,
                     ];
                 }
                 if in_deny {
@@ -413,9 +423,34 @@ pub(super) fn route_mouse(
                     return vec![
                         Effect::DenyTool {
                             id: tool_id,
-                            reason: String::new(),
+                            reason: state.pasted_blobs.expand(&textarea.text),
                         },
-                        Effect::RestoreInputState,
+                        Effect::ClearTextarea,
+                        Effect::RestoreSlashOverlay,
+                    ];
+                }
+            }
+
+            // Clarify OK / Cancel button clicks.
+            if matches!(state.mode, TuiMode::ClarifyPending { .. }) {
+                let position = (column, row).into();
+                let ok_clicked = state.layout.clarify_ok_button.contains(position);
+                let cancel_clicked = state.layout.clarify_cancel_button.contains(position);
+                if ok_clicked || cancel_clicked {
+                    let TuiMode::ClarifyPending { id, .. } = state.mode else {
+                        return vec![];
+                    };
+                    state.mode = TuiMode::Pending;
+                    if cancel_clicked {
+                        return vec![Effect::AbortClarify { id }, Effect::RestoreSlashOverlay];
+                    }
+                    return vec![
+                        Effect::AnswerClarify {
+                            id,
+                            answer: state.pasted_blobs.expand(&textarea.text),
+                        },
+                        Effect::ClearTextarea,
+                        Effect::RestoreSlashOverlay,
                     ];
                 }
             }

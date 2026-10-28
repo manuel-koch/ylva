@@ -585,25 +585,6 @@ fn format_parameter_value(value: &str, (can_go_smaller, can_go_greater): (bool, 
     format!("{smaller_slot}{value}{greater_suffix}")
 }
 
-/// The message-draft input state parked by `Effect::SaveInputStateAndClear`
-/// while a tool approval or clarify question pauses the input, and given
-/// back as one unit by `Effect::RestoreInputState`.
-///
-/// Bundling the textarea lines with the slash overlay makes the
-/// save/restore pairing atomic: a `/models` picker's fetched catalog (which
-/// the draft text alone cannot reproduce) always returns together with the
-/// draft it was opened from, and neither half can be overwritten without
-/// the other.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputSnapshot {
-    /// The draft's textarea lines as they were; `None` when it was empty.
-    pub input_lines: Option<Vec<String>>,
-    /// The slash overlay as it was when the input was parked.
-    pub slash_overlay: SlashOverlay,
-    /// The collapsed pastes the parked draft's markers refer to.
-    pub pasted_blobs: super::PastedBlobs,
-}
-
 /// Indices into `choices` whose engine name and `provider_connection/model` identity
 /// contains every whitespace-separated word of `filter`, case-insensitively
 /// (in any order — e.g. `"deepseek v3"` matches `stub/deepseek-v3` and
@@ -852,7 +833,7 @@ impl AppState {
     /// catalog by re-deriving its filter from the draft.
     ///
     /// A pending tool approval outranks every overlay: the overlay is
-    /// parked and hidden by `Effect::SaveInputStateAndClear` when the
+    /// parked and hidden by `Effect::ParkSlashOverlay` when the
     /// approval is armed (see `presenter::tool_bubbles::push_tool_pending_bubble`), and
     /// this recompute must not bring it back while the approval owns the
     /// rows above the input — e.g. while the user types a denial reason
@@ -860,7 +841,7 @@ impl AppState {
     /// the help popup having temporarily replaced it (consulting the
     /// outstanding-approval bubble via [`AppState::pending_tool_approval`]),
     /// so no slash-command UI can surface while a verdict is outstanding.
-    /// `Effect::RestoreInputState` gives the parked overlay back when the
+    /// `Effect::RestoreSlashOverlay` gives the parked overlay back when the
     /// approval resolves; the next recompute then reconciles it with the
     /// restored draft.
     ///

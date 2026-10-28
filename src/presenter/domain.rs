@@ -180,6 +180,17 @@ fn domain_subagent_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Ef
             }
             vec![]
         }
+        DomainEvent::TypingSettled => {
+            state.settle_typing();
+            let was_visible = state.prompt_is_visible();
+            state.resume_deferred_prompt();
+            // A deferred clarify is reported through `queued_clarify_activated`.
+            if !was_visible && state.is_approval_pending() {
+                vec![Effect::ParkSlashOverlay]
+            } else {
+                vec![]
+            }
+        }
         DomainEvent::BubbleExpansionFeedbackShown => {
             state.pending_bubble_expansion = None;
             vec![]

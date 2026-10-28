@@ -37,7 +37,7 @@ fn pending_and_running_transitions_share_bubble_semantics_across_root_modes() {
                 }),
                 &empty_textarea(),
             ),
-            [Effect::SaveInputStateAndClear]
+            [Effect::ParkSlashOverlay]
         );
         assert!(state.turn_buffer.partial_assistant_text.is_empty());
         assert!(matches!(
@@ -404,7 +404,7 @@ fn tool_pending_parks_the_input_state_via_the_save_effect() {
     );
     assert!(matches!(state.focus, Focus::ToolApproval { .. }));
     assert!(
-        effects.contains(&Effect::SaveInputStateAndClear),
+        effects.contains(&Effect::ParkSlashOverlay),
         "expected the input-state save effect, got {effects:?}"
     );
 }
@@ -447,4 +447,66 @@ fn denied_tool_bubble_retains_arguments() {
         args,
         "Denied bubble must retain the arguments from the Pending state"
     );
+}
+
+#[test]
+fn approval_arriving_while_typing_waits_until_typing_settles() {
+    let mut state = AppState::new();
+    state.note_keystroke(std::time::Instant::now());
+    let tool_id = Uuid::new_v4();
+    let effects = update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ToolPending {
+            id: tool_id,
+            name: "write".into(),
+            arguments: serde_json::json!({}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(state.focus, Focus::MainInput);
+    assert_eq!(state.deferred_prompt_count(), 1);
+
+    let effects = update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::TypingSettled),
+        &empty_textarea(),
+    );
+    assert_eq!(effects, [Effect::ParkSlashOverlay]);
+    assert!(matches!(
+        state.focus,
+        Focus::ToolApproval { tool_id: shown, .. } if shown == tool_id
+    ));
+    assert_eq!(state.deferred_prompt_count(), 0);
+}
+
+#[test]
+fn clarify_arriving_while_typing_waits_until_typing_settles() {
+    let mut state = AppState::new();
+    state.note_keystroke(std::time::Instant::now());
+    let clarify_id = Uuid::new_v4();
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ClarifyPending {
+            id: clarify_id,
+            question: "Which?".into(),
+            context: None,
+            choices: None,
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+    assert!(!matches!(state.mode, TuiMode::ClarifyPending { .. }));
+    assert_eq!(state.deferred_prompt_count(), 1);
+
+    let effects = update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::TypingSettled),
+        &empty_textarea(),
+    );
+    assert_eq!(effects, [Effect::ParkSlashOverlay]);
+    assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
 }

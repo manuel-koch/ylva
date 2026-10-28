@@ -22,10 +22,13 @@ use ratatui::Frame;
 
 use crate::agent::AgentMode;
 use crate::theme::{
-    approve_background_color, approve_hover_background_color, button_text_color,
-    deny_background_color, deny_hover_background_color, footer_status_color, muted_text_color,
+    approval_title_color, approve_background_color, approve_hover_background_color,
+    button_text_color, deny_background_color, deny_hover_background_color, footer_status_color,
+    muted_text_color,
 };
-use crate::tui_reducer_state::{ActiveSubagentCounts, ChatEntry, SlashOverlay, ToolCallState};
+use crate::tui_reducer_state::{
+    ActiveSubagentCounts, ChatEntry, PromptButton, SlashOverlay, ToolCallState,
+};
 use crate::tui_render_state::TuiState;
 
 use super::{ButtonAreas, ConversationSource, SPINNER_FRAMES};
@@ -107,9 +110,16 @@ const HELP_POPUP_BUSY_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("F1", "close"),
 ];
 const CLARIFY_FOOTER_HINTS: &[FooterHint] = &[
-    FooterHint::key("enter", "answer"),
+    FooterHint::key("tab", "focus OK/Cancel"),
+    FooterHint::key("enter", "activate"),
     FooterHint::key("click", "choice"),
-    FooterHint::key("ctrl-c/esc", "cancel"),
+    FooterHint::key("ctrl-c", "cancel"),
+    FooterHint::key("F1", "help"),
+];
+const APPROVAL_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("tab", "focus Approve/Deny"),
+    FooterHint::key("enter", "activate"),
+    FooterHint::key("ctrl-c", "deny"),
     FooterHint::key("F1", "help"),
 ];
 const SUBAGENT_VIEW_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
@@ -117,12 +127,12 @@ const SUBAGENT_VIEW_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("F1", "help"),
 ];
 const SUBAGENT_VIEW_BUSY_FOOTER_HINTS: &[FooterHint] = &[
-    FooterHint::key("esc", "back to conversation"),
+    FooterHint::key("ctrl-p", "back to conversation"),
     FooterHint::key("ctrl-c", "cancel & quit"),
     FooterHint::key("F1", "help"),
 ];
 const SUBAGENT_VIEW_IDLE_FOOTER_HINTS: &[FooterHint] = &[
-    FooterHint::key("esc", "back to conversation"),
+    FooterHint::key("ctrl-p", "back to conversation"),
     FooterHint::key("ctrl-c", "quit"),
     FooterHint::key("F1", "help"),
 ];
@@ -171,7 +181,9 @@ pub(super) fn footer_keybinding_hints(
         SlashOverlay::Hidden => {
             let in_subagent_view = state.subagent_view.subagent_view_bubble.is_some();
             let parent_agent_is_busy = state.parent_agent_mode != AgentMode::Idle;
-            if state.clarify_banner_state.pending_clarify.is_some() {
+            if state.pending_approval.is_some() {
+                APPROVAL_FOOTER_HINTS
+            } else if state.clarify_banner_state.pending_clarify.is_some() {
                 CLARIFY_FOOTER_HINTS
             } else if in_subagent_view && !input_is_empty {
                 // Viewing a subagent's drill-in transcript: `enter send` is
@@ -180,8 +192,7 @@ pub(super) fn footer_keybinding_hints(
                 // no longer steers the root agent from here either.
                 SUBAGENT_VIEW_DRAFT_FOOTER_HINTS
             } else if in_subagent_view {
-                // Esc with an empty draft navigates back to the root
-                // conversation instead of acting on the root agent's turn.
+                // ctrl-p navigates back to the root conversation.
                 if parent_agent_is_busy {
                     SUBAGENT_VIEW_BUSY_FOOTER_HINTS
                 } else {
@@ -190,11 +201,11 @@ pub(super) fn footer_keybinding_hints(
             } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
                 BUSY_DRAFT_FOOTER_HINTS
             } else if state.agent_mode != AgentMode::Idle {
-                // Busy with an empty draft: Esc stops the turn, while Ctrl-C
+                // Busy with an empty draft: Esc stops the turn, while ctrl-c
                 // stops the turn and quits the TUI.
                 BUSY_EMPTY_FOOTER_HINTS
             } else if !input_is_empty {
-                // Idle with a draft: Esc clears it; Ctrl-C quits on confirm.
+                // Idle with a draft: Esc clears it; ctrl-c quits on confirm.
                 IDLE_DRAFT_FOOTER_HINTS
             } else {
                 IDLE_EMPTY_FOOTER_HINTS
@@ -488,6 +499,18 @@ pub(super) fn draw_normal_footer(
     hint: Option<&str>,
     source: Option<&ConversationSource<'_>>,
 ) {
+    let waiting_text = (state.deferred_prompt_count > 0).then(|| {
+        let noun = if state.deferred_prompt_count == 1 {
+            "prompt"
+        } else {
+            "prompts"
+        };
+        format!(
+            "⏳ {} {noun} waiting (finish typing)",
+            state.deferred_prompt_count
+        )
+    });
+    let hint = hint.or(waiting_text.as_deref());
     let thinking = source.map_or(!state.partial_thinking_text.is_empty(), |source| {
         !source.turn.partial_thinking_text.is_empty()
     });
@@ -739,24 +762,47 @@ fn draw_footer_context_usage(
     area
 }
 
+/// Only a focused or hovered button is drawn filled; idle buttons are
+/// outlined in their colour, so a freshly shown prompt (no focus) never looks
+/// as if a button were selected.
+pub(super) fn button_style(
+    normal: Color,
+    hover: Color,
+    is_hovered: bool,
+    is_focused: bool,
+) -> Style {
+    if is_hovered {
+        Style::default()
+            .fg(button_text_color())
+            .bg(hover)
+            .add_modifier(Modifier::BOLD)
+    } else if is_focused {
+        Style::default()
+            .fg(button_text_color())
+            .bg(normal)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(normal)
+    }
+}
+
+/// Rows the approval prompt occupies: title and buttons.
+pub(super) const APPROVAL_PROMPT_HEIGHT: u16 = 2;
+
+/// Draw the approval title and buttons above the input field.
 /// Returns the button `Rect`s for mouse hit-testing.
-#[expect(clippy::too_many_arguments)]
-pub(super) fn draw_approval_footer(
+pub(super) fn draw_approval_prompt(
     frame: &mut Frame,
-    footer_area: Rect,
+    area: Rect,
     state: &TuiState,
     tool_name: &str,
     is_subagent: bool,
-    input_is_empty: bool,
     mouse_pos: Option<(u16, u16)>,
-    hint: Option<&str>,
-) -> Option<ButtonAreas> {
-    let row_1_text = if let Some(hint_text) = hint {
-        hint_text.to_string()
-    } else if is_subagent {
+) -> ButtonAreas {
+    let title = if is_subagent {
         // The pending tool call belongs to a subagent, not the root agent —
         // this can be shown while viewing the root conversation (the user
-        // navigated back via Esc (empty draft) while the subagent's own tool call is
+        // navigated back via ctrl-p while the subagent's own tool call is
         // still awaiting approval), where the pending call is otherwise
         // invisible, so make the title unambiguous about which agent it's
         // asking on behalf of.
@@ -765,40 +811,16 @@ pub(super) fn draw_approval_footer(
         format!(" Tool '{tool_name}' requests your approval:")
     };
 
-    // When the user is typing a denial reason, Enter will deny rather than
-    // approve — reflect this by disabling the Approve button and adding
-    // "(enter)" to the Deny button label.
-    let approve_label = " [ ✓ Approve (enter) ] ";
-    let deny_label = if input_is_empty {
-        " [ ✗ Deny (esc) ] "
-    } else {
-        " [ ✗ Deny (enter/esc) ] "
-    };
+    // Buttons are only activated explicitly (click, or Tab to focus then
+    // Enter); typed text never changes what a bare Enter does.
+    let approve_focused = state.prompt_button_focus == Some(PromptButton::Approve);
+    let deny_focused = state.prompt_button_focus == Some(PromptButton::Deny);
+    let approve_label = " [ ✓ Approve ] ";
+    let deny_label = " [ ✗ Deny ] ";
     let approve_width = approve_label.chars().count() as u16;
     let deny_width = deny_label.chars().count() as u16;
-    let controls_area = match split_footer_rows(footer_area) {
-        FooterRows::Wide { status, controls } => {
-            draw_footer_row(frame, status, &row_1_text, footer_status_color(), state);
-            draw_footer_context_usage(
-                frame,
-                controls,
-                state.cost_total_text.as_deref(),
-                state.context_usage_text.as_deref(),
-                1 + approve_width + 2 + deny_width,
-            )
-        }
-        FooterRows::Narrow {
-            status,
-            meta,
-            controls,
-        } => {
-            // Meta (engine/costs/context) first, then the approval title,
-            // then the buttons.
-            draw_footer_meta(frame, status, state);
-            draw_footer_status(frame, meta, &row_1_text, footer_status_color());
-            controls
-        }
-    };
+    let [title_area, controls_area] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+    draw_footer_status(frame, title_area, &title, approval_title_color());
     // Indent buttons by 1 char so they align with the leading space of the
     // approval title above.
     let [_, buttons_area] = Layout::default()
@@ -818,32 +840,18 @@ pub(super) fn draw_approval_footer(
     let approve_hovered = pointer.is_some_and(|pos| approve_area.contains(pos));
     let deny_hovered = pointer.is_some_and(|pos| deny_area.contains(pos));
 
-    // Approve button is disabled (greyed out, no hover) when the user has
-    // typed a denial reason — pressing Enter at that point denies instead.
-    let approve_style = if !input_is_empty {
-        Style::default()
-            .fg(muted_text_color())
-            .add_modifier(Modifier::DIM)
-    } else if approve_hovered {
-        Style::default()
-            .fg(button_text_color())
-            .bg(approve_hover_background_color())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(button_text_color())
-            .bg(approve_background_color())
-    };
-    let deny_style = if deny_hovered {
-        Style::default()
-            .fg(button_text_color())
-            .bg(deny_hover_background_color())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(button_text_color())
-            .bg(deny_background_color())
-    };
+    let approve_style = button_style(
+        approve_background_color(),
+        approve_hover_background_color(),
+        approve_hovered,
+        approve_focused,
+    );
+    let deny_style = button_style(
+        deny_background_color(),
+        deny_hover_background_color(),
+        deny_hovered,
+        deny_focused,
+    );
 
     frame.render_widget(
         Paragraph::new(Line::styled(approve_label, approve_style)).alignment(Alignment::Left),
@@ -854,10 +862,10 @@ pub(super) fn draw_approval_footer(
         deny_area,
     );
 
-    Some(ButtonAreas {
+    ButtonAreas {
         approve: approve_area,
         deny: deny_area,
-    })
+    }
 }
 
 #[cfg(test)]

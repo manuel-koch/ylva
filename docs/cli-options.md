@@ -69,20 +69,20 @@ epilog lists the same codes, generated from the same source.
 | `1` | General execution error | A provider or stream failure, a root-level error such as the tool-use iteration cap, an I/O failure while a run is in progress, a partial `ylva session` maintenance failure, or a non-zero exit from the editor run by `ylva profile edit`. |
 | `2` | Usage or startup error; no run started | An unknown flag, a missing flag value, a `--log-file` that cannot be opened, an unresolvable profile or `--agent`, an unknown `--conversation-id`, a failing `init`, or a `ylva profile` refusal such as an invalid name, an existing profile without `--force`, or a broken `config.toml` in scope. |
 | `3` | Approval required but denied | A tool needed approval and was denied. Headless mode cannot ask, so it denies every such call; in the TUI a user denial counts too. The run continues after a denial. |
-| `130` | User interruption (SIGINT or SIGTERM) | An external SIGINT or SIGTERM that aborts the run: Ctrl+C in headless mode, or a signal to the TUI in any state. `130` is the shell convention `128 + 2`. |
+| `130` | User interruption (SIGINT or SIGTERM) | An external SIGINT or SIGTERM that aborts the run: ctrl-c in headless mode, or a signal to the TUI in any state. `130` is the shell convention `128 + 2`. |
 
 When several outcomes occur in one run, the highest-precedence one sets the code:
 `130`, then `1`, then `3`, then `0`. A usage or startup error (`2`) ends the
 process before a run starts, so it never competes with them.
 
-Headless Ctrl+C (SIGINT) and SIGTERM are cooperative. The first signal stops the
+Headless ctrl-c (SIGINT) and SIGTERM are cooperative. The first signal stops the
 agent, the run ends through the normal path, the resume hint is printed, and the
 process exits `130`. Later signals during that shutdown do not force an exit.
 The CLI does not handle SIGHUP.
 
 In the TUI, only the latest turn counts. A new prompt starts a fresh outcome, and a
-steer joins the running turn. Ctrl+C and Esc stop a turn without setting `130`,
-because Ctrl+C is also how the TUI quits. An external SIGINT or SIGTERM always sets
+steer joins the running turn. ctrl-c and Esc stop a turn without setting `130`,
+because ctrl-c is also how the TUI quits. An external SIGINT or SIGTERM always sets
 `130` in the TUI, in any state: it quits an idle TUI at once, and it stops a running
 turn (including a live subagent) before quitting. The TUI then restores the
 terminal and prints the resume hint, as on every other TUI exit.
@@ -402,7 +402,7 @@ When a secret is stored there, the workspace `.gitignore` is seeded so `.env`
 stays out of version control. Secrets are never printed.
 
 - `ylva connect copilot` logs in with the OAuth device flow: it prints a
-  verification URL and a user code and waits for authorization (Ctrl-C
+  verification URL and a user code and waits for authorization (ctrl-c
   cancels). The stored secret is the GitHub token; no `api_base_url` is
   written.
 - `ylva connect ollama` and `ylva connect openrouter` ask for the base URL

@@ -59,3 +59,14 @@ pub(super) async fn bubble_click_timeout(state: &AppState) {
         std::future::pending::<()>().await;
     }
 }
+
+/// A future that resolves once the current typing burst counts as over — the
+/// idle delay after the last keystroke or the deferral cap, whichever comes
+/// first (or never, when nobody is typing). See `AppState::note_keystroke`.
+pub(super) async fn typing_settle_timeout(state: &AppState) {
+    if let Some(settles_at) = state.typing_settles_at() {
+        tokio::time::sleep(settles_at.saturating_duration_since(Instant::now())).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}

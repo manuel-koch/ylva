@@ -115,7 +115,7 @@ impl AppState {
 
     /// Name of the tool bubble `tool_id` when it is still awaiting approval
     /// in the root or any subagent transcript.
-    fn pending_approval_name(&self, tool_id: Uuid) -> Option<String> {
+    pub(crate) fn pending_approval_name(&self, tool_id: Uuid) -> Option<String> {
         fn find_in(messages: &[ChatEntry], tool_id: Uuid) -> Option<String> {
             messages.iter().find_map(|entry| match entry {
                 ChatEntry::ToolBubble {

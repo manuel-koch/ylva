@@ -39,6 +39,7 @@ mod layout;
 mod model_picker;
 mod panels;
 mod pasted_blobs;
+mod prompt;
 mod selection;
 mod session_picker;
 
@@ -61,11 +62,11 @@ pub(crate) use model_picker::{
     slash_overlay_text_rows, visible_model_choices, PickerRow,
 };
 pub use model_picker::{
-    ChoiceLabel, InputSnapshot, ModelChoice, ModelParameterEdit, ParameterField, PickerRowLayout,
-    SlashOverlay,
+    ChoiceLabel, ModelChoice, ModelParameterEdit, ParameterField, PickerRowLayout, SlashOverlay,
 };
 pub use panels::{ClarifyBannerState, HelpPopupState, QueuedClarify, TuiDisplayMetadata};
 pub use pasted_blobs::{PastedBlob, PastedBlobs, LARGE_PASTE_CHAR_THRESHOLD};
+pub use prompt::{InputActivity, PromptButton, PROMPT_DEFERRAL_CAP, PROMPT_IDLE_DELAY};
 pub use selection::{BannerDragSelection, ChatSelection};
 pub use session_picker::{SessionAction, SessionChoice, SessionPicker, SessionPickerPhase};
 
@@ -79,7 +80,7 @@ const TOAST_DURATION: Duration = Duration::from_millis(1500);
 /// gesture) rather than a second, independent single click (collapse toggle).
 pub(crate) const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(250);
 
-/// Window for confirming the second press of a `Ctrl+C`/`Esc` action.
+/// Window for confirming the second press of a `ctrl-c`/`Esc` action.
 pub(crate) const CONFIRM_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Number of columns moved by one horizontal help-popup scroll action.

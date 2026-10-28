@@ -42,9 +42,7 @@ use crate::tui_reducer_state::{
 };
 
 use crate::llm::engine::{Engine, EngineConfig, EngineImpl, ModelSelection};
-use crate::tui_reducer_state::{
-    ChatEntry, ConversationView, Focus, InputSnapshot, ModelChoice, ToolCallState,
-};
+use crate::tui_reducer_state::{ChatEntry, ConversationView, Focus, ModelChoice, ToolCallState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -105,7 +103,7 @@ async fn clarify_commands_keep_their_destination_after_the_reducer_leaves_pendin
             )
             .await;
             assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
-            assert_eq!(textarea.lines(), &[""]);
+            assert_eq!(textarea.lines(), &["unfinished draft"]);
             if !abort {
                 execute_effects(
                     &mut state,
@@ -119,13 +117,14 @@ async fn clarify_commands_keep_their_destination_after_the_reducer_leaves_pendin
                 .await;
             }
             let context = textarea_ctx_from(&textarea);
+            state.prompt_button_focus = Some(if abort {
+                crate::tui_reducer_state::PromptButton::ClarifyCancel
+            } else {
+                crate::tui_reducer_state::PromptButton::ClarifyOk
+            });
             let effects = presenter::update(
                 &mut state,
-                TuiEvent::Input(if abort {
-                    InputEvent::Escape
-                } else {
-                    InputEvent::KeyInput(key_event(KeyCode::Enter))
-                }),
+                TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
                 &context,
             );
             assert_eq!(state.mode, TuiMode::Pending);
@@ -155,8 +154,10 @@ async fn clarify_commands_keep_their_destination_after_the_reducer_leaves_pendin
                 None => expected_command,
             };
             assert_eq!(cmd_rx.try_recv(), Ok(expected_command));
-            assert_eq!(textarea.lines(), &["unfinished draft"]);
-            assert!(state.pending_input_snapshot.is_none());
+            // Answering consumes the field; cancelling leaves the draft alone.
+            let expected_lines: &[&str] = if abort { &["unfinished draft"] } else { &[""] };
+            assert_eq!(textarea.lines(), expected_lines);
+            assert!(state.parked_slash_overlay.is_none());
 
             execute_effects(
                 &mut state,

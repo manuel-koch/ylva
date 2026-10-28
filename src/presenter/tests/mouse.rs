@@ -1264,3 +1264,65 @@ fn slash_overlay_footer_drag_is_clamped_to_the_footer() {
         "footer selection must stay in the footer: {effects:?}"
     );
 }
+
+fn left_click(column: u16, row: u16) -> TuiEvent {
+    TuiEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+#[test]
+fn clarify_buttons_answer_with_the_text_or_cancel() {
+    for (click_ok, column) in [(true, 1), (false, 7)] {
+        let mut state = AppState::new();
+        let clarify_id = Uuid::new_v4();
+        state.mode = TuiMode::ClarifyPending {
+            id: clarify_id,
+            question: "Pick one".to_string(),
+            context: None,
+            choices: None,
+        };
+        state.layout.clarify_ok_button = ratatui::layout::Rect::new(0, 10, 5, 1);
+        state.layout.clarify_cancel_button = ratatui::layout::Rect::new(6, 10, 5, 1);
+        let effects = update(
+            &mut state,
+            left_click(column, 10),
+            &textarea_with("my answer"),
+        );
+        assert_eq!(state.mode, TuiMode::Pending);
+        if click_ok {
+            assert_eq!(
+                effects,
+                [
+                    Effect::AnswerClarify {
+                        id: clarify_id,
+                        answer: "my answer".to_string(),
+                    },
+                    Effect::ClearTextarea,
+                    Effect::RestoreSlashOverlay,
+                ]
+            );
+        } else {
+            assert_eq!(
+                effects,
+                [
+                    Effect::AbortClarify { id: clarify_id },
+                    Effect::RestoreSlashOverlay
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn back_button_click_returns_from_a_subagent_view_to_the_root() {
+    let mut state = AppState::new();
+    let run_id = tracked_subagent(&mut state);
+    state.switch_to_subagent_view(run_id);
+    state.layout.subagent_back_button = ratatui::layout::Rect::new(0, 0, 10, 1);
+    update(&mut state, left_click(3, 0), &empty_textarea());
+    assert_eq!(state.active_view, ConversationView::Root);
+}

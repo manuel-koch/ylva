@@ -66,6 +66,16 @@ fn help_sections() -> Vec<HelpSection> {
                     "Interrupt generation, then quit",
                 ),
                 help_entry("esc", "Close popup"),
+                help_entry("ctrl-p", "Back to the parent conversation (subagent view)"),
+            ],
+        },
+        HelpSection {
+            heading: "Tool approval / clarify prompt",
+            entries: vec![
+                help_entry("tab / shift-tab", "Focus next / previous button"),
+                help_entry("enter", "Activate the focused button (nothing if none)"),
+                help_entry("esc", "Remove button focus (clarify: clear text)"),
+                help_entry("click", "Activate a button"),
             ],
         },
         HelpSection {

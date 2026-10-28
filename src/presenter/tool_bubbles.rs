@@ -50,7 +50,10 @@ pub(super) fn push_tool_pending_bubble(
         });
     let already_awaiting_approval = state.has_outstanding_interaction();
     state.pending_approval_order.push(id);
-    if already_awaiting_approval {
+    // A prompt that arrives while the user types stays queued until
+    // `DomainEvent::TypingSettled`, so keystrokes meant for the draft cannot
+    // resolve it.
+    if already_awaiting_approval || state.is_typing() {
         return vec![];
     }
     state.focus = Focus::ToolApproval {
@@ -59,13 +62,13 @@ pub(super) fn push_tool_pending_bubble(
     };
     // The approval footer occupies the rows directly above the input, the
     // same rows any slash overlay draws itself onto, and the approval also
-    // takes over keyboard routing — so the save effect below parks the open
-    // overlay (notably a `/models` picker's already-fetched catalog, which
-    // the draft alone cannot reproduce) into `pending_input_snapshot` and
-    // hides it until `RestoreInputState` brings draft and overlay back
-    // together when the approval resolves.
+    // takes over keyboard routing — so the park effect hides the open overlay
+    // (notably a `/models` picker's already-fetched catalog) until
+    // `RestoreSlashOverlay` brings it back when the approval resolves. The
+    // draft stays in the input field.
+    state.prompt_button_focus = None;
     state.note_interactive_pause(run_id);
-    vec![Effect::SaveInputStateAndClear]
+    vec![Effect::ParkSlashOverlay]
 }
 
 /// Shared handling for `DomainEvent::ClarifyPending`, used identically by
@@ -113,17 +116,17 @@ pub(super) fn push_clarify_pending_bubble(
         choices,
         run_id,
     };
-    // Strict arrival order: behind another prompt, wait for it to resolve.
-    if state.has_outstanding_interaction() {
+    // Strict arrival order: behind another prompt, or while the user types,
+    // wait.
+    if state.has_outstanding_interaction() || state.is_typing() {
         state.pending_approval_order.push(id);
         state.queued_clarifies.insert(id, request);
         return vec![];
     }
     state.show_clarify(request);
     // The banner sits on the same rows above the input as the approval
-    // footer, so this save parks draft *and* overlay together — see
-    // `InputSnapshot`.
-    vec![Effect::SaveInputStateAndClear]
+    // footer, so the overlay is parked the same way.
+    vec![Effect::ParkSlashOverlay]
 }
 // ─── Tool bubble update helpers ───────────────────────────────────────────────
 

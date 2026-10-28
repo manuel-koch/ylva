@@ -187,4 +187,13 @@ pub struct AppLayout {
     /// Written by the Driver after each `tui_widgets::draw` call; zero-sized when
     /// no approval footer is visible.
     pub deny_button: Rect,
+    /// Rect of the OK button below the clarify banner. Zero-sized when no
+    /// clarify is pending.
+    pub clarify_ok_button: Rect,
+    /// Rect of the Cancel button below the clarify banner. Zero-sized when
+    /// no clarify is pending.
+    pub clarify_cancel_button: Rect,
+    /// Rect of the back button in the subagent-view header. Zero-sized while
+    /// viewing `Root`.
+    pub subagent_back_button: Rect,
 }
