@@ -798,3 +798,65 @@ fn subagent_bubble_title_carries_the_agent_type_as_a_subtype() {
         "the summary pairs are only rendered when expanded: {title_row:?}"
     );
 }
+
+#[test]
+fn back_button_aligns_with_header_expand_indicator() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{ChatEntry, ToolCallState};
+
+    let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("terminal");
+    let mut state = ylva::TuiState {
+        subagent_view: ylva::tui_render_state::SubagentViewState {
+            subagent_view_bubble: Some((
+                uuid::Uuid::new_v4(),
+                "spawn_subagent".to_string(),
+                ToolCallState::Running {
+                    arguments: serde_json::json!({"task": "Analyze"}),
+                    content_sections: vec![],
+                    title_arguments: vec![("task".to_string(), serde_json::json!("Analyze"))],
+                    progress_arguments: vec![],
+                },
+                true,
+            )),
+            ..ylva::TuiState::new().subagent_view
+        },
+        chat_entries: vec![ChatEntry::AssistantMessage {
+            text: "reply".to_string(),
+            interrupted: false,
+        }],
+        ..ylva::TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let row_symbols = |row: u16| -> Vec<String> {
+        (0..60)
+            .map(|column| buffer.cell((column, row)).unwrap().symbol().to_string())
+            .collect()
+    };
+    let back_row = row_symbols(0);
+    let header_row = row_symbols(1);
+    let bracket_column = back_row.iter().position(|symbol| symbol == "[").expect("[");
+    let indicator_column = header_row
+        .iter()
+        .position(|symbol| symbol == "▶" || symbol == "▼")
+        .expect("indicator");
+    assert_eq!(
+        bracket_column, indicator_column,
+        "{back_row:?} {header_row:?}"
+    );
+}

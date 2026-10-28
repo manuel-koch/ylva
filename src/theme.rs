@@ -83,14 +83,14 @@ themed_colors! {
 
     // Clarify interaction palette.
     /// Clarify banner foreground and selection colors.
-    clarify_banner_fg_color(Color::Yellow, LIGHT_AMBER);
+    clarify_banner_fg_color(Color::Cyan, LIGHT_TEAL);
     clarify_banner_selection_fg_color(Color::Black, Color::Black);
     clarify_banner_scroll_indicator_color(Color::DarkGray, Color::DarkGray);
 
     // Help and notification palette.
     /// Help popup border, title, section heading, and scroll-indicator colors.
-    help_popup_border_color(Color::Blue, Color::Blue);
-    help_popup_heading_color(Color::Blue, Color::Blue);
+    help_popup_border_color(Color::Cyan, LIGHT_TEAL);
+    help_popup_heading_color(Color::Cyan, LIGHT_TEAL);
     toast_bg_color(Color::Blue, Color::Blue);
     toast_fg_color(Color::White, Color::White);
     notice_color(Color::Cyan, LIGHT_TEAL);
@@ -115,6 +115,8 @@ themed_colors! {
     /// Foreground of the `/models` row for the model currently serving the conversation.
     active_model_color(Color::Green, Color::Rgb(0, 140, 40));
     overlay_selection_color(Color::Yellow, LIGHT_AMBER);
+    /// Approval prompt title; shares the slash-command popup colour.
+    approval_title_color(Color::Cyan, LIGHT_TEAL);
     button_text_color(Color::Black, Color::Black);
     approve_hover_background_color(Color::LightGreen, Color::LightGreen);
     approve_background_color(Color::Green, Color::Green);

@@ -305,7 +305,7 @@ async fn double_press_ctrl_c_mid_stream_cancels_pending_steer() {
 
 #[tokio::test]
 async fn ctrl_c_then_mismatched_escape_does_not_stop_stream() {
-    // Regression: Ctrl-C arms its own quit-confirm window. A *different* key
+    // Regression: ctrl-c arms its own quit-confirm window. A *different* key
     // (Esc) must not confirm it — it starts Esc's own fresh confirm window
     // instead, leaving the current turn (and any queued steer) to complete
     // normally.
@@ -738,7 +738,7 @@ fn footer_shows_compacting_independently_of_agent_mode() {
 }
 
 #[test]
-fn approval_footer_keeps_context_usage_beside_buttons() {
+fn approval_prompt_sits_above_input_and_regular_footer() {
     use ratatui_textarea::TextArea;
     use ylva::tui_widgets;
     use ylva::TuiState;
@@ -747,6 +747,7 @@ fn approval_footer_keeps_context_usage_beside_buttons() {
         for denial_reason in ["", "Do not execute this"] {
             let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
             let mut state = TuiState {
+                agent_mode: ylva::AgentMode::ToolPending,
                 context_usage_text: Some("64.2K (45%)".to_string()),
                 pending_approval: Some((
                     uuid::Uuid::new_v4(),
@@ -773,15 +774,24 @@ fn approval_footer_keeps_context_usage_beside_buttons() {
                 .expect("draw");
             let buttons = buttons.expect("approval buttons");
             let buffer = terminal.backend().buffer();
-            let line: String = (0..80)
-                .map(|column| buffer.cell((column, buttons.approve.y)).unwrap().symbol())
-                .collect();
+            let row_text = |row: u16| -> String {
+                (0..80)
+                    .map(|column| buffer.cell((column, row)).unwrap().symbol())
+                    .collect()
+            };
+            let title_row = buttons.approve.y - 1;
+            assert!(row_text(title_row).contains("requests your approval"));
+            assert!(row_text(buttons.approve.y).contains("Deny"));
             assert!(
-                line.ends_with("64.2K (45%)"),
-                "approval row must retain the right-aligned readout: {line:?}"
+                row_text(buttons.approve.y + 1).contains(if denial_reason.is_empty() {
+                    "Optional reason"
+                } else {
+                    denial_reason
+                })
             );
-            assert!(line.contains("Approve") && line.contains("Deny"));
-            assert!(buttons.deny.right() <= 80 - "64.2K (45%)".len() as u16);
+            assert!(row_text(19).ends_with("64.2K (45%)"));
+            assert!(row_text(18).contains("Awaiting approval"));
+            assert!(row_text(19).contains("tab"));
         }
     }
 }
@@ -904,9 +914,9 @@ fn narrow_approval_footer_preserves_buttons_without_context_usage() {
     assert!(!usage_row.contains("Approve"), "{usage_row:?}");
     let buttons_row = rows
         .iter()
-        .find(|row| row.contains("Approve (enter)"))
+        .find(|row| row.contains("Approve"))
         .expect("approval buttons");
-    assert!(buttons_row.contains("Deny (esc)"), "{buttons_row:?}");
+    assert!(buttons_row.contains("Deny"), "{buttons_row:?}");
     assert!(!buttons_row.contains("64.2K"), "{buttons_row:?}");
 }
 
@@ -1896,7 +1906,7 @@ fn collapsed_bubble_title_cut_drops_a_space_before_the_marker() {
 
 #[tokio::test]
 async fn escape_twice_while_streaming_stops_stream_but_keeps_tui_open() {
-    // Esc+Esc must stop the agent but NOT exit the TUI (unlike Ctrl+C+Ctrl+C).
+    // Esc+Esc must stop the agent but NOT exit the TUI (unlike ctrl-c+ctrl-c).
     let run = GatedTuiRun::new(None);
     type_and_enter(&run.actions, "hello").await;
     run.start_response(1).await;
@@ -2088,7 +2098,7 @@ fn wide_footer_keeps_status_and_label_on_the_first_row() {
 }
 
 #[test]
-fn narrow_approval_footer_orders_meta_title_buttons() {
+fn narrow_approval_prompt_precedes_input_and_three_row_footer() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -2097,6 +2107,7 @@ fn narrow_approval_footer_orders_meta_title_buttons() {
 
     let mut terminal = Terminal::new(TestBackend::new(60, 14)).expect("terminal");
     let mut state = TuiState {
+        agent_mode: ylva::AgentMode::ToolPending,
         context_usage_text: Some("64.2K (45%)".to_string()),
         pending_approval: Some((
             uuid::Uuid::new_v4(),
@@ -2127,11 +2138,13 @@ fn narrow_approval_footer_orders_meta_title_buttons() {
             .collect()
     };
 
-    let meta_row = buttons.approve.y - 2;
-    assert!(row_text(meta_row).contains("64.2K (45%)"));
-    assert!(row_text(meta_row + 1).contains("requests your approval"));
+    assert!(row_text(buttons.approve.y - 1).contains("requests your approval"));
     assert!(row_text(buttons.approve.y).contains("Approve"));
-    assert!(!row_text(meta_row + 1).contains("Approve"));
+    assert!(!row_text(buttons.approve.y - 1).contains("Approve"));
+    // Three footer rows follow the one-row input: status, meta, hints.
+    assert!(row_text(11).contains("Awaiting approval"));
+    assert!(row_text(12).contains("64.2K (45%)"));
+    assert!(row_text(13).contains("tab"));
 }
 
 #[test]

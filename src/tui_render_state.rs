@@ -92,6 +92,10 @@ pub struct SubagentViewState {
     /// hit-testing (routing scroll-wheel events to the header instead of the
     /// chat area below it). Zero-sized while `subagent_view_bubble` is `None`.
     pub header_bubble_area: ratatui::layout::Rect,
+    /// On-screen rect of the back button in the header's top row, written each
+    /// frame by `tui_widgets::draw` for mouse hit-testing. Zero-sized while
+    /// `subagent_view_bubble` is `None`.
+    pub back_button_area: ratatui::layout::Rect,
     /// Plain text of every rendered header line, indexed before the vertical
     /// scroll offset. Used for extracting selected text on mouse-up.
     pub header_rendered_lines: Vec<String>,
@@ -121,6 +125,12 @@ pub struct ClarifyBannerState {
     /// for mouse click-to-select-choice hit-testing. Zero-sized when no
     /// clarify is pending.
     pub clarify_banner: ratatui::layout::Rect,
+    /// On-screen rect of the OK button below the banner; zero-sized when no
+    /// clarify is pending.
+    pub ok_button: ratatui::layout::Rect,
+    /// On-screen rect of the Cancel button below the banner; zero-sized when
+    /// no clarify is pending.
+    pub cancel_button: ratatui::layout::Rect,
 }
 
 /// Root-or-subagent scrollable conversation-list render state (Phase 6.10
@@ -241,6 +251,10 @@ pub struct TuiState {
     /// title so it's unambiguous which agent's tool call is being approved.
     /// Meaningless when `pending_approval` is `None`.
     pub pending_approval_is_subagent: bool,
+    /// The focused button of the visible approval/clarify prompt.
+    pub prompt_button_focus: Option<crate::tui_reducer_state::PromptButton>,
+    /// Approval/clarify prompts held back while the user types.
+    pub deferred_prompt_count: usize,
     /// All `UserMessage` texts, oldest → newest (including pending and
     /// cancelled steers, so the user can recover them via ↑).
     pub input_history: Vec<String>,
@@ -307,6 +321,8 @@ impl TuiState {
             compacting: false,
             pending_approval: None,
             pending_approval_is_subagent: false,
+            prompt_button_focus: None,
+            deferred_prompt_count: 0,
             input_history: Vec::new(),
             history_index: None,
             draft: String::new(),
@@ -329,11 +345,14 @@ impl TuiState {
                 clarify_scroll_offset: 0,
                 clarify_banner_drag: None,
                 clarify_banner: ratatui::layout::Rect::default(),
+                ok_button: ratatui::layout::Rect::default(),
+                cancel_button: ratatui::layout::Rect::default(),
             },
             subagent_view: SubagentViewState {
                 subagent_view_bubble: None,
                 header_bubble_scroll_offset: 0,
                 header_bubble_area: ratatui::layout::Rect::default(),
+                back_button_area: ratatui::layout::Rect::default(),
                 header_rendered_lines: Vec::new(),
                 header_rendered_line_prefix_widths: Vec::new(),
                 header_selection: None,

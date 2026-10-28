@@ -169,14 +169,14 @@ pub async fn poll_for_access_token(
 }
 
 /// Run the device flow interactively: print the verification instructions to
-/// `output`, then poll until authorized. Ctrl-C cancels the wait.
+/// `output`, then poll until authorized. ctrl-c cancels the wait.
 pub async fn authorize_with_copilot_device_flow(output: &mut dyn Write) -> anyhow::Result<String> {
     let client = reqwest::Client::new();
     let endpoints = DeviceFlowEndpoints::default();
     let device_code = request_device_code(&client, &endpoints).await?;
     writeln!(
         output,
-        "Open {} and enter the code {}\nWaiting for authorization (Ctrl-C to cancel)...",
+        "Open {} and enter the code {}\nWaiting for authorization (ctrl-c to cancel)...",
         device_code.verification_uri, device_code.user_code
     )?;
     output.flush()?;

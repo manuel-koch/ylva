@@ -23,20 +23,21 @@ use ratatui::Frame;
 use crate::markdown::render_markdown;
 use crate::saturating_cast::saturating_u16;
 use crate::theme::{
-    active_model_color, chat_scrollbar_color, clarify_banner_fg_color,
-    clarify_banner_scroll_indicator_color, clarify_banner_selection_fg_color,
-    compaction_mismatch_color, list_border_color, list_selection_background_color,
+    active_model_color, approve_background_color, approve_hover_background_color,
+    chat_scrollbar_color, clarify_banner_fg_color, clarify_banner_scroll_indicator_color,
+    clarify_banner_selection_fg_color, compaction_mismatch_color, deny_background_color,
+    deny_hover_background_color, list_border_color, list_selection_background_color,
     list_selection_foreground_color, list_text_color, muted_text_color, overlay_selection_color,
     toast_bg_color, toast_fg_color,
 };
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, model_picker_row_is_details,
     model_picker_row_layout, slash_overlay_text_rows, visible_model_choices, BannerDragSelection,
-    PickerRow, PickerRowLayout, SlashOverlay, SlashOverlayLayout,
+    PickerRow, PickerRowLayout, PromptButton, SlashOverlay, SlashOverlayLayout,
 };
 
 use super::chat::{apply_selection_highlight_to_line, render_chat_scrollbar};
-use super::footer::elide_balanced_tokens;
+use super::footer::{button_style, elide_balanced_tokens};
 
 const SESSION_RESUME_BUTTON_LABEL: &str = " Resume ";
 const SESSION_CLONE_BUTTON_LABEL: &str = " Clone ";
@@ -565,6 +566,56 @@ fn model_picker_detail_lines(
         return Vec::new();
     }
     vec![compaction_effect]
+}
+
+/// Draw the OK / Cancel buttons on `button_row` and return their rects.
+pub(super) fn draw_clarify_buttons(
+    frame: &mut Frame,
+    button_row: Rect,
+    focus: Option<PromptButton>,
+    mouse_pos: Option<(u16, u16)>,
+) -> (Rect, Rect) {
+    let ok_label = " [ ✓ OK ] ";
+    let cancel_label = " [ ✗ Cancel ] ";
+    let ok_width = saturating_u16(ok_label.chars().count());
+    let cancel_width = saturating_u16(cancel_label.chars().count());
+    let [_, ok_area, _, cancel_area, _] = Layout::horizontal([
+        Constraint::Length(1),
+        Constraint::Length(ok_width),
+        Constraint::Length(2),
+        Constraint::Length(cancel_width),
+        Constraint::Fill(1),
+    ])
+    .areas(button_row);
+    let hovered = |area: Rect| {
+        mouse_pos
+            .is_some_and(|(column, row)| area.contains(ratatui::layout::Position::new(column, row)))
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            ok_label,
+            button_style(
+                approve_background_color(),
+                approve_hover_background_color(),
+                hovered(ok_area),
+                focus == Some(PromptButton::ClarifyOk),
+            ),
+        )),
+        ok_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            cancel_label,
+            button_style(
+                deny_background_color(),
+                deny_hover_background_color(),
+                hovered(cancel_area),
+                focus == Some(PromptButton::ClarifyCancel),
+            ),
+        )),
+        cancel_area,
+    );
+    (ok_area, cancel_area)
 }
 
 #[expect(clippy::too_many_arguments)]

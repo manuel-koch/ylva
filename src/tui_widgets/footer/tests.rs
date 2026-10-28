@@ -15,6 +15,14 @@
 use super::*;
 
 #[test]
+fn button_style_fills_only_focused_or_hovered_buttons() {
+    let (normal, hover) = (Color::Green, Color::LightGreen);
+    assert_eq!(button_style(normal, hover, false, false).bg, None);
+    assert_eq!(button_style(normal, hover, false, true).bg, Some(normal));
+    assert_eq!(button_style(normal, hover, true, false).bg, Some(hover));
+}
+
+#[test]
 fn plural_noun_uses_singular_only_for_one() {
     assert_eq!(plural_noun(1, "message", "messages"), "message");
     assert_eq!(plural_noun(0, "message", "messages"), "messages");

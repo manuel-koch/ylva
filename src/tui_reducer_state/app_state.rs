@@ -49,6 +49,13 @@ pub struct AppState {
     /// Active profile and workspace paths shown by the TUI's startup logo
     /// and help popup.
     pub display_metadata: TuiDisplayMetadata,
+    /// Profile `[tui]` presentation settings (tool-bubble auto-expansion).
+    pub tui_config: crate::config::TuiConfig,
+    /// Tool bubbles that `[tui] auto_expand_approval` expanded while awaiting
+    /// approval and that must collapse once the approval resolves. A bubble
+    /// the user toggled by hand is removed, so the feature never overrides a
+    /// manual choice.
+    pub(crate) approval_auto_expanded: std::collections::HashSet<Uuid>,
     /// Provider/model identity for the root conversation. The Driver refreshes
     /// this from the live root engine before each frame so Engine runtime model
     /// switches are reflected immediately.
@@ -69,11 +76,15 @@ pub struct AppState {
     pub conversation: ConversationListState,
 
     // ── tool-approval ───────────────────────────────────────────────────────
-    /// The message-draft input state parked by `Effect::SaveInputStateAndClear`
-    /// when a tool approval or clarify question pauses the input, restored as
-    /// one unit by `Effect::RestoreInputState` (see [`InputSnapshot`]).
-    /// `None` when no pause is in progress or the input was empty.
-    pub pending_input_snapshot: Option<InputSnapshot>,
+    /// The slash overlay hidden by `Effect::ParkSlashOverlay` while a tool
+    /// approval or clarify question owns the rows above the input; given back
+    /// by `Effect::RestoreSlashOverlay`. The draft itself is never parked.
+    pub parked_slash_overlay: Option<SlashOverlay>,
+    /// The button of the visible approval/clarify prompt that has keyboard
+    /// focus; `None` until the user presses `Tab`.
+    pub prompt_button_focus: Option<PromptButton>,
+    /// Keystroke timing that defers prompts while the user types.
+    pub input_activity: InputActivity,
 
     // ── pasted blobs ────────────────────────────────────────────────────────
     /// Large pastes collapsed to markers in the current draft; expanded on
@@ -132,7 +143,7 @@ pub struct AppState {
     pub _history_direction: Option<HistoryDirection>,
 
     // ── abort-exit flag ──────────────────────────────────────────────────────
-    /// `true` when `TuiMode::Aborting` was entered via Ctrl+C double-press,
+    /// `true` when `TuiMode::Aborting` was entered via ctrl-c double-press,
     /// meaning the Driver should break the event loop once mode returns to
     /// Idle. `false` when Aborting was entered via Esc (soft cancel) — the
     /// TUI stays open so the user can continue chatting.
@@ -180,8 +191,7 @@ pub struct AppState {
     /// `pending_approval_order`, which decides when it is shown.
     pub queued_clarifies: HashMap<Uuid, QueuedClarify>,
     /// Set when a queued clarify was just shown; `presenter::update` turns it
-    /// into `Effect::SaveInputStateAndClear` so the banner starts with an
-    /// empty input.
+    /// into `Effect::ParkSlashOverlay`.
     pub(crate) queued_clarify_activated: bool,
     /// `true` when `active_view` was switched automatically (an interactive
     /// pause — `note_interactive_pause`), to `Subagent` *or* `Root`, rather than
@@ -292,6 +302,8 @@ impl AppState {
             focus: Focus::MainInput,
             layout: AppLayout::default(),
             display_metadata: TuiDisplayMetadata::default(),
+            tui_config: crate::config::TuiConfig::default(),
+            approval_auto_expanded: std::collections::HashSet::new(),
             engine_display: EngineDisplayInfo::default(),
             context_usage: None,
             replay_compaction_boundary: None,
@@ -303,7 +315,9 @@ impl AppState {
 
             conversation: ConversationListState::default(),
 
-            pending_input_snapshot: None,
+            parked_slash_overlay: None,
+            prompt_button_focus: None,
+            input_activity: InputActivity::default(),
 
             pasted_blobs: PastedBlobs::default(),
 

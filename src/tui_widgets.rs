@@ -48,10 +48,11 @@ use chat::{
     prepare_cached_header, render_chat_scrollbar, rendered_line_selection_data,
 };
 use footer::{
-    draw_approval_footer, draw_normal_footer, footer_keybinding_hints, help_popup_footer_hints,
+    draw_approval_prompt, draw_normal_footer, footer_keybinding_hints, help_popup_footer_hints,
+    APPROVAL_PROMPT_HEIGHT,
 };
 use help::draw_help_popup;
-use overlays::{draw_clarify_banner, draw_slash_overlay, draw_toast};
+use overlays::{draw_clarify_banner, draw_clarify_buttons, draw_slash_overlay, draw_toast};
 use tool_bubble::{append_tool_bubble_lines, ToolBubbleArgs};
 
 pub(crate) struct ConversationSource<'a> {
@@ -232,15 +233,19 @@ fn draw_internal(
         // out the chat area entirely.
         let max_header_height = saturating_u16((full_area.height as usize * 40 / 100).max(1));
         let header_height = saturating_u16(header_total.min(max_header_height as usize));
-        let [header_area, header_separator_area, rest] = Layout::default()
+        let [back_button_row, header_area, header_separator_area, rest] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1),
                 Constraint::Length(header_height),
                 Constraint::Length(1),
                 Constraint::Fill(1),
             ])
             .areas(full_area);
-        (Some((header_area, header_separator_area)), rest)
+        (
+            Some((back_button_row, header_area, header_separator_area)),
+            rest,
+        )
     };
     // The input box grows to fit its (word-wrapped) content, capped at 1/3 of
     // the terminal height. Wrapped row count, not logical line count, drives
@@ -265,11 +270,12 @@ fn draw_internal(
 
     // When a tool approval is pending the approval title and buttons appear
     // ABOVE the input field so the approve/deny controls sit immediately
-    // above where the user types a denial reason.
+    // above where the user types a denial reason. The regular footer stays
+    // below the input.
     //
     // The footer is one area whose height (2 wide / 3 narrow rows) comes from
     // `footer::footer_height`; its row split happens inside the footer
-    // drawing functions. In approval mode the footer sits above the input.
+    // drawing functions.
     let approval_pending = state.pending_approval.is_some();
     let clarify_banner_content_height = state
         .clarify_banner_state
@@ -297,49 +303,68 @@ fn draw_internal(
         0
     };
     let footer_height = footer::footer_height(area.width);
-    let (chat_area, separator_area, input_area, footer_area, clarify_area) = if approval_pending {
-        let [chat_area, separator_area, footer_area, input_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Fill(1),
-                Constraint::Length(1),
-                Constraint::Length(footer_height),
-                Constraint::Length(input_height),
-            ])
-            .areas(area);
-        (chat_area, separator_area, input_area, footer_area, None)
-    } else if clarify_banner_height > 0 {
-        let [chat_area, separator_area, clarify_area, input_area, footer_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Fill(1),
-                Constraint::Length(1),
-                Constraint::Length(clarify_banner_height),
-                Constraint::Length(input_height),
-                Constraint::Length(footer_height),
-            ])
-            .areas(area);
-        (
-            chat_area,
-            separator_area,
-            input_area,
-            footer_area,
-            Some(clarify_area),
-        )
-    } else {
-        let [chat_area, separator_area, input_area, footer_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Fill(1),
-                Constraint::Length(1),
-                Constraint::Length(input_height),
-                Constraint::Length(footer_height),
-            ])
-            .areas(area);
-        (chat_area, separator_area, input_area, footer_area, None)
-    };
+    let (chat_area, separator_area, input_area, footer_area, clarify_area, approval_area) =
+        if approval_pending {
+            let [chat_area, separator_area, approval_area, input_area, footer_area] =
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Fill(1),
+                        Constraint::Length(1),
+                        Constraint::Length(APPROVAL_PROMPT_HEIGHT),
+                        Constraint::Length(input_height),
+                        Constraint::Length(footer_height),
+                    ])
+                    .areas(area);
+            (
+                chat_area,
+                separator_area,
+                input_area,
+                footer_area,
+                None,
+                Some(approval_area),
+            )
+        } else if clarify_banner_height > 0 {
+            let [chat_area, separator_area, clarify_area, input_area, footer_area] =
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Fill(1),
+                        Constraint::Length(1),
+                        Constraint::Length(clarify_banner_height + 1),
+                        Constraint::Length(input_height),
+                        Constraint::Length(footer_height),
+                    ])
+                    .areas(area);
+            (
+                chat_area,
+                separator_area,
+                input_area,
+                footer_area,
+                Some(clarify_area),
+                None,
+            )
+        } else {
+            let [chat_area, separator_area, input_area, footer_area] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                    Constraint::Length(input_height),
+                    Constraint::Length(footer_height),
+                ])
+                .areas(area);
+            (
+                chat_area,
+                separator_area,
+                input_area,
+                footer_area,
+                None,
+                None,
+            )
+        };
 
-    if let Some((header_area, header_separator_area)) = header_area {
+    if let Some((back_button_row, header_area, header_separator_area)) = header_area {
         let [header_content_area, header_scrollbar_area] = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Fill(1), Constraint::Length(1)])
@@ -402,7 +427,7 @@ fn draw_internal(
         // Tint the whole header block (content, scrollbar column and the
         // divider below) so the drill-in header reads as distinct from the
         // scrollable transcript; cells the content leaves untouched keep it.
-        for tinted_area in [header_area, header_separator_area] {
+        for tinted_area in [back_button_row, header_area, header_separator_area] {
             frame.render_widget(
                 Block::default().style(Style::default().bg(subagent_view_header_bg_color())),
                 tinted_area,
@@ -410,6 +435,32 @@ fn draw_internal(
         }
         let paragraph = Paragraph::new(header_lines);
         frame.render_widget(paragraph, header_content_area);
+
+        // The button is inset by two columns so its `[` (after one padding
+        // space) sits above the header's expand/collapse indicator; the
+        // hover highlight and hit area cover only the button itself.
+        let back_label = " [ ← Back ] ";
+        let back_inset = 2.min(back_button_row.width);
+        let back_width =
+            saturating_u16(back_label.chars().count()).min(back_button_row.width - back_inset);
+        let back_button_area = Rect::new(
+            back_button_row.x + back_inset,
+            back_button_row.y,
+            back_width,
+            back_button_row.height,
+        );
+        let back_hovered = mouse_pos.is_some_and(|(column, row)| {
+            back_button_area.contains(ratatui::layout::Position::new(column, row))
+        });
+        let mut back_style = Style::default().add_modifier(Modifier::BOLD);
+        if back_hovered {
+            back_style = back_style.add_modifier(Modifier::REVERSED);
+        }
+        frame.render_widget(
+            Paragraph::new(Span::styled(back_label, back_style)),
+            back_button_area,
+        );
+        state.subagent_view.back_button_area = back_button_area;
 
         // Show the scroll indicators/scrollbar only when the bubble's full
         // content overflows the clamped header height. Tinted
@@ -445,6 +496,7 @@ fn draw_internal(
         );
     } else {
         state.subagent_view.header_bubble_area = Rect::default();
+        state.subagent_view.back_button_area = Rect::default();
         state.subagent_view.header_rendered_lines.clear();
         state
             .subagent_view
@@ -502,6 +554,20 @@ fn draw_internal(
             .style(Style::default().bg(user_message_bg_color())),
     );
     frame.render_widget(&*textarea, input_area);
+    // Text typed into the field is discarded by Approve; dim it while that
+    // button has focus so the outcome is visible before activating it.
+    if approval_pending
+        && state.prompt_button_focus == Some(crate::tui_reducer_state::PromptButton::Approve)
+    {
+        let buffer = frame.buffer_mut();
+        for row in input_area.top()..input_area.bottom() {
+            for column in input_area.left()..input_area.right() {
+                if let Some(cell) = buffer.cell_mut((column, row)) {
+                    cell.modifier.insert(Modifier::DIM);
+                }
+            }
+        }
+    }
 
     // InViewport clamps an origin cursor to the actual rendered viewport top.
     // Probe a clone so cursor movement and draft replacement cannot desync it.
@@ -548,7 +614,7 @@ fn draw_internal(
         };
         frame.render_widget(
             Paragraph::new(Line::styled(
-                "Enter reason for denial here…",
+                "Optional reason, used only by Deny…",
                 Style::default()
                     .fg(muted_text_color())
                     .bg(user_message_bg_color()),
@@ -569,7 +635,26 @@ fn draw_internal(
     // Store the input rect for mouse click/drag handling in the event loop.
     state.input_area = input_area;
     // Store the clarify banner rect for mouse click-to-choose handling.
+    let (clarify_area, clarify_button_row) = match clarify_area {
+        Some(full_area) => {
+            let [banner_area, button_row] = Layout::vertical([
+                Constraint::Length(full_area.height.saturating_sub(1)),
+                Constraint::Length(1),
+            ])
+            .areas(full_area);
+            (Some(banner_area), Some(button_row))
+        }
+        None => (None, None),
+    };
     state.clarify_banner_state.clarify_banner = clarify_area.unwrap_or_default();
+    state.clarify_banner_state.ok_button = Rect::default();
+    state.clarify_banner_state.cancel_button = Rect::default();
+    if let Some(button_row) = clarify_button_row {
+        let (ok_area, cancel_area) =
+            draw_clarify_buttons(frame, button_row, state.prompt_button_focus, mouse_pos);
+        state.clarify_banner_state.ok_button = ok_area;
+        state.clarify_banner_state.cancel_button = cancel_area;
+    }
 
     if let (Some(clarify_area), Some((question, choices, context))) = (
         clarify_area,
@@ -590,31 +675,26 @@ fn draw_internal(
     let footer_source = conversation
         .as_ref()
         .map(|conversation| conversation.source);
-    let button_areas = if state.help_popup.show_help {
-        draw_normal_footer(
-            frame,
-            footer_area,
-            state,
-            help_popup_footer_hints(state),
-            hint,
-            footer_source,
-        );
-        None
-    } else if let Some((_, name, _)) = &state.pending_approval.clone() {
-        draw_approval_footer(
-            frame,
-            footer_area,
-            state,
-            name,
-            state.pending_approval_is_subagent,
-            input_is_empty,
-            mouse_pos,
-            hint,
-        )
+    let footer_hints = if state.help_popup.show_help {
+        help_popup_footer_hints(state)
     } else {
-        let footer_hints = footer_keybinding_hints(state, input_is_empty);
-        draw_normal_footer(frame, footer_area, state, footer_hints, hint, footer_source);
-        None
+        footer_keybinding_hints(state, input_is_empty)
+    };
+    draw_normal_footer(frame, footer_area, state, footer_hints, hint, footer_source);
+    // The help popup covers the prompt, so its buttons are not clickable then.
+    let button_areas = match (approval_area, state.pending_approval.clone()) {
+        (Some(approval_area), Some((_, name, _))) => {
+            let areas = draw_approval_prompt(
+                frame,
+                approval_area,
+                state,
+                &name,
+                state.pending_approval_is_subagent,
+                mouse_pos,
+            );
+            (!state.help_popup.show_help).then_some(areas)
+        }
+        _ => None,
     };
 
     if state.help_popup.show_help {

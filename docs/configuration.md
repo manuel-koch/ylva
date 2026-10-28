@@ -232,8 +232,9 @@ over values from either profile environment file.
 - Profile validation errors (for example, an engine reference that has no
   corresponding `[engines.*]` table) name the selected profile and the full
   path of the resolved `config.toml` together with the validation detail.
-- Unknown keys do not stop loading. Each one is reported as a warning naming
-  the file, the full key path and, when a known key is close, a suggestion
+- Unknown keys and unknown tool names in `[tui] auto_expand_tool` do not stop
+  loading. Each one is reported as a warning naming the file, the full key path
+  and, when a known key is close, a suggestion
   (for example *unknown key `agents.coder.descrption`; did you mean `description`?*).
   Warnings appear once at startup: as a notice in the TUI conversation, on
   stderr in console mode, and in the log. Pass `--strict-config` to turn any
@@ -300,6 +301,7 @@ engine = "ollama/local"
 | `theme` | `dark` \| `light` | Colour theme for the whole TUI and CLI output, not only syntax highlighting: `dark` for dark terminal backgrounds (default), `light` for light ones. See [features — rendering](./features.md#tui-architecture). |
 | `input_history_limit` | number | Maximum number of explicit messages from prior root sessions loaded into TUI input history. Defaults to `50`; `0` disables prior-session history. |
 | `max_concurrent_subagents` | integer or integer string | Profile-level cap on simultaneously running subagents across the delegation tree. Defaults to `4`; values `<= 0` mean unlimited. `--max-concurrent-subagents <N>` overrides this for one run. The cap limits subagent runs, not the root request. Provider request concurrency is separately limited per connection (4 open requests, held for the whole streamed response, shared by root, subagents, title generation and compaction); excess agents wait for a free permit. |
+| `[tui]` | table | TUI presentation settings — see [TUI configuration](#tui-configuration) below. |
 | `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
 | `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind (`mock`, `ollama`, `openrouter` or `copilot`; any other value fails at load); its endpoint and credentials belong to this connection. |
 | `[engines.<name>]` | table | A named engine — see [Engine configuration](#engine-configuration) below. |
@@ -866,6 +868,26 @@ The change does not alter an in-flight LLM request; it is observed by the
 agent's next request, which may be another request in the same subagent run after
 a tool call. The selection is dynamic rather than pinned at spawn time. Use
 separate named engines when the root and a subagent must remain independent.
+
+### TUI configuration
+
+The optional `[tui]` table controls how tool bubbles are expanded in the TUI.
+Both settings default to today's behavior: bubbles arrive collapsed and only
+clicking toggles them.
+
+```toml
+[tui]
+auto_expand_tool = ["read", "write", "edit"]
+auto_expand_approval = true
+```
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `auto_expand_tool` | array of strings | Exact, case-sensitive tool names whose bubbles are expanded when they arrive, in the root and in subagent conversations. Default: empty. A name matching no registered tool is a configuration warning (an error with `--strict-config`). `clarify` needs no entry: its bubble always arrives expanded. |
+| `auto_expand_approval` | boolean | Expand the bubble awaiting user approval while the approval is pending, and collapse it again once the approval resolves (approved, denied, killed or failed). A bubble expanded by `auto_expand_tool` or by hand stays expanded; toggling a bubble by hand during approval keeps the manual state. Default: `false`. |
+
+Auto-expansion never shows the `Expanding…` feedback and never unpins a view
+that follows the bottom of the conversation.
 
 ### Web search configuration
 

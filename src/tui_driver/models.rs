@@ -86,7 +86,7 @@ pub(super) fn abort_pending_model_list(pending_model_list: &mut Option<PendingMo
 ///
 /// A result completing while the pause hid the overlay is discarded — the
 /// result branch only applies to a visible `SlashOverlay::LoadingModels` —
-/// so once `RestoreInputState` puts `LoadingModels` back, the request must
+/// so once `RestoreSlashOverlay` puts `LoadingModels` back, the request must
 /// be made again for the picker to ever populate. When the original request
 /// is still in flight, its pending handle remains and the existing result
 /// branch applies it on arrival, so this is a no-op then.

@@ -115,7 +115,7 @@ impl AppState {
 
     /// Name of the tool bubble `tool_id` when it is still awaiting approval
     /// in the root or any subagent transcript.
-    fn pending_approval_name(&self, tool_id: Uuid) -> Option<String> {
+    pub(crate) fn pending_approval_name(&self, tool_id: Uuid) -> Option<String> {
         fn find_in(messages: &[ChatEntry], tool_id: Uuid) -> Option<String> {
             messages.iter().find_map(|entry| match entry {
                 ChatEntry::ToolBubble {
@@ -195,6 +195,57 @@ impl AppState {
         killed_tool_ids
     }
 
+    /// Whether a bubble for tool `name` is created collapsed: every tool not
+    /// listed (by exact name) in `[tui] auto_expand_tool`. The single place
+    /// that rule lives; all bubble creation sites route through it. Arrival
+    /// expansion deliberately sets no `pending_bubble_expansion` and leaves
+    /// `scroll_locked` alone, so a bottom-pinned view stays pinned.
+    pub(crate) fn tool_bubble_arrives_collapsed(&self, name: &str) -> bool {
+        !self
+            .tui_config
+            .auto_expand_tool
+            .iter()
+            .any(|auto_expand_name| auto_expand_name == name)
+    }
+
+    /// Expand the bubble now awaiting approval when `[tui]
+    /// auto_expand_approval` is enabled, remembering that this feature (not
+    /// the user or the arrival rule) did it. Like arrival expansion, it
+    /// leaves `pending_bubble_expansion` and `scroll_locked` untouched.
+    pub(crate) fn expand_bubble_for_approval(&mut self, id: Uuid) {
+        if !self.tui_config.auto_expand_approval {
+            return;
+        }
+        if let Some(ChatEntry::ToolBubble { collapsed, .. }) =
+            self.find_tool_bubble_for_render_mutation(id, false)
+        {
+            if *collapsed {
+                *collapsed = false;
+                self.approval_auto_expanded.insert(id);
+            }
+        }
+    }
+
+    /// Collapse every bubble that `expand_bubble_for_approval` expanded and
+    /// whose approval is over, i.e. it is no longer `Pending` (approved,
+    /// denied, killed, failed or gone).
+    pub(crate) fn collapse_resolved_approval_expansions(&mut self) {
+        let resolved: Vec<Uuid> = self
+            .approval_auto_expanded
+            .iter()
+            .copied()
+            .filter(|id| self.pending_approval_name(*id).is_none())
+            .collect();
+        for id in resolved {
+            self.approval_auto_expanded.remove(&id);
+            if let Some(ChatEntry::ToolBubble { collapsed, .. }) =
+                self.find_tool_bubble_for_render_mutation(id, false)
+            {
+                *collapsed = true;
+            }
+        }
+    }
+
     /// Toggle the collapsed/expanded state of the tool bubble with the given id.
     ///
     /// Collapsing a bubble whose body extends below the viewport shrinks the
@@ -208,6 +259,7 @@ impl AppState {
     /// transcript (`subagent_conversations`) — the click that triggers this can
     /// target a bubble in any of them, depending on `active_view`.
     pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
+        self.approval_auto_expanded.remove(&target_id);
         let expanded = if let Some(ChatEntry::ToolBubble { collapsed, .. }) =
             self.find_tool_bubble_for_render_mutation(target_id, false)
         {

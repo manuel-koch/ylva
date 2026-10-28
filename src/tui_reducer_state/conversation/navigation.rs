@@ -74,6 +74,7 @@ impl AppState {
     /// `true`," generalized to cover an auto-switch into `Root` for a
     /// root-owned approval as well.
     pub(crate) fn resolve_possible_interactive_pause(&mut self, id: Uuid) {
+        self.collapse_resolved_approval_expansions();
         if !self.auto_switched_to_subagent {
             self.resume_pending_tool_approval();
             return;
@@ -98,6 +99,11 @@ impl AppState {
         self.resume_pending_tool_approval();
     }
 
+    /// Shows the prompt that was deferred while the user typed.
+    pub(crate) fn resume_deferred_prompt(&mut self) {
+        self.resume_pending_tool_approval();
+    }
+
     pub(in crate::tui_reducer_state) fn resume_pending_tool_approval(&mut self) {
         self.prune_pending_approval_order();
         if matches!(self.focus, Focus::HelpPopup)
@@ -117,6 +123,11 @@ impl AppState {
                 return;
             }
             self.focus = Focus::MainInput;
+        }
+        // The next prompt waits while the user is typing; `TypingSettled`
+        // resumes it.
+        if self.is_typing() {
+            return;
         }
         match self.next_pending_interaction() {
             Some(PendingInteraction::Approval { tool_id, tool_name }) => {
@@ -150,6 +161,7 @@ impl AppState {
         // visible immediately; clamped to max_scroll on render.
         self.clarify_banner_state.clarify_scroll_offset = usize::MAX;
         self.focus = Focus::MainInput;
+        self.prompt_button_focus = None;
         self.note_interactive_pause(run_id);
     }
 
@@ -175,7 +187,19 @@ impl AppState {
                     .then_some(*run_id)
             });
         self.focus = Focus::ToolApproval { tool_id, tool_name };
+        self.expand_bubble_for_approval(tool_id);
+        self.prompt_button_focus = None;
         self.note_interactive_pause(run_id);
+    }
+
+    /// Steps out of the current subagent view to its parent conversation.
+    /// A no-op in the root view. Subagents cannot spawn subagents today, so the
+    /// parent is always the root conversation; this is the single place to
+    /// resolve a nested parent.
+    pub fn switch_to_parent_view(&mut self) {
+        if matches!(self.active_view, ConversationView::Subagent { .. }) {
+            self.switch_to_root_view();
+        }
     }
 
     pub fn switch_to_subagent_view(&mut self, run_id: Uuid) {

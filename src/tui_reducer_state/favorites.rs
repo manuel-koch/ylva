@@ -18,7 +18,7 @@ use super::AppState;
 
 impl AppState {
     /// Apply a confirmed favorite change to the visible overlay and to an
-    /// overlay parked in `pending_input_snapshot` by an approval or clarify
+    /// overlay parked in `parked_slash_overlay` by an approval or clarify
     /// pause, so restoring the snapshot shows current membership.
     pub fn apply_favorite_membership(
         &mut self,
@@ -28,12 +28,8 @@ impl AppState {
     ) {
         self.slash_overlay
             .apply_favorite_membership(provider_connection, model_id, favorite);
-        if let Some(snapshot) = self.pending_input_snapshot.as_mut() {
-            snapshot.slash_overlay.apply_favorite_membership(
-                provider_connection,
-                model_id,
-                favorite,
-            );
+        if let Some(overlay) = self.parked_slash_overlay.as_mut() {
+            overlay.apply_favorite_membership(provider_connection, model_id, favorite);
         }
     }
 }

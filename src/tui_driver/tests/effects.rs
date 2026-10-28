@@ -111,7 +111,7 @@ async fn aborting_tool_error_waits_for_idle_before_quitting() {
     assert_eq!(
         idle_outcome,
         ActionOutcome::Quit,
-        "the following idle event should complete a Ctrl-C abort"
+        "the following idle event should complete a ctrl-c abort"
     );
 }
 
@@ -271,12 +271,13 @@ async fn overlapping_approvals_resume_root_and_preserve_input() {
             .await;
         }
         let context = textarea_ctx_from(&textarea);
+        state.prompt_button_focus = Some(crate::tui_reducer_state::PromptButton::Approve);
         let effects = presenter::update(
             &mut state,
             TuiEvent::Input(if approve_subagent {
                 InputEvent::KeyInput(key_event(KeyCode::Enter))
             } else {
-                InputEvent::Escape
+                InputEvent::CtrlC
             }),
             &context,
         );
@@ -310,9 +311,10 @@ async fn overlapping_approvals_resume_root_and_preserve_input() {
             crate::tui_reducer_state::ConversationView::Root
         );
         assert_eq!(state.agent_mode(), crate::AgentMode::ToolPending);
-        assert_eq!(textarea.lines(), &[""]);
+        assert_eq!(textarea.lines(), &["unfinished draft"]);
 
         let context = textarea_ctx_from(&textarea);
+        state.prompt_button_focus = Some(crate::tui_reducer_state::PromptButton::Approve);
         let effects = presenter::update(
             &mut state,
             TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -391,6 +393,7 @@ async fn two_subagent_approvals_are_presented_fifo_and_route_to_their_own_runs()
     ));
 
     let context = textarea_ctx_from(&textarea);
+    state.prompt_button_focus = Some(crate::tui_reducer_state::PromptButton::Approve);
     let effects = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -423,7 +426,7 @@ async fn two_subagent_approvals_are_presented_fifo_and_route_to_their_own_runs()
     ));
 
     let context = textarea_ctx_from(&textarea);
-    let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &context);
+    let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::CtrlC), &context);
     execute_effects(
         &mut state,
         &mut textarea,
@@ -478,6 +481,7 @@ async fn approval_enter_sends_approve_tool() {
     .await;
 
     let ctx = textarea_ctx_from(&textarea);
+    state.prompt_button_focus = Some(crate::tui_reducer_state::PromptButton::Approve);
     let effects = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -530,7 +534,7 @@ async fn approval_escape_sends_deny_tool() {
     .await;
 
     let ctx = textarea_ctx_from(&textarea);
-    let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);
+    let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::CtrlC), &ctx);
     assert!(effects.contains(&Effect::DenyTool {
         id: tool_id,
         reason: String::new(),
@@ -556,7 +560,7 @@ async fn approval_escape_sends_deny_tool() {
 }
 
 #[tokio::test]
-async fn save_and_restore_textarea_for_approval() {
+async fn approval_leaves_the_draft_untouched_until_a_button_is_activated() {
     let (mut state, _, cmd_tx, _cmd_rx) = setup();
     let mut textarea = TextArea::from(vec!["hello world".to_string()]);
     configure_textarea(&mut textarea);
@@ -583,15 +587,8 @@ async fn save_and_restore_textarea_for_approval() {
         &mut PendingRunIds::default(),
     )
     .await;
-    assert_eq!(
-        state.pending_input_snapshot,
-        Some(InputSnapshot {
-            input_lines: Some(vec!["hello world".to_string()]),
-            slash_overlay: SlashOverlay::Hidden,
-            pasted_blobs: Default::default(),
-        })
-    );
-    assert_eq!(textarea.lines(), &[""]);
+    assert_eq!(textarea.lines(), &["hello world"]);
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
 
     let context = textarea_ctx_from(&textarea);
     let effects = presenter::update(
@@ -599,18 +596,9 @@ async fn save_and_restore_textarea_for_approval() {
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
         &context,
     );
-    execute_effects(
-        &mut state,
-        &mut textarea,
-        &cmd_tx,
-        effects,
-        &mut MouseDrag::default(),
-        &mut NoopClipboard,
-        &mut PendingRunIds::default(),
-    )
-    .await;
+    assert!(effects.is_empty());
     assert_eq!(textarea.lines(), &["hello world"]);
-    assert_eq!(state.pending_input_snapshot, None);
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
 }
 
 #[tokio::test]
@@ -657,7 +645,7 @@ async fn approval_hides_the_suggestion_overlay_and_reopens_it_when_resolved() {
     )
     .await;
     assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
-    assert_eq!(textarea.lines(), &[""]);
+    assert_eq!(textarea.lines(), &["/mo"]);
 
     // Typing a denial reason containing `/` must not reopen the overlay
     // while the approval is pending: the Driver recomputes it after every
@@ -686,7 +674,7 @@ async fn approval_hides_the_suggestion_overlay_and_reopens_it_when_resolved() {
 
     let effects = presenter::update(
         &mut state,
-        TuiEvent::Input(InputEvent::Escape),
+        TuiEvent::Input(InputEvent::CtrlC),
         &textarea_ctx_from(&textarea),
     );
     execute_effects(
@@ -708,9 +696,10 @@ async fn approval_hides_the_suggestion_overlay_and_reopens_it_when_resolved() {
     );
     assert_eq!(
         textarea.lines(),
-        &["/mo"],
-        "the snapshotted draft must be restored after the approval"
+        &["//mo"],
+        "the draft, including text typed during the approval, must stay"
     );
+    textarea.input(key_event(KeyCode::Backspace));
     state.refresh_slash_overlay(&textarea.lines().join("\n"));
     assert!(
         matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }),
@@ -777,7 +766,7 @@ async fn mouse_approve_restores_the_draft_and_reopens_the_suggestion_overlay() {
         effects,
         vec![
             Effect::ApproveTool { id: tool_id },
-            Effect::RestoreInputState
+            Effect::RestoreSlashOverlay
         ]
     );
     execute_effects(
@@ -873,20 +862,18 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
     )
     .await;
     assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
-    let parked = state
-        .pending_input_snapshot
-        .clone()
-        .expect("input state must be parked while the approval is pending");
     assert!(
-        matches!(parked.slash_overlay, SlashOverlay::ModelPicker { .. }),
-        "the picker must be parked, got {:?}",
-        parked.slash_overlay
+        matches!(
+            state.parked_slash_overlay,
+            Some(SlashOverlay::ModelPicker { .. })
+        ),
+        "the picker must be parked while the approval is pending, got {:?}",
+        state.parked_slash_overlay
     );
-    assert_eq!(parked.input_lines, Some(vec!["/models deep".to_string()]));
 
     let effects = presenter::update(
         &mut state,
-        TuiEvent::Input(InputEvent::Escape),
+        TuiEvent::Input(InputEvent::CtrlC),
         &textarea_ctx_from(&textarea),
     );
     execute_effects(
@@ -906,7 +893,7 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
             reason: String::new(),
         })
     );
-    assert_eq!(state.pending_input_snapshot, None);
+    assert_eq!(state.parked_slash_overlay, None);
     assert_eq!(textarea.lines(), &["/models deep"]);
     // The Driver's post-effect recompute reconciles the restored picker
     // with the restored draft (same filter, kept catalog).
@@ -935,7 +922,7 @@ async fn approval_input_never_interprets_slash_commands() {
     let mut clipboard = NoopClipboard;
     let mut pending_run_ids = PendingRunIds::default();
 
-    let mut textarea = TextArea::from(vec!["hello".to_string()]);
+    let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
 
     let tool_id = Uuid::new_v4();
@@ -990,15 +977,18 @@ async fn approval_input_never_interprets_slash_commands() {
     }
     assert_eq!(textarea.lines(), &["/clear"]);
 
-    // Tab must not complete a slash command in the approval input.
+    // Tab only moves button focus; it must not complete a slash command.
     let effects = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab))),
         &textarea_ctx_from(&textarea),
     );
-    assert_eq!(effects, vec![Effect::TextareaKey(key_event(KeyCode::Tab))]);
+    assert!(effects.is_empty());
+    assert_eq!(textarea.lines(), &["/clear"]);
 
-    // Enter must deny with the typed reason, not run `/clear`.
+    // Enter on the focused Deny button must deny with the typed reason, not
+    // run `/clear`.
+    state.prompt_button_focus = Some(crate::tui_reducer_state::PromptButton::Deny);
     let effects = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -1007,7 +997,7 @@ async fn approval_input_never_interprets_slash_commands() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::DenyTool { id, reason }, Effect::RestoreInputState]
+            [Effect::DenyTool { id, reason }, Effect::ClearTextarea, Effect::RestoreSlashOverlay]
                 if *id == tool_id && reason == "/clear"
         ),
         "Enter must deny with the reason, got {effects:?}"
@@ -1224,7 +1214,7 @@ async fn stop_key_alone_keeps_the_run_outcome_successful() {
     assert_eq!(
         pending_run_ids.run_outcome.exit_code(),
         crate::ExitCode::Success,
-        "Ctrl+C and Esc stop a turn without setting the exit code"
+        "ctrl-c and Esc stop a turn without setting the exit code"
     );
 }
 

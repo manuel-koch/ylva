@@ -424,7 +424,7 @@ subagent-run replay, input history, title handling, and final exit identity all
 follow the activated store. The old loop is joined and its obsolete stores
 released; hydration never appends historical messages again.
 
-`Esc` cancels publication, not an already-running blocking archive restoration,
+`esc` cancels publication, not an already-running blocking archive restoration,
 normal repair-on-resume, or durable clone creation. If a clone exists but is
 not activated, it is retained and its ID explicitly reported as
 `Clone created but not activated`; it remains eligible for later resume.

@@ -21,7 +21,7 @@ use crate::slash_command::{
 };
 use crate::tui_reducer_state::{
     AppState, ConfirmKey, ConversationView, Effect, Focus, HistoryDirection, InputEvent,
-    SlashOverlay, TuiMode, UserMessageState, HELP_HORIZONTAL_SCROLL_COLUMNS,
+    PromptButton, SlashOverlay, TuiMode, UserMessageState, HELP_HORIZONTAL_SCROLL_COLUMNS,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::time::Instant;
@@ -55,6 +55,7 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
         }
         InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => handle_ctrl_c_generic(state, true),
+        InputEvent::ParentView => vec![],
         InputEvent::KeyInput(key_event) => {
             match key_event.code {
                 KeyCode::Up => {
@@ -83,6 +84,27 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
     }
 }
 
+/// `ctrl-p` as the textarea sees it, for contexts where it does not navigate.
+fn parent_view_key_event() -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)
+}
+
+/// A bare `Enter` (no newline-inserting modifier) activates a prompt button.
+fn is_activation_key(key_event: &crossterm::event::KeyEvent) -> bool {
+    key_event.code == KeyCode::Enter
+        && !key_event
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+}
+
+fn is_focus_cycle_key(key_event: &crossterm::event::KeyEvent) -> Option<bool> {
+    match key_event.code {
+        KeyCode::Tab => Some(false),
+        KeyCode::BackTab => Some(true),
+        _ => None,
+    }
+}
+
 fn keyboard_approval(
     state: &mut AppState,
     event: InputEvent,
@@ -93,7 +115,7 @@ fn keyboard_approval(
         _ => return vec![],
     };
     match event {
-        InputEvent::CtrlC | InputEvent::Escape => {
+        InputEvent::CtrlC => {
             state.focus = Focus::MainInput;
             // No reason given — deny silently without an implicit user message.
             vec![
@@ -101,31 +123,45 @@ fn keyboard_approval(
                     id: tool_id,
                     reason: String::new(),
                 },
-                Effect::RestoreInputState,
+                Effect::RestoreSlashOverlay,
             ]
         }
+        // Esc never resolves an approval; it only drops button focus.
+        InputEvent::Escape => {
+            state.prompt_button_focus = None;
+            vec![]
+        }
         InputEvent::StopSignal => handle_stop_signal(state),
-        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Enter => {
-            state.focus = Focus::MainInput;
-            if textarea.is_empty {
-                vec![
-                    Effect::ApproveTool { id: tool_id },
-                    Effect::RestoreInputState,
-                ]
-            } else {
-                // User typed a denial reason — pass it to the agent so it can
-                // be forwarded to the model as an implicit user message.
-                let reason = textarea.text.clone();
-                vec![
-                    Effect::DenyTool {
-                        id: tool_id,
-                        reason,
-                    },
-                    Effect::RestoreInputState,
-                ]
+        InputEvent::KeyInput(key_event) if is_focus_cycle_key(&key_event).is_some() => {
+            state.cycle_prompt_button(is_focus_cycle_key(&key_event) == Some(true));
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if is_activation_key(&key_event) => {
+            match state.focused_prompt_button() {
+                Some(PromptButton::Approve) => {
+                    state.focus = Focus::MainInput;
+                    // The text in the input field is ignored and kept.
+                    vec![
+                        Effect::ApproveTool { id: tool_id },
+                        Effect::RestoreSlashOverlay,
+                    ]
+                }
+                Some(PromptButton::Deny) => {
+                    state.focus = Focus::MainInput;
+                    vec![
+                        Effect::DenyTool {
+                            id: tool_id,
+                            reason: state.pasted_blobs.expand(&textarea.text),
+                        },
+                        Effect::ClearTextarea,
+                        Effect::RestoreSlashOverlay,
+                    ]
+                }
+                _ => vec![],
             }
         }
         InputEvent::KeyInput(key_event) => vec![Effect::TextareaKey(key_event)],
+        InputEvent::ParentView => vec![Effect::TextareaKey(parent_view_key_event())],
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
             state.clear_help_selection();
@@ -154,19 +190,13 @@ fn keyboard_main(
         }
         InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => handle_ctrl_c_generic(state, textarea.is_empty),
-        // Esc with an empty draft while viewing a subagent's drill-in
-        // transcript navigates back to the root conversation instead of
-        // acting on the (root) agent's `TuiMode` — the subagent's own
-        // transcript is read-only here, so there is nothing to "cancel". A
-        // non-empty draft still just clears via the normal Escape path
-        // below, same as in the root view.
-        InputEvent::Escape
-            if textarea.is_empty
-                && matches!(state.active_view, ConversationView::Subagent { .. }) =>
+        InputEvent::ParentView
+            if matches!(state.active_view, ConversationView::Subagent { .. }) =>
         {
-            state.switch_to_root_view();
+            state.switch_to_parent_view();
             vec![]
         }
+        InputEvent::ParentView => handle_key_main(state, parent_view_key_event(), textarea),
         InputEvent::Escape => handle_escape_main(state, textarea),
         InputEvent::Paste(text) => vec![Effect::Paste(text)],
         InputEvent::KeyInput(key_event) => handle_key_main(state, key_event, textarea),
@@ -198,30 +228,53 @@ fn keyboard_clarify(
             let Some(id) = take_clarify_id(state) else {
                 return vec![];
             };
-            vec![Effect::AbortClarify { id }, Effect::RestoreInputState]
+            vec![Effect::AbortClarify { id }, Effect::RestoreSlashOverlay]
         }
+        // Esc drops button focus and clears typed text; aborting needs the
+        // Cancel button.
         InputEvent::Escape => {
+            state.prompt_button_focus = None;
             if textarea.is_empty {
-                let Some(id) = take_clarify_id(state) else {
-                    return vec![];
-                };
-                vec![Effect::AbortClarify { id }, Effect::RestoreInputState]
+                vec![]
             } else {
                 vec![Effect::ClearTextarea]
             }
         }
         InputEvent::Paste(text) => vec![Effect::Paste(text)],
-        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Enter => {
-            let Some(id) = take_clarify_id(state) else {
-                return vec![];
-            };
-            vec![
-                Effect::AnswerClarify {
-                    id,
-                    answer: textarea.text.clone(),
-                },
-                Effect::RestoreInputState,
-            ]
+        InputEvent::ParentView
+            if matches!(state.active_view, ConversationView::Subagent { .. }) =>
+        {
+            state.switch_to_parent_view();
+            vec![]
+        }
+        InputEvent::ParentView => vec![Effect::TextareaKey(parent_view_key_event())],
+        InputEvent::KeyInput(key_event) if is_focus_cycle_key(&key_event).is_some() => {
+            state.cycle_prompt_button(is_focus_cycle_key(&key_event) == Some(true));
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if is_activation_key(&key_event) => {
+            match state.focused_prompt_button() {
+                Some(PromptButton::ClarifyOk) => {
+                    let Some(id) = take_clarify_id(state) else {
+                        return vec![];
+                    };
+                    vec![
+                        Effect::AnswerClarify {
+                            id,
+                            answer: state.pasted_blobs.expand(&textarea.text),
+                        },
+                        Effect::ClearTextarea,
+                        Effect::RestoreSlashOverlay,
+                    ]
+                }
+                Some(PromptButton::ClarifyCancel) => {
+                    let Some(id) = take_clarify_id(state) else {
+                        return vec![];
+                    };
+                    vec![Effect::AbortClarify { id }, Effect::RestoreSlashOverlay]
+                }
+                _ => vec![],
+            }
         }
         InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Up => {
             state.clarify_scroll_up(1);
@@ -266,7 +319,7 @@ fn handle_stop_signal(state: &mut AppState) -> Vec<Effect> {
     vec![Effect::StopAgent]
 }
 
-/// Ctrl+C logic for non-approval contexts.
+/// ctrl-c logic for non-approval contexts.
 fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<Effect> {
     let mode_is_idle = matches!(effective_mode(&state.mode), TuiMode::Idle);
 
@@ -297,7 +350,7 @@ fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<E
                 vec![Effect::Quit]
             } else {
                 // Busy double-press → stop agent and exit TUI on done.
-                tracing::info!("double Ctrl-C: entering Aborting, stop requested");
+                tracing::info!("double ctrl-c: entering Aborting, stop requested");
                 state.mode = TuiMode::Aborting;
                 state.aborting_exit = true;
                 vec![Effect::StopAgent]
@@ -308,8 +361,8 @@ fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<E
             armed_by: ConfirmKey::Escape,
             ..
         } => {
-            // Esc armed the pending confirm, not Ctrl-C: this Ctrl-C press
-            // does not confirm Esc's action. Start Ctrl-C's own fresh
+            // Esc armed the pending confirm, not ctrl-c: this ctrl-c press
+            // does not confirm Esc's action. Start ctrl-c's own fresh
             // confirm window against the real underlying mode instead.
             state.mode = TuiMode::DoublePressAbort {
                 pressed_at: Instant::now(),
@@ -364,7 +417,7 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
 
     if mode_is_idle {
         // Idle: clear textarea and reset history. This always executes
-        // immediately (single press, never quits) even when a Ctrl-C
+        // immediately (single press, never quits) even when a ctrl-c
         // confirm window is pending — Esc dismisses that pending quit
         // rather than confirming it.
         state.history_index = None;
@@ -387,7 +440,7 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
     }
 
     // Busy with empty input: double-press → stop, but stay in the TUI.
-    // Unlike Ctrl+C, Esc does not set aborting_exit; the TUI remains open
+    // Unlike ctrl-c, Esc does not set aborting_exit; the TUI remains open
     // when StreamCancelled transitions mode to Idle.
     let current_mode = std::mem::replace(&mut state.mode, TuiMode::Idle);
     match current_mode {
@@ -407,8 +460,8 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
             armed_by: ConfirmKey::CtrlC,
             ..
         } => {
-            // Ctrl-C armed the pending confirm, not Esc: this Esc press
-            // does not confirm Ctrl-C's quit. Start Esc's own fresh
+            // ctrl-c armed the pending confirm, not Esc: this Esc press
+            // does not confirm ctrl-c's quit. Start Esc's own fresh
             // confirm window against the real underlying mode instead.
             state.mode = TuiMode::DoublePressAbort {
                 pressed_at: Instant::now(),
@@ -474,6 +527,7 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
             state.focus = Focus::HelpPopup;
             vec![]
         }
+        InputEvent::ParentView => vec![],
         InputEvent::KeyInput(key) => {
             let page_entry_count = state.layout.slash_overlay.page_entry_count();
             let SlashOverlay::SessionPicker(picker) = &mut state.slash_overlay else {
@@ -633,7 +687,7 @@ fn handle_key_main(
     }
 
     match key_event.code {
-        // Shift+Enter or Alt+Enter: insert a newline, exit history browsing.
+        // shift-enter or alt-enter: insert a newline, exit history browsing.
         KeyCode::Enter
             if key_event.modifiers.contains(KeyModifiers::SHIFT)
                 || key_event.modifiers.contains(KeyModifiers::ALT) =>

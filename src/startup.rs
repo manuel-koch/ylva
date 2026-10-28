@@ -212,7 +212,7 @@ pub fn run(
         profile_workspace_root.as_deref(),
     )?;
     for warning in &profile.config_warnings {
-        tracing::warn!(%warning, "unknown configuration key");
+        tracing::warn!(%warning, "configuration warning");
     }
     if cli.strict_config {
         if let Some(notice) = profile.config_warnings_notice() {

@@ -194,11 +194,7 @@ fn picker_results_reach_parked_approval_input_but_ignore_dismissed_or_reopened_p
     let mut picker = SessionPicker::loading();
     picker.action = SessionAction::Clone;
     let identity = picker.identity;
-    state.pending_input_snapshot = Some(crate::tui_reducer_state::InputSnapshot {
-        input_lines: None,
-        slash_overlay: SlashOverlay::SessionPicker(picker),
-        pasted_blobs: Default::default(),
-    });
+    state.parked_slash_overlay = Some(SlashOverlay::SessionPicker(picker));
     let picker = picker_mut(&mut state, identity).unwrap();
     picker
         .choices
@@ -209,8 +205,7 @@ fn picker_results_reach_parked_approval_input_but_ignore_dismissed_or_reopened_p
         });
     picker.phase = SessionPickerPhase::Ready;
     selection_error(&mut state, identity, "selection failure".into());
-    let parked = state.pending_input_snapshot.take().unwrap();
-    state.slash_overlay = parked.slash_overlay;
+    state.slash_overlay = state.parked_slash_overlay.take().unwrap();
     let picker = picker_mut(&mut state, identity).unwrap();
     assert_eq!(picker.action, SessionAction::Clone);
     assert_eq!(picker.choices.len(), 1);
@@ -754,6 +749,7 @@ fn cancelling_after_clone_creation_keeps_clone_visible_and_old_root_usable() {
                 update_rx: title_update_rx,
                 display_metadata: TuiDisplayMetadata::default(),
                 input_history_limit: 50,
+                tui_config: Default::default(),
                 exit_snapshot: Some(exit_snapshot.clone()),
                 unactivated_clones: notices.clone(),
                 startup_notice: None,
@@ -876,6 +872,7 @@ fn assembled_session_picker_switches_resume_and_clone_and_exit_identity() {
                     update_rx: title_update_rx,
                     display_metadata: TuiDisplayMetadata::default(),
                     input_history_limit: 50,
+                    tui_config: Default::default(),
                     exit_snapshot: Some(exit_snapshot.clone()),
                     unactivated_clones: Arc::default(),
                     startup_notice: None,
@@ -984,6 +981,7 @@ fn queued_continuous_mouse_motion_is_drawn_as_one_frame() {
                     update_rx: title_update_rx,
                     display_metadata: TuiDisplayMetadata::default(),
                     input_history_limit: 50,
+                    tui_config: Default::default(),
                     exit_snapshot: None,
                     unactivated_clones: Arc::new(std::sync::Mutex::new(Vec::new())),
                     startup_notice: None,

@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 /// loop, where context decides what it means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {
-    /// Ctrl+C pressed: stop if busy; quit if idle (after double-press confirm).
+    /// ctrl-c pressed: stop if busy; quit if idle (after double-press confirm).
     CtrlC,
     /// Esc pressed: mode-dependent — see `run_tui` dispatch table.
     Escape,
@@ -55,7 +55,7 @@ pub enum AppAction {
 /// Map a single crossterm `Event` to an [`AppAction`].
 ///
 /// Only `KeyEventKind::Press` events are considered; release/repeat are
-/// ignored. `Ctrl+C`, `Esc`, and `F1` are lifted into dedicated variants so
+/// ignored. `ctrl-c`, `Esc`, and `F1` are lifted into dedicated variants so
 /// the main task can branch on intent rather than raw key codes. Terminal
 /// encodings of modified Enter are normalized before other key events are
 /// forwarded.
@@ -170,8 +170,8 @@ mod tests {
 
     #[test]
     fn line_feed_from_shift_enter_maps_to_a_modified_enter() {
-        // Zed's terminal encodes Shift+Enter as LF. In crossterm raw mode,
-        // LF is decoded as Ctrl+J, so normalize that terminal-specific representation
+        // Zed's terminal encodes shift-enter as LF. In crossterm raw mode,
+        // LF is decoded as ctrl-j, so normalize that terminal-specific representation
         // before context-dependent key routing.
         for key in [
             press(KeyCode::Char('j'), KeyModifiers::CONTROL),
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn uppercase_character_is_not_swallowed_by_ctrl_c() {
-        // Ctrl+Shift+C (uppercase 'C') is not Ctrl+C.
+        // ctrl-shift-c (uppercase 'C') is not ctrl-c.
         let key = press(KeyCode::Char('C'), KeyModifiers::SHIFT);
         let action = map_event(Event::Key(key));
         assert_eq!(action, Some(AppAction::KeyInput(key)));

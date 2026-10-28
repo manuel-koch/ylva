@@ -44,7 +44,7 @@ impl RunOutcome {
     }
 
     /// An external SIGINT or SIGTERM aborted the run. A stop requested by the user
-    /// (Ctrl+C or Esc in the TUI, the cancelled stream itself) does not call this.
+    /// (ctrl-c or Esc in the TUI, the cancelled stream itself) does not call this.
     pub fn record_interruption(&mut self) {
         self.interrupted = true;
     }

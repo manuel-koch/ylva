@@ -737,6 +737,15 @@ pub const DEFAULT_TUI_TOOLS: &[&str] = &[
     web_fetch::WebFetchTool::NAME,
 ];
 
+/// Whether `name` is the exact name of a tool Ylva can register in any
+/// context (CLI, TUI, root or subagent).
+pub fn is_registered_tool_name(name: &str) -> bool {
+    DEFAULT_TUI_TOOLS.contains(&name)
+        || DEFAULT_CLI_TOOLS.contains(&name)
+        || name == spawn_subagent::SpawnSubagentTool::NAME
+        || name == agent_finish::AgentFinishTool::NAME
+}
+
 /// One tool whose approval prompt can be bypassed via a `--auto-approve-*`
 /// CLI flag or [`ToolRegistryConfig::auto_approve`] entry. `clarify` has no
 /// variant here: it always requires user approval (there is no sandbox or

@@ -44,14 +44,21 @@ conversation. The original draft returns after all approvals are resolved.
 | `ctrl-c` (×2, same key, ≤ 2 s) | Help popup open | Quit when idle; interrupt and quit while busy |
 | Left-click inside popup | Help popup open | No effect (stays open) |
 | Left-click outside popup | Help popup open | Close popup |
-| `enter` | Approval sub-mode, input empty | Approve tool |
-| `enter` | Approval sub-mode, input non-empty | Deny tool with the input text as the reason |
-| `esc` or `ctrl-c` | Approval sub-mode | Deny tool immediately without a reason, even with non-empty input; no confirmation, conversation interrupt, or quit |
+| `tab` / `shift-tab` | Approval sub-mode | Move focus between the Approve and Deny buttons (none focused initially) |
+| `enter` | Approval sub-mode, Approve focused | Approve the tool; text in the input field is left untouched |
+| `enter` | Approval sub-mode, Deny focused | Deny the tool with the input text as the reason, then clear the field |
+| `enter` | Approval sub-mode, no button focused | No effect (typed text never changes what a bare `enter` does) |
+| `esc` | Approval sub-mode | Remove button focus; never approves or denies |
+| `ctrl-c` | Approval sub-mode | Deny tool immediately without a reason, even with non-empty input; no confirmation, conversation interrupt, or quit |
+| Left-click Approve / Deny | Approval sub-mode | Approve / deny (Deny uses the input text as the reason and clears the field) |
 | click choice | Clarify sub-mode with choices | Copy the clicked choice into the input field |
-| `enter` | Clarify sub-mode | Send the current input as the clarify answer |
+| `tab` / `shift-tab` | Clarify sub-mode | Move focus between the OK and Cancel buttons (none focused initially) |
+| `enter` | Clarify sub-mode, OK focused | Send the current input as the clarify answer, then clear the field |
+| `enter` | Clarify sub-mode, Cancel focused | Abort the clarify prompt; sends a tool error to the model |
+| `enter` | Clarify sub-mode, no button focused | No effect |
+| Left-click OK / Cancel | Clarify sub-mode | Answer with the input text / abort the clarify prompt |
 | `ctrl-c` | Clarify sub-mode | Abort the clarify prompt; sends a tool error to the model |
-| `esc` (input empty) | Clarify sub-mode | Abort the clarify prompt; sends a tool error to the model |
-| `esc` (input non-empty) | Clarify sub-mode | Clear the input field |
+| `esc` | Clarify sub-mode | Remove button focus and clear the input field (never aborts) |
 | `F1` | Any | Toggle Help popup |
 | `↑` (cursor on first line) | Input focused | Load previous user message; save draft |
 | `↓` (cursor on last line) | Input focused | Load next user message; restore draft at newest |
@@ -68,7 +75,9 @@ conversation. The original draft returns after all approvals are resolved.
 | Left-drag | Chat or subagent-view header bubble | Select visible text; release copies a non-empty selection to the clipboard |
 | Left-click on tool bubble title / border | Any | Toggle tool bubble expand (`▼`) / collapse (`▶`); expansion shows `Expanding…` before body layout |
 | Double-click on a `spawn_subagent` tool bubble's title | Any | Drill in to the subagent's conversation view (manual navigation; does not auto-return; still works after the subagent has finished) |
-| `esc` (input empty) | Subagent drill-in view | Go back to the root conversation (does not cancel/interrupt the root agent's turn); restores the scroll position from before drilling in |
+| `ctrl-p` | Subagent drill-in view | Go back to the root conversation (does not cancel/interrupt the root agent's turn); restores the scroll position from before drilling in |
+| Left-click `← Back` | Subagent drill-in view | Same as `ctrl-p` |
+| `ctrl-p` | Any other view | Forwarded to the input field (cursor up) |
 | `esc` (input non-empty) | Subagent drill-in view | Clear the input field (same as elsewhere; does not navigate back) |
 | `enter` | Subagent drill-in view | No-op; the subagent conversation doesn't accept input and Enter no longer steers the root agent from here (footer omits `enter send`) |
 

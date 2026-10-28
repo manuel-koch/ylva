@@ -306,7 +306,7 @@ fn domain_clarify_pending_sets_tui_mode() {
         }),
         &empty_textarea(),
     );
-    assert!(effects.contains(&Effect::SaveInputStateAndClear));
+    assert!(effects.contains(&Effect::ParkSlashOverlay));
     assert!(matches!(
         state.mode,
         TuiMode::ClarifyPending { ref question, choices: None, .. } if question == "Test?"
@@ -466,7 +466,7 @@ fn prompts_are_shown_in_strict_arrival_order_across_approvals_and_clarifies() {
         TuiMode::ClarifyPending { id, .. } if id == clarify
     ));
     assert_eq!(state.focus, Focus::MainInput);
-    assert!(effects.contains(&Effect::SaveInputStateAndClear));
+    assert!(effects.contains(&Effect::ParkSlashOverlay));
 
     // After the clarify's call completes, the second approval follows.
     state.mode = TuiMode::Pending; // as set when the user answers

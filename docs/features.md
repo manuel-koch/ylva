@@ -90,7 +90,7 @@ Argument parsing is `clap`-backed (see [CLI options](./cli-options.md)):
 `--help` prints usage to stdout and exits successfully; unknown flags and
 missing values are usage errors. Exit codes are a contract for scripts and CI:
 each run ends with one documented code (see [exit codes](./cli-options.md#exit-codes)).
-Ctrl+C or SIGTERM stops a headless run cooperatively and exits with the interruption code.
+ctrl-c or SIGTERM stops a headless run cooperatively and exits with the interruption code.
 
 Selected automatically when stdout is not a terminal, or forced via `--no-tui`.
 
@@ -429,7 +429,7 @@ for 30 minutes within the run (failures are retried on the next `/models`),
 and lists configured named
 engine shortcuts before favorite models and the remaining raw
 `provider_connection/model` catalog entries. Favorite membership is an exact,
-case-sensitive provider-connection preference saved with Ctrl+F from the
+case-sensitive provider-connection preference saved with ctrl-f from the
 highlighted row in either the list or parameter popup; it does not switch the
 model or alter parameter drafts. Favorites not currently returned by discovery
 remain configured but are hidden. Groups are introduced by non-selectable
@@ -450,7 +450,7 @@ different effective context window than the highlighted choice, including
 raw catalog models from the same provider connection. A different
 provider connection or model alone does not indicate a context-window mismatch.
 While the parameter popup is open, the detail uses the popup's edited context
-length, so it previews the window before `Enter` confirms it; `Esc` restores
+length, so it previews the window before `enter` confirms it; `esc` restores
 the stored window.
 Compaction that follows the conversation selection shows the resulting pair
 without a mismatch warning. Explicit compaction keeps its configured model and
@@ -488,7 +488,7 @@ reasoning as `unavailable`, its default label, or the current value. The paramet
 shows whether it can be adjusted: `◂`/`▸` mark each direction that can still
 move. While an overlay is open, the footer replaces the normal send
 hint with the controls for that overlay.
-`Enter` activates the exact named-engine shortcut or applies the raw catalog
+`enter` activates the exact named-engine shortcut or applies the raw catalog
 model and selected effort to subsequent requests. On a named shortcut, the
 engine keeps its current Engine runtime model/settings; only a reasoning-effort edit
 in the picker is reapplied. The choice preview does not mutate an engine.
@@ -834,7 +834,7 @@ before execution unless a `[tools.web_fetch]` `network_request` rule or
 Ask the user a question in the TUI and wait for their answer.
 Optional `context` adds supporting detail. Optional `choices` supplies up to
 5 numbered answers; clicking a choice copies it into the input box,
-and `Enter` submits it as the tool result. The TUI renders the question in a
+and `enter` submits it as the tool result. The TUI renders the question in a
 yellow banner above the footer. This tool is not registered in headless CLI
 mode, so it never appears in the headless `tools` array.
 
@@ -925,7 +925,7 @@ parent keeps processing its own messages and tools while the subagent works.
   recorded without forcing an acknowledgement turn; once `all_done` is true,
   the parent receives one continuation so it can aggregate the results without
   waiting for a new user message.
-- Stopping the parent (`Ctrl+C`/`Esc`) or clearing its context (`/clear`)
+- Stopping the parent (`ctrl-c`/`esc`) or clearing its context (`/clear`)
   cancels every running and queued subagent, settling each spawn call as cancelled.
 - A subagent's own tool calls go through the same approval flow as the
   parent's — a subagent is never auto-denied just for being a subagent. Approval
@@ -958,8 +958,8 @@ full-screen view — not just a summary bubble — while the parent keeps
 streaming/running tools in the background:
 
 - Double-clicking a `spawn_subagent` tool bubble's title switches to that
-  specific subagent's transcript. `Esc` (with an empty draft) navigates back to
-  the root conversation.
+  specific subagent's transcript. `ctrl-p` or the `← Back` button above the header
+  navigates back to the root conversation.
 - Spawning a subagent never switches your view automatically — you stay on
   whatever you were looking at. The view only auto-switches when a tool
   approval or clarify question actually pauses for input, and it always
@@ -996,7 +996,7 @@ streaming/running tools in the background:
 - Several subagent transcripts can stream independently. Each text and thinking
   fragment is assigned to its originating subagent run.
 - If a tool approval is pending for a subagent while you've navigated back to
-  the root view, the approval footer is prefixed `"Subagent tool '<name>'
+  the root view, the approval prompt is prefixed `"Subagent tool '<name>'
   requests your approval:"` so it's clear the approval belongs to a
   backgrounded subagent, not the root agent.
 
@@ -1053,26 +1053,40 @@ for the full mechanics.
   percentage is its fill of the window rounded to a whole percent and clamped
   at `100%`. It follows the dynamic footer layout and is dropped when there is no
   room. Headless output has no footer and ignores the update.
-- **Input always active:** the input box is never disabled. `Enter` sends
+- **Input always active:** the input box is never disabled. `enter` sends
   unconditionally — while the model is streaming, the message is queued as a
   pending steer (shown dimmed, then committed once the model has seen it),
-  and `Ctrl+C`/`Esc` interrupt the current round. Interrupting marks any
+  and `ctrl-c`/`esc` interrupt the current round. Interrupting marks any
   staged steers as cancelled (not sent), retaining the text in input history
   so it can be recovered with `↑`.
-- **Tool approval sub-mode:** when a tool awaits approval the footer switches
-  to `[ ✓ Approve (Enter) ]  [ ✗ Deny (Esc) ]` (mouse-clickable). With approval
-  focus, `Enter` approves when the input is empty; typing a reason and pressing
-  `Enter` denies with that reason. `Esc` or `Ctrl+C` denies immediately without
-  a reason, even when text is present; neither uses double-press confirmation
-  or interrupts the whole conversation. The user's draft is snapshotted when
-  approval sub-mode starts and restored after all outstanding approvals resolve.
-- **Double-press `Ctrl+C`/`Esc` to quit/cancel:** while pending or streaming,
+- **Tool approval sub-mode:** when a tool awaits approval a two-row prompt
+  (title and `[ ✓ Approve ]  [ ✗ Deny ]`, mouse-clickable) appears above the
+  input field, so the denial reason is typed directly below the buttons. The
+  regular footer stays below the input with approval-specific key hints. A
+  bare `enter` or `esc`
+  never resolves an approval: `tab`/`shift-tab` focus a button (idle
+  buttons are outlined in their colour; only the focused or hovered one is
+  drawn filled, so a freshly shown prompt has no apparent selection) and
+  `enter` activates only the focused one. Approve
+  leaves the input text alone (it is dimmed while Approve is focused, as a
+  hint it is not used); Deny sends the input text as the reason and clears
+  the field. `ctrl-c` denies immediately without a reason; it uses no
+  double-press confirmation and does not interrupt the whole conversation.
+  The input field keeps the user's draft throughout; only a parked slash
+  overlay is restored after all outstanding approvals resolve.
+- **Prompts wait while you type:** an approval or clarify prompt that arrives
+  while you are typing is queued instead of shown, so a keystroke cannot answer
+  it. It appears after 1.5 s without keystrokes, or at the latest 10 s after
+  the typing burst began. The footer shows `⏳ N prompt(s) waiting (finish
+  typing)` meanwhile. Clarify prompts use `[ ✓ OK ]  [ ✗ Cancel ]` buttons with
+  the same focus rules.
+- **Double-press `ctrl-c`/`esc` to quit/cancel:** while pending or streaming,
   with normal root input focused and empty, the first press shows a per-key
-  hint (`Esc`: cancel only; `Ctrl+C`: cancel & quit) and a second press within
+  hint (`esc`: cancel only; `ctrl-c`: cancel & quit) and a second press within
   2 seconds confirms that key's action. A non-empty busy draft is cleared
   instead. Approval, clarify, and overlay controls take precedence; see
-  [keybindings](keybindings.md). While idle, `Ctrl+C` double-press quits and
-  `Esc` immediately clears the input. After an interrupt, the TUI waits for the
+  [keybindings](keybindings.md). While idle, `ctrl-c` double-press quits and
+  `esc` immediately clears the input. After an interrupt, the TUI waits for the
   agent's terminal idle update before applying the selected quit-or-stay-open
   behavior. An external
   SIGINT or SIGTERM skips the double-press: an idle TUI quits at once, and a
@@ -1108,7 +1122,7 @@ for the full mechanics.
   start/end of the current line, wrapping to the previous/next line.
 - **Starts empty:** the TUI launches with an empty input box and no auto-sent
   turn. An explicit `--prompt` or piped stdin still auto-sends on startup.
-- **Sending state:** after `Enter` (or an auto-sent initial prompt) the footer
+- **Sending state:** after `enter` (or an auto-sent initial prompt) the footer
   shows `"Sending…"` until the first stream event arrives.
 - **Footer distinguishes thinking / responding / tool execution:** while
   streaming, the footer shows `"Thinking…"` when the model is emitting
@@ -1137,9 +1151,9 @@ for the full mechanics.
   slash-command overlay (including the `/models` footer), copying it to the
   clipboard on release.
   `read`/`glob` tool status lines and approval buttons remain mouse-clickable.
-- **Shift+Enter / Alt+Enter:** insert a newline through the terminal's
+- **shift-enter / alt-enter:** insert a newline through the terminal's
   modified-key encoding. Kitty keyboard protocol terminals (iTerm2, kitty,
-  WezTerm) report the modifier directly; terminals that encode Shift+Enter as
+  WezTerm) report the modifier directly; terminals that encode shift-enter as
   a line feed (such as Zed's terminal) are normalized to the same action.
 - **Message dedenting:** submitted messages are automatically dedented —
   common leading whitespace is stripped and leading/trailing blank-only lines
@@ -1171,7 +1185,11 @@ for the full mechanics.
   title line: the tool title, its main argument and optional label, with the
   running or final duration right-aligned (the left part is truncated with `…`
   before the duration is). Remaining arguments render only when expanded. This
-  also applies to the subagent drill-in header bubble. An expanded bubble is
+  also applies to the subagent drill-in header bubble. The profile's
+  `[tui] auto_expand_tool` makes listed tools' bubbles arrive expanded and
+  `[tui] auto_expand_approval` expands the bubble awaiting approval until the
+  approval resolves (see [TUI configuration](./configuration.md#tui-configuration)).
+  An expanded bubble is
   laid out as title, the main argument, an underlined `Arguments:` section
   listing the remaining arguments one `key=value` per line (e.g. `read`'s
   `mode=lines`, `offset=926`), an underlined `Result:` section listing the
@@ -1309,9 +1327,9 @@ Typing `/` as the **first character** of the draft-message input opens a
 command overlay above the conversation; it narrows as the command is typed.
 Canonical command names appear first, followed by aliases as separate selectable
 entries. `/reset` appears alongside `/clear` and invokes the same action;
-typing `/re` suggests `/reset`, and `Tab` preserves that spelling.
-`↑`/`↓` highlight a command, `Tab` completes the highlighted command, and
-`Enter` activates it even when only a partial command has been typed.
+typing `/re` suggests `/reset`, and `tab` preserves that spelling.
+`↑`/`↓` highlight a command, `tab` completes the highlighted command, and
+`enter` activates it even when only a partial command has been typed.
 The command set is a fixed allowlist — a leading `/` that matches nothing in
 it (e.g. `/foo`) remains ordinary chat text when no suggestion is selected
 and is sent to the model unchanged, as is any `/` that is not the first
@@ -1353,7 +1371,7 @@ the context, reasoning and modality markers. Clicking either row highlights that
 model.
 The model currently serving the conversation is shown by its identity text in
 bold green instead of a text suffix.
-`Enter` on a highlighted model opens its parameter popup instead of switching.
+`enter` on a highlighted model opens its parameter popup instead of switching.
 The popup lists one row per parameter, each a label followed by its value: the
 effective context length and, when the model advertises selectable efforts, the
 reasoning effort. `↑`/`↓` move between the rows; `←`/`→` adjust the highlighted
@@ -1367,13 +1385,13 @@ Reasoning effort moves through the
 advertised efforts in order (and the provider default's slot, see above), without
 wrapping. When the advertised default is `medium`, that effort cannot be chosen
 on its own; its slot selects the provider default.
-Its edit is session-only and is not written to the profile. In the popup, `Enter`
-confirms the model and parameters and switches; `Esc` returns to the model list
-and discards the parameter edits. `Esc` in the list cancels and clears the input.
+Its edit is session-only and is not written to the profile. In the popup, `enter`
+confirms the model and parameters and switches; `esc` returns to the model list
+and discards the parameter edits. `esc` in the list cancels and clears the input.
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |
-| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights); page keys move by a page; `Enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `Esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
+| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights); page keys move by a page; `enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |
 | `/session` | Opens the recent-session picker in either conversation view. Select Resume or Clone, then confirm a root session. | Transient; activation and subsequent work use the selected persisted identity |
 | `/compact` | Requests a useful completed-prefix summary in the root conversation, regardless of automatic thresholds. | Transient outcomes; an applied summary is persisted |
@@ -1396,9 +1414,9 @@ action. Keybinding hints appear only in the TUI footer. The popup shows status
 or errors only when relevant, without repeating footer controls.
 Each open starts in **Resume**. `Left`/`Right` or clicking the action selects
 Resume/Clone; arrows, page keys, and wheel navigate; clicking a row only
-highlights it. `Enter` confirms. Loading and `Resuming`/`Cloning` remain
+highlights it. `enter` confirms. Loading and `Resuming`/`Cloning` remain
 responsive to cancellation and quit; other mutations are blocked during
-preparation. `Esc` dismisses and clears the draft without changing the
+preparation. `esc` dismisses and clears the draft without changing the
 conversation. Selection errors keep the picker, chosen action, and old view.
 Cancelled or superseded results never activate a target.
 

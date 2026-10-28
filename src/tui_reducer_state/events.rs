@@ -44,7 +44,7 @@ pub enum TuiMode {
     /// `AgentCommand::Stop` has been sent; waiting for `StreamCancelled` or
     /// the agent to become idle.
     Aborting,
-    /// A first confirm-key press (Ctrl+C or Esc) has been received; waiting
+    /// A first confirm-key press (ctrl-c or Esc) has been received; waiting
     /// for a second press of the *same* key within the confirm window to
     /// actually quit/stop, or for the window to expire.
     DoublePressAbort {
@@ -53,8 +53,8 @@ pub enum TuiMode {
         return_to: Box<TuiMode>,
         /// Which key armed this confirm window. Only a second press of the
         /// *same* key confirms; a press of the other key starts its own
-        /// fresh confirm window instead (so e.g. Esc-then-Ctrl+C never
-        /// quits, and Ctrl+C-then-Esc never confirms Ctrl+C's quit).
+        /// fresh confirm window instead (so e.g. Esc-then-ctrl-c never
+        /// quits, and ctrl-c-then-Esc never confirms ctrl-c's quit).
         armed_by: ConfirmKey,
     },
 }
@@ -115,7 +115,7 @@ pub enum InputEvent {
     ShowHelp,
     /// External SIGINT or SIGTERM: stop immediately, no confirm.
     StopSignal,
-    /// Ctrl+C terminal key event; follows double-press confirm logic.
+    /// ctrl-c terminal key event; follows double-press confirm logic.
     CtrlC,
     /// Esc key; interpreted based on current [`Focus`] and [`TuiMode`].
     Escape,
@@ -123,6 +123,9 @@ pub enum InputEvent {
     KeyInput(KeyEvent),
     /// Bracketed paste text.
     Paste(String),
+    /// `ctrl-p`: step out of a subagent view to its parent conversation.
+    /// Outside a subagent view it is the textarea's own "cursor up" key.
+    ParentView,
 }
 
 // ─── DomainEvent ──────────────────────────────────────────────────────────────
@@ -269,6 +272,10 @@ pub enum DomainEvent {
     /// (see `AppState::last_bubble_click`). A no-op if a second click (or a
     /// click on a different bubble) already resolved/cleared it first.
     BubbleClickWindowExpired,
+    /// The input was idle for `PROMPT_IDLE_DELAY` (or typing lasted
+    /// `PROMPT_DEFERRAL_CAP`): show the approval/clarify prompt that was
+    /// deferred while the user typed.
+    TypingSettled,
     /// The terminal flushed the lightweight frame acknowledging an expansion.
     BubbleExpansionFeedbackShown,
     /// Estimated size against the active context window; see [`super::ContextUsage`]
@@ -317,6 +324,7 @@ impl DomainEvent {
             DomainEvent::SubagentContextUsage { .. } => "SubagentContextUsage",
             DomainEvent::SubagentDone { .. } => "SubagentDone",
             DomainEvent::BubbleClickWindowExpired => "BubbleClickWindowExpired",
+            DomainEvent::TypingSettled => "TypingSettled",
             DomainEvent::BubbleExpansionFeedbackShown => "BubbleExpansionFeedbackShown",
             DomainEvent::ContextUsage { .. } => "ContextUsage",
             DomainEvent::CompactionApplied { .. } => "CompactionApplied",
@@ -353,15 +361,12 @@ pub enum Effect {
     },
     /// Replace the textarea with an empty, freshly-configured default.
     ClearTextarea,
-    /// Park the message-draft input state: snapshot the textarea lines and
-    /// the current slash overlay into `AppState::pending_input_snapshot` as
-    /// one [`super::InputSnapshot`], clear the textarea, and hide the overlay for
-    /// the duration of the pause (the approval footer / clarify banner owns
-    /// the rows above the input).
-    SaveInputStateAndClear,
-    /// Give back what `SaveInputStateAndClear` parked: restore the textarea
-    /// lines and the slash overlay from `AppState::pending_input_snapshot`.
-    RestoreInputState,
+    /// Hide the slash overlay while an approval footer / clarify banner owns
+    /// the rows above the input, parking it in
+    /// `AppState::parked_slash_overlay`. The draft stays in the input field.
+    ParkSlashOverlay,
+    /// Give back the overlay parked by `ParkSlashOverlay`.
+    RestoreSlashOverlay,
     /// Replace the textarea content with the given text.
     SetInputText(String),
     /// Feed a key event into the textarea.

@@ -36,7 +36,9 @@ use super::models::{
 use super::runtime::TuiRuntime;
 use super::sessions::{picker_mut, selection_error, SessionResult, SessionTasks};
 use super::terminal::set_terminal_title;
-use super::timers::{bubble_click_timeout, confirm_timeout, spinner_should_tick};
+use super::timers::{
+    bubble_click_timeout, confirm_timeout, spinner_should_tick, typing_settle_timeout,
+};
 use super::title::trigger_title_on_stream_done;
 use super::updates::{app_state_to_tui_state, prepare_subagent_replay_effects, process_one_update};
 use super::{ActionOutcome, ClipboardSink, CHANNEL_CAPACITY, SPINNER_TICK_INTERVAL};
@@ -69,6 +71,7 @@ where
         update_rx: mut title_update_rx,
         display_metadata,
         input_history_limit,
+        tui_config,
         exit_snapshot,
         unactivated_clones,
         startup_notice,
@@ -78,6 +81,7 @@ where
     let mut exit_guard = agent.exit_guard(exit_snapshot);
     let mut state = AppState::new();
     state.display_metadata = display_metadata;
+    state.tui_config = tui_config;
     state.enable_render_cache();
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
@@ -230,8 +234,10 @@ where
                                 engine = agent.engine();
                                 exit_guard.current_store = agent.current_store_handle();
                                 let display_metadata = state.display_metadata.clone();
+                                let tui_config = state.tui_config.clone();
                                 state = AppState::new();
                                 state.display_metadata = display_metadata;
+                                state.tui_config = tui_config;
                                 state.enable_render_cache();
                                 state.replay_compaction_boundary = prepared.transcript.compaction_transcript_boundary;
                                 state.replay_messages(&prepared.transcript.messages, &prepared.subagent_runs, state.replay_compaction_boundary);
@@ -256,7 +262,7 @@ where
                             result => {
                                 let newer_preparation = [
                                     Some(&state.slash_overlay),
-                                    state.pending_input_snapshot.as_ref().map(|snapshot| &snapshot.slash_overlay),
+                                    state.parked_slash_overlay.as_ref(),
                                 ].into_iter().flatten().any(|overlay| matches!(
                                     overlay, SlashOverlay::SessionPicker(picker)
                                     if picker.phase == crate::tui_reducer_state::SessionPickerPhase::Preparing && picker.identity != picker_id
@@ -375,10 +381,21 @@ where
                     continue;
                 }
 
-                // Ctrl+C/Esc do not come through here: only an external signal
+                // ctrl-c/Esc do not come through here: only an external signal
                 // interrupts the run, whatever the TUI is showing.
                 if matches!(action, AppAction::StopSignal) {
                     pending_run_ids.record_stop_signal();
+                }
+                // Keys pressed in the help popup never edit the draft, so they
+                // must not defer prompts (closing help with Esc would
+                // otherwise hide the approval until the idle delay passes).
+                if !state.show_help()
+                    && matches!(
+                        action,
+                        AppAction::KeyInput(_) | AppAction::Paste(_) | AppAction::Escape | AppAction::CtrlC
+                    )
+                {
+                    state.note_keystroke(std::time::Instant::now());
                 }
                 let Some(event) = app_action_to_tui_event(action) else { continue };
                 let was_loading_models = matches!(state.slash_overlay, SlashOverlay::LoadingModels);
@@ -525,6 +542,22 @@ where
                 let effects = presenter::update(
                     &mut state,
                     TuiEvent::Domain(DomainEvent::ConfirmExpired),
+                    &textarea_ctx,
+                );
+                let effects =
+                    prepare_subagent_replay_effects(&mut state, effects, replay_store.as_ref());
+                execute_effects(
+                    &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
+                    &mut pending_run_ids,
+                )
+                .instrument(agent.session_span())
+                .await;
+            }
+
+            _ = typing_settle_timeout(&state) => {
+                let effects = presenter::update(
+                    &mut state,
+                    TuiEvent::Domain(DomainEvent::TypingSettled),
                     &textarea_ctx,
                 );
                 let effects =

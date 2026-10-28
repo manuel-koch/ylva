@@ -16,8 +16,7 @@ use super::ClipboardSink;
 use crate::events::AppAction;
 use crate::presenter::TuiEvent;
 use crate::tui_reducer_state::{
-    AppState, Focus, HistoryDirection, InputEvent, InputSnapshot, SlashOverlay,
-    LARGE_PASTE_CHAR_THRESHOLD,
+    AppState, Focus, HistoryDirection, InputEvent, SlashOverlay, LARGE_PASTE_CHAR_THRESHOLD,
 };
 use ratatui::style::Style;
 use ratatui_textarea::TextArea;
@@ -29,6 +28,11 @@ pub(super) fn configure_textarea(textarea: &mut TextArea<'_>) {
     textarea.set_cursor_line_style(Style::default());
 }
 
+fn is_parent_view_key(event: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    event.code == KeyCode::Char('p') && event.modifiers == KeyModifiers::CONTROL
+}
+
 /// Map an [`AppAction`] to the typed [`TuiEvent`] the Presenter accepts.
 /// Returns `None` for actions that require no presenter call (e.g. `Resize`).
 pub(super) fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent> {
@@ -37,6 +41,9 @@ pub(super) fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent> {
         AppAction::Escape => Some(TuiEvent::Input(InputEvent::Escape)),
         AppAction::ShowHelp => Some(TuiEvent::Input(InputEvent::ShowHelp)),
         AppAction::StopSignal => Some(TuiEvent::Input(InputEvent::StopSignal)),
+        AppAction::KeyInput(event) if is_parent_view_key(&event) => {
+            Some(TuiEvent::Input(InputEvent::ParentView))
+        }
         AppAction::KeyInput(event) => Some(TuiEvent::Input(InputEvent::KeyInput(event))),
         AppAction::Paste(text) => Some(TuiEvent::Input(InputEvent::Paste(text))),
         AppAction::MouseInput(mouse) => Some(TuiEvent::Mouse(mouse)),
@@ -114,48 +121,6 @@ impl MouseDrag {
 pub(super) fn clear_textarea(textarea: &mut TextArea<'_>) {
     *textarea = TextArea::default();
     configure_textarea(textarea);
-}
-
-pub(super) fn save_input_state_and_clear(state: &mut AppState, textarea: &mut TextArea<'_>) {
-    let lines = textarea.lines().to_vec();
-    let input_lines = if lines == vec![String::new()] {
-        None
-    } else {
-        Some(lines)
-    };
-    clear_textarea(textarea);
-    // Park the draft and overlay together before approval controls hide them.
-    let slash_overlay = state.slash_overlay.clone();
-    let pasted_blobs = std::mem::take(&mut state.pasted_blobs);
-    state.pending_input_snapshot.get_or_insert(InputSnapshot {
-        input_lines,
-        slash_overlay,
-        pasted_blobs,
-    });
-    state.slash_overlay = SlashOverlay::Hidden;
-}
-
-pub(super) fn restore_input_state(state: &mut AppState, textarea: &mut TextArea<'_>) {
-    if state.is_approval_pending() {
-        clear_textarea(textarea);
-        state.pasted_blobs.clear();
-        return;
-    }
-    let snapshot = state.pending_input_snapshot.take();
-    *textarea = if let Some(InputSnapshot {
-        input_lines: Some(lines),
-        ..
-    }) = &snapshot
-    {
-        TextArea::from(lines.clone())
-    } else {
-        TextArea::default()
-    };
-    configure_textarea(textarea);
-    if let Some(snapshot) = snapshot {
-        state.slash_overlay = snapshot.slash_overlay;
-        state.pasted_blobs = snapshot.pasted_blobs;
-    }
 }
 
 pub(super) fn set_input_text(textarea: &mut TextArea<'_>, text: &str) {

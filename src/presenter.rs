@@ -66,7 +66,7 @@ pub fn update(state: &mut AppState, event: TuiEvent, textarea: &TextareaContext)
     // A queued clarify just reached the screen: park the draft like a
     // freshly arrived clarify does.
     if std::mem::take(&mut state.queued_clarify_activated) {
-        effects.push(Effect::SaveInputStateAndClear);
+        effects.push(Effect::ParkSlashOverlay);
     }
     effects
 }

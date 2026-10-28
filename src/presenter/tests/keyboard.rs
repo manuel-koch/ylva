@@ -14,7 +14,7 @@
 
 use super::*;
 use crate::llm::ModelInfo;
-use crate::tui_reducer_state::{ChoiceLabel, ModelChoice};
+use crate::tui_reducer_state::{ChoiceLabel, ModelChoice, PromptButton};
 
 fn picker_choice(connection: &str, model: &str, favorite_rank: Option<usize>) -> ModelChoice {
     let mut choice = ModelChoice {
@@ -524,11 +524,17 @@ fn root_tool_pending_while_drilled_into_a_subagent_auto_switches_to_root_and_res
 }
 
 #[test]
-fn esc_with_empty_draft_in_subagent_view_navigates_back_to_root() {
+fn ctrl_p_in_subagent_view_navigates_back_to_root_while_esc_does_not() {
     let mut state = AppState::new();
     state.mode = TuiMode::Streaming;
     let run_id = tracked_subagent(&mut state);
     state.switch_to_subagent_view(run_id);
+
+    update(
+        &mut state,
+        TuiEvent::Input(InputEvent::Escape),
+        &empty_textarea(),
+    );
     assert!(matches!(
         state.active_view,
         ConversationView::Subagent { .. }
@@ -536,20 +542,11 @@ fn esc_with_empty_draft_in_subagent_view_navigates_back_to_root() {
 
     let effects = update(
         &mut state,
-        TuiEvent::Input(InputEvent::Escape),
+        TuiEvent::Input(InputEvent::ParentView),
         &empty_textarea(),
     );
-
     assert_eq!(state.active_view, ConversationView::Root);
-    assert!(
-        effects.is_empty(),
-        "back-navigation must not touch TuiMode/Aborting effects: {effects:?}"
-    );
-    assert_eq!(
-        state.mode,
-        TuiMode::Streaming,
-        "the root agent's own busy state must be left untouched by back-navigation"
-    );
+    assert!(effects.is_empty(), "{effects:?}");
 }
 
 #[test]
@@ -606,7 +603,7 @@ fn ctrl_c_while_idle_second_press_returns_quit_effect() {
 
 #[test]
 fn escape_after_ctrl_c_while_idle_clears_draft_instead_of_confirming_quit() {
-    // Regression: pressing Ctrl-C once (arming the quit confirm), then
+    // Regression: pressing ctrl-c once (arming the quit confirm), then
     // Esc, must not be treated as the confirming second press. Esc
     // dismisses the pending quit and clears the draft instead.
     let mut state = AppState::new();
@@ -630,8 +627,8 @@ fn escape_after_ctrl_c_while_idle_clears_draft_instead_of_confirming_quit() {
 #[test]
 fn ctrl_c_after_escape_while_streaming_does_not_quit() {
     // Regression: pressing Esc once (arming the cancel-only confirm),
-    // then Ctrl-C, must not be treated as Ctrl-C's confirming second
-    // press. Ctrl-C instead starts its own fresh confirm window.
+    // then ctrl-c, must not be treated as ctrl-c's confirming second
+    // press. ctrl-c instead starts its own fresh confirm window.
     let mut state = AppState::new();
     state.mode = TuiMode::Streaming;
     update(
@@ -696,21 +693,21 @@ fn ctrl_c_while_busy_second_press_returns_stop_agent_effect() {
     assert_eq!(state.mode, TuiMode::Aborting);
     assert!(
         state.aborting_exit,
-        "aborting_exit must be set after double-press Ctrl-C while busy"
+        "aborting_exit must be set after double-press ctrl-c while busy"
     );
 }
 
 #[test]
 fn double_ctrl_c_while_streaming_quits_after_stream_cancelled() {
     let mut state = AppState::new();
-    // First Ctrl-C: enters DoublePressAbort.
+    // First ctrl-c: enters DoublePressAbort.
     state.mode = TuiMode::Streaming;
     update(
         &mut state,
         TuiEvent::Input(InputEvent::CtrlC),
         &empty_textarea(),
     );
-    // Second Ctrl-C: sends StopAgent and sets aborting_exit.
+    // Second ctrl-c: sends StopAgent and sets aborting_exit.
     let effects = update(
         &mut state,
         TuiEvent::Input(InputEvent::CtrlC),
@@ -726,7 +723,7 @@ fn double_ctrl_c_while_streaming_quits_after_stream_cancelled() {
     );
     assert!(
         effects.contains(&Effect::Quit),
-        "StreamCancelled after double Ctrl-C while streaming must emit Quit"
+        "StreamCancelled after double ctrl-c while streaming must emit Quit"
     );
 }
 
@@ -734,13 +731,13 @@ fn double_ctrl_c_while_streaming_quits_after_stream_cancelled() {
 fn double_ctrl_c_while_tool_running_quits_after_tool_killed() {
     let mut state = AppState::new();
     state.mode = TuiMode::Streaming;
-    // First Ctrl-C.
+    // First ctrl-c.
     update(
         &mut state,
         TuiEvent::Input(InputEvent::CtrlC),
         &empty_textarea(),
     );
-    // Second Ctrl-C: stop agent, set aborting_exit.
+    // Second ctrl-c: stop agent, set aborting_exit.
     let effects = update(
         &mut state,
         TuiEvent::Input(InputEvent::CtrlC),
@@ -759,7 +756,7 @@ fn double_ctrl_c_while_tool_running_quits_after_tool_killed() {
     );
     assert!(
         effects.contains(&Effect::Quit),
-        "ToolKilled after double Ctrl-C while tool running must emit Quit"
+        "ToolKilled after double ctrl-c while tool running must emit Quit"
     );
     assert_eq!(state.mode, TuiMode::Idle, "mode must return to Idle");
 }
@@ -781,7 +778,7 @@ fn ctrl_c_while_tool_approval_denies_tool() {
         id: tool_id,
         reason: String::new(),
     }));
-    assert!(effects.contains(&Effect::RestoreInputState));
+    assert!(effects.contains(&Effect::RestoreSlashOverlay));
     assert_eq!(state.focus, Focus::MainInput);
 }
 
@@ -798,23 +795,22 @@ fn escape_while_help_open_closes_help() {
 }
 
 #[test]
-fn escape_while_tool_approval_denies_tool() {
+fn escape_while_tool_approval_only_drops_button_focus() {
     let mut state = AppState::new();
     let tool_id = Uuid::new_v4();
     state.focus = Focus::ToolApproval {
         tool_id,
         tool_name: "test_tool".to_string(),
     };
+    state.prompt_button_focus = Some(PromptButton::Deny);
     let effects = update(
         &mut state,
         TuiEvent::Input(InputEvent::Escape),
         &empty_textarea(),
     );
-    assert!(effects.contains(&Effect::DenyTool {
-        id: tool_id,
-        reason: String::new(),
-    }));
-    assert!(effects.contains(&Effect::RestoreInputState));
+    assert!(effects.is_empty());
+    assert_eq!(state.prompt_button_focus, None);
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
 }
 
 #[test]
@@ -988,40 +984,79 @@ fn enter_with_text_in_subagent_view_is_a_no_op() {
 }
 
 #[test]
-fn enter_while_approval_empty_returns_approve_tool_effect() {
+fn enter_while_approval_without_button_focus_does_nothing() {
     let mut state = AppState::new();
-    let tool_id = Uuid::new_v4();
     state.focus = Focus::ToolApproval {
-        tool_id,
+        tool_id: Uuid::new_v4(),
         tool_name: "test_tool".to_string(),
     };
-    let effects = update(
-        &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
-        &empty_textarea(),
-    );
-    assert!(effects.contains(&Effect::ApproveTool { id: tool_id }));
-    assert!(effects.contains(&Effect::RestoreInputState));
+    for text in ["", "deny reason"] {
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_with(text),
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+    }
 }
 
 #[test]
-fn enter_while_approval_with_text_returns_deny_tool_effect() {
+fn tab_cycles_approval_buttons_and_enter_activates_the_focused_one() {
     let mut state = AppState::new();
     let tool_id = Uuid::new_v4();
     state.focus = Focus::ToolApproval {
         tool_id,
         tool_name: "test_tool".to_string(),
     };
+    let tab = TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab)));
+    update(&mut state, tab.clone(), &empty_textarea());
+    assert_eq!(state.prompt_button_focus, Some(PromptButton::Approve));
+    update(&mut state, tab.clone(), &empty_textarea());
+    assert_eq!(state.prompt_button_focus, Some(PromptButton::Deny));
+    update(&mut state, tab, &empty_textarea());
+    assert_eq!(state.prompt_button_focus, Some(PromptButton::Approve));
+
+    // Approve leaves the typed text alone.
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &textarea_with("ignored"),
+    );
+    assert_eq!(
+        effects,
+        vec![
+            Effect::ApproveTool { id: tool_id },
+            Effect::RestoreSlashOverlay
+        ]
+    );
+}
+
+#[test]
+fn enter_on_focused_deny_uses_and_clears_the_text() {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    state.focus = Focus::ToolApproval {
+        tool_id,
+        tool_name: "test_tool".to_string(),
+    };
+    state.prompt_button_focus = Some(PromptButton::Deny);
     let effects = update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
         &textarea_with("deny reason"),
     );
-    assert!(effects.contains(&Effect::DenyTool {
-        id: tool_id,
-        reason: "deny reason".to_string(),
-    }));
-    assert!(effects.contains(&Effect::RestoreInputState));
+    assert_eq!(
+        effects,
+        vec![
+            Effect::DenyTool {
+                id: tool_id,
+                reason: "deny reason".to_string(),
+            },
+            Effect::ClearTextarea,
+            Effect::RestoreSlashOverlay,
+        ]
+    );
 }
 
 #[test]
@@ -1046,7 +1081,7 @@ fn clarify_digit_passes_through_to_textarea() {
 }
 
 #[test]
-fn clarify_enter_answers_and_restores_textarea() {
+fn clarify_enter_answers_only_with_ok_focused() {
     let mut state = AppState::new();
     let clarify_id = Uuid::new_v4();
     state.mode = TuiMode::ClarifyPending {
@@ -1055,11 +1090,22 @@ fn clarify_enter_answers_and_restores_textarea() {
         context: None,
         choices: None,
     };
+    let enter = TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter)));
     let effects = update(
         &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        enter.clone(),
         &textarea_with("free-form answer"),
     );
+    assert!(effects.is_empty());
+    assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
+
+    update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab))),
+        &empty_textarea(),
+    );
+    assert_eq!(state.prompt_button_focus, Some(PromptButton::ClarifyOk));
+    let effects = update(&mut state, enter, &textarea_with("free-form answer"));
     assert_eq!(state.mode, TuiMode::Pending);
     assert_eq!(
         effects,
@@ -1068,13 +1114,14 @@ fn clarify_enter_answers_and_restores_textarea() {
                 id: clarify_id,
                 answer: "free-form answer".to_string(),
             },
-            Effect::RestoreInputState,
+            Effect::ClearTextarea,
+            Effect::RestoreSlashOverlay,
         ]
     );
 }
 
 #[test]
-fn clarify_esc_with_empty_input_aborts_question() {
+fn clarify_cancel_button_aborts_question_but_esc_does_not() {
     let mut state = AppState::new();
     let clarify_id = Uuid::new_v4();
     state.mode = TuiMode::ClarifyPending {
@@ -1088,13 +1135,21 @@ fn clarify_esc_with_empty_input_aborts_question() {
         TuiEvent::Input(InputEvent::Escape),
         &empty_textarea(),
     );
+    assert!(effects.is_empty());
+
+    state.prompt_button_focus = Some(PromptButton::ClarifyCancel);
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &empty_textarea(),
+    );
     assert_eq!(state.mode, TuiMode::Pending);
     assert!(effects.contains(&Effect::AbortClarify { id: clarify_id }));
-    assert!(effects.contains(&Effect::RestoreInputState));
+    assert!(effects.contains(&Effect::RestoreSlashOverlay));
 }
 
 #[test]
-fn clarify_esc_with_non_empty_input_clears_input_only() {
+fn clarify_esc_with_non_empty_input_clears_input_and_button_focus() {
     let mut state = AppState::new();
     state.mode = TuiMode::ClarifyPending {
         id: Uuid::new_v4(),
@@ -1102,11 +1157,13 @@ fn clarify_esc_with_non_empty_input_clears_input_only() {
         context: None,
         choices: None,
     };
+    state.prompt_button_focus = Some(PromptButton::ClarifyOk);
     let effects = update(
         &mut state,
         TuiEvent::Input(InputEvent::Escape),
         &textarea_with("partial answer"),
     );
+    assert_eq!(state.prompt_button_focus, None);
     assert!(
         matches!(state.mode, TuiMode::ClarifyPending { .. }),
         "mode must stay ClarifyPending when input is not empty"
@@ -1179,7 +1236,7 @@ fn closing_help_during_an_outstanding_approval_returns_to_the_approval_focus() {
     assert!(
         !effects
             .iter()
-            .any(|effect| matches!(effect, Effect::RestoreInputState)),
+            .any(|effect| matches!(effect, Effect::RestoreSlashOverlay)),
         "closing help must not restore the input — the pause is still active"
     );
 }

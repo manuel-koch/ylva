@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use super::input::{
-    clear_textarea, dedent, load_history_into_textarea, paste_text, restore_input_state,
-    save_input_state_and_clear, set_input_text, MouseDrag,
+    clear_textarea, dedent, load_history_into_textarea, paste_text, set_input_text, MouseDrag,
 };
 use super::models::{apply_model_list_result, fetch_model_list, switch_model};
 use super::{ActionOutcome, ClipboardSink};
@@ -119,11 +118,11 @@ pub(super) async fn execute_effects(
                 state.pasted_blobs.clear();
                 *mouse_drag = MouseDrag::default();
             }
-            Effect::SaveInputStateAndClear => {
-                save_input_state_and_clear(state, textarea);
+            Effect::ParkSlashOverlay => {
+                state.park_slash_overlay();
             }
-            Effect::RestoreInputState => {
-                restore_input_state(state, textarea);
+            Effect::RestoreSlashOverlay => {
+                state.restore_slash_overlay();
             }
             Effect::SetInputText(text) => {
                 set_input_text(textarea, &text);

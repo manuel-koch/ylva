@@ -582,6 +582,16 @@ See [persistence](./persistence.md) for on-disk contracts.
   also drains queued subagent UI updates before handling a finish.
 - The TUI shows only the head of the FIFO approval queue; a subagent awaiting
   a later prompt stays blocked without pausing its siblings.
+- Prompt deferral (`tui_reducer_state/prompt.rs`): the presenter never reads the clock. The driver calls
+  `AppState::note_keystroke(Instant::now())` for input actions and a timer arm
+  sends `DomainEvent::TypingSettled` at `typing_settles_at()` (idle delay
+  `PROMPT_IDLE_DELAY`, capped by `PROMPT_DEFERRAL_CAP`). While
+  `is_typing()`, arriving approvals/clarifies only join the queue and
+  `resume_pending_tool_approval` is a no-op; `TypingSettled` releases the
+  head. `AppState::prompt_button_focus` holds the `PromptButton` focused by
+  `tab`; `enter` activates only that button. `InputEvent::ParentView`
+  (plain `ctrl-p`) navigates back from a subagent view and is otherwise
+  forwarded to the textarea as `ctrl-p`.
 
 ### Drill-in TUI conversation view internals
 
@@ -600,7 +610,7 @@ See [features](./features.md#drill-in-tui-conversation-view).
   (root for `None`/unknown `run_id`) regardless of what is on screen, saving
   `pre_pause_view`, and skips the switch if that view is already open so a
   manual drill-in triggers no automatic return. Overlapping pauses preserve the
-  first `pending_input_snapshot`; restoration waits until no approval owns the
+  first `parked_slash_overlay`; restoration waits until no approval owns the
   input.
 
 ## Implementation diagrams
@@ -620,7 +630,7 @@ not user-facing workflows, planned features, or exhaustive generated inventories
   `ConversationView`, `SlashOverlay`, compaction activity, and per-subagent
   state are independent dimensions. An idle root mode does not imply that
   all subagents have finished. Edges describe the current presenter, including
-  immediate Ctrl+C denial in approval focus.
+  immediate ctrl-c denial in approval focus.
 - [Turn-execution sequence](diagrams/turn-execution-sequence.mmd): model requests,
   serial tool advancement, approval/error paths, and safe steer injection.
 - [Subagent lifecycle](diagrams/subagent-lifecycle-sequence.mmd): admission versus
@@ -671,15 +681,14 @@ terminal teardown and title restoration keep a fixed order.
 - `paste_text` inserts the dedented text with one `TextArea::insert_str` call.
   Per-character `input` re-wrapped the whole draft for every key
   (`push_history` → `screen_map_load`), making a paste O(n²) and freezing the
-  single-threaded event loop (including Ctrl-C) for large pastes.
+  single-threaded event loop (including ctrl-c) for large pastes.
 - Pastes above `LARGE_PASTE_CHAR_THRESHOLD` (1,000 chars, measured on the
   dedented text) insert a one-line marker instead. `PastedBlobs`
   (`tui_reducer_state/pasted_blobs.rs`, held in `AppState::pasted_blobs`)
   stores marker → text; markers are numbered per draft. `Effect::SubmitPrompt`
   expands markers still present verbatim before `dedent` and sends, then
-  clears the store; `ClearTextarea` clears it too and
-  `InputSnapshot::pasted_blobs` parks/restores it with the draft around
-  approvals. History recall (`set_input_text`) never creates markers; history
+  clears the store; `ClearTextarea` clears it too. Approvals and clarifies
+  leave the draft and its blobs in place. History recall (`set_input_text`) never creates markers; history
   entries are the expanded sent text.
 - Continuous mouse motion (wheel scroll, drag, hover) is coalesced: when more
   actions are queued after such an event, the event loop skips the next frame
@@ -720,6 +729,26 @@ terminal teardown and title restoration keep a fixed order.
   layouts are not retained; others evict least-recently-retained. Required
   current layouts stay resident even if oversized.
 
+### Tool bubble auto-expansion
+
+- `ProfileConfig::tui` (`TuiConfig`) reaches the reducer through
+  `TuiRuntime::tui_config` into `AppState::tui_config`; the `/new`-style state
+  reset in the event loop carries it over. `auto_expand_tool` names are checked
+  against `agent::tools::is_registered_tool_name` at profile load and reported
+  as `ConfigWarning`s of kind `UnknownToolName`, which `--strict-config`
+  escalates like unknown keys.
+- Arrival: every bubble creation site in `presenter/tool_bubbles.rs` takes its
+  `collapsed` value from `AppState::tool_bubble_arrives_collapsed` (the single
+  rule). It sets neither `pending_bubble_expansion` nor `scroll_locked`.
+- Approval: `expand_bubble_for_approval` runs where `Focus::ToolApproval` is
+  armed (`push_tool_pending_bubble`) and where a queued approval is promoted
+  (`show_tool_approval`). It records bubbles it expanded in
+  `AppState::approval_auto_expanded`.
+  `collapse_resolved_approval_expansions`, called first in
+  `resolve_possible_interactive_pause`, collapses recorded bubbles that are no
+  longer `Pending`; `toggle_tool_bubble_collapsed` drops the record so manual
+  toggles win.
+
 ### Favorites
 
 - Picker display order is derived from each row's group and `favorite_rank`,
@@ -734,16 +763,16 @@ terminal teardown and title restoration keep a fixed order.
   replayed request cannot flip state. It is driver-owned and never an agent
   command.
 - Membership is published only after a confirmed save and is applied to the
-  open picker and the overlay parked in `pending_input_snapshot`.
+  open picker and the overlay parked in `parked_slash_overlay`.
 
 ## Slash commands
 
 Draft normalization, model-filter extraction, suggestions and help all derive
 from the constants and allowlist in `slash_command.rs`. Engine-dependent
 effects are handled by the driver, not the reducer; `/models` runs in a
-cancellable background task so input and agent updates continue. The pending
-input snapshot stores the slash overlay with the draft, so restoring after
-approval/clarify keeps fetched model choices. See
+cancellable background task so input and agent updates continue. The parked
+slash overlay (`Effect::ParkSlashOverlay`/`RestoreSlashOverlay`) keeps fetched
+model choices across an approval/clarify; the draft is never parked. See
 [features](./features.md#slash-commands).
 
 ## Steer ordering

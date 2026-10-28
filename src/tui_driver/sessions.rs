@@ -339,11 +339,9 @@ pub(super) fn picker_mut(state: &mut AppState, picker_id: Uuid) -> Option<&mut S
             return Some(picker);
         }
     }
-    if let Some(snapshot) = &mut state.pending_input_snapshot {
-        if let SlashOverlay::SessionPicker(picker) = &mut snapshot.slash_overlay {
-            if picker.identity == picker_id {
-                return Some(picker);
-            }
+    if let Some(SlashOverlay::SessionPicker(picker)) = &mut state.parked_slash_overlay {
+        if picker.identity == picker_id {
+            return Some(picker);
         }
     }
     None

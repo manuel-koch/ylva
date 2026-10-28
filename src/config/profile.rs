@@ -112,10 +112,29 @@ pub struct ProfileConfig {
     /// when the profile loads.
     #[serde(default)]
     pub web_fetch: WebFetchConfig,
+    /// `[tui]` section: presentation preferences of the interactive TUI.
+    #[serde(default)]
+    pub tui: TuiConfig,
     /// Unknown keys found while loading this profile (its `config.toml` and
     /// agent-type files). Never read from a file; callers surface them.
     #[serde(skip)]
     pub config_warnings: Vec<ConfigWarning>,
+}
+
+/// A profile's `[tui]` table: presentation preferences of the interactive TUI.
+///
+/// The defaults (empty list, `false`) keep every tool bubble collapsed on
+/// arrival.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TuiConfig {
+    /// Exact tool names whose bubbles are expanded when they arrive. Names
+    /// matching no registered tool are reported as a [`ConfigWarning`].
+    #[serde(default)]
+    pub auto_expand_tool: Vec<String>,
+    /// Expand the bubble awaiting user approval while the approval is
+    /// pending, and collapse it again once the approval resolves.
+    #[serde(default)]
+    pub auto_expand_approval: bool,
 }
 
 /// Settings for background conversation-summary compaction.
@@ -579,6 +598,7 @@ impl Default for ProfileConfig {
             tools: HashMap::new(),
             web_search: WebSearchConfig::default(),
             web_fetch: WebFetchConfig::default(),
+            tui: TuiConfig::default(),
             config_warnings: Vec::new(),
         }
     }
@@ -792,6 +812,7 @@ impl ProfileConfig {
             &mut warnings,
         )?;
         profile.config_warnings = warnings;
+        profile.warn_about_unknown_auto_expand_tools(&path);
         validate_provider_connection_models(&profile, &path)?;
         validate_tool_sandbox_rules(&profile.tools, &path)?;
         profile.web_search.validate(&path)?;
@@ -848,6 +869,21 @@ impl ProfileConfig {
         validate_compaction_timeout(&profile.compaction, &profile.default_engine, built_in_path)?;
         validate_agent_compaction_settings(&profile.agents, &profile.compaction, built_in_path)?;
         Ok(profile)
+    }
+
+    /// Append a [`ConfigWarning`] for every `[tui] auto_expand_tool` entry
+    /// that names no registered tool (case-sensitive).
+    fn warn_about_unknown_auto_expand_tools(&mut self, file: &Path) {
+        let unknown_tool_warnings: Vec<ConfigWarning> = self
+            .tui
+            .auto_expand_tool
+            .iter()
+            .filter(|tool_name| !crate::agent::tools::is_registered_tool_name(tool_name))
+            .map(|tool_name| {
+                ConfigWarning::unknown_tool_name(file, "tui.auto_expand_tool", tool_name)
+            })
+            .collect();
+        self.config_warnings.extend(unknown_tool_warnings);
     }
 
     /// Fill in every engine that named no model of its own from

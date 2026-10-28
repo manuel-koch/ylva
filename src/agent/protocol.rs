@@ -27,7 +27,7 @@ pub enum AgentMode {
     /// A tool has been approved and is actively executing.
     ToolRunning,
     ClarifyPending,
-    /// User requested abort (double Ctrl+C); `AgentCommand::Stop` has been
+    /// User requested abort (double ctrl-c); `AgentCommand::Stop` has been
     /// sent. The TUI waits for the resulting `StreamCancelled` / `Idle`
     /// transition before quitting.
     Aborting,

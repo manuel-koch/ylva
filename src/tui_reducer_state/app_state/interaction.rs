@@ -110,7 +110,11 @@ impl AppState {
             }
             TuiMode::Pending => AgentMode::Pending,
             TuiMode::Streaming => {
-                if matches!(self.focus, Focus::ToolApproval { .. }) {
+                // Help opened over an approval keeps reporting the approval.
+                let help_over_approval = matches!(self.focus, Focus::HelpPopup)
+                    && !self.is_typing()
+                    && self.pending_tool_approval().is_some();
+                if matches!(self.focus, Focus::ToolApproval { .. }) || help_over_approval {
                     AgentMode::ToolPending
                 } else if self.has_running_tool_bubble() {
                     AgentMode::ToolRunning

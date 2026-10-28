@@ -142,6 +142,26 @@ fn restore_focus_after_help_returns_to_an_outstanding_approval_first() {
     );
 }
 
+#[test]
+fn agent_mode_reports_tool_pending_while_help_covers_an_approval() {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    state.chat_entries.push(ChatEntry::ToolBubble {
+        id: tool_id,
+        name: "write".to_string(),
+        state: Box::new(ToolCallState::Pending {
+            arguments: serde_json::json!({}),
+            content_sections: vec![],
+            title_arguments: vec![],
+        }),
+        collapsed: true,
+    });
+    state.pending_approval_order.push(tool_id);
+    state.mode = TuiMode::Streaming;
+    state.focus = Focus::HelpPopup;
+    assert_eq!(state.agent_mode(), AgentMode::ToolPending);
+}
+
 // ── Focus::is_modal ───────────────────────────────────────────────────────
 
 #[test]
@@ -274,3 +294,37 @@ fn agent_mode_reports_streaming_when_no_tool_bubble_is_running() {
 // ── Thinking bubble flush / toggle ────────────────────────────────────────
 
 // ── Header bubble scroll offset ───────────────────────────────────────────
+
+#[test]
+fn typing_settles_after_the_idle_delay_but_never_later_than_the_cap() {
+    let mut state = AppState::new();
+    assert_eq!(state.typing_settles_at(), None);
+
+    let start = Instant::now();
+    state.note_keystroke(start);
+    assert!(state.is_typing());
+    assert_eq!(state.typing_settles_at(), Some(start + PROMPT_IDLE_DELAY));
+
+    // Keystrokes arriving faster than the idle delay extend the burst, up to
+    // the cap measured from the burst start.
+    let mut now = start;
+    while now < start + PROMPT_DEFERRAL_CAP {
+        now += PROMPT_IDLE_DELAY / 2;
+        state.note_keystroke(now);
+    }
+    assert_eq!(state.typing_settles_at(), Some(start + PROMPT_DEFERRAL_CAP));
+
+    state.settle_typing();
+    assert!(!state.is_typing());
+    assert_eq!(state.typing_settles_at(), None);
+}
+
+#[test]
+fn a_keystroke_after_an_idle_gap_starts_a_new_burst() {
+    let mut state = AppState::new();
+    let start = Instant::now();
+    state.note_keystroke(start);
+    let later = start + PROMPT_DEFERRAL_CAP * 2;
+    state.note_keystroke(later);
+    assert_eq!(state.typing_settles_at(), Some(later + PROMPT_IDLE_DELAY));
+}

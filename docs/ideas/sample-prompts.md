@@ -197,6 +197,8 @@ sleep 1
 grep foo README.md
 ```
 
+Run `grep foo README.md ; echo exit=$?` in bash.
+
 ---
 
 Use subagent to delegate discovering tool capabilities in
@@ -431,11 +433,29 @@ Save the ADR in folder `docs/architecture-design-records`.
 
 ---
 
-Perform a documenation review over the following files:
+Perform a documentation review over the following files:
 
 - docs/development-workflow.md
 - docs/cli-options.md
 - docs/features.md
+
+Save your findings as a markdown formatted report to
+`tmp/docs-review.md`.
+
+---
+
+Perform a full documentation review over all relavant files.
+Cluster the documents by scope, use subagents to perform the review.
+Only review, don't touch any file!
+
+- docs/*.md
+- docs/*.mmd
+- docs/ideas/*.md ( treat them as non-authoritative, WIP )
+- docs/plans/*.md ( treat them as authoritative, may be WIP )
+- AGENTS.md
+- README.md
+- CONTEXT.md
+- CHANGELOG.md
 
 Save your findings as a markdown formatted report to
 `tmp/docs-review.md`.

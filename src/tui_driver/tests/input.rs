@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::super::input::{
-    load_history_into_textarea, paste_text, restore_input_state, save_input_state_and_clear,
-    scroll_input_at_mouse,
-};
+use super::super::input::{load_history_into_textarea, paste_text, scroll_input_at_mouse};
 use super::*;
 use crate::tui_reducer_state::HistoryDirection;
 
@@ -948,21 +945,6 @@ fn history_recall_of_a_huge_entry_loads_verbatim_without_marker() {
     ));
     assert_eq!(textarea.lines().join("\n"), huge);
     assert!(state.pasted_blobs.is_empty());
-}
-
-#[test]
-fn approval_save_and_restore_keep_blobs_with_the_draft() {
-    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
-    paste_text(&mut state, &mut textarea, &"z".repeat(2_000));
-    let marker_line = textarea.lines().to_vec();
-    save_input_state_and_clear(&mut state, &mut textarea);
-    assert!(state.pasted_blobs.is_empty());
-    restore_input_state(&mut state, &mut textarea);
-    assert_eq!(textarea.lines(), marker_line.as_slice());
-    assert_eq!(
-        state.pasted_blobs.expand(&marker_line[0]),
-        "z".repeat(2_000)
-    );
 }
 
 #[test]
