@@ -44,15 +44,16 @@ conversation. The original draft returns after all approvals are resolved.
 | `ctrl-c` (×2, same key, ≤ 2 s) | Help popup open | Quit when idle; interrupt and quit while busy |
 | Left-click inside popup | Help popup open | No effect (stays open) |
 | Left-click outside popup | Help popup open | Close popup |
-| `tab` / `shift-tab` | Approval sub-mode | Move focus between the Approve and Deny buttons (none focused initially) |
+| `tab` / `shift-tab` | Approval sub-mode | Move focus between the Approve and Deny buttons, plus the *Go to agent* button when the approval belongs to another conversation than the viewed one (none focused initially) |
 | `enter` | Approval sub-mode, Approve focused | Approve the tool; text in the input field is left untouched |
 | `enter` | Approval sub-mode, Deny focused | Deny the tool with the input text as the reason, then clear the field |
 | `enter` | Approval sub-mode, no button focused | No effect (typed text never changes what a bare `enter` does) |
 | `esc` | Approval sub-mode | Remove button focus; never approves or denies |
 | `ctrl-c` | Approval sub-mode | Deny tool immediately without a reason, even with non-empty input; no confirmation, conversation interrupt, or quit |
 | Left-click Approve / Deny | Approval sub-mode | Approve / deny (Deny uses the input text as the reason and clears the field) |
+| `enter` / left-click *Go to agent* | Approval or clarify sub-mode, prompt belongs to another conversation | Switch to the conversation owning the prompt; the prompt stays pending and the draft is untouched |
 | click choice | Clarify sub-mode with choices | Copy the clicked choice into the input field |
-| `tab` / `shift-tab` | Clarify sub-mode | Move focus between the OK and Cancel buttons (none focused initially) |
+| `tab` / `shift-tab` | Clarify sub-mode | Move focus between the OK and Cancel buttons, plus the *Go to agent* button when the clarify belongs to another conversation than the viewed one (none focused initially) |
 | `enter` | Clarify sub-mode, OK focused | Send the current input as the clarify answer, then clear the field |
 | `enter` | Clarify sub-mode, Cancel focused | Abort the clarify prompt; sends a tool error to the model |
 | `enter` | Clarify sub-mode, no button focused | No effect |
@@ -60,6 +61,14 @@ conversation. The original draft returns after all approvals are resolved.
 | `ctrl-c` | Clarify sub-mode | Abort the clarify prompt; sends a tool error to the model |
 | `esc` | Clarify sub-mode | Remove button focus and clear the input field (never aborts) |
 | `F1` | Any | Toggle Help popup |
+| `ctrl-a` | Any (including approval, clarify and Help popup) | Toggle the Agents popup; the draft is untouched |
+| `↑` / `↓`, `page-up` / `page-down` | Agents popup open | Move the highlight (queued rows are skipped) |
+| `enter` | Agents popup open | Switch to the highlighted conversation |
+| `esc` / `ctrl-a` | Agents popup open | Close popup |
+| `F1` | Agents popup open | Switch to the Help popup |
+| Left-click row | Agents popup open | Highlight; a second click within 250 ms switches |
+| Mouse wheel | Agents popup open | Scroll popup |
+| Left-click outside popup | Agents popup open | Close popup |
 | `↑` (cursor on first line) | Input focused | Load previous user message; save draft |
 | `↓` (cursor on last line) | Input focused | Load next user message; restore draft at newest |
 | Any edit key while browsing | Input focused | Copy browsed entry to draft; exit browsing mode |
@@ -89,12 +98,14 @@ conversation. The original draft returns after all approvals are resolved.
 | `↑` / `↓` | Command overlay open | Move the highlighted command |
 | `tab` | Command overlay open | Complete the highlighted command spelling, including aliases such as `/reset` |
 | `enter` | Input holds a recognized command or a highlighted command suggestion | Run the selected command instead of sending the draft to the model (see [features](./features.md#slash-commands)) |
+| double-click on a suggestion | Command suggestions shown | Same as `enter` on that suggestion |
 | `esc` | Command overlay open | Close the overlay and clear the input (otherwise the still-matching draft would immediately reopen it) |
 | `↑` / `↓` | `/models` picker open | Move the highlighted provider-connection/model |
 | `page-up` / `fn-up` | `/models` picker open | Move the highlighted provider-connection/model up by a page |
 | `page-down` / `fn-down` | `/models` picker open | Move the highlighted provider-connection/model down by a page |
 | `Mouse wheel` | `/models` picker open | Move the highlighted provider-connection/model up / down |
 | `left-click` on an entry | `/models` picker open | Highlight the provider-connection/model; does not switch until `enter` |
+| double-click on an entry | `/models` picker open | Same as `enter`: open the parameter popup |
 | `left-drag` | Slash-command overlay open | Select visible popup text; release copies it to the clipboard. A drag stays within its region: the list rows or the footer text (e.g. the compaction preview) |
 | any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices by engine name, provider connection, or model ID; no re-query |
 | `ctrl-f` | `/models` picker list or parameter popup | Save the highlighted provider-connection/model as a favorite, or remove it if already marked; does not switch models or edit parameter drafts |
@@ -109,6 +120,7 @@ conversation. The original draft returns after all approvals are resolved.
 | `←` / `→` | `/session` picker ready | Select Resume / Clone; every new open defaults to Resume |
 | `left-click` on action | `/session` picker ready | Choose Resume or Clone without activating |
 | `left-click` on row | `/session` picker ready | Highlight only; `enter` confirms |
+| double-click on row | `/session` picker ready | Same as `enter` with the chosen Resume / Clone action |
 | `enter` | `/session` picker ready | Resume the highlighted root or activate a new clone; reject while root/subagent/compaction work remains |
 | `esc` | `/session` loading or preparing | Cancel before activation and clear the draft; a durable clone is retained with an ID-bearing notice |
 | ordinary typing/paste | `/session` picker open | Ignored, never submitted as a prompt |

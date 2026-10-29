@@ -409,7 +409,7 @@ impl RunState {
                             run_id: cancelled.run_id,
                             call_id: cancelled.call_id,
                             origin: crate::subagent_manager::FinishResultOrigin::Runtime,
-                            status: "cancelled".to_string(),
+                            status: crate::subagent_manager::STATUS_CANCELLED.to_string(),
                             result: None,
                             error: Some(
                                 "The parent agent stopped before the subagent finished."
@@ -447,7 +447,10 @@ impl RunState {
                                 result_section: crate::tui_reducer_state::ResultSection::plain(
                                     String::new(),
                                 ),
-                                summary: vec![("status".to_string(), "cancelled".to_string())],
+                                summary: vec![(
+                                    "status".to_string(),
+                                    crate::subagent_manager::STATUS_CANCELLED.to_string(),
+                                )],
                                 duration: std::time::Duration::ZERO,
                                 content_sections,
                                 run_id: self.own_run_id,

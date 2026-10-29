@@ -1240,3 +1240,207 @@ fn closing_help_during_an_outstanding_approval_returns_to_the_approval_focus() {
         "closing help must not restore the input — the pause is still active"
     );
 }
+
+fn show_agents(state: &mut AppState) {
+    update(
+        state,
+        TuiEvent::Input(InputEvent::ShowAgents),
+        &empty_textarea(),
+    );
+}
+
+#[test]
+fn show_agents_toggles_popup_from_main_input() {
+    let mut state = AppState::new();
+    show_agents(&mut state);
+    assert_eq!(state.focus, Focus::AgentsPopup);
+    show_agents(&mut state);
+    assert_eq!(state.focus, Focus::MainInput);
+}
+
+#[test]
+fn agents_popup_esc_closes_and_help_key_switches_to_help() {
+    let mut state = AppState::new();
+    show_agents(&mut state);
+    update(
+        &mut state,
+        TuiEvent::Input(InputEvent::Escape),
+        &empty_textarea(),
+    );
+    assert_eq!(state.focus, Focus::MainInput);
+
+    show_agents(&mut state);
+    update(
+        &mut state,
+        TuiEvent::Input(InputEvent::ShowHelp),
+        &empty_textarea(),
+    );
+    assert_eq!(state.focus, Focus::HelpPopup);
+}
+
+#[test]
+fn agents_popup_enter_switches_to_selected_subagent() {
+    let mut state = AppState::new();
+    let run_id = Uuid::new_v4();
+    state.start_subagent_run(crate::tui_reducer_state::SubagentRunInfo {
+        run_id,
+        bubble_id: Uuid::new_v4(),
+        agent_type: "default".to_string(),
+        task: "task".to_string(),
+        label: "label".to_string(),
+    });
+    show_agents(&mut state);
+    for code in [KeyCode::Down, KeyCode::Enter] {
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(code))),
+            &empty_textarea(),
+        );
+    }
+    assert_eq!(state.focus, Focus::MainInput);
+    assert!(matches!(
+        state.active_view,
+        ConversationView::Subagent { run_id: id, .. } if id == run_id
+    ));
+}
+
+#[test]
+fn show_agents_from_tool_approval_returns_to_approval_on_close() {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::ToolPending {
+            id: tool_id,
+            name: "write".to_string(),
+            arguments: serde_json::json!({}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            run_id: None,
+        }),
+        &empty_textarea(),
+    );
+    show_agents(&mut state);
+    assert_eq!(state.focus, Focus::AgentsPopup);
+    update(
+        &mut state,
+        TuiEvent::Input(InputEvent::Escape),
+        &empty_textarea(),
+    );
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+}
+
+fn subagent_with_pending_prompt(state: &mut AppState, prompt_id: Uuid) -> Uuid {
+    let run_id = Uuid::new_v4();
+    state.start_subagent_run(crate::tui_reducer_state::SubagentRunInfo {
+        run_id,
+        bubble_id: Uuid::new_v4(),
+        agent_type: "reviewer".to_string(),
+        task: "task".to_string(),
+        label: "label".to_string(),
+    });
+    state
+        .subagent_conversations
+        .get_mut(&run_id)
+        .unwrap()
+        .messages
+        .push(ChatEntry::ToolBubble {
+            id: prompt_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+    run_id
+}
+
+#[test]
+fn go_to_agent_button_is_offered_and_switches_to_the_prompt_owner() {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    let run_id = subagent_with_pending_prompt(&mut state, tool_id);
+    state.focus = Focus::ToolApproval {
+        tool_id,
+        tool_name: "bash".to_string(),
+    };
+    let tab = TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab)));
+    for expected in [
+        PromptButton::Approve,
+        PromptButton::Deny,
+        PromptButton::GoToAgent,
+    ] {
+        update(&mut state, tab.clone(), &empty_textarea());
+        assert_eq!(state.prompt_button_focus, Some(expected));
+    }
+
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &empty_textarea(),
+    );
+
+    assert!(effects.is_empty());
+    assert!(matches!(
+        state.active_view,
+        ConversationView::Subagent { run_id: viewed, .. } if viewed == run_id
+    ));
+    assert_eq!(state.prompt_button_focus, None);
+    // The prompt stays pending, but no longer offers the button.
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+    assert_eq!(state.prompt_owner_elsewhere(), None);
+}
+
+#[test]
+fn go_to_agent_button_is_not_offered_while_viewing_the_prompt_owner() {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    let run_id = subagent_with_pending_prompt(&mut state, tool_id);
+    state.switch_to_subagent_view(run_id);
+    state.focus = Focus::ToolApproval {
+        tool_id,
+        tool_name: "bash".to_string(),
+    };
+    let tab = TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab)));
+    update(&mut state, tab.clone(), &empty_textarea());
+    update(&mut state, tab.clone(), &empty_textarea());
+    update(&mut state, tab, &empty_textarea());
+    assert_eq!(state.prompt_button_focus, Some(PromptButton::Approve));
+}
+
+#[test]
+fn go_to_agent_from_a_subagent_view_returns_to_the_root_owning_a_clarify() {
+    let mut state = AppState::new();
+    let clarify_id = Uuid::new_v4();
+    state.chat_entries.push(ChatEntry::ToolBubble {
+        id: clarify_id,
+        name: "clarify".to_string(),
+        state: Box::new(ToolCallState::Running {
+            arguments: serde_json::json!({}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            progress_arguments: vec![],
+        }),
+        collapsed: true,
+    });
+    let run_id = subagent_with_pending_prompt(&mut state, Uuid::new_v4());
+    state.switch_to_subagent_view(run_id);
+    state.mode = TuiMode::ClarifyPending {
+        id: clarify_id,
+        question: "which?".to_string(),
+        choices: None,
+        context: None,
+    };
+    state.prompt_button_focus = Some(PromptButton::GoToAgent);
+
+    update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &empty_textarea(),
+    );
+
+    assert_eq!(state.active_view, ConversationView::Root);
+    assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
+}

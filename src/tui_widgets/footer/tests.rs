@@ -143,3 +143,53 @@ fn narrow_meta_row_shows_cost_before_usage_and_drops_cost_when_too_narrow() {
         "{tight:?}"
     );
 }
+
+#[test]
+fn agents_hint_appears_before_help_only_once_a_subagent_exists() {
+    let keys = |state: &TuiState| {
+        footer_keybinding_hints(state, true)
+            .iter()
+            .filter_map(|hint| hint.key)
+            .collect::<Vec<_>>()
+    };
+    let mut state = TuiState::new();
+    assert_eq!(keys(&state), ["enter", "ctrl-c", "F1"]);
+    state.has_subagents = true;
+    assert_eq!(keys(&state), ["enter", "ctrl-c", "ctrl-a", "F1"]);
+}
+
+#[test]
+fn approval_prompt_offers_go_to_agent_button_only_for_other_conversations() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    for offers_go_to_agent in [false, true] {
+        let state = TuiState {
+            prompt_offers_go_to_agent: offers_go_to_agent,
+            ..TuiState::new()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 2)).expect("terminal");
+        let mut areas = None;
+        terminal
+            .draw(|frame| {
+                areas = Some(draw_approval_prompt(
+                    frame,
+                    frame.area(),
+                    &state,
+                    "bash",
+                    true,
+                    None,
+                ));
+            })
+            .expect("draw");
+        let areas = areas.expect("button areas");
+        assert_eq!(!areas.go_to_agent.is_empty(), offers_go_to_agent);
+        if offers_go_to_agent {
+            assert!(areas.go_to_agent.x >= areas.deny.x + areas.deny.width);
+            let row: String = (0..80)
+                .map(|x| terminal.backend().buffer()[(x, 1)].symbol().to_string())
+                .collect();
+            assert!(row.contains("Go to agent"), "{row:?}");
+        }
+    }
+}

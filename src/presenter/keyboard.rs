@@ -36,6 +36,7 @@ pub(super) fn route_keyboard(
 ) -> Vec<Effect> {
     match &state.focus {
         Focus::HelpPopup => keyboard_help(state, event),
+        Focus::AgentsPopup => keyboard_agents_popup(state, event),
         Focus::ToolApproval { .. } => keyboard_approval(state, event, textarea),
         Focus::MainInput => keyboard_main(state, event, textarea),
     }
@@ -51,6 +52,12 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
             state.help_popup.help_scroll_offset = 0;
             state.help_popup.help_scroll_x = 0;
             state.clear_help_selection();
+            vec![]
+        }
+        InputEvent::ShowAgents => {
+            state.help_popup.help_scroll_offset = 0;
+            state.help_popup.help_scroll_x = 0;
+            state.open_agents_popup();
             vec![]
         }
         InputEvent::StopSignal => handle_stop_signal(state),
@@ -81,6 +88,41 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
             vec![]
         }
         InputEvent::Paste(_) => vec![],
+    }
+}
+
+fn keyboard_agents_popup(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
+    match event {
+        InputEvent::ShowAgents | InputEvent::Escape => {
+            state.close_agents_popup();
+            vec![]
+        }
+        InputEvent::ShowHelp => {
+            state.focus = Focus::HelpPopup;
+            state.clear_help_selection();
+            vec![]
+        }
+        InputEvent::StopSignal => handle_stop_signal(state),
+        InputEvent::CtrlC => handle_ctrl_c_generic(state, true),
+        InputEvent::ParentView | InputEvent::Paste(_) => vec![],
+        InputEvent::KeyInput(key_event) => {
+            let page = state
+                .layout
+                .agents_popup
+                .visible_rows
+                .saturating_sub(1)
+                .max(1) as isize;
+            let now = Instant::now();
+            match key_event.code {
+                KeyCode::Up => state.agents_popup_move_selection(-1, now),
+                KeyCode::Down => state.agents_popup_move_selection(1, now),
+                KeyCode::PageUp => state.agents_popup_move_selection(-page, now),
+                KeyCode::PageDown => state.agents_popup_move_selection(page, now),
+                KeyCode::Enter => return state.activate_agents_popup_selection(now),
+                _ => {}
+            }
+            vec![]
+        }
     }
 }
 
@@ -157,6 +199,7 @@ fn keyboard_approval(
                         Effect::RestoreSlashOverlay,
                     ]
                 }
+                Some(PromptButton::GoToAgent) => state.go_to_prompt_owner(),
                 _ => vec![],
             }
         }
@@ -165,6 +208,10 @@ fn keyboard_approval(
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
             state.clear_help_selection();
+            vec![]
+        }
+        InputEvent::ShowAgents => {
+            state.open_agents_popup();
             vec![]
         }
         InputEvent::Paste(text) => vec![Effect::Paste(text)],
@@ -186,6 +233,10 @@ fn keyboard_main(
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
             state.clear_help_selection();
+            vec![]
+        }
+        InputEvent::ShowAgents => {
+            state.open_agents_popup();
             vec![]
         }
         InputEvent::StopSignal => handle_stop_signal(state),
@@ -221,6 +272,10 @@ fn keyboard_clarify(
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
             state.clear_help_selection();
+            vec![]
+        }
+        InputEvent::ShowAgents => {
+            state.open_agents_popup();
             vec![]
         }
         InputEvent::StopSignal => handle_stop_signal(state),
@@ -273,6 +328,7 @@ fn keyboard_clarify(
                     };
                     vec![Effect::AbortClarify { id }, Effect::RestoreSlashOverlay]
                 }
+                Some(PromptButton::GoToAgent) => state.go_to_prompt_owner(),
                 _ => vec![],
             }
         }
@@ -483,7 +539,7 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
 
 /// Translate a recognized slash command into its effects.
 ///
-/// `/clear`, `/session` and `/compact` clear the input first so the command line never
+/// `/clear`, `/session`, `/compact` and `/agents` clear the input first so the command line never
 /// lingers as a draft. `/models` instead normalizes the draft to the
 /// canonical `/models <filter>` form and leaves it in the textarea: the
 /// picker it opens stays keyed off that text, so further typing narrows the
@@ -511,6 +567,10 @@ fn slash_command_effects(state: &mut AppState, invocation: SlashCommandInvocatio
         }
         SlashCommand::Clear => vec![Effect::ClearTextarea, Effect::ClearConversation],
         SlashCommand::Session => vec![Effect::ClearTextarea, Effect::ListSessions],
+        SlashCommand::Agents => {
+            state.open_agents_popup();
+            vec![Effect::ClearTextarea]
+        }
         SlashCommand::Compact => vec![Effect::ClearTextarea, Effect::Compact],
     }
 }
@@ -525,6 +585,10 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
         InputEvent::CtrlC => handle_ctrl_c_generic(state, true),
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
+            vec![]
+        }
+        InputEvent::ShowAgents => {
+            state.open_agents_popup();
             vec![]
         }
         InputEvent::ParentView => vec![],
@@ -544,12 +608,7 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
                 KeyCode::Left => picker.action = crate::tui_reducer_state::SessionAction::Resume,
                 KeyCode::Right => picker.action = crate::tui_reducer_state::SessionAction::Clone,
                 KeyCode::Enter if key.modifiers.is_empty() => {
-                    if let Some(choice) = picker.selected() {
-                        return vec![Effect::SelectSession {
-                            source_id: choice.session_id,
-                            action: picker.action,
-                        }];
-                    }
+                    return confirm_session_picker_selection(picker);
                 }
                 _ => {}
             }
@@ -557,6 +616,36 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
         }
         InputEvent::Paste(_) => vec![],
     }
+}
+
+/// Resume or clone the highlighted session (`enter` or double-click).
+pub(super) fn confirm_session_picker_selection(
+    picker: &crate::tui_reducer_state::SessionPicker,
+) -> Vec<Effect> {
+    picker
+        .selected()
+        .map(|choice| {
+            vec![Effect::SelectSession {
+                source_id: choice.session_id,
+                action: picker.action,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+/// Run the highlighted command suggestion (`enter` or double-click).
+pub(super) fn activate_selected_slash_suggestion(state: &mut AppState) -> Vec<Effect> {
+    let Some(command) = state.selected_slash_command().map(|info| info.command) else {
+        return vec![];
+    };
+    state.slash_overlay = SlashOverlay::Hidden;
+    slash_command_effects(
+        state,
+        SlashCommandInvocation {
+            command,
+            argument: None,
+        },
+    )
 }
 
 /// Keys while the `/models` picker is open. The list selects and opens the
@@ -661,17 +750,10 @@ fn handle_key_main(
                     return vec![Effect::SetInputText(command.name.to_string())];
                 }
             }
-            KeyCode::Enter if key_event.modifiers.is_empty() => {
-                if let Some(command) = state.selected_slash_command().map(|info| info.command) {
-                    state.slash_overlay = SlashOverlay::Hidden;
-                    return slash_command_effects(
-                        state,
-                        SlashCommandInvocation {
-                            command,
-                            argument: None,
-                        },
-                    );
-                }
+            KeyCode::Enter
+                if key_event.modifiers.is_empty() && state.selected_slash_command().is_some() =>
+            {
+                return activate_selected_slash_suggestion(state);
             }
             _ => {}
         }
@@ -699,7 +781,7 @@ fn handle_key_main(
             if let Some(invocation) = parse_slash_command_invocation(&textarea.text) {
                 if matches!(
                     invocation.command,
-                    SlashCommand::Session | SlashCommand::Compact
+                    SlashCommand::Session | SlashCommand::Compact | SlashCommand::Agents
                 ) {
                     state.slash_overlay = SlashOverlay::Hidden;
                     return slash_command_effects(state, invocation);

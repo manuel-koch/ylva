@@ -16,7 +16,7 @@ use super::ClipboardSink;
 use crate::events::AppAction;
 use crate::presenter::TuiEvent;
 use crate::tui_reducer_state::{
-    AppState, Focus, HistoryDirection, InputEvent, SlashOverlay, LARGE_PASTE_CHAR_THRESHOLD,
+    AppState, HistoryDirection, InputEvent, SlashOverlay, LARGE_PASTE_CHAR_THRESHOLD,
 };
 use ratatui::style::Style;
 use ratatui_textarea::TextArea;
@@ -40,6 +40,7 @@ pub(super) fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent> {
         AppAction::CtrlC => Some(TuiEvent::Input(InputEvent::CtrlC)),
         AppAction::Escape => Some(TuiEvent::Input(InputEvent::Escape)),
         AppAction::ShowHelp => Some(TuiEvent::Input(InputEvent::ShowHelp)),
+        AppAction::ShowAgents => Some(TuiEvent::Input(InputEvent::ShowAgents)),
         AppAction::StopSignal => Some(TuiEvent::Input(InputEvent::StopSignal)),
         AppAction::KeyInput(event) if is_parent_view_key(&event) => {
             Some(TuiEvent::Input(InputEvent::ParentView))
@@ -166,7 +167,7 @@ pub(super) fn scroll_input_at_mouse(
         mouse.kind,
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
     ) && state.layout.input_area.contains(mouse.column, mouse.row)
-        && !matches!(state.focus, Focus::HelpPopup)
+        && !state.focus.is_modal()
         && !matches!(state.slash_overlay, SlashOverlay::SessionPicker(_))
     {
         let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {

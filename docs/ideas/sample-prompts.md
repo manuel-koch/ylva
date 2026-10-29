@@ -228,6 +228,8 @@ ONLY use `bash` tool to search for relevant files!
 Save the complete summary to `tmp/summary.md`, don't edit an existing
 file nor use its current content. If file exists, override it.
 
+Let subagent run skill `unslop` on the saved `tmp/summary.md` afterwards.
+
 ---
 
 Which subagent types can you use to delegate tasks ?
@@ -421,6 +423,8 @@ Do not edit files, install anything, access the network, or change Git state.
 
 ---
 
+Run in a subagent ( use a really long label for the subagent ):
+
 Copy `docs/known-test-issues.md` to `tmp/dummy.md`
 ( overwrite target file if it exists ) using a `bash` tool call.
 Use skill `unslop` to rewrite `tmp/dummy.md`.
@@ -448,14 +452,14 @@ Perform a full documentation review over all relavant files.
 Cluster the documents by scope, use subagents to perform the review.
 Only review, don't touch any file!
 
-- docs/*.md
-- docs/*.mmd
-- docs/ideas/*.md ( treat them as non-authoritative, WIP )
-- docs/plans/*.md ( treat them as authoritative, may be WIP )
-- AGENTS.md
-- README.md
-- CONTEXT.md
-- CHANGELOG.md
+- `docs/*.md`
+- `docs/*.mmd`
+- `docs/ideas/*.md` ( treat them as non-authoritative, WIP )
+- `docs/plans/*.md` ( treat them as authoritative, may be WIP )
+- `AGENTS.md`
+- `README.md`
+- `CONTEXT.md`
+- `CHANGELOG.md`
 
 Save your findings as a markdown formatted report to
 `tmp/docs-review.md`.

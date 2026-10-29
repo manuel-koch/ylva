@@ -851,7 +851,7 @@ impl AppState {
     /// when the draft changes the set.
     pub fn refresh_slash_overlay(&mut self, draft: &str) {
         let approval_owns_input = matches!(self.focus, Focus::ToolApproval { .. })
-            || (matches!(self.focus, Focus::HelpPopup) && self.pending_tool_approval().is_some());
+            || (self.focus.is_modal() && self.pending_tool_approval().is_some());
         if approval_owns_input {
             self.slash_overlay = SlashOverlay::Hidden;
             self.slash_overlay_drag_start = None;

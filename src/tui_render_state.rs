@@ -67,6 +67,26 @@ pub struct HelpPopupState {
     pub help_drag_active: bool,
 }
 
+/// Agents popup (`/agents`, `ctrl-a`) render state.
+#[derive(Default)]
+pub struct AgentsPopupRenderState {
+    pub show: bool,
+    /// Rows in display order, built for this frame (durations already
+    /// evaluated against the frame's clock).
+    pub rows: Vec<crate::tui_reducer_state::AgentRow>,
+    pub selected_index: usize,
+    /// Clamped by `draw_agents_popup` each frame.
+    pub scroll_offset: usize,
+    /// When set, `draw_agents_popup` scrolls the selected row into view and
+    /// clears it.
+    pub reveal_selection: bool,
+    /// Written each frame for click-outside hit-testing; zero-sized when hidden.
+    pub popup_rect: ratatui::layout::Rect,
+    /// Rendered row rects for click hit-testing.
+    pub row_hitboxes: Vec<(ratatui::layout::Rect, crate::tui_reducer_state::AgentRowKey)>,
+    pub visible_rows: usize,
+}
+
 /// Drill-in subagent-view header bubble render state.
 pub struct SubagentViewState {
     /// Set when the drill-in view (`AppState::active_view ==
@@ -131,6 +151,9 @@ pub struct ClarifyBannerState {
     /// On-screen rect of the Cancel button below the banner; zero-sized when
     /// no clarify is pending.
     pub cancel_button: ratatui::layout::Rect,
+    /// On-screen rect of the go-to-agent button next to OK / Cancel; zero-sized
+    /// unless the clarify belongs to another conversation.
+    pub go_to_agent_button: ratatui::layout::Rect,
 }
 
 /// Root-or-subagent scrollable conversation-list render state (Phase 6.10
@@ -208,6 +231,9 @@ pub struct TuiState {
     /// while a drilled-in subagent transcript is displayed because the footer
     /// indicator belongs to the main conversation.
     pub active_subagent_counts: ActiveSubagentCounts,
+    /// At least one subagent run exists in the session (footer shows the
+    /// agents popup hint).
+    pub has_subagents: bool,
     /// Engine label for the transcript currently being rendered.
     pub engine_display: EngineDisplayInfo,
     pub chat_entries: Vec<ChatEntry>,
@@ -251,6 +277,9 @@ pub struct TuiState {
     /// title so it's unambiguous which agent's tool call is being approved.
     /// Meaningless when `pending_approval` is `None`.
     pub pending_approval_is_subagent: bool,
+    /// The visible approval/clarify prompt belongs to a conversation other
+    /// than the viewed one, so a go-to-agent button is offered.
+    pub prompt_offers_go_to_agent: bool,
     /// The focused button of the visible approval/clarify prompt.
     pub prompt_button_focus: Option<crate::tui_reducer_state::PromptButton>,
     /// Approval/clarify prompts held back while the user types.
@@ -279,6 +308,7 @@ pub struct TuiState {
 
     // ── help popup ──────────────────────────────────────────────────────────
     pub help_popup: HelpPopupState,
+    pub agents_popup: AgentsPopupRenderState,
 
     // ── clarify banner ───────────────────────────────────────────────────────
     pub clarify_banner_state: ClarifyBannerState,
@@ -308,6 +338,7 @@ impl TuiState {
             parent_agent_mode: AgentMode::Idle,
             agent_mode: AgentMode::Idle,
             active_subagent_counts: ActiveSubagentCounts::default(),
+            has_subagents: false,
             engine_display: EngineDisplayInfo::default(),
             chat_entries: Vec::new(),
             partial_assistant_text: String::new(),
@@ -321,6 +352,7 @@ impl TuiState {
             compacting: false,
             pending_approval: None,
             pending_approval_is_subagent: false,
+            prompt_offers_go_to_agent: false,
             prompt_button_focus: None,
             deferred_prompt_count: 0,
             input_history: Vec::new(),
@@ -340,6 +372,7 @@ impl TuiState {
                 help_selection: None,
                 help_drag_active: false,
             },
+            agents_popup: AgentsPopupRenderState::default(),
             clarify_banner_state: ClarifyBannerState {
                 pending_clarify: None,
                 clarify_scroll_offset: 0,
@@ -347,6 +380,7 @@ impl TuiState {
                 clarify_banner: ratatui::layout::Rect::default(),
                 ok_button: ratatui::layout::Rect::default(),
                 cancel_button: ratatui::layout::Rect::default(),
+                go_to_agent_button: ratatui::layout::Rect::default(),
             },
             subagent_view: SubagentViewState {
                 subagent_view_bubble: None,

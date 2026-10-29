@@ -86,6 +86,7 @@ where
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
     let mut replay_store = agent.store();
+    state.session_title = replay_store.as_ref().map(|store| store.title());
     if let Some(store) = replay_store.as_ref() {
         // One read rebuilds both the transcript and the compaction marker's
         // position; a snapshot written before the transcript-relative
@@ -249,6 +250,7 @@ where
                                 replay_store = agent.store();
                                 active_title_session_id = replay_store.as_ref().map(|store| store.session_id());
                                 if let Some(store) = replay_store.as_ref() {
+                                    state.session_title = Some(store.title());
                                     let configuration = engine.config();
                                     store.record_model_changed(&configuration.provider_connection, &configuration.model);
                                     if let Err(error) = set_terminal_title(Some(&store.title())) {
@@ -288,6 +290,7 @@ where
             title_update = title_update_rx.recv(), if title_updates_open => {
                 match title_update {
                     Some(update) if active_title_session_id == Some(update.session_id) => {
+                        state.session_title = Some(update.title.clone());
                         if let Err(error) = set_terminal_title(Some(&update.title)) {
                             tracing::warn!(
                                 %error,
@@ -389,7 +392,7 @@ where
                 // Keys pressed in the help popup never edit the draft, so they
                 // must not defer prompts (closing help with Esc would
                 // otherwise hide the approval until the idle delay passes).
-                if !state.show_help()
+                if !state.focus.is_modal()
                     && matches!(
                         action,
                         AppAction::KeyInput(_) | AppAction::Paste(_) | AppAction::Escape | AppAction::CtrlC

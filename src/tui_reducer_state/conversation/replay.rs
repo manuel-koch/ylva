@@ -15,9 +15,10 @@
 //! Conversation / replay state and operations.
 
 use super::{
-    result_section_ids, AppState, ChatEntry, ResultSection, SubagentConversation, SubagentRunInfo,
-    ToolCallState, UserMessageState,
+    result_section_ids, AppState, ChatEntry, ResultSection, SubagentConversation, SubagentOutcome,
+    SubagentRunInfo, ToolCallState, UserMessageState,
 };
+use crate::agent::subagent_manager::STATUS_FAILURE;
 use crate::agent::{AssistantStatus, Message, UserMessageKind};
 use crate::store::SubagentRunRecord;
 use std::collections::HashMap;
@@ -265,12 +266,12 @@ pub(in crate::tui_reducer_state) fn project_messages_with_subagent_runs(
                     call_id: subagent_run.call_id,
                     origin: subagent_run.origin,
                     status: status.clone(),
-                    result: if status == "failure" {
+                    result: if status == STATUS_FAILURE {
                         None
                     } else {
                         subagent_run.result.clone()
                     },
-                    error: if status == "failure" {
+                    error: if status == STATUS_FAILURE {
                         subagent_run.result.clone()
                     } else {
                         None
@@ -370,16 +371,20 @@ impl AppState {
             if subagent_run.call_id.is_nil() {
                 continue;
             }
-            self.subagent_conversations.insert(
-                subagent_run.run_id,
-                SubagentConversation::new_replay(SubagentRunInfo {
-                    run_id: subagent_run.run_id,
-                    bubble_id: subagent_run.call_id,
-                    agent_type: subagent_run.agent_type.clone(),
-                    task: subagent_run.task.clone(),
-                    label: subagent_run.label.clone(),
-                }),
-            );
+            let mut conversation = SubagentConversation::new_replay(SubagentRunInfo {
+                run_id: subagent_run.run_id,
+                bubble_id: subagent_run.call_id,
+                agent_type: subagent_run.agent_type.clone(),
+                task: subagent_run.task.clone(),
+                label: subagent_run.label.clone(),
+            });
+            conversation.outcome = subagent_run
+                .status
+                .as_deref()
+                .map(SubagentOutcome::from_status);
+            conversation.recorded_duration = subagent_run.duration;
+            self.subagent_conversations
+                .insert(subagent_run.run_id, conversation);
         }
         self.conversation.scroll_locked = true;
         self.conversation.scroll_offset = 0;

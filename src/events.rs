@@ -38,6 +38,8 @@ pub enum AppAction {
     Escape,
     /// F1 pressed — toggle Help popup.
     ShowHelp,
+    /// ctrl-a pressed — toggle the agents popup.
+    ShowAgents,
     /// External SIGINT or SIGTERM (e.g. `kill -INT`): stop immediately, no
     /// double-press. Distinct from `CtrlC`, which is a terminal key event that
     /// follows the double-press confirm.
@@ -80,6 +82,7 @@ fn map_key_event(key: KeyEvent) -> Option<AppAction> {
         }
         KeyCode::Esc => Some(AppAction::Escape),
         KeyCode::F(1) => Some(AppAction::ShowHelp),
+        KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => Some(AppAction::ShowAgents),
         _ => Some(AppAction::KeyInput(key)),
     }
 }
@@ -159,6 +162,16 @@ mod tests {
     fn f1_maps_to_show_help_action() {
         let action = map_event(Event::Key(press(KeyCode::F(1), KeyModifiers::NONE)));
         assert_eq!(action, Some(AppAction::ShowHelp));
+    }
+
+    #[test]
+    fn ctrl_a_maps_to_show_agents_action_but_plain_and_alt_a_do_not() {
+        let action = map_event(Event::Key(press(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+        assert_eq!(action, Some(AppAction::ShowAgents));
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::ALT] {
+            let key = press(KeyCode::Char('a'), modifiers);
+            assert_eq!(map_event(Event::Key(key)), Some(AppAction::KeyInput(key)));
+        }
     }
 
     #[test]

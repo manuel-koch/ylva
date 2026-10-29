@@ -20,7 +20,10 @@ use ratatui::text::{Line, Span};
 use crate::theme::{content_color, error_color, tool_bubble_border_color};
 use crate::tui_reducer_state::ToolCallState;
 
+use std::time::Duration;
+
 use super::super::bubbles::BubbleStyle;
+use super::super::elapsed::{format_duration, format_elapsed};
 use super::super::SPINNER_FRAMES;
 use super::ToolBubbleArgs;
 
@@ -256,12 +259,12 @@ pub(super) fn append_tool_chrome(
                 || name == crate::agent::tools::bash::BashTool::NAME =>
         {
             elapsed_seconds
-                .map(|elapsed_seconds| format!("{elapsed_seconds}s"))
+                .map(|elapsed_seconds| format_elapsed(Duration::from_secs(elapsed_seconds)))
                 .unwrap_or_default()
         }
-        ToolCallState::Done { duration, .. } => format!("{:.3}s", duration.as_secs_f64()),
+        ToolCallState::Done { duration, .. } => format_duration(*duration),
         ToolCallState::Error { duration, .. } if duration.as_nanos() > 0 => {
-            format!("{:.3}s", duration.as_secs_f64())
+            format_duration(*duration)
         }
         _ => String::new(),
     };

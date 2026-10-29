@@ -513,6 +513,8 @@ boundary supersedes the recovery handoff.
 - Subagent replay reads messages and the latest boundary together
   (`Store::read_session_state`); snapshots without a boundary load without a
   marker.
+- Replayed subagent runs have no live timer or `SubagentDone`; their status
+  and duration come from the persisted `SubagentRunRecord`.
 - The provider binds a request-scoped failure callback to the response dump so
   compaction timeouts can append their reason after the stream future was
   dropped.
@@ -589,9 +591,18 @@ See [persistence](./persistence.md) for on-disk contracts.
   `is_typing()`, arriving approvals/clarifies only join the queue and
   `resume_pending_tool_approval` is a no-op; `TypingSettled` releases the
   head. `AppState::prompt_button_focus` holds the `PromptButton` focused by
-  `tab`; `enter` activates only that button. `InputEvent::ParentView`
+  `tab`; `enter` activates only that button. `PromptButton::GoToAgent` is
+  offered only when the prompt's owner is not the viewed conversation; the
+  owner is the conversation whose transcript holds the prompt's tool bubble.
+  `InputEvent::ParentView`
   (plain `ctrl-p`) navigates back from a subagent view and is otherwise
   forwarded to the textarea as `ctrl-p`.
+- **Double-click:** `DoubleClickTracker` is shared by the agents popup and
+  the slash-overlay lists; the second click acts like `enter`.
+- **Agents popup:** `Focus::AgentsPopup` is modal. Awaiting-input is derived
+  from transcripts, not from `pending_approval_order`. The root row label is
+  `AppState::session_title`, which the Driver refreshes on activation and
+  title updates. Live durations rely on the existing spinner tick.
 
 ### Drill-in TUI conversation view internals
 

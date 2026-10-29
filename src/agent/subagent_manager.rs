@@ -75,6 +75,15 @@ pub enum FinishResultOrigin {
     Runtime,
 }
 
+/// `FinishResult::status` of a run stopped before it finished.
+pub const STATUS_CANCELLED: &str = "cancelled";
+/// `FinishResult::status` of a run that reported failure or could not complete.
+pub const STATUS_FAILURE: &str = "failure";
+/// Progress status of a spawned run that started immediately.
+pub const STATUS_RUNNING: &str = "running";
+/// Progress status of a spawned run waiting for a free subagent slot.
+pub const STATUS_QUEUED: &str = "queued";
+
 /// Outcome of a completed, cancelled, or unstructured-fallback subagent run.
 #[derive(Debug, Clone)]
 pub struct FinishResult {
@@ -83,7 +92,7 @@ pub struct FinishResult {
     /// Determines whether user-authored Markdown is appropriate for an
     /// error: only a subagent-reported outcome is model-authored content.
     pub origin: FinishResultOrigin,
-    /// `"success"`, `"failure"`, or `"unstructured"` (subagent never called
+    /// `"success"`, `"failure"`, `STATUS_CANCELLED`, or `"unstructured"` (subagent never called
     /// `agent_finish`; last assistant text was captured as a fallback).
     pub status: String,
     pub result: Option<String>,
@@ -448,7 +457,7 @@ impl SubagentManager {
                 "tool_progress_queued",
                 UiUpdate::ToolProgress {
                     id: call_id,
-                    title_arguments: spawn_progress_title_arguments("queued", run_id),
+                    title_arguments: spawn_progress_title_arguments(STATUS_QUEUED, run_id),
                 },
             );
             self.queue.push_back(request);
@@ -489,7 +498,7 @@ impl SubagentManager {
             "tool_progress_running",
             UiUpdate::ToolProgress {
                 id: call_id,
-                title_arguments: spawn_progress_title_arguments("running", run_id),
+                title_arguments: spawn_progress_title_arguments(STATUS_RUNNING, run_id),
             },
         );
         if let Some(store) = &self.store {

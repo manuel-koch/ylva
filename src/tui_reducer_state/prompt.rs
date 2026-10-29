@@ -19,7 +19,9 @@
 
 use std::time::{Duration, Instant};
 
-use super::{AppState, Focus, SlashOverlay, TuiMode};
+use super::{
+    AgentRowKey, AppState, ChatEntry, ConversationView, Effect, Focus, SlashOverlay, TuiMode,
+};
 
 /// Idle time after the last keystroke before a deferred prompt is shown.
 pub const PROMPT_IDLE_DELAY: Duration = Duration::from_millis(1500);
@@ -34,6 +36,8 @@ pub enum PromptButton {
     Deny,
     ClarifyOk,
     ClarifyCancel,
+    /// Switches to the conversation the visible prompt belongs to.
+    GoToAgent,
 }
 
 /// Keystroke timing used to defer prompts while the user is typing.
@@ -106,25 +110,71 @@ impl AppState {
             || matches!(self.mode, TuiMode::ClarifyPending { .. })
     }
 
+    /// The conversation the visible prompt belongs to, when it is not the one
+    /// being viewed.
+    pub fn prompt_owner_elsewhere(&self) -> Option<AgentRowKey> {
+        let prompt_id = match (&self.focus, &self.mode) {
+            (Focus::ToolApproval { tool_id, .. }, _) => *tool_id,
+            (_, TuiMode::ClarifyPending { id, .. }) => *id,
+            _ => return None,
+        };
+        let owner = self
+            .subagent_conversations
+            .iter()
+            .find(|(_, conversation)| {
+                conversation.messages.iter().any(
+                    |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == prompt_id),
+                )
+            })
+            .map_or(AgentRowKey::Root, |(run_id, _)| AgentRowKey::Run(*run_id));
+        let viewed = match &self.active_view {
+            ConversationView::Root => AgentRowKey::Root,
+            ConversationView::Subagent { run_id, .. } => AgentRowKey::Run(*run_id),
+        };
+        (owner != viewed).then_some(owner)
+    }
+
+    /// Switches to the conversation the visible prompt belongs to. Returns the
+    /// lazy transcript load effect when that run's transcript is not loaded.
+    pub fn go_to_prompt_owner(&mut self) -> Vec<Effect> {
+        self.prompt_button_focus = None;
+        match self.prompt_owner_elsewhere() {
+            Some(AgentRowKey::Root) => self.switch_to_root_view(),
+            Some(AgentRowKey::Run(run_id)) => {
+                if self.subagent_needs_lazy_load(run_id) {
+                    return vec![Effect::LoadSubagentTranscript { run_id }];
+                }
+                self.switch_to_subagent_view(run_id);
+            }
+            _ => {}
+        }
+        vec![]
+    }
+
     /// Moves button focus to the next (or previous) button of the visible
-    /// prompt: none → first → second → first …. A no-op without a prompt.
+    /// prompt: none → first → second → go-to-agent (when offered) → first ….
+    /// A no-op without a prompt.
     pub(crate) fn cycle_prompt_button(&mut self, backwards: bool) {
-        let (first, second) = if matches!(self.focus, Focus::ToolApproval { .. }) {
-            (PromptButton::Approve, PromptButton::Deny)
+        let mut buttons = if matches!(self.focus, Focus::ToolApproval { .. }) {
+            vec![PromptButton::Approve, PromptButton::Deny]
         } else if matches!(self.mode, TuiMode::ClarifyPending { .. }) {
-            (PromptButton::ClarifyOk, PromptButton::ClarifyCancel)
+            vec![PromptButton::ClarifyOk, PromptButton::ClarifyCancel]
         } else {
             return;
         };
-        let current = self
+        if self.prompt_owner_elsewhere().is_some() {
+            buttons.push(PromptButton::GoToAgent);
+        }
+        let position = self
             .prompt_button_focus
-            .filter(|button| *button == first || *button == second);
-        self.prompt_button_focus = Some(match current {
-            None if backwards => second,
-            None => first,
-            Some(button) if button == first => second,
-            Some(_) => first,
-        });
+            .and_then(|focused| buttons.iter().position(|button| *button == focused));
+        let next = match (position, backwards) {
+            (None, false) => 0,
+            (None, true) => buttons.len() - 1,
+            (Some(index), false) => (index + 1) % buttons.len(),
+            (Some(index), true) => (index + buttons.len() - 1) % buttons.len(),
+        };
+        self.prompt_button_focus = Some(buttons[next]);
     }
 
     /// The focused button, when it belongs to the prompt currently shown.
@@ -137,6 +187,7 @@ impl AppState {
             PromptButton::ClarifyOk | PromptButton::ClarifyCancel if clarify && !approval => {
                 Some(button)
             }
+            PromptButton::GoToAgent if self.prompt_owner_elsewhere().is_some() => Some(button),
             _ => None,
         }
     }
