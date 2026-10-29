@@ -268,39 +268,28 @@ fn estimated_usage_ratio_uses_the_active_engines_effective_context_length() {
 }
 
 #[test]
-fn tool_schema_budget_reuses_counts_without_retokenizing() {
+fn tool_schema_budget_is_stable_across_repeated_queries() {
     let mut context = Context::new();
     context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
     context.push_user("A bounded task.".to_string());
     let tools = compaction_test_tools();
     let expected_budget = context.available_result_token_budget(&tools, 64_000);
     let expected_tokens = context.model_view_token_count() + tool_schema_token_count(&tools);
-    let tokenizer = tiktoken_rs::cl100k_base_singleton();
-    let tokenizer_lock = tokenizer.lock();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        let engine = test_engine();
-        assert_eq!(
-            context.estimated_model_tokens(&tools, engine.as_ref()),
-            expected_tokens
-        );
-        assert!(context
-            .summary_boundary_for_model_target(64_000, &tools, engine.as_ref())
-            .is_none());
-        assert!(
-            context
-                .recover_model_view(64_000, 64_000, &tools)
-                .fits_ceiling
-        );
-        let budget = context.available_result_token_budget(&tools, 64_000);
-        sender.send(budget).expect("send budget");
-    });
-
-    let result = receiver.recv_timeout(Duration::from_secs(1));
-    drop(tokenizer_lock);
-    worker.join().expect("budget worker");
+    let engine = test_engine();
     assert_eq!(
-        result.expect("unchanged schemas must not wait for the tokenizer"),
+        context.estimated_model_tokens(&tools, engine.as_ref()),
+        expected_tokens
+    );
+    assert!(context
+        .summary_boundary_for_model_target(64_000, &tools, engine.as_ref())
+        .is_none());
+    assert!(
+        context
+            .recover_model_view(64_000, 64_000, &tools)
+            .fits_ceiling
+    );
+    assert_eq!(
+        context.available_result_token_budget(&tools, 64_000),
         expected_budget
     );
 }

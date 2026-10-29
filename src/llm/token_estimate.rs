@@ -40,7 +40,6 @@ impl TokenEstimator {
         }
         match self {
             Self::Tiktoken => tiktoken_rs::cl100k_base_singleton()
-                .lock()
                 .encode_ordinary(text)
                 .len(),
             Self::FourCharactersPerToken => text.chars().count().div_ceil(4),

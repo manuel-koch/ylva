@@ -700,13 +700,17 @@ pub(super) fn validate_args_with_schema(
 ) -> Result<(), String> {
     let schema_value = serde_json::to_value(schema)
         .map_err(|error| format!("failed to serialize schema: {error}"))?;
-    let compiled = jsonschema::JSONSchema::compile(&schema_value)
+    let validator = jsonschema::validator_for(&schema_value)
         .map_err(|error| format!("invalid schema: {error}"))?;
-    if let Err(errors) = compiled.validate(arguments) {
-        let messages: Vec<String> = errors.map(|error| error.to_string()).collect();
-        return Err(messages.join("; "));
+    let messages: Vec<String> = validator
+        .iter_errors(arguments)
+        .map(|error| error.to_string())
+        .collect();
+    if messages.is_empty() {
+        Ok(())
+    } else {
+        Err(messages.join("; "))
     }
-    Ok(())
 }
 
 /// Names of the tools available in a CLI (headless) context.

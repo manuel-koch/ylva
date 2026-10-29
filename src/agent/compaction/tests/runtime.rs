@@ -71,7 +71,7 @@ async fn schedule_summary_starts_only_above_the_soft_threshold_and_only_once() {
 }
 
 #[test]
-fn inactive_request_gate_does_not_tokenize_tool_schemas() {
+fn inactive_request_gate_does_not_defer() {
     let (mut runtime, _outcomes, _updates, _run_id, engine, mut context) =
         new_recording_runtime("A summary.");
     context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
@@ -80,19 +80,8 @@ fn inactive_request_gate_does_not_tokenize_tool_schemas() {
         description: "Read a file.".to_string(),
         parameters: serde_json::json!({"type": "object"}),
     }];
-    let tokenizer = tiktoken_rs::cl100k_base_singleton();
-    let tokenizer_lock = tokenizer.lock();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        let deferred = runtime.defer_request(&context, engine.as_ref(), &tools);
-        sender.send(deferred).expect("send gate decision");
-    });
-
-    let result = receiver.recv_timeout(Duration::from_secs(1));
-    drop(tokenizer_lock);
-    worker.join().expect("request gate worker");
     assert!(
-        !result.expect("an inactive gate must not wait for the tokenizer"),
+        !runtime.defer_request(&context, engine.as_ref(), &tools),
         "only a running summary can defer a request"
     );
 }
