@@ -1149,3 +1149,38 @@ fn stream_chunk_during_double_press_abort_preserves_confirm_window() {
         "chunk must still be appended"
     );
 }
+
+#[test]
+fn subagent_done_records_outcome_and_freezes_elapsed_duration() {
+    for (status, expected_outcome) in [
+        ("success", SubagentOutcome::Success),
+        ("unstructured", SubagentOutcome::Success),
+        ("failure", SubagentOutcome::Error),
+        ("cancelled", SubagentOutcome::Cancelled),
+    ] {
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        state.start_subagent_run(SubagentRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "explore".into(),
+            task: "task".into(),
+            label: "label".into(),
+        });
+        assert_eq!(state.subagent_conversations[&run_id].outcome, None);
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::SubagentDone {
+                run_id,
+                status: status.to_string(),
+                result: None,
+            }),
+            &empty_textarea(),
+        );
+
+        let conversation = &state.subagent_conversations[&run_id];
+        assert_eq!(conversation.outcome, Some(expected_outcome), "{status}");
+        assert!(conversation.finished_at.is_some(), "{status}");
+    }
+}

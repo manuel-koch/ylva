@@ -441,31 +441,6 @@ fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
 
 #[test]
 fn mouse_click_on_model_picker_entry_selects_without_switching() {
-    let model_choice = |model_id: &str| ModelChoice {
-        label: crate::tui_reducer_state::ChoiceLabel {
-            identity: format!("stub/{model_id}"),
-            details: Vec::new(),
-        },
-        initial_reasoning_effort: None,
-        catalog_context_length: None,
-        selection: ProviderModelOption {
-            context_length_override: None,
-            provider_connection: "stub".to_string(),
-            model: crate::llm::ModelInfo {
-                id: model_id.to_string(),
-                context_length: None,
-                reasoning_efforts: None,
-                reasoning_default: None,
-                input_modalities: None,
-            },
-            reasoning_effort: None,
-        },
-        is_active: false,
-        engine_name: None,
-        selection_target: None,
-        selection_preview_error: None,
-        favorite_rank: None,
-    };
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
         parameters: None,
@@ -1325,4 +1300,193 @@ fn back_button_click_returns_from_a_subagent_view_to_the_root() {
     state.layout.subagent_back_button = ratatui::layout::Rect::new(0, 0, 10, 1);
     update(&mut state, left_click(3, 0), &empty_textarea());
     assert_eq!(state.active_view, ConversationView::Root);
+}
+
+#[test]
+fn agents_popup_mouse_click_selects_double_click_activates_outside_closes() {
+    use crate::tui_reducer_state::{AgentRowKey, SubagentRunInfo};
+    use ratatui::layout::Rect;
+    let mouse_at = |column: u16, row: u16| {
+        TuiEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let mut state = AppState::new();
+    let run_id = Uuid::new_v4();
+    state.start_subagent_run(SubagentRunInfo {
+        run_id,
+        bubble_id: Uuid::new_v4(),
+        agent_type: "default".to_string(),
+        task: "task".to_string(),
+        label: "label".to_string(),
+    });
+    state.open_agents_popup();
+    state.layout.agents_popup.rect = Rect::new(10, 5, 40, 4);
+    state.layout.agents_popup.row_hitboxes = vec![
+        (Rect::new(11, 6, 38, 1), AgentRowKey::Root),
+        (Rect::new(11, 7, 38, 1), AgentRowKey::Run(run_id)),
+    ];
+
+    update(&mut state, mouse_at(20, 7), &empty_textarea());
+    assert!(state.show_agents_popup());
+    update(&mut state, mouse_at(20, 7), &empty_textarea());
+    assert!(!state.show_agents_popup());
+    assert!(matches!(
+        state.active_view,
+        ConversationView::Subagent { run_id: id, .. } if id == run_id
+    ));
+
+    state.open_agents_popup();
+    update(&mut state, mouse_at(0, 0), &empty_textarea());
+    assert!(!state.show_agents_popup());
+}
+
+fn model_choice(model_id: &str) -> ModelChoice {
+    ModelChoice {
+        label: crate::tui_reducer_state::ChoiceLabel {
+            identity: format!("stub/{model_id}"),
+            details: Vec::new(),
+        },
+        initial_reasoning_effort: None,
+        catalog_context_length: None,
+        selection: ProviderModelOption {
+            context_length_override: None,
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                id: model_id.to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
+            },
+            reasoning_effort: None,
+        },
+        is_active: false,
+        engine_name: None,
+        selection_target: None,
+        selection_preview_error: None,
+        favorite_rank: None,
+    }
+}
+
+#[test]
+fn double_click_on_model_picker_entry_opens_parameters() {
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: vec![model_choice("model-0"), model_choice("model-1")],
+        filter: String::new(),
+        selected: 0,
+    };
+    state.layout.input_area.rect = ratatui::layout::Rect::new(0, 10, 40, 2);
+    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 6, 37, 3);
+    update(&mut state, left_click(5, 8), &empty_textarea());
+    assert!(matches!(
+        state.slash_overlay,
+        SlashOverlay::ModelPicker {
+            parameters: None,
+            ..
+        }
+    ));
+    update(&mut state, left_click(5, 8), &empty_textarea());
+    assert!(matches!(
+        state.slash_overlay,
+        SlashOverlay::ModelPicker {
+            parameters: Some(_),
+            selected: 1,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn double_click_on_session_picker_row_selects_session() {
+    use crate::tui_reducer_state::{SessionChoice, SessionPicker, SessionPickerPhase};
+    let mut picker = SessionPicker::loading();
+    picker.phase = SessionPickerPhase::Ready;
+    picker.choices = (0..3)
+        .map(|index| SessionChoice {
+            session_id: Uuid::from_u128(index),
+            title: "title".into(),
+            last_used_at: "date".into(),
+        })
+        .collect();
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::SessionPicker(picker);
+    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(0, 4, 40, 3);
+    assert!(update(&mut state, left_click(2, 6), &empty_textarea()).is_empty());
+    let effects = update(&mut state, left_click(2, 6), &empty_textarea());
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SelectSession { source_id, .. }] if *source_id == Uuid::from_u128(2)
+    ));
+}
+
+#[test]
+fn double_click_on_command_suggestion_runs_the_command() {
+    let mut state = AppState::new();
+    let choices = crate::slash_command::slash_command_suggestions("/");
+    let agents_index = choices
+        .iter()
+        .position(|info| info.command == crate::slash_command::SlashCommand::Agents)
+        .expect("agents suggestion");
+    state.slash_overlay = SlashOverlay::Suggestions {
+        choices,
+        selected: 0,
+    };
+    state.layout.input_area.rect = ratatui::layout::Rect::new(0, 10, 40, 2);
+    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 4, 37, 6);
+    let row = 4 + agents_index as u16;
+    update(&mut state, left_click(5, row), &empty_textarea());
+    assert!(matches!(
+        state.slash_overlay,
+        SlashOverlay::Suggestions { selected, .. } if selected == agents_index
+    ));
+    update(&mut state, left_click(5, row), &empty_textarea());
+    assert_eq!(state.focus, Focus::AgentsPopup);
+}
+
+#[test]
+fn clicking_go_to_agent_switches_to_the_prompt_owner() {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    state.start_subagent_run(SubagentRunInfo {
+        run_id,
+        bubble_id: Uuid::new_v4(),
+        agent_type: "reviewer".to_string(),
+        task: "task".to_string(),
+        label: "label".to_string(),
+    });
+    state
+        .subagent_conversations
+        .get_mut(&run_id)
+        .unwrap()
+        .messages
+        .push(ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+    state.focus = Focus::ToolApproval {
+        tool_id,
+        tool_name: "bash".to_string(),
+    };
+    state.layout.go_to_agent_button = ratatui::layout::Rect::new(40, 5, 20, 1);
+
+    let effects = update(&mut state, left_click(45, 5), &empty_textarea());
+
+    assert!(effects.is_empty());
+    assert!(matches!(
+        state.active_view,
+        ConversationView::Subagent { run_id: viewed, .. } if viewed == run_id
+    ));
 }

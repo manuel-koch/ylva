@@ -89,6 +89,29 @@ impl HelpPopupLayout {
     }
 }
 
+/// Screen-space geometry for the agents popup, written by the View each frame.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AgentsPopupLayout {
+    pub rect: Rect,
+    /// Screen rect of each rendered row, for click hit-testing.
+    pub row_hitboxes: Vec<(Rect, super::AgentRowKey)>,
+    /// Number of rows that fit in the popup's list area.
+    pub visible_rows: usize,
+}
+
+impl AgentsPopupLayout {
+    pub fn hit(&self, col: u16, row: u16) -> bool {
+        self.rect.contains((col, row).into())
+    }
+
+    pub fn row_key_at(&self, col: u16, row: u16) -> Option<super::AgentRowKey> {
+        self.row_hitboxes
+            .iter()
+            .find(|(rect, _)| rect.contains((col, row).into()))
+            .map(|(_, key)| *key)
+    }
+}
+
 /// Screen-space geometry for the slash-command overlay's selectable content.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SlashOverlayLayout {
@@ -171,6 +194,7 @@ pub struct AppLayout {
     pub chat_scrollbar: ChatScrollbarLayout,
     pub input_area: InputAreaLayout,
     pub help_popup: HelpPopupLayout,
+    pub agents_popup: AgentsPopupLayout,
     pub slash_overlay: SlashOverlayLayout,
     /// Rect of the clarify banner. Zero-sized when no clarify is pending.
     pub clarify_banner: ratatui::layout::Rect,
@@ -193,6 +217,9 @@ pub struct AppLayout {
     /// Rect of the Cancel button below the clarify banner. Zero-sized when
     /// no clarify is pending.
     pub clarify_cancel_button: Rect,
+    /// Rect of the go-to-agent button of the approval prompt or clarify
+    /// dialog. Zero-sized unless the prompt belongs to another conversation.
+    pub go_to_agent_button: Rect,
     /// Rect of the back button in the subagent-view header. Zero-sized while
     /// viewing `Root`.
     pub subagent_back_button: Rect,

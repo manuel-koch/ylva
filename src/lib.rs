@@ -138,9 +138,9 @@ pub use store::{
 pub use subagent_manager::{FinishResult, SpawnRequest, SpawnStatus, SubagentManager};
 pub use tui_driver::TuiApp;
 pub use tui_reducer_state::{
-    ActiveSubagentCounts, AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, ContextUsage,
-    DomainEvent, Effect, Focus, HelpPopupLayout, InputAreaLayout, InputEvent, SlashOverlayLayout,
-    ToolCallState, TuiDisplayMetadata, TuiMode, UserMessageState,
+    ActiveSubagentCounts, AgentsPopupLayout, AppLayout, AppState, ChatArea, ChatEntry,
+    ChatSelection, ContextUsage, DomainEvent, Effect, Focus, HelpPopupLayout, InputAreaLayout,
+    InputEvent, SlashOverlayLayout, ToolCallState, TuiDisplayMetadata, TuiMode, UserMessageState,
 };
 pub use tui_render_state::TuiState;
 pub use ylva_home::{ylva_home, YLVA_DIR_NAME, YLVA_HOME_ENVIRONMENT_VARIABLE};

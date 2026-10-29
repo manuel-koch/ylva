@@ -27,6 +27,8 @@ use crate::theme::{
 };
 use crate::tui_reducer_state::UserMessageState;
 
+use super::elapsed::{format_duration, format_elapsed};
+
 /// Common visual scaffolding shared by every chat bubble renderer
 /// (assistant, user, streaming-assistant, and tool bubbles): a colored
 /// left-border bar and a 2-space margin between the bar and content.
@@ -174,7 +176,7 @@ pub(super) fn append_thinking_lines(
 ) {
     let style = BubbleStyle::new(thinking_border_color());
     let dim = Style::default().add_modifier(Modifier::DIM);
-    let title_text = format!("Thought for {:.3}s", duration.as_secs_f64());
+    let title_text = format!("Thought for {}", format_duration(duration));
 
     let bubble_start_row = lines.len();
 
@@ -232,10 +234,10 @@ pub(super) fn append_streaming_thinking_lines(
 ) {
     let style = BubbleStyle::new(thinking_border_color());
     let dim = Style::default().add_modifier(Modifier::DIM);
-    let elapsed_seconds = thinking_started_at
-        .map(|started_at| started_at.elapsed().as_secs())
+    let elapsed = thinking_started_at
+        .map(|started_at| started_at.elapsed())
         .unwrap_or_default();
-    let title_text = format!("Thinking… ({elapsed_seconds}s)");
+    let title_text = format!("Thinking… ({})", format_elapsed(elapsed));
 
     let bubble_start_row = lines.len();
 

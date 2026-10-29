@@ -72,8 +72,12 @@ pub(in crate::agent) async fn resolve_spawn_subagent(
             let status = manager.spawn(task, briefing, agent_type, label.clone(), call_id);
             let outstanding_count = manager.outstanding_count();
             let (status_text, run_id) = match status {
-                crate::subagent_manager::SpawnStatus::Started(run_id) => ("running", run_id),
-                crate::subagent_manager::SpawnStatus::Queued(run_id) => ("queued", run_id),
+                crate::subagent_manager::SpawnStatus::Started(run_id) => {
+                    (crate::subagent_manager::STATUS_RUNNING, run_id)
+                }
+                crate::subagent_manager::SpawnStatus::Queued(run_id) => {
+                    (crate::subagent_manager::STATUS_QUEUED, run_id)
+                }
             };
             (status_text, run_id, outstanding_count)
         }

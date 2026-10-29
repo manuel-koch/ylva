@@ -90,6 +90,9 @@ pub enum Focus {
     MainInput,
     /// Modal help overlay; captures all keyboard and mouse input.
     HelpPopup,
+    /// Modal agents popup (`/agents`, `ctrl-a`); captures all keyboard and
+    /// mouse input, like [`Focus::HelpPopup`].
+    AgentsPopup,
     /// Tool-approval banner; captures keyboard only (non-modal).
     /// Tool arguments are **not** stored here — they live solely in the
     /// corresponding `ToolBubble` chat entry.
@@ -97,10 +100,10 @@ pub enum Focus {
 }
 
 impl Focus {
-    /// Returns `true` only for modal focus variants (currently only
-    /// [`Focus::HelpPopup`]).
+    /// Returns `true` only for modal focus variants ([`Focus::HelpPopup`] and
+    /// [`Focus::AgentsPopup`]).
     pub fn is_modal(&self) -> bool {
-        matches!(self, Focus::HelpPopup)
+        matches!(self, Focus::HelpPopup | Focus::AgentsPopup)
     }
 }
 
@@ -113,6 +116,8 @@ impl Focus {
 pub enum InputEvent {
     /// F1 pressed — toggle help popup.
     ShowHelp,
+    /// `ctrl-a` pressed (or `/agents` submitted) — toggle the agents popup.
+    ShowAgents,
     /// External SIGINT or SIGTERM: stop immediately, no confirm.
     StopSignal,
     /// ctrl-c terminal key event; follows double-press confirm logic.

@@ -241,6 +241,8 @@ pub(super) fn route_mouse(
                 } else {
                     state.help_scroll_down(1);
                 }
+            } else if matches!(state.focus, Focus::AgentsPopup) {
+                state.agents_popup_scroll(if scroll_up { -1 } else { 1 });
             } else if matches!(
                 state.slash_overlay,
                 SlashOverlay::ModelPicker { .. } | SlashOverlay::SessionPicker(_)
@@ -278,6 +280,18 @@ pub(super) fn route_mouse(
         }
 
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            if matches!(state.focus, Focus::AgentsPopup) {
+                if !state.layout.agents_popup.hit(column, row) {
+                    state.close_agents_popup();
+                } else if let Some(key) = state.layout.agents_popup.row_key_at(column, row) {
+                    let now = std::time::Instant::now();
+                    if state.agents_popup_click(key, now) {
+                        return state.activate_agents_popup_selection(now);
+                    }
+                }
+                return vec![];
+            }
+
             // Close modal on click outside.
             if matches!(state.focus, Focus::HelpPopup) {
                 if !state.layout.help_popup.hit(column, row) {
@@ -301,8 +315,9 @@ pub(super) fn route_mouse(
             }
 
             // A click on a rendered slash-overlay row starts a possible text
-            // drag. Model-picker clicks also change the highlight only;
-            // confirmation remains an explicit Enter action.
+            // drag and highlights the row; a double-click on it acts like
+            // Enter (model picker: open parameters; session picker: resume
+            // or clone; suggestions: run the command).
             if state.slash_overlay.is_visible() {
                 if let SlashOverlay::SessionPicker(picker) = &mut state.slash_overlay {
                     if picker.phase == crate::tui_reducer_state::SessionPickerPhase::Ready {
@@ -323,6 +338,14 @@ pub(super) fn route_mouse(
                         } else if let Some(index) = state.layout.slash_overlay.row_at(column, row) {
                             if index < picker.choices.len() {
                                 picker.selected = index;
+                                if state
+                                    .slash_overlay_click
+                                    .register(index, std::time::Instant::now())
+                                {
+                                    return super::keyboard::confirm_session_picker_selection(
+                                        picker,
+                                    );
+                                }
                             }
                         }
                     }
@@ -347,6 +370,24 @@ pub(super) fn route_mouse(
                                 .copied()
                         {
                             *selected = entry_index;
+                            if state
+                                .slash_overlay_click
+                                .register(entry_index, std::time::Instant::now())
+                            {
+                                state.open_model_parameters();
+                            }
+                        }
+                    } else if let SlashOverlay::Suggestions { choices, selected } =
+                        &mut state.slash_overlay
+                    {
+                        if overlay_row < choices.len() {
+                            *selected = overlay_row;
+                            if state
+                                .slash_overlay_click
+                                .register(overlay_row, std::time::Instant::now())
+                            {
+                                return super::keyboard::activate_selected_slash_suggestion(state);
+                            }
                         }
                     }
                     return vec![];
@@ -397,6 +438,15 @@ pub(super) fn route_mouse(
                     state.subagent_view.header_drag_active = true;
                 }
                 return vec![];
+            }
+
+            if state.prompt_owner_elsewhere().is_some()
+                && state
+                    .layout
+                    .go_to_agent_button
+                    .contains((column, row).into())
+            {
+                return state.go_to_prompt_owner();
             }
 
             // Approve / Deny button clicks while in tool-approval focus.

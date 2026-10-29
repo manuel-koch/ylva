@@ -177,6 +177,27 @@ fn draw_expansion_indicator(frame: &mut Frame, state: &TuiState, target: BubbleE
     );
 }
 
+/// Snapshot of the agents popup for one frame; rows are built only while it
+/// is shown.
+pub(crate) fn agents_popup_render_state(
+    state: &AppState,
+) -> crate::tui_render_state::AgentsPopupRenderState {
+    if !state.show_agents_popup() {
+        return Default::default();
+    }
+    let rows = state.agent_rows(std::time::Instant::now());
+    crate::tui_render_state::AgentsPopupRenderState {
+        show: true,
+        selected_index: state.agents_popup_selected_index(&rows),
+        rows,
+        scroll_offset: state.agents_popup.scroll_offset,
+        reveal_selection: state.agents_popup.reveal_selection,
+        popup_rect: state.layout.agents_popup.rect,
+        row_hitboxes: state.layout.agents_popup.row_hitboxes.clone(),
+        visible_rows: state.layout.agents_popup.visible_rows,
+    }
+}
+
 /// Project the canonical [`AppState`] to the legacy [`TuiState`] snapshot
 /// required by [`crate::tui_widgets::draw`].
 ///
@@ -187,15 +208,21 @@ fn project_for_draw(state: &AppState) -> TuiState {
 }
 
 fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
-    let pending_approval = if let Focus::ToolApproval {
-        tool_id,
-        ref tool_name,
-    } = state.focus
-    {
-        Some((tool_id, tool_name.clone(), serde_json::Value::Null))
-    } else {
-        None
-    };
+    // The modal agents popup only overlays an outstanding approval (like it
+    // does a clarify banner); the prompt stays drawn beneath it.
+    let pending_approval = match &state.focus {
+        Focus::ToolApproval { tool_id, tool_name } => Some((*tool_id, tool_name.clone())),
+        Focus::AgentsPopup
+            if !matches!(
+                state.mode,
+                crate::tui_reducer_state::TuiMode::ClarifyPending { .. }
+            ) =>
+        {
+            state.pending_tool_approval()
+        }
+        _ => None,
+    }
+    .map(|(tool_id, tool_name)| (tool_id, tool_name, serde_json::Value::Null));
     // A pending approval belongs to a subagent, not the root agent, when
     // its `tool_id` lives in any tracked subagent's own transcript rather than
     // `chat_entries` — this can be true even while `active_view == Root`
@@ -204,10 +231,14 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
     // approval), in which case the approval footer needs to say so
     // explicitly (see `tui_widgets::draw_approval_prompt`), since the
     // pending tool call is otherwise invisible from the root transcript.
-    let pending_approval_is_subagent = matches!(state.focus, Focus::ToolApproval { tool_id, .. }
-    if state.subagent_conversations.values().any(|conversation| conversation.messages.iter().any(
-        |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id)
-    )));
+    let pending_approval_is_subagent = pending_approval.as_ref().is_some_and(|(tool_id, _, _)| {
+        state.subagent_conversations.values().any(|conversation| {
+            conversation
+                .messages
+                .iter()
+                .any(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if id == tool_id))
+        })
+    });
     // Drill-in conversation model (Phase 6.10): while viewing a subagent, the
     // main chat area and in-flight stream text project from that subagent's own
     // transcript/accumulator instead of the root's — the root's own
@@ -352,6 +383,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
             .compaction_requests
             .contains_key(&showing_subagent_run_id),
         active_subagent_counts,
+        has_subagents: !state.subagent_conversations.is_empty(),
         engine_display,
         chat_entries,
         subagent_started_at: state.subagent_started_at(),
@@ -367,6 +399,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         steer_indicator: state.steer_indicator && showing_subagent_run_id.is_none(),
         pending_approval,
         pending_approval_is_subagent,
+        prompt_offers_go_to_agent: state.prompt_owner_elsewhere().is_some(),
         prompt_button_focus: state.focused_prompt_button(),
         deferred_prompt_count: state.deferred_prompt_count(),
         input_history: if include_content {
@@ -397,6 +430,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
             help_selection: state.help_popup.help_selection,
             help_drag_active: state.help_popup.help_drag_active,
         },
+        agents_popup: agents_popup_render_state(state),
         clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
             pending_clarify: if let crate::tui_reducer_state::TuiMode::ClarifyPending {
                 question,
@@ -432,6 +466,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
             clarify_banner: ratatui::layout::Rect::default(),
             ok_button: ratatui::layout::Rect::default(),
             cancel_button: ratatui::layout::Rect::default(),
+            go_to_agent_button: ratatui::layout::Rect::default(),
         },
         subagent_view: crate::tui_render_state::SubagentViewState {
             subagent_view_bubble,
@@ -493,15 +528,22 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
         rendered.subagent_view.header_rendered_line_prefix_widths;
     state.subagent_view.header_selection = rendered.subagent_view.header_selection;
     state.subagent_view.header_drag_active = rendered.subagent_view.header_drag_active;
+    state.layout.agents_popup.rect = rendered.agents_popup.popup_rect;
+    state.layout.agents_popup.row_hitboxes = rendered.agents_popup.row_hitboxes;
+    state.layout.agents_popup.visible_rows = rendered.agents_popup.visible_rows;
+    state.agents_popup.scroll_offset = rendered.agents_popup.scroll_offset;
+    state.agents_popup.reveal_selection = rendered.agents_popup.reveal_selection;
     state.layout.help_popup.rect = rendered.help_popup.help_popup_rect;
     state.layout.help_popup.content_area = rendered.help_popup.help_content_area;
     state.layout.slash_overlay = rendered.slash_overlay_layout;
     if let Some(buttons) = button_areas {
         state.layout.approve_button = buttons.approve;
         state.layout.deny_button = buttons.deny;
+        state.layout.go_to_agent_button = buttons.go_to_agent;
     } else {
         state.layout.approve_button = ratatui::layout::Rect::default();
         state.layout.deny_button = ratatui::layout::Rect::default();
+        state.layout.go_to_agent_button = rendered.clarify_banner_state.go_to_agent_button;
     }
     state.layout.clarify_ok_button = rendered.clarify_banner_state.ok_button;
     state.layout.clarify_cancel_button = rendered.clarify_banner_state.cancel_button;
@@ -1350,6 +1392,34 @@ mod tests {
         let projected = project_for_draw(&state);
 
         assert!(projected.pending_approval_is_subagent);
+    }
+
+    #[test]
+    fn project_for_draw_keeps_a_pending_approval_while_the_agents_popup_is_open() {
+        let mut state = AppState::new();
+        let tool_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+        state.pending_approval_order.push(tool_id);
+        state.focus = Focus::AgentsPopup;
+
+        let projected = project_for_draw(&state);
+
+        assert_eq!(
+            projected.pending_approval.map(|(id, name, _)| (id, name)),
+            Some((tool_id, "bash".to_string()))
+        );
+
+        state.pending_approval_order.clear();
+        assert!(project_for_draw(&state).pending_approval.is_none());
     }
 
     #[test]

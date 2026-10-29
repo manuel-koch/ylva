@@ -19,9 +19,10 @@ use super::tool_bubbles::{
     update_tool_bubble_to_denied, update_tool_bubble_to_done, update_tool_bubble_to_killed,
     update_tool_bubble_to_running, ToolDonePayload,
 };
+use crate::agent::subagent_manager::STATUS_CANCELLED;
 use crate::tui_reducer_state::{
     AppState, ChatEntry, ConfirmKey, ContextUsage, ConversationView, DomainEvent, Effect, Focus,
-    SubagentRunInfo, TuiMode, UserMessageState,
+    SubagentOutcome, SubagentRunInfo, TuiMode, UserMessageState,
 };
 use std::time::Instant;
 
@@ -146,7 +147,11 @@ fn domain_subagent_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Ef
         DomainEvent::SubagentDone { run_id, status, .. } => {
             state.compaction_requests.remove(&Some(run_id));
             state.flush_subagent_partial_text(run_id);
-            if status == "cancelled" {
+            if let Some(conversation) = state.subagent_conversations.get_mut(&run_id) {
+                conversation.finished_at = Some(Instant::now());
+                conversation.outcome = Some(SubagentOutcome::from_status(&status));
+            }
+            if status == STATUS_CANCELLED {
                 for tool_id in state.kill_unfinished_subagent_tools(run_id) {
                     if matches!(state.focus, Focus::ToolApproval { tool_id: focused_id, .. } if focused_id == tool_id)
                     {

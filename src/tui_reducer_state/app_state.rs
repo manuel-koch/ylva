@@ -60,6 +60,9 @@ pub struct AppState {
     /// this from the live root engine before each frame so Engine runtime model
     /// switches are reflected immediately.
     pub engine_display: EngineDisplayInfo,
+    /// Generated title of the active session; empty or `None` until generated.
+    /// The Driver refreshes it on activation and title updates.
+    pub session_title: Option<String>,
 
     // ── chat view-model ─────────────────────────────────────────────────────
     pub chat_entries: Vec<ChatEntry>,
@@ -126,6 +129,9 @@ pub struct AppState {
 
     // ── help popup ──────────────────────────────────────────────────────────
     pub help_popup: HelpPopupState,
+
+    // ── agents popup ────────────────────────────────────────────────────────
+    pub agents_popup: AgentsPopupState,
 
     // ── clarify banner ───────────────────────────────────────────────────────
     pub clarify_banner_state: ClarifyBannerState,
@@ -244,6 +250,8 @@ pub struct AppState {
     pub slash_overlay: SlashOverlay,
     /// Screen position where a slash-overlay text drag started.
     pub slash_overlay_drag_start: Option<(u16, u16)>,
+    /// Detects double-clicks on rows of the suggestion, model and session lists.
+    pub slash_overlay_click: super::DoubleClickTracker<usize>,
     /// Current screen position of a slash-overlay text drag.
     pub slash_overlay_drag_end: Option<(u16, u16)>,
 }
@@ -302,6 +310,7 @@ impl AppState {
             focus: Focus::MainInput,
             layout: AppLayout::default(),
             display_metadata: TuiDisplayMetadata::default(),
+            session_title: None,
             tui_config: crate::config::TuiConfig::default(),
             approval_auto_expanded: std::collections::HashSet::new(),
             engine_display: EngineDisplayInfo::default(),
@@ -333,6 +342,8 @@ impl AppState {
 
             help_popup: HelpPopupState::default(),
 
+            agents_popup: AgentsPopupState::default(),
+
             clarify_banner_state: ClarifyBannerState::default(),
 
             subagent_view: SubagentViewState::default(),
@@ -343,6 +354,7 @@ impl AppState {
 
             slash_overlay: SlashOverlay::default(),
             slash_overlay_drag_start: None,
+            slash_overlay_click: super::DoubleClickTracker::default(),
             slash_overlay_drag_end: None,
 
             aborting_exit: false,

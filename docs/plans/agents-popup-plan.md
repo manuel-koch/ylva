@@ -82,28 +82,28 @@ message and while an approval/clarify is shown (where `esc` would abort it).
 Implementing agent: flip `[ ]` to `[x]` immediately after completing each step
 and rewrite this file in place so progress is resumable across sessions.
 
-1. [ ] Read `CONTEXT.md`, `docs/development-workflow.md`,
+1. [x] Read `CONTEXT.md`, `docs/development-workflow.md`,
    `docs/known-test-issues.md`, and the help-popup implementation as the pattern
    to mirror (`Focus::HelpPopup` in `src/tui_reducer_state/events.rs`,
    `keyboard_help` in `src/presenter/keyboard.rs`, help branches in
    `src/presenter/mouse.rs`, `HelpPopupLayout` in
    `src/tui_reducer_state/layout.rs`, `draw_help_popup` in
    `src/tui_widgets/`).
-2. [ ] Store run outcome data. Extend `SubagentConversation`
+2. [x] Store run outcome data. Extend `SubagentConversation`
    (`src/tui_reducer_state/conversation.rs`) with a frozen elapsed duration (or
    `finished_at: Option<Instant>`) and `outcome: Option<SubagentOutcome>`
    (success / error / cancelled, derived from `DomainEvent::SubagentDone
    { status, .. }`). Set them in the `SubagentDone` arm of
    `src/presenter/domain.rs`. Write the failing tests first
    (`src/presenter/tests/domain.rs`).
-3. [ ] Add the row model: `AgentRow`/`AgentRowStatus` and a builder on `AppState`
+3. [x] Add the row model: `AgentRow`/`AgentRowStatus` and a builder on `AppState`
    producing the ordered list (root; running; queued; finished) with
    current-marker, elapsed duration source, and awaiting-input flag (from
    `pending_approval_order` / `queued_clarifies`, mapped to the owning run).
    Queued rows come from root `spawn_subagent` bubbles whose
    `progress_arguments` has `status=queued`. Unit-test ordering, grouping,
    current-marker and badge.
-4. [ ] Add `Focus::AgentsPopup` (`src/tui_reducer_state/events.rs`; include in
+4. [x] Add `Focus::AgentsPopup` (`src/tui_reducer_state/events.rs`; include in
    `Focus::is_modal`) and an `AgentsPopupState` (selection tracked by run id so
    reordering never moves the highlight; scroll offset) plus
    `AgentsPopupLayout` (rect, row hit-boxes) in the reducer/layout modules,
@@ -111,29 +111,29 @@ and rewrite this file in place so progress is resumable across sessions.
    `Focus::HelpPopup` use (see hints) and decide per site whether
    `AgentsPopup` needs the same handling (e.g. `agent_mode`, slash-overlay
    hiding, `is_typing`, input routing).
-5. [ ] Add `SlashCommand::Agents`, `AGENTS_COMMAND_NAME = "/agents"` and an
+5. [x] Add `SlashCommand::Agents`, `AGENTS_COMMAND_NAME = "/agents"` and an
    allowlist entry in `src/slash_command.rs` (description e.g. "List subagents
    and switch to one", `accepts_argument: false`); update the tests there that
    enumerate commands/suggestions. Handle submit where `/session` is handled
    (`src/tui_driver/input.rs`, presenter): clear the draft, set
    `Focus::AgentsPopup`.
-6. [ ] Add the `ctrl-a` mapping in `src/events.rs` (`map_event`, near
+6. [x] Add the `ctrl-a` mapping in `src/events.rs` (`map_event`, near
    `KeyCode::F(1)`) to a new `AppAction::ShowAgents` → `InputEvent::ShowAgents`;
    route it from every focus handled in `src/presenter/keyboard.rs` (main,
    approval, clarify, session picker, help) so it works everywhere `F1` does,
    with the toggle/switch semantics above. Ensure it is not forwarded to the
    textarea.
-7. [ ] Add `keyboard_agents_popup` in `src/presenter/keyboard.rs`:
+7. [x] Add `keyboard_agents_popup` in `src/presenter/keyboard.rs`:
    `↑`/`↓` (skipping queued rows), page keys, `enter` → activate, `esc` and
    `ctrl-a` → close, `F1` → switch to help, `ctrl-c` as in the help popup. Add
    mouse handling in `src/presenter/mouse.rs`: wheel scrolls, click highlights,
    double-click activates, click outside closes (as help).
-8. [ ] Implement activation: close the popup, then reuse
+8. [x] Implement activation: close the popup, then reuse
    `switch_to_subagent_view(run_id)` / `switch_to_root_view()`
    (`src/tui_reducer_state/conversation.rs`), triggering the lazy transcript
    load for replayed runs (`needs_lazy_load`) and keeping the chat pinned to the
    last item. Switching to the already-current agent just closes the popup.
-9. [ ] Render the popup in `src/tui_widgets/` (new `agents_popup.rs` or alongside
+9. [x] Render the popup in `src/tui_widgets/` (new `agents_popup.rs` or alongside
    the help popup): centered modal; columns `[marker] label … result duration
    [badge]`; label elided so marker, result, duration and badge always fit;
    group headers or separators per priority; `–` instead of a duration for
@@ -141,15 +141,15 @@ and rewrite this file in place so progress is resumable across sessions.
    dimmed queued / error); write layout (rect, row hit-boxes) back each frame
    like `draw_help_popup` (`render.rs`, `tui_render_state.rs`,
    `tui_driver/updates.rs` bridge).
-10. [ ] Live elapsed time: confirm the redraw tick already runs while subagents
+10. [x] Live elapsed time: confirm the redraw tick already runs while subagents
     run (bubble durations use `subagent_started_at`); if the tick is gated on
     mode/focus, extend it so an open agents popup with a running row keeps
     redrawing. Test with the existing time-injection patterns.
-11. [ ] Footer: when the popup is open the footer shows popup controls (as for
+11. [x] Footer: when the popup is open the footer shows popup controls (as for
     help; `src/tui_widgets/footer.rs`). Add `ctrl-a` to the footer idle hints
     only if space allows per the existing dynamic layout rules, and to the
     help-popup keybinding table source.
-12. [ ] Update docs in the same commit: `docs/features.md` (Slash commands table
+12. [x] Update docs in the same commit: `docs/features.md` (Slash commands table
     row for `/agents`; an *Agents popup* subsection near the drill-in section
     and a mention in the Help popup bullet), `docs/keybindings.md` (`ctrl-a`
     rows for all contexts, popup keys, note that `home` replaces the emacs
@@ -159,7 +159,7 @@ and rewrite this file in place so progress is resumable across sessions.
     added. Remove the `/agent` section from `docs/ideas/slash-commands.md`
     (including the intro sentence that refers to it). Run `rumdl check` /
     `rumdl fmt` on touched markdown.
-13. [ ] Verify: `make format lint` and `make test-coverage`; manually run
+13. [x] Verify: `make format lint` and `make test-coverage`; manually run
     `make build-debug-and-run` with several subagents (ordering, live
     durations, badge during an approval, drill-in scroll position, `esc`,
     `F1` ↔ `ctrl-a` switching, draft preserved).

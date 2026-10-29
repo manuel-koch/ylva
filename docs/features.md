@@ -1079,7 +1079,9 @@ for the full mechanics.
   it. It appears after 1.5 s without keystrokes, or at the latest 10 s after
   the typing burst began. The footer shows `⏳ N prompt(s) waiting (finish
   typing)` meanwhile. Clarify prompts use `[ ✓ OK ]  [ ✗ Cancel ]` buttons with
-  the same focus rules.
+  the same focus rules. When you view another conversation than the prompt's
+  owner, a `[ ⇢ Go to agent ]` button (click, or `tab` then `enter`) switches
+  to it; the prompt stays pending.
 - **Double-press `ctrl-c`/`esc` to quit/cancel:** while pending or streaming,
   with normal root input focused and empty, the first press shows a per-key
   hint (`esc`: cancel only; `ctrl-c`: cancel & quit) and a second press within
@@ -1091,6 +1093,25 @@ for the full mechanics.
   behavior. An external
   SIGINT or SIGTERM skips the double-press: an idle TUI quits at once, and a
   running turn is stopped before the TUI quits with exit code `130`.
+- **Agents popup (`ctrl-a` or `/agents`):** a modal tree of the root
+  conversation and the session's subagent runs, one level deep (`├─`/`└─`).
+  Order: root, running (oldest first), queued, finished (newest first;
+  replayed runs last). Each agent is one line: a marker for the viewed
+  conversation, the elided label, then the status and the elapsed time flush
+  right, three spaces apart.
+  - **Label:** the root row shows the session title once generated, else
+    `Root (main conversation)`.
+  - **Status:** `running`, `queued`, `success`, `error`, `cancelled`, or
+    `waiting for user input` (highlighted, replaces `running` while a tool
+    approval or clarify answer is pending). Replayed runs show their stored
+    status.
+  - **Elapsed time:** live while running, frozen when finished, recovered from
+    the stored run on replay, `–` when unknown.
+  - **Actions:** `enter` or a double-click switches to the row's conversation
+    (replayed transcripts load on demand); queued rows are not selectable.
+  - **Side effects:** none on the draft or a pending approval/clarify, whose
+    prompt stays drawn beneath the popup. The footer shows `ctrl-a agents`
+    (before `F1`) once the session has a subagent run.
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
   table, the selected profile and its config path, the resolved Ylva
   home, the discovered workspace root, and build-info values. An unavailable
@@ -1211,9 +1232,11 @@ for the full mechanics.
   actually begins execution (not while queued). Running `bash` bubbles show
   the same live timer, starting when the call begins running. Running timers
   display whole seconds, truncated rather than rounded, so subsecond redraws
-  do not change the readout. Spinner and streamed-output updates keep their
+  do not change the readout. Durations from one minute on read `1m30s`
+  (`1h02m` from one hour), as in the Agents popup. Spinner and streamed-output updates keep their
   existing cadence. The timer continues while the subagent waits for approval
-  and is replaced by the final duration with millisecond precision on completion.
+  and is replaced by the final duration with millisecond precision on completion
+  (`1m30s` from one minute on).
 - **Toast notifications:** transient messages appear in the bottom-right
   corner (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
@@ -1391,9 +1414,10 @@ and discards the parameter edits. `esc` in the list cancels and clears the input
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |
-| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights); page keys move by a page; `enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
+| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights; a double-click acts like `enter`); page keys move by a page; `enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |
 | `/session` | Opens the recent-session picker in either conversation view. Select Resume or Clone, then confirm a root session. | Transient; activation and subsequent work use the selected persisted identity |
+| `/agents` | Opens the Agents popup (same as `ctrl-a`); available while busy and in either conversation view. | Transient |
 | `/compact` | Requests a useful completed-prefix summary in the root conversation, regardless of automatic thresholds. | Transient outcomes; an applied summary is persisted |
 
 `/session` and `/compact` are TUI-only; they do not change headless CLI parsing
@@ -1414,7 +1438,7 @@ action. Keybinding hints appear only in the TUI footer. The popup shows status
 or errors only when relevant, without repeating footer controls.
 Each open starts in **Resume**. `Left`/`Right` or clicking the action selects
 Resume/Clone; arrows, page keys, and wheel navigate; clicking a row only
-highlights it. `enter` confirms. Loading and `Resuming`/`Cloning` remain
+highlights it. `enter` or a double-click on a row confirms. Loading and `Resuming`/`Cloning` remain
 responsive to cancellation and quit; other mutations are blocked during
 preparation. `esc` dismisses and clears the draft without changing the
 conversation. Selection errors keep the picker, chosen action, and old view.

@@ -15,9 +15,10 @@
 //! Conversation state and operations.
 
 use super::{AppState, ChatSelection, ContextUsage, Focus, TuiMode};
+use crate::agent::subagent_manager::{STATUS_CANCELLED, STATUS_FAILURE, STATUS_QUEUED};
 use crate::agent::AgentMode;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 mod navigation;
@@ -169,7 +170,7 @@ impl ActiveSubagentCounts {
                 .iter()
                 .find_map(|(key, value)| (key == "status").then(|| value.as_str()))
                 .flatten();
-            if status == Some("queued") {
+            if status == Some(STATUS_QUEUED) {
                 counts.queued += 1;
             } else {
                 counts.running += 1;
@@ -377,8 +378,17 @@ pub struct SubagentRunInfo {
 #[derive(Debug, Clone)]
 pub struct SubagentConversation {
     pub info: SubagentRunInfo,
-    /// Monotonic start of live execution; replayed runs have no live timer.
+    /// Monotonic start of live execution; replayed runs use `recorded_duration`.
     pub started_at: Option<Instant>,
+    /// Monotonic finish of live execution, set on `SubagentDone`; freezes the
+    /// elapsed duration. `None` while running and for replayed runs.
+    pub finished_at: Option<Instant>,
+    /// Persisted run duration for replayed runs; `None` for live runs.
+    pub recorded_duration: Option<Duration>,
+    /// Terminal outcome reported by `SubagentDone` (or the persisted run
+    /// status for replayed runs); `None` while running and for replayed runs
+    /// that never recorded a status.
+    pub outcome: Option<SubagentOutcome>,
     pub messages: Vec<ChatEntry>,
     pub turn_buffer: TurnBuffer,
     /// Latest context estimate reported by this subagent run. Kept with the
@@ -388,11 +398,43 @@ pub struct SubagentConversation {
     pub needs_lazy_load: bool,
 }
 
+/// Terminal result of a subagent run, derived from the `status` of
+/// `DomainEvent::SubagentDone`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentOutcome {
+    Success,
+    Error,
+    Cancelled,
+}
+
+impl SubagentOutcome {
+    /// Maps a `SubagentDone` status string; `"unstructured"` (the subagent
+    /// finished without `agent_finish`) counts as success.
+    pub fn from_status(status: &str) -> Self {
+        match status {
+            STATUS_CANCELLED => SubagentOutcome::Cancelled,
+            STATUS_FAILURE => SubagentOutcome::Error,
+            _ => SubagentOutcome::Success,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SubagentOutcome::Success => "success",
+            SubagentOutcome::Error => "error",
+            SubagentOutcome::Cancelled => "cancelled",
+        }
+    }
+}
+
 impl SubagentConversation {
     pub(crate) fn new(info: SubagentRunInfo) -> Self {
         SubagentConversation {
             info,
             started_at: Some(Instant::now()),
+            finished_at: None,
+            recorded_duration: None,
+            outcome: None,
             messages: Vec::new(),
             turn_buffer: TurnBuffer::default(),
             context_usage: None,
@@ -404,6 +446,9 @@ impl SubagentConversation {
         SubagentConversation {
             info,
             started_at: None,
+            finished_at: None,
+            recorded_duration: None,
+            outcome: None,
             messages: Vec::new(),
             turn_buffer: TurnBuffer::default(),
             context_usage: None,

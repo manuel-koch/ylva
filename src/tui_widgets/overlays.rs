@@ -37,7 +37,10 @@ use crate::tui_reducer_state::{
 };
 
 use super::chat::{apply_selection_highlight_to_line, render_chat_scrollbar};
-use super::footer::{button_style, elide_balanced_tokens};
+use super::footer::{
+    button_style, draw_go_to_agent_button, elide_balanced_tokens, GO_TO_AGENT_LABEL,
+};
+use super::ButtonAreas;
 
 const SESSION_RESUME_BUTTON_LABEL: &str = " Resume ";
 const SESSION_CLONE_BUTTON_LABEL: &str = " Clone ";
@@ -573,17 +576,25 @@ pub(super) fn draw_clarify_buttons(
     frame: &mut Frame,
     button_row: Rect,
     focus: Option<PromptButton>,
+    offers_go_to_agent: bool,
     mouse_pos: Option<(u16, u16)>,
-) -> (Rect, Rect) {
+) -> ButtonAreas {
     let ok_label = " [ ✓ OK ] ";
     let cancel_label = " [ ✗ Cancel ] ";
     let ok_width = saturating_u16(ok_label.chars().count());
     let cancel_width = saturating_u16(cancel_label.chars().count());
-    let [_, ok_area, _, cancel_area, _] = Layout::horizontal([
+    let go_to_width = if offers_go_to_agent {
+        saturating_u16(GO_TO_AGENT_LABEL.chars().count())
+    } else {
+        0
+    };
+    let [_, ok_area, _, cancel_area, _, go_to_area, _] = Layout::horizontal([
         Constraint::Length(1),
         Constraint::Length(ok_width),
         Constraint::Length(2),
         Constraint::Length(cancel_width),
+        Constraint::Length(if offers_go_to_agent { 2 } else { 0 }),
+        Constraint::Length(go_to_width),
         Constraint::Fill(1),
     ])
     .areas(button_row);
@@ -615,7 +626,23 @@ pub(super) fn draw_clarify_buttons(
         )),
         cancel_area,
     );
-    (ok_area, cancel_area)
+    if offers_go_to_agent {
+        draw_go_to_agent_button(
+            frame,
+            go_to_area,
+            focus == Some(PromptButton::GoToAgent),
+            hovered(go_to_area),
+        );
+    }
+    ButtonAreas {
+        approve: ok_area,
+        deny: cancel_area,
+        go_to_agent: if offers_go_to_agent {
+            go_to_area
+        } else {
+            Rect::default()
+        },
+    }
 }
 
 #[expect(clippy::too_many_arguments)]

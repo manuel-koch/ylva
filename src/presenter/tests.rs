@@ -22,7 +22,8 @@ use uuid::Uuid;
 
 use super::*;
 use crate::tui_reducer_state::{
-    ConfirmKey, ContextUsage, DomainEvent, Effect, SubagentRunInfo, UserMessageState,
+    ConfirmKey, ContextUsage, DomainEvent, Effect, SubagentOutcome, SubagentRunInfo,
+    UserMessageState,
 };
 
 mod domain;

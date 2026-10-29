@@ -17,8 +17,10 @@
 //! Test-backend fixtures verify buffers and rendering geometry. This facade and
 //! all widget subagents participate in the aggregate coverage gate.
 
+mod agents_popup;
 mod bubbles;
 mod chat;
+mod elapsed;
 mod footer;
 mod help;
 mod overlays;
@@ -43,13 +45,14 @@ use crate::tui_reducer_state::BubbleExpansionTarget;
 use crate::tui_reducer_state::ChatEntry;
 use crate::tui_render_state::TuiState;
 
+use agents_popup::draw_agents_popup;
 use chat::{
     apply_selection_highlight_to_line, draw_cached_chat, draw_chat, line_alignment_offset,
     prepare_cached_header, render_chat_scrollbar, rendered_line_selection_data,
 };
 use footer::{
-    draw_approval_prompt, draw_normal_footer, footer_keybinding_hints, help_popup_footer_hints,
-    APPROVAL_PROMPT_HEIGHT,
+    agents_popup_footer_hints, draw_approval_prompt, draw_normal_footer, footer_keybinding_hints,
+    help_popup_footer_hints, APPROVAL_PROMPT_HEIGHT,
 };
 use help::draw_help_popup;
 use overlays::{draw_clarify_banner, draw_clarify_buttons, draw_slash_overlay, draw_toast};
@@ -111,6 +114,8 @@ const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦
 pub struct ButtonAreas {
     pub approve: Rect,
     pub deny: Rect,
+    /// Zero-sized unless the prompt belongs to another conversation.
+    pub go_to_agent: Rect,
 }
 
 /// Draw the full TUI frame. Returns `Some(ButtonAreas)` when in tool approval
@@ -649,11 +654,18 @@ fn draw_internal(
     state.clarify_banner_state.clarify_banner = clarify_area.unwrap_or_default();
     state.clarify_banner_state.ok_button = Rect::default();
     state.clarify_banner_state.cancel_button = Rect::default();
+    state.clarify_banner_state.go_to_agent_button = Rect::default();
     if let Some(button_row) = clarify_button_row {
-        let (ok_area, cancel_area) =
-            draw_clarify_buttons(frame, button_row, state.prompt_button_focus, mouse_pos);
-        state.clarify_banner_state.ok_button = ok_area;
-        state.clarify_banner_state.cancel_button = cancel_area;
+        let areas = draw_clarify_buttons(
+            frame,
+            button_row,
+            state.prompt_button_focus,
+            state.prompt_offers_go_to_agent,
+            mouse_pos,
+        );
+        state.clarify_banner_state.ok_button = areas.approve;
+        state.clarify_banner_state.cancel_button = areas.deny;
+        state.clarify_banner_state.go_to_agent_button = areas.go_to_agent;
     }
 
     if let (Some(clarify_area), Some((question, choices, context))) = (
@@ -675,12 +687,21 @@ fn draw_internal(
     let footer_source = conversation
         .as_ref()
         .map(|conversation| conversation.source);
-    let footer_hints = if state.help_popup.show_help {
-        help_popup_footer_hints(state)
+    let footer_hints = if state.agents_popup.show {
+        std::borrow::Cow::Borrowed(agents_popup_footer_hints())
+    } else if state.help_popup.show_help {
+        std::borrow::Cow::Borrowed(help_popup_footer_hints(state))
     } else {
         footer_keybinding_hints(state, input_is_empty)
     };
-    draw_normal_footer(frame, footer_area, state, footer_hints, hint, footer_source);
+    draw_normal_footer(
+        frame,
+        footer_area,
+        state,
+        &footer_hints,
+        hint,
+        footer_source,
+    );
     // The help popup covers the prompt, so its buttons are not clickable then.
     let button_areas = match (approval_area, state.pending_approval.clone()) {
         (Some(approval_area), Some((_, name, _))) => {
@@ -699,6 +720,9 @@ fn draw_internal(
 
     if state.help_popup.show_help {
         draw_help_popup(frame, state);
+    }
+    if state.agents_popup.show {
+        draw_agents_popup(frame, state);
     }
 
     // Dismiss any toast whose display window has elapsed, then render it.

@@ -26,6 +26,7 @@ pub const RESET_COMMAND_NAME: &str = "/reset";
 pub const MODELS_COMMAND_NAME: &str = "/models";
 pub const COMPACT_COMMAND_NAME: &str = "/compact";
 pub const SESSION_COMMAND_NAME: &str = "/session";
+pub const AGENTS_COMMAND_NAME: &str = "/agents";
 
 /// A recognized slash command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +39,8 @@ pub enum SlashCommand {
     Session,
     /// Summarize a completed prefix of the root model view.
     Compact,
+    /// Open the agents popup listing the root and all subagent runs.
+    Agents,
 }
 
 /// Static description of one entry in the slash-command allowlist.
@@ -95,6 +98,13 @@ pub const SLASH_COMMANDS: &[SlashCommandInfo] = &[
         aliases: &[],
         description: "Resume or clone a recent session",
         command: SlashCommand::Session,
+        accepts_argument: false,
+    },
+    SlashCommandInfo {
+        name: AGENTS_COMMAND_NAME,
+        aliases: &[],
+        description: "List subagents and switch to one",
+        command: SlashCommand::Agents,
         accepts_argument: false,
     },
 ];
@@ -182,6 +192,7 @@ mod tests {
         for (name, command) in [
             ("/session", SlashCommand::Session),
             ("/compact", SlashCommand::Compact),
+            ("/agents", SlashCommand::Agents),
         ] {
             assert_eq!(parse_slash_command(name), Some(command));
             assert_eq!(parse_slash_command(&format!("{name} \n")), Some(command));
@@ -247,7 +258,7 @@ mod tests {
         let suggestions = slash_command_suggestions("/");
         assert_eq!(
             suggestions.iter().map(|info| info.name).collect::<Vec<_>>(),
-            ["/clear", "/models", "/compact", "/session", "/reset"]
+            ["/clear", "/models", "/compact", "/session", "/agents", "/reset"]
         );
         for suggestion in suggestions {
             assert_eq!(

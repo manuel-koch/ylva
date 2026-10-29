@@ -29,9 +29,11 @@ use std::time::Duration;
 
 pub use crate::agent::ContextUsageSource;
 
+mod agents_popup;
 mod app_state;
 mod context_usage;
 mod conversation;
+mod double_click;
 mod events;
 mod favorites;
 mod input_history;
@@ -43,18 +45,22 @@ mod prompt;
 mod selection;
 mod session_picker;
 
+pub use agents_popup::{
+    AgentRow, AgentRowKey, AgentRowStatus, AgentsPopupState, AGENTS_POPUP_ROOT_LABEL,
+};
 pub use app_state::AppState;
 pub use context_usage::{format_context_usage, format_context_usage_readout, ContextUsage};
 pub use conversation::{
     project_messages, result_section_ids, ActiveSubagentCounts, BubbleExpansionTarget, ChatEntry,
-    ConversationListState, ConversationView, ResultSection, SubagentConversation, SubagentRunInfo,
-    SubagentViewState, ToolCallState, TurnBuffer, UserMessageState,
+    ConversationListState, ConversationView, ResultSection, SubagentConversation, SubagentOutcome,
+    SubagentRunInfo, SubagentViewState, ToolCallState, TurnBuffer, UserMessageState,
 };
+pub use double_click::DoubleClickTracker;
 pub use events::{ConfirmKey, DomainEvent, Effect, Focus, InputEvent, TuiMode};
 pub use input_history::HistoryDirection;
 pub use layout::{
-    AppLayout, ChatArea, ChatScrollbarLayout, HelpPopupLayout, InputArea, InputAreaLayout,
-    SlashOverlayLayout,
+    AgentsPopupLayout, AppLayout, ChatArea, ChatScrollbarLayout, HelpPopupLayout, InputArea,
+    InputAreaLayout, SlashOverlayLayout,
 };
 pub(crate) use model_picker::{
     engine_choice_parts, extract_models_filter, matching_model_indices, model_choice_parts,

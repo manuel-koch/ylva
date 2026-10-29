@@ -33,7 +33,7 @@ use super::{
     ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
 use crate::sandbox::ApprovalCheck;
-use crate::subagent_manager::{FinishResult, FinishResultOrigin};
+use crate::subagent_manager::{FinishResult, FinishResultOrigin, STATUS_FAILURE};
 
 /// The status a subagent reports for its own run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Deserialize)]
@@ -47,7 +47,7 @@ impl AgentFinishStatus {
     fn as_str(self) -> &'static str {
         match self {
             AgentFinishStatus::Success => "success",
-            AgentFinishStatus::Failure => "failure",
+            AgentFinishStatus::Failure => STATUS_FAILURE,
         }
     }
 }

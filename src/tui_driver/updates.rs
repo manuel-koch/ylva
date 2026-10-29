@@ -345,12 +345,15 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
     let context_usage_text = app
         .active_context_usage()
         .map(crate::tui_reducer_state::format_context_usage_readout);
+    let has_subagents = !app.subagent_conversations.is_empty();
+    let agents_popup = crate::render::agents_popup_render_state(&app);
     TuiState {
         compacting: false,
         display_metadata: app.display_metadata,
         parent_agent_mode: agent_mode,
         agent_mode,
         active_subagent_counts,
+        has_subagents,
         chat_entries: app.chat_entries,
         subagent_started_at,
         partial_assistant_text: app.turn_buffer.partial_assistant_text,
@@ -364,6 +367,7 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
         cost_total_text: crate::llm::CostLedger::process().totals_text(),
         pending_approval: None,
         pending_approval_is_subagent: false,
+        prompt_offers_go_to_agent: false,
         prompt_button_focus: None,
         deferred_prompt_count: 0,
         input_history: app.input_history,
@@ -386,6 +390,7 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
             help_selection: app.help_popup.help_selection,
             help_drag_active: app.help_popup.help_drag_active,
         },
+        agents_popup,
         clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
             pending_clarify,
             clarify_scroll_offset: app.clarify_banner_state.clarify_scroll_offset,
@@ -393,6 +398,7 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
             clarify_banner: ratatui::layout::Rect::default(),
             ok_button: ratatui::layout::Rect::default(),
             cancel_button: ratatui::layout::Rect::default(),
+            go_to_agent_button: ratatui::layout::Rect::default(),
         },
         subagent_view: crate::tui_render_state::SubagentViewState {
             subagent_view_bubble: None,

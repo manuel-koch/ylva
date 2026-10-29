@@ -106,7 +106,7 @@ impl AppState {
 
     pub(in crate::tui_reducer_state) fn resume_pending_tool_approval(&mut self) {
         self.prune_pending_approval_order();
-        if matches!(self.focus, Focus::HelpPopup)
+        if self.focus.is_modal()
             || matches!(
                 self.mode,
                 TuiMode::ClarifyPending { .. } | TuiMode::Aborting
@@ -211,6 +211,7 @@ impl AppState {
             return;
         };
         self.release_active_render_layout();
+        let was_root_view = matches!(self.active_view, ConversationView::Root);
         self.active_view = ConversationView::Subagent {
             run_id: info.run_id,
             agent_type: info.agent_type,
@@ -222,10 +223,15 @@ impl AppState {
         // overwritten below, so `switch_to_root_view` can restore it as a
         // best-effort fallback (see `saved_root_scroll_bubble` below for the
         // primary, content-shift-proof resolution).
-        self.saved_root_scroll = Some((
-            self.conversation.scroll_offset,
-            self.conversation.scroll_locked,
-        ));
+        // Switching directly between subagents (agents popup) keeps the root
+        // position saved on the way in: the shared scroll fields then hold the
+        // previous subagent's position, not the root's.
+        if was_root_view {
+            self.saved_root_scroll = Some((
+                self.conversation.scroll_offset,
+                self.conversation.scroll_locked,
+            ));
+        }
         // Record the actual `spawn_subagent` bubble being drilled into, so
         // `switch_to_root_view` can scroll back to *its* current row rather
         // than a raw offset that would drift if the root conversation grows

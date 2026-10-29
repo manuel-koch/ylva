@@ -345,6 +345,16 @@ fn replay_subagent_transcripts_load_once_on_drill_in() {
     let mut state = AppState::new();
     state.replay_messages(&root_messages, &subagent_runs, None);
     assert!(state.subagent_needs_lazy_load(run_id));
+    assert_eq!(
+        state.subagent_conversations[&run_id].outcome,
+        Some(SubagentOutcome::Success),
+        "a replayed run shows its persisted status"
+    );
+    assert_eq!(
+        state.subagent_conversations[&run_id].recorded_duration,
+        Some(Duration::from_secs(1)),
+        "a replayed run keeps its persisted duration"
+    );
     assert!(state
         .subagent_conversations
         .get(&run_id)

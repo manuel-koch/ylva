@@ -111,7 +111,7 @@ impl AppState {
             TuiMode::Pending => AgentMode::Pending,
             TuiMode::Streaming => {
                 // Help opened over an approval keeps reporting the approval.
-                let help_over_approval = matches!(self.focus, Focus::HelpPopup)
+                let help_over_approval = self.focus.is_modal()
                     && !self.is_typing()
                     && self.pending_tool_approval().is_some();
                 if matches!(self.focus, Focus::ToolApproval { .. }) || help_over_approval {
@@ -149,6 +149,11 @@ impl AppState {
     /// Returns `true` when the help popup is currently displayed.
     pub fn show_help(&self) -> bool {
         matches!(self.focus, Focus::HelpPopup)
+    }
+
+    /// Returns `true` when the agents popup is currently displayed.
+    pub fn show_agents_popup(&self) -> bool {
+        matches!(self.focus, Focus::AgentsPopup)
     }
 
     /// Returns `true` when a tool is awaiting user approval.

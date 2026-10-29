@@ -161,6 +161,8 @@ fn assert_tool_bubble_roundtrip_with_subagent_runs(
     // tool-bubble rendering rather than unrelated live/resumed mode chrome.
     live_state.mode = TuiMode::Idle;
     replayed_state.mode = TuiMode::Idle;
+    // Replayed runs add the footer's agents hint, which is not bubble rendering.
+    replayed_state.subagent_conversations.clear();
     let live_buffer = render_app_state_buffer(&mut live_state);
     let replayed_buffer = render_app_state_buffer(&mut replayed_state);
 

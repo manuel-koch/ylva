@@ -24,7 +24,7 @@ use crate::agent::AgentMode;
 use crate::theme::{
     approval_title_color, approve_background_color, approve_hover_background_color,
     button_text_color, deny_background_color, deny_hover_background_color, footer_status_color,
-    muted_text_color,
+    muted_text_color, overlay_selection_color,
 };
 use crate::tui_reducer_state::{
     ActiveSubagentCounts, ChatEntry, PromptButton, SlashOverlay, ToolCallState,
@@ -51,6 +51,7 @@ const SESSION_PICKER_PENDING_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("F1", "help"),
 ];
 
+#[derive(Clone, Copy)]
 pub(super) struct FooterHint {
     key: Option<&'static str>,
     description: &'static str,
@@ -109,6 +110,11 @@ const HELP_POPUP_BUSY_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("ctrl-c", "cancel & quit"),
     FooterHint::key("F1", "close"),
 ];
+const AGENTS_POPUP_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("↑/↓", "select"),
+    FooterHint::key("enter", "switch"),
+    FooterHint::key("esc", "close"),
+];
 const CLARIFY_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("tab", "focus OK/Cancel"),
     FooterHint::key("enter", "activate"),
@@ -159,10 +165,25 @@ const IDLE_EMPTY_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("F1", "help"),
 ];
 
+/// Footer hints for normal views; once a subagent exists the agents popup
+/// hint is inserted before the trailing `F1` hint.
 pub(super) fn footer_keybinding_hints(
     state: &TuiState,
     input_is_empty: bool,
-) -> &'static [FooterHint] {
+) -> std::borrow::Cow<'static, [FooterHint]> {
+    let hints = base_footer_keybinding_hints(state, input_is_empty);
+    let shows_agents_hint = state.has_subagents
+        && matches!(state.slash_overlay, SlashOverlay::Hidden)
+        && hints.last().is_some_and(|hint| hint.key == Some("F1"));
+    if !shows_agents_hint {
+        return std::borrow::Cow::Borrowed(hints);
+    }
+    let mut with_agents = hints.to_vec();
+    with_agents.insert(hints.len() - 1, FooterHint::key("ctrl-a", "agents"));
+    std::borrow::Cow::Owned(with_agents)
+}
+
+fn base_footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'static [FooterHint] {
     match &state.slash_overlay {
         SlashOverlay::Suggestions { .. } => SUGGESTION_FOOTER_HINTS,
         SlashOverlay::LoadingModels => LOADING_MODELS_FOOTER_HINTS,
@@ -212,6 +233,10 @@ pub(super) fn footer_keybinding_hints(
             }
         }
     }
+}
+
+pub(super) fn agents_popup_footer_hints() -> &'static [FooterHint] {
+    AGENTS_POPUP_FOOTER_HINTS
 }
 
 pub(super) fn help_popup_footer_hints(state: &TuiState) -> &'static [FooterHint] {
@@ -786,6 +811,24 @@ pub(super) fn button_style(
     }
 }
 
+pub(super) const GO_TO_AGENT_LABEL: &str = " [ ⇢ Go to agent ] ";
+
+/// Draw the go-to-agent button of a prompt that belongs to another conversation.
+pub(super) fn draw_go_to_agent_button(
+    frame: &mut Frame,
+    area: Rect,
+    is_focused: bool,
+    is_hovered: bool,
+) {
+    let style = button_style(
+        approval_title_color(),
+        overlay_selection_color(),
+        is_hovered,
+        is_focused,
+    );
+    frame.render_widget(Paragraph::new(Line::styled(GO_TO_AGENT_LABEL, style)), area);
+}
+
 /// Rows the approval prompt occupies: title and buttons.
 pub(super) const APPROVAL_PROMPT_HEIGHT: u16 = 2;
 
@@ -827,12 +870,19 @@ pub(super) fn draw_approval_prompt(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(1), Constraint::Fill(1)])
         .areas(controls_area);
-    let [approve_area, _, deny_area] = Layout::default()
+    let go_to_width = if state.prompt_offers_go_to_agent {
+        GO_TO_AGENT_LABEL.chars().count() as u16
+    } else {
+        0
+    };
+    let [approve_area, _, deny_area, _, go_to_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(approve_width),
             Constraint::Length(2),
             Constraint::Length(deny_width),
+            Constraint::Length(if go_to_width > 0 { 2 } else { 0 }),
+            Constraint::Length(go_to_width),
         ])
         .areas(buttons_area);
 
@@ -862,9 +912,23 @@ pub(super) fn draw_approval_prompt(
         deny_area,
     );
 
+    if state.prompt_offers_go_to_agent {
+        draw_go_to_agent_button(
+            frame,
+            go_to_area,
+            state.prompt_button_focus == Some(PromptButton::GoToAgent),
+            pointer.is_some_and(|pos| go_to_area.contains(pos)),
+        );
+    }
+
     ButtonAreas {
         approve: approve_area,
         deny: deny_area,
+        go_to_agent: if state.prompt_offers_go_to_agent {
+            go_to_area
+        } else {
+            Rect::default()
+        },
     }
 }
 
