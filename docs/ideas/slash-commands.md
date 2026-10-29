@@ -26,3 +26,5 @@ where the model's instructions came from:
   - tool calls ( the call and its result )
   - assistent messages
   - user messages
+
+`/status` can be used in root or subagent conversations.
