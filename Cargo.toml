@@ -18,7 +18,7 @@ debug = "line-tables-only"
 debug = false
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 futures = "0.3"
