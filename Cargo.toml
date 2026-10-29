@@ -45,7 +45,7 @@ ratatui-textarea = { version = "0.9", features = ["crossterm"] }
 textwrap = "0.16"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "html", "dump-load", "regex-fancy"] }
 arboard = "3"
-jsonschema = { version = "0.17", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 sha2 = "0.10"
 dirs = "7"
