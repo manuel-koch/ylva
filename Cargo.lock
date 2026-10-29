@@ -4539,7 +4539,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "textwrap",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "tiktoken-rs",
  "time",
  "tokio",
