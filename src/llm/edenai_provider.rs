@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Message, StreamEvent};
-use crate::llm::engine::EngineRuntimeConfigHandle;
+use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle};
 use crate::llm::{ModelInfo, Provider, RequestCost, ToolSchema};
 
 use super::openai_compatible_provider::{model_list_entries, ModelCatalog};
@@ -98,17 +98,37 @@ pub struct EdenAiProvider {
 }
 
 impl EdenAiProvider {
+    /// Eden AI uses a body `session_id` as its first-priority sticky-routing
+    /// key, keeping unprefixed model names on the provider holding the prompt
+    /// cache. It is never forwarded to the provider.
+    fn customize_request_body(
+        request_body: &mut serde_json::Value,
+        _runtime_config: &EngineRuntimeConfig,
+        session_id: Option<uuid::Uuid>,
+    ) {
+        if let Some(session_id) = session_id {
+            request_body["session_id"] = serde_json::json!(session_id.to_string());
+        }
+    }
+
     /// Create an Eden AI provider.
     ///
     /// `base_url` should normally be `https://api.edenai.run`.
     pub fn new(name: String, base_url: String, model: String, api_key: Option<String>) -> Self {
         let openai_base_url = format!("{base_url}/v3");
         Self {
-            inner: OpenAiCompatibleProvider::new(name, openai_base_url, model, api_key)
-                .with_provider_kind("edenai")
-                .with_usage_cost_parser(parse_reported_cost)
-                .with_model_catalog(std::sync::Arc::new(EdenAiModelCatalog))
-                .with_extra_headers(vec![(USAGE_TAGS_HEADER, USAGE_TAGS)]),
+            inner: OpenAiCompatibleProvider::new_with_request_body_customizer(
+                name,
+                openai_base_url,
+                model,
+                api_key,
+                Self::customize_request_body,
+                super::openai_compatible_provider::redact_chat_completion_request_body,
+            )
+            .with_provider_kind("edenai")
+            .with_usage_cost_parser(parse_reported_cost)
+            .with_model_catalog(std::sync::Arc::new(EdenAiModelCatalog))
+            .with_extra_headers(vec![(USAGE_TAGS_HEADER, USAGE_TAGS)]),
         }
     }
 }
@@ -225,6 +245,29 @@ mod tests {
         }
         assert_eq!(USAGE_TAGS_HEADER, USAGE_TAGS_HEADER.to_lowercase());
         assert!(USAGE_TAGS.ends_with(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn body_carries_session_id_only_when_known() {
+        let runtime_config = EngineRuntimeConfig {
+            context_length_override: None,
+            model: "some/model".to_string(),
+            temperature: None,
+            context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
+            reasoning_effort: None,
+            input_modalities: None,
+        };
+        let session_id = uuid::Uuid::new_v4();
+        let mut with_session = serde_json::json!({});
+        EdenAiProvider::customize_request_body(
+            &mut with_session,
+            &runtime_config,
+            Some(session_id),
+        );
+        assert_eq!(with_session["session_id"], session_id.to_string());
+        let mut without_session = serde_json::json!({});
+        EdenAiProvider::customize_request_body(&mut without_session, &runtime_config, None);
+        assert!(without_session.get("session_id").is_none());
     }
 
     #[test]

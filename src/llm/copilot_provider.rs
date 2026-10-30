@@ -122,6 +122,7 @@ impl CopilotProvider {
     fn customize_request_body(
         request_body: &mut serde_json::Value,
         runtime_config: &EngineRuntimeConfig,
+        _session_id: Option<uuid::Uuid>,
     ) {
         if let Some(reasoning_effort) = runtime_config.reasoning_effort.as_deref() {
             request_body["reasoning_effort"] = serde_json::json!(reasoning_effort);

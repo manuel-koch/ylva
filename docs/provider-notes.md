@@ -70,6 +70,10 @@ from a price table.
   which only labels the user's own usage in their EdenAI dashboard and does
   not advertise Ylva. It is always sent, contains no user data, and no other
   provider sends it.
+- Chat requests carry the Ylva session id as the body field `session_id` (when known).
+  EdenAI uses it as the sticky-routing key so requests for unprefixed model
+  names stay on the provider holding the prompt cache; it is never forwarded to
+  the provider. Models addressed as `provider/model` are pinned already.
 - Model discovery keeps entries that output text and do not explicitly lack
   function calling (alias entries such as the default `openai/gpt-latest` are
   kept), and reads `context_length` and `capabilities.input_modalities`.

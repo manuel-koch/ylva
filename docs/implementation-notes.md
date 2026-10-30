@@ -432,6 +432,9 @@ See [features](./features.md#cli-mode).
   header the same way (built with `concat!`/`env!`, so pre-release versions
   must keep satisfying EdenAI's tag value rules, which a unit test checks).
   It is a usage label, not attribution, and no other provider sends it.
+  Its request-body customizer (which, like every customizer, also receives the
+  per-chat session id) sets the body `session_id` when one is known, for
+  EdenAI's cache-affine sticky routing.
 
 ### Policy and scheduling
 

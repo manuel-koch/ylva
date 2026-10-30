@@ -37,12 +37,13 @@ pub(crate) mod messages;
 /// that reports them supplies its own parser.
 pub(crate) type UsageCostParser = fn(&str) -> Option<RequestCost>;
 
-type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig);
+type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig, Option<uuid::Uuid>);
 pub(crate) type RequestBodyRedactor = fn(&serde_json::Value) -> serde_json::Value;
 
 fn no_request_body_customization(
     _request_body: &mut serde_json::Value,
     _runtime_config: &EngineRuntimeConfig,
+    _session_id: Option<uuid::Uuid>,
 ) {
 }
 
@@ -726,7 +727,7 @@ impl Provider for OpenAiCompatibleProvider {
                 if let Some(temperature) = runtime_config.temperature {
                     request_body["temperature"] = serde_json::json!(temperature);
                 }
-                request_body_customizer(&mut request_body, &runtime_config);
+                request_body_customizer(&mut request_body, &runtime_config, session_id);
                 if !tools.is_empty() {
                     request_body["tools"] = serde_json::Value::Array(tools);
                     request_body["tool_choice"] = serde_json::json!("auto");

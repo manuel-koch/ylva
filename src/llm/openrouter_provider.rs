@@ -115,6 +115,7 @@ impl OpenRouterProvider {
     fn customize_request_body(
         request_body: &mut serde_json::Value,
         runtime_config: &EngineRuntimeConfig,
+        _session_id: Option<uuid::Uuid>,
     ) {
         if let Some(reasoning_effort) = runtime_config.reasoning_effort.as_deref() {
             request_body["reasoning"] = serde_json::json!({
@@ -430,7 +431,7 @@ mod tests {
             input_modalities: None,
         };
 
-        OpenRouterProvider::customize_request_body(&mut request_body, &runtime_config);
+        OpenRouterProvider::customize_request_body(&mut request_body, &runtime_config, None);
 
         assert_eq!(
             request_body,
