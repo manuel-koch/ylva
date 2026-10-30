@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0](https://github.com/manuel-koch/ylva/compare/v0.34.0...v0.35.0) - 2026-10-30
+
+### Added
+
+- Sent session-id with EdenAI requests to benefit from sticky
+- Add EdenAI provider implementation
+- Show popup dialog with all agent conversations ( root and
+
 ## [0.34.0](https://github.com/manuel-koch/ylva/compare/v0.33.0...v0.34.0) - 2026-10-28
 
 ### Added
