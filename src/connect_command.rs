@@ -188,6 +188,16 @@ pub fn run(
             *workspace,
             *force,
         ),
+        ConnectCommand::Edenai {
+            name,
+            workspace,
+            force,
+        } => (
+            Box::new(EndpointConnect::edenai()),
+            name,
+            *workspace,
+            *force,
+        ),
     };
     let connection_name = name.as_deref().unwrap_or(flow.kind());
     let result = (|| {

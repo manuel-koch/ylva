@@ -412,7 +412,8 @@ See [features](./features.md#cli-mode).
   hook (default: none) applied to every SSE payload, independent of
   `parse_sse_payload` because usage-only frames have no choices.
   `OpenRouterProvider` supplies the parser for its `usage.cost` field (USD) and
-  `CopilotProvider` for `usage.copilot_usage.total_nano_aiu` (AIC);
+  `CopilotProvider` for `usage.copilot_usage.total_nano_aiu` (AIC) and
+  `EdenAiProvider` for the top-level `cost` (USD, `usage.cost` accepted too);
   Ollama and plain OpenAI-compatible providers report none. The first cost frame of a request is recorded
   immediately, before the terminal stream event is sent, so the redraw that
   follows completion already sees it, and so failed or cancelled streams keep
@@ -427,6 +428,13 @@ See [features](./features.md#cli-mode).
 - `OpenRouterProvider` sets its app attribution headers via the shared
   `extra_headers` (lowercase names: `HeaderName::from_static` panics on
   uppercase). The referer comes from `CARGO_PKG_REPOSITORY`.
+- `EdenAiProvider` sends one `x-edenai-tags: app=ylva,version=<version>`
+  header the same way (built with `concat!`/`env!`, so pre-release versions
+  must keep satisfying EdenAI's tag value rules, which a unit test checks).
+  It is a usage label, not attribution, and no other provider sends it.
+  Its request-body customizer (which, like every customizer, also receives the
+  per-chat session id) sets the body `session_id` when one is known, for
+  EdenAI's cache-affine sticky routing.
 
 ### Policy and scheduling
 
@@ -793,10 +801,10 @@ keeps it outside `Context`. After `SteerApplied`, the loop commits it after the
 current round's emitted messages, so persisted order matches what the model
 saw. If the round is cancelled first, the steer is not sent.
 
-## GitHub Copilot provider
+## Copilot provider
 
 - Copilot reuses the OpenAI-compatible transport instead of a separate one
-  (see [provider notes](./provider-notes.md#github-copilot)). Its two
+  (see [provider notes](./provider-notes.md#copilot)). Its two
   differences are a per-request base URL and bearer token (the session
   token's `endpoints.api` and the exchanged token) and a few headers, so the
   transport has a `RequestAuthorizer` hook rather than a Copilot branch.
@@ -804,11 +812,24 @@ saw. If the round is cancelled first, the steer is not sent.
 - The transport speaks both Chat Completions and the Responses API
   (`openai_responses`). The Responses body is projected from the serialized
   Chat Completions messages, keeping one source of truth for attachment and
-  tool-outcome handling. A provider opts in with `with_responses_only_models`;
-  the protocol is then chosen per request from the catalog's
-  `supported_endpoints`, which `list_models` records and a chat loads once if
-  no listing ran yet. If that load fails the request uses Chat Completions.
+  tool-outcome handling. The protocol is chosen per request through the
+  provider's `ModelCatalog` (`uses_responses_api`); only Copilot's catalog
+  answers true, for models whose `supported_endpoints` list `/responses` but
+  not `/chat/completions`. A catalog whose `is_loaded` is false is listed once
+  by the first chat; if that load fails the request uses Chat Completions.
   Responses streams end with `response.completed`, not `[DONE]`.
+- Model discovery is provider-shaped, so the transport holds a
+  `ModelCatalog` trait object (`with_model_catalog`) instead of parsing
+  `/models` itself: `parse` turns a body into `ModelInfo`s (and may record
+  state), `is_loaded` and `uses_responses_api` default to `true`/`false`.
+  `DefaultModelCatalog` keeps only ids, so plain OpenAI-compatible backends
+  advertise no context length, modalities or efforts. `OpenRouterModelCatalog`
+  (`openrouter_provider.rs`), `CopilotModelCatalog`
+  (`copilot_provider/catalog.rs`) and `EdenAiModelCatalog`
+  (`edenai_provider.rs`) hold their provider's shape; Ollama keeps its native
+  `/api/tags` + `/api/show` parsing. Generic helpers
+  (`order_reasoning_efforts`, `parse_input_modality_names`,
+  `parse_reasoning_object`) live in `llm.rs`.
 - The 2 s request spacing and the exchange single-flight both live in
   `CopilotAuth::authorize()`, so every clone of a connection (subagents,
   `with_runtime_config`) shares one clock. HTTP retries inside a chat request
@@ -827,6 +848,6 @@ saw. If the round is cancelled first, the steer is not sent.
 - `ylva connect` validates the config and `.env` before the browser flow or
   the questions (using the flow's declared `env_variables`), so a refused
   name fails early; the entries returned by `connect` are checked again
-  before writing. The Ollama/OpenRouter key is
+  before writing. The EdenAI/Ollama/OpenRouter key is
   read with crossterm raw mode to avoid echo; piped stdin falls back to one
   line per answer.

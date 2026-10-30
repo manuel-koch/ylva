@@ -47,8 +47,8 @@ pub(super) fn apply_provider_env_to_profile(
 }
 
 const NO_PROVIDER_GUIDANCE: &str = "no model provider is configured; \
-run `ylva connect ollama` or `ylva connect openrouter`, or define a provider \
-connection and engine in your profile.";
+run `ylva connect <provider>` (copilot, edenai, ollama or openrouter), or \
+define a provider connection and engine in your profile.";
 
 /// Build one engine for every provider configured by the environment.
 ///
@@ -207,7 +207,9 @@ mod tests {
             Err(error) => error.to_string(),
         };
 
-        assert!(error.contains("ylva connect ollama"), "{error}");
-        assert!(error.contains("ylva connect openrouter"), "{error}");
+        assert!(error.contains("ylva connect <provider>"), "{error}");
+        for provider in ["copilot", "edenai", "ollama", "openrouter"] {
+            assert!(error.contains(provider), "{provider}: {error}");
+        }
     }
 }

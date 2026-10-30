@@ -18,9 +18,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+mod common;
+use common::mock_llm_server::{content_frame, MockLlmConfig, MockLlmServer};
+
 use tokio_util::sync::CancellationToken;
 use ylva::agent::StreamEvent;
-use ylva::{CostLedger, MockProvider, Provider, RequestCost};
+use ylva::{CostLedger, EdenAiProvider, MockProvider, Provider, RequestCost};
 
 async fn run_request(provider: &dyn Provider) {
     let mut events = provider
@@ -62,4 +65,33 @@ async fn requests_without_a_reported_cost_leave_the_total_empty() {
 
     assert!(ledger.totals().is_empty());
     assert_eq!(ledger.totals_text(), None);
+}
+
+#[tokio::test]
+async fn edenai_top_level_cost_frame_accumulates_in_the_process_ledger() {
+    let cost_frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({"choices": [], "usage": {"prompt_tokens": 3}, "cost": 0.25})
+    );
+    let server = MockLlmServer::start(MockLlmConfig {
+        frames: vec![content_frame("ok"), cost_frame],
+        end_after_frames: true,
+        ..Default::default()
+    })
+    .await
+    .expect("bind failed");
+    let provider = EdenAiProvider::new(
+        "edenai".to_string(),
+        server.base_url(),
+        "openai/gpt-latest".to_string(),
+        None,
+    );
+
+    run_request(&provider).await;
+    run_request(&provider).await;
+
+    assert_eq!(
+        CostLedger::process().totals_text().as_deref(),
+        Some("0.50 USD")
+    );
 }

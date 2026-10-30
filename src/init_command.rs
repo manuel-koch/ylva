@@ -42,6 +42,9 @@ theme = "dark"
 # put this envvar into the .env file of the profile
 # api_key = "${OLLAMA_CLOUD_API_KEY}"
 
+# Providers are easier to set up with `ylva connect <provider>` (copilot, edenai,
+# ollama or openrouter), which writes the connection and stores the API key.
+
 # [engines.default]
 # provider_connection = "example-ollama-local"
 # model = "replace-me"

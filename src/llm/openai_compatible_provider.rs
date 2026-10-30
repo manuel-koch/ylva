@@ -28,7 +28,7 @@ use crate::llm::openai_compatible_provider::messages::{
 };
 use crate::llm::token_usage::{TokenUsageDumpSource, TokenUsageRecord};
 use crate::llm::usage_cost::{CostLedger, RequestCost};
-use crate::llm::{order_reasoning_efforts, InputModality, Provider, ToolSchema};
+use crate::llm::{Provider, ToolSchema};
 
 pub(crate) mod messages;
 
@@ -37,12 +37,13 @@ pub(crate) mod messages;
 /// that reports them supplies its own parser.
 pub(crate) type UsageCostParser = fn(&str) -> Option<RequestCost>;
 
-type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig);
+type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig, Option<uuid::Uuid>);
 pub(crate) type RequestBodyRedactor = fn(&serde_json::Value) -> serde_json::Value;
 
 fn no_request_body_customization(
     _request_body: &mut serde_json::Value,
     _runtime_config: &EngineRuntimeConfig,
+    _session_id: Option<uuid::Uuid>,
 ) {
 }
 
@@ -296,56 +297,67 @@ pub struct OpenAiCompatibleProvider {
     request_authorizer: Option<std::sync::Arc<dyn RequestAuthorizer>>,
     /// Static headers added to every chat and model-listing request.
     extra_headers: Vec<(&'static str, &'static str)>,
-    /// `Some` when the backend serves some models only through `/responses`.
-    responses_only_models: Option<std::sync::Arc<ResponsesOnlyModels>>,
+    /// Interprets the backend's `/models` body and endpoint routing.
+    model_catalog: std::sync::Arc<dyn ModelCatalog>,
 }
 
-/// Models that the backend's catalog lists for `/responses` but not for
-/// `/chat/completions`, shared by all clones of a provider.
-#[derive(Debug, Default)]
-pub(crate) struct ResponsesOnlyModels {
-    model_ids: std::sync::RwLock<std::collections::HashSet<String>>,
-    catalog_loaded: std::sync::atomic::AtomicBool,
-}
+/// Translates a backend's `GET /models` body into [`ModelInfo`]s and tells
+/// which models need the Responses API. Implementations hold any state they
+/// learn from the listing, shared by all clones of a provider.
+pub(crate) trait ModelCatalog: Send + Sync + std::fmt::Debug {
+    /// Translate a `/models` body; may record state for later routing.
+    fn parse(&self, body: &serde_json::Value) -> Vec<crate::llm::ModelInfo>;
 
-impl ResponsesOnlyModels {
-    /// Replace the known models from a `/models` body that advertises
-    /// `supported_endpoints` per model.
-    fn replace_from_catalog(&self, body: &serde_json::Value) {
-        let model_ids = body
-            .get("data")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| {
-                let endpoints = entry
-                    .get("supported_endpoints")?
-                    .as_array()?
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .collect::<Vec<_>>();
-                let responses_only =
-                    endpoints.contains(&"/responses") && !endpoints.contains(&"/chat/completions");
-                responses_only.then(|| entry.get("id")?.as_str().map(str::to_owned))?
-            })
-            .collect();
-        if let Ok(mut known) = self.model_ids.write() {
-            *known = model_ids;
-            self.catalog_loaded
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
-
+    /// Whether a listing has been parsed, when routing depends on one.
     fn is_loaded(&self) -> bool {
-        self.catalog_loaded
-            .load(std::sync::atomic::Ordering::Acquire)
+        true
     }
 
-    fn contains(&self, model: &str) -> bool {
-        self.model_ids
-            .read()
-            .is_ok_and(|known| known.contains(model))
+    /// Whether `model` is served only through `/responses`.
+    fn uses_responses_api(&self, _model: &str) -> bool {
+        false
     }
+}
+
+/// Catalog of generic OpenAI-compatible backends: entries with a string `id`,
+/// plus best-effort `context_length`, a top-level `reasoning` object and
+/// `architecture.input_modalities` / `input_modalities` when present.
+#[derive(Debug, Default)]
+pub(crate) struct DefaultModelCatalog;
+
+impl ModelCatalog for DefaultModelCatalog {
+    fn parse(&self, body: &serde_json::Value) -> Vec<crate::llm::ModelInfo> {
+        model_list_entries(body)
+            .filter_map(|entry| {
+                let id = entry.get("id")?.as_str()?;
+                let (reasoning_efforts, reasoning_default) =
+                    crate::llm::parse_reasoning_object(entry.get("reasoning"));
+                Some(crate::llm::ModelInfo {
+                    id: id.to_string(),
+                    context_length: entry
+                        .get("context_length")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|length| length as usize),
+                    reasoning_efforts,
+                    reasoning_default,
+                    input_modalities: entry
+                        .pointer("/architecture/input_modalities")
+                        .or_else(|| entry.get("input_modalities"))
+                        .and_then(crate::llm::parse_input_modality_names),
+                })
+            })
+            .collect()
+    }
+}
+
+/// The entries of a `/models` body's `data` array.
+pub(crate) fn model_list_entries(
+    body: &serde_json::Value,
+) -> impl Iterator<Item = &serde_json::Value> {
+    body.get("data")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
 }
 
 fn join_endpoint(base_url: &str, endpoint: &str) -> String {
@@ -439,7 +451,7 @@ impl OpenAiCompatibleProvider {
             usage_cost_parser: None,
             request_authorizer: None,
             extra_headers: Vec::new(),
-            responses_only_models: None,
+            model_catalog: std::sync::Arc::new(DefaultModelCatalog),
         }
     }
 
@@ -465,10 +477,13 @@ impl OpenAiCompatibleProvider {
         self
     }
 
-    /// Send models that the catalog lists only for `/responses` through the
-    /// Responses API instead of `/chat/completions`.
-    pub(crate) fn with_responses_only_models(mut self) -> Self {
-        self.responses_only_models = Some(std::sync::Arc::default());
+    /// Interpret model listings, and route models the catalog marks as
+    /// `/responses`-only through the Responses API.
+    pub(crate) fn with_model_catalog(
+        mut self,
+        model_catalog: std::sync::Arc<dyn ModelCatalog>,
+    ) -> Self {
+        self.model_catalog = model_catalog;
         self
     }
 
@@ -565,7 +580,7 @@ impl Provider for OpenAiCompatibleProvider {
         let request_limiter = self.request_limiter.clone();
         let request_authorizer = self.request_authorizer.clone();
         let extra_headers = self.extra_headers.clone();
-        let responses_only_models = self.responses_only_models.clone();
+        let model_catalog = std::sync::Arc::clone(&self.model_catalog);
         Box::pin(async move {
             let _permit = request_limiter.acquire().await?;
             let (models_url, api_key) = match &request_authorizer {
@@ -587,10 +602,7 @@ impl Provider for OpenAiCompatibleProvider {
                 &crate::http::RequestDumpSource::Environment,
             )
             .await?;
-            if let Some(responses_only_models) = &responses_only_models {
-                responses_only_models.replace_from_catalog(&body);
-            }
-            Ok(parse_model_list(&body))
+            Ok(model_catalog.parse(&body))
         })
     }
 
@@ -661,8 +673,8 @@ impl Provider for OpenAiCompatibleProvider {
         };
         let provider_connection = self.name.clone();
         let base_url = self.base_url.clone();
-        let responses_only_models = self.responses_only_models.clone();
-        let catalog_provider = responses_only_models.as_ref().map(|_| self.clone());
+        let model_catalog = std::sync::Arc::clone(&self.model_catalog);
+        let catalog_provider = (!model_catalog.is_loaded()).then(|| self.clone());
         let api_key = self.api_key.clone();
         let client = self.client.clone();
         let request_body_customizer = self.request_body_customizer;
@@ -682,19 +694,16 @@ impl Provider for OpenAiCompatibleProvider {
             tools.iter().map(ToolSchema::to_request_value).collect()
         };
         Box::pin(async move {
-            let use_responses = match (&responses_only_models, &catalog_provider) {
-                (Some(responses_only_models), Some(catalog_provider)) => {
-                    if !responses_only_models.is_loaded() {
-                        // The catalog tells which models need `/responses`; a
-                        // failure here falls back to chat completions.
-                        if let Err(error) = catalog_provider.list_models().await {
-                            tracing::debug!(%error, "model catalog unavailable for endpoint selection");
-                        }
-                    }
-                    responses_only_models.contains(&runtime_config.model)
+            if let Some(catalog_provider) = catalog_provider.filter(|_| !model_catalog.is_loaded())
+            {
+                // The catalog tells which models need `/responses`; a
+                // failure here falls back to chat completions. Re-checked so
+                // concurrent first chats skip a listing another one finished.
+                if let Err(error) = catalog_provider.list_models().await {
+                    tracing::debug!(%error, "model catalog unavailable for endpoint selection");
                 }
-                _ => false,
-            };
+            }
+            let use_responses = model_catalog.uses_responses_api(&runtime_config.model);
             let serialized_messages = serialize_messages_with_policy(
                 &messages,
                 runtime_config.input_modalities.as_deref(),
@@ -718,7 +727,7 @@ impl Provider for OpenAiCompatibleProvider {
                 if let Some(temperature) = runtime_config.temperature {
                     request_body["temperature"] = serde_json::json!(temperature);
                 }
-                request_body_customizer(&mut request_body, &runtime_config);
+                request_body_customizer(&mut request_body, &runtime_config, session_id);
                 if !tools.is_empty() {
                     request_body["tools"] = serde_json::Value::Array(tools);
                     request_body["tool_choice"] = serde_json::json!("auto");
@@ -1155,151 +1164,6 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
     }
 
     None
-}
-
-/// Translate an OpenAI-compatible `GET /models` body into [`ModelInfo`]s.
-///
-/// OpenRouter carries `context_length` in each `data` entry.
-/// Entries without an `id` are the only ones dropped — every other field is
-/// best-effort so an unknown OpenAI-compatible backend still yields a usable
-/// list.
-fn parse_model_list(body: &serde_json::Value) -> Vec<crate::llm::ModelInfo> {
-    let entries = match body.get("data").and_then(serde_json::Value::as_array) {
-        Some(entries) => entries,
-        None => return Vec::new(),
-    };
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let id = entry.get("id").and_then(serde_json::Value::as_str)?;
-            if !serves_a_chat_endpoint(entry) {
-                return None;
-            }
-            Some(crate::llm::ModelInfo {
-                id: id.to_string(),
-                context_length: parse_context_length(entry),
-                reasoning_efforts: parse_reasoning_efforts(entry),
-                reasoning_default: parse_reasoning_default(entry),
-                input_modalities: parse_input_modalities(entry),
-            })
-        })
-        .collect()
-}
-
-/// Whether an entry can answer `/chat/completions` or `/responses`. Copilot
-/// lists embedding and completion models (`capabilities.type`) and models
-/// serving neither endpoint (`supported_endpoints`); entries without that
-/// metadata are kept.
-fn serves_a_chat_endpoint(entry: &serde_json::Value) -> bool {
-    let endpoint_allows_chat = entry
-        .get("supported_endpoints")
-        .and_then(serde_json::Value::as_array)
-        .is_none_or(|endpoints| {
-            endpoints.iter().any(|endpoint| {
-                matches!(endpoint.as_str(), Some("/chat/completions" | "/responses"))
-            })
-        });
-    let type_allows_chat = entry
-        .pointer("/capabilities/type")
-        .and_then(serde_json::Value::as_str)
-        .is_none_or(|kind| kind == "chat");
-    endpoint_allows_chat && type_allows_chat
-}
-
-/// Read the usable input size: OpenRouter's `context_length`, or Copilot's
-/// `capabilities.limits.max_prompt_tokens` (falling back to
-/// `max_context_window_tokens`, which also counts the output budget).
-fn parse_context_length(entry: &serde_json::Value) -> Option<usize> {
-    entry
-        .get("context_length")
-        .or_else(|| entry.pointer("/capabilities/limits/max_prompt_tokens"))
-        .or_else(|| entry.pointer("/capabilities/limits/max_context_window_tokens"))
-        .and_then(serde_json::Value::as_u64)
-        .map(|length| length as usize)
-}
-
-/// Copilot reports `supports.vision` and the document types it accepts
-/// (`limits.vision.supported_media_types`). `None` without `supports`.
-fn parse_copilot_input_modalities(entry: &serde_json::Value) -> Option<Vec<InputModality>> {
-    let supports = entry.pointer("/capabilities/supports")?;
-    let mut modalities = Vec::new();
-    if supports.get("vision").and_then(serde_json::Value::as_bool) == Some(true) {
-        modalities.push(InputModality::Image);
-        let accepts_documents = entry
-            .pointer("/capabilities/limits/vision/supported_media_types")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|types| {
-                types
-                    .iter()
-                    .any(|kind| kind.as_str() == Some("application/pdf"))
-            });
-        if accepts_documents {
-            modalities.push(InputModality::File);
-        }
-    }
-    Some(modalities)
-}
-
-fn parse_input_modalities(entry: &serde_json::Value) -> Option<Vec<InputModality>> {
-    let Some(values) = entry
-        .pointer("/architecture/input_modalities")
-        .or_else(|| entry.get("input_modalities"))
-    else {
-        return parse_copilot_input_modalities(entry);
-    };
-    let values = values.as_array()?;
-    Some(
-        values
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .filter_map(|modality| match modality {
-                "image" => Some(InputModality::Image),
-                "file" => Some(InputModality::File),
-                _ => None,
-            })
-            .collect(),
-    )
-}
-
-/// Read the selectable efforts: OpenRouter's `reasoning.supported_efforts`, or
-/// Copilot's `capabilities.supports.reasoning_effort` list.
-fn parse_reasoning_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
-    let copilot_efforts = entry.pointer("/capabilities/supports/reasoning_effort");
-    let (efforts, reasoning_declared) = match (entry.get("reasoning"), copilot_efforts) {
-        (Some(reasoning), _) => (reasoning.get("supported_efforts"), true),
-        (None, Some(efforts)) => (Some(efforts), true),
-        (None, None) => (None, false),
-    };
-    if !reasoning_declared {
-        return None;
-    }
-    let efforts = efforts
-        .and_then(serde_json::Value::as_array)
-        .map(|efforts| {
-            efforts
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .filter(|effort| !effort.is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(order_reasoning_efforts(efforts))
-}
-
-/// Read an entry's provider-advertised default effort
-/// (`reasoning.default_effort`, OpenRouter's shape) — `None` when absent or
-/// not a non-empty string.
-///
-/// The same `reasoning` object also carries `mandatory` and
-/// `default_enabled`, which Ylva intentionally does not consume (see
-/// `docs/implementation-notes.md`).
-fn parse_reasoning_default(entry: &serde_json::Value) -> Option<String> {
-    entry
-        .pointer("/reasoning/default_effort")?
-        .as_str()
-        .filter(|effort| !effort.is_empty())
-        .map(String::from)
 }
 
 #[cfg(test)]

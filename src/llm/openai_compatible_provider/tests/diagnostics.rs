@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::llm::InputModality;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

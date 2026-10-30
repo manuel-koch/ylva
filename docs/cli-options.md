@@ -376,7 +376,7 @@ not load a profile. See [workspace trust](configuration.md#workspace-trust).
 
 `ylva [--profile <profile>] connect <provider> [--name <name>] [--workspace]`
 adds a provider connection to the selected profile and stores its secret for you.
-`<provider>` is `copilot`, `ollama` or `openrouter`.
+`<provider>` is `copilot`, `edenai`, `ollama` or `openrouter`.
 
 Every action
 
@@ -385,7 +385,7 @@ Every action
   existing table of that name is an error.
 - stores the secret in the profile's `.env` (owner-only) and references it as
   `api_key = "${<variable>}"`. The variable is `COPILOT_GITHUB_TOKEN`,
-  `OLLAMA_API_KEY` or `OPENROUTER_API_KEY` for the default name, which the
+  `OLLAMA_API_KEY`, `OPENROUTER_API_KEY` or `EDENAI_API_KEY` for the default name, which the
   environment auto-detection also reads, and `<VARIABLE>_<NAME>`
   (upper-cased, other characters replaced by `_`) when `--name` is given. The
   default variable is refreshed on re-run; a named variable that already
@@ -405,11 +405,12 @@ stays out of version control. Secrets are never printed.
   verification URL and a user code and waits for authorization (ctrl-c
   cancels). The stored secret is the GitHub token; no `api_base_url` is
   written.
-- `ylva connect ollama` and `ylva connect openrouter` ask for the base URL
-  (default `http://localhost:11434` and `https://openrouter.ai`, written as
+- `ylva connect edenai`, `ylva connect ollama` and `ylva connect openrouter`
+  ask for the base URL (default `https://api.edenai.run`,
+  `http://localhost:11434` and `https://openrouter.ai`, written as
   `api_base_url`) and the API key (input hidden; piped stdin is read as one
   line per answer). The key is optional for Ollama and required for
-  OpenRouter. Without a key no `.env` entry and no `api_key` are written.
+  OpenRouter and EdenAI. Without a key no `.env` entry and no `api_key` are written.
 - Re-running for an existing connection name is refused (also before the
   login) when `config.toml` already defines it or, for a named connection,
   `.env` already defines its variable. `--force` replaces the connection and
@@ -484,7 +485,7 @@ connection and displays connection-qualified model choices. When no explicit
 engines or provider connections are configured, the supported environment
 providers are discovered instead. When none is configured either, an ordinary
 conversation (TUI or headless) does not start: Ylva prints setup guidance
-pointing to `ylva connect ollama`, `ylva connect openrouter` and the profile
+pointing to `ylva connect <provider>` and the profile
 configuration, and exits with code 2 (usage or startup error). There is no
 implicit mock provider. Help, version, and the `profile`, `connect`, `init`,
 `trust` and `session` commands do not need a provider.
@@ -502,11 +503,14 @@ selection affects the conversation's summarizer.
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai` | OpenRouter origin. The provider derives `/api/v1` for chat and model discovery. Unlike Ollama, OpenRouter is a single hosted service, so this has a working default and never has to be set manually. |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | OpenRouter model. |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key. Setting `OPENROUTER_API_KEY` (or `OPENROUTER_MODEL`) alone is enough to configure OpenRouter — `OPENROUTER_BASE_URL` does not need to be exported. |
+| `EDENAI_BASE_URL` | `https://api.edenai.run` | EdenAI origin. The provider derives `/v3` for chat and model discovery. Like OpenRouter, a single hosted service, so the default rarely needs changing. |
+| `EDENAI_MODEL` | `openai/gpt-latest` | EdenAI model. |
+| `EDENAI_API_KEY` | — | EdenAI API key. Setting `EDENAI_API_KEY` (or `EDENAI_MODEL`, `EDENAI_BASE_URL`) alone is enough to configure EdenAI. |
 | `COPILOT_GITHUB_TOKEN` | — | Long-lived GitHub OAuth (`ghu_…`) token for Copilot. A non-empty value auto-detects a `copilot` connection. `GH_TOKEN` is never read. |
 | `COPILOT_MODEL` | `gpt-4o` | Model for the auto-detected Copilot connection. |
 
 For explicit provider connections, `api_key` values in `config.toml` remain
-authoritative. When omitted, `OLLAMA_API_KEY`, `OPENROUTER_API_KEY` or
+authoritative. When omitted, `OLLAMA_API_KEY`, `OPENROUTER_API_KEY`, `EDENAI_API_KEY` or
 `COPILOT_GITHUB_TOKEN` fills the connection based on its `provider`
 implementation kind. API keys and expanded environment values are never written to logs.
 

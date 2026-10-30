@@ -21,8 +21,8 @@ use crate::config::{ProviderConnectionConfig, ProviderKind};
 use crate::llm::engine::EngineConfig;
 
 use super::{
-    CopilotProvider, MockProvider, OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider,
-    Provider,
+    CopilotProvider, EdenAiProvider, MockProvider, OllamaProvider, OpenAiCompatibleProvider,
+    OpenRouterProvider, Provider,
 };
 
 /// Default Ollama model when `OLLAMA_MODEL` is unset.
@@ -31,11 +31,17 @@ pub const DEFAULT_OLLAMA_MODEL: &str = "gemma4:e4b-mlx";
 /// Default OpenRouter model when `OPENROUTER_MODEL` is unset.
 pub const DEFAULT_OPENROUTER_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 
+/// Default EdenAI model when `EDENAI_MODEL` is unset.
+pub const DEFAULT_EDENAI_MODEL: &str = "openai/gpt-latest";
+
 /// Default Copilot model when `COPILOT_MODEL` is unset.
 pub const DEFAULT_COPILOT_MODEL: &str = "gpt-4o";
 
 /// Default OpenRouter origin when `OPENROUTER_BASE_URL` is unset.
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai";
+
+/// Default EdenAI origin when `EDENAI_BASE_URL` is unset.
+pub const DEFAULT_EDENAI_BASE_URL: &str = "https://api.edenai.run";
 
 /// Snapshot of the environment variables used for automatic provider
 /// selection.
@@ -50,6 +56,9 @@ pub struct ProviderEnv {
     pub openrouter_base_url: Option<String>,
     pub openrouter_model: Option<String>,
     pub openrouter_api_key: Option<String>,
+    pub edenai_base_url: Option<String>,
+    pub edenai_model: Option<String>,
+    pub edenai_api_key: Option<String>,
     pub copilot_model: Option<String>,
     /// Long-lived GitHub OAuth token for Copilot. `GH_TOKEN` is never read.
     pub copilot_github_token: Option<String>,
@@ -86,6 +95,7 @@ impl ProviderEnv {
         let api_key = match engine_config.provider_connection.as_str() {
             "ollama" => self.ollama_api_key.as_ref(),
             "openrouter" => self.openrouter_api_key.as_ref(),
+            "edenai" => self.edenai_api_key.as_ref(),
             "copilot" => self.copilot_github_token.as_ref(),
             _ => None,
         };
@@ -107,6 +117,7 @@ impl ProviderEnv {
         let api_key = match provider_config.provider {
             ProviderKind::Ollama => self.ollama_api_key.as_ref(),
             ProviderKind::Openrouter => self.openrouter_api_key.as_ref(),
+            ProviderKind::Edenai => self.edenai_api_key.as_ref(),
             ProviderKind::Copilot => self.copilot_github_token.as_ref(),
             ProviderKind::Mock => None,
         };
@@ -123,6 +134,9 @@ impl ProviderEnv {
             openrouter_base_url: lookup("OPENROUTER_BASE_URL"),
             openrouter_model: lookup("OPENROUTER_MODEL"),
             openrouter_api_key: lookup("OPENROUTER_API_KEY"),
+            edenai_base_url: lookup("EDENAI_BASE_URL"),
+            edenai_model: lookup("EDENAI_MODEL"),
+            edenai_api_key: lookup("EDENAI_API_KEY"),
             copilot_model: lookup("COPILOT_MODEL"),
             copilot_github_token: lookup("COPILOT_GITHUB_TOKEN"),
         }
@@ -275,11 +289,11 @@ impl ProviderRegistry {
                 model: engine_config.model.clone(),
                 api_key: engine_config.api_key.clone(),
             }),
-            name @ ("ollama" | "openrouter") => {
-                let provider_kind = if name == "ollama" {
-                    ProviderKind::Ollama
-                } else {
-                    ProviderKind::Openrouter
+            name @ ("ollama" | "openrouter" | "edenai") => {
+                let provider_kind = match name {
+                    "ollama" => ProviderKind::Ollama,
+                    "openrouter" => ProviderKind::Openrouter,
+                    _ => ProviderKind::Edenai,
                 };
                 let base_url = engine_config
                     .api_base_url
@@ -329,7 +343,7 @@ impl ProviderRegistry {
                     .clone()
                     .or_else(|| provider_config.api_key.clone()),
             }),
-            ProviderKind::Ollama | ProviderKind::Openrouter => {
+            ProviderKind::Ollama | ProviderKind::Openrouter | ProviderKind::Edenai => {
                 let base_url = engine_config
                     .api_base_url
                     .as_ref()
@@ -359,16 +373,16 @@ impl ProviderRegistry {
     /// Resolve the backend for a captured environment snapshot, or `None` when
     /// no provider is configured.
     ///
-    /// Ollama has precedence over OpenRouter, and OpenRouter over Copilot, when
-    /// several are configured.
+    /// Precedence when several are configured: Ollama, OpenRouter, EdenAI,
+    /// Copilot.
     pub fn from_environment(env: &ProviderEnv) -> Option<ProviderSelection> {
         Self::all_from_environment(env).into_iter().next()
     }
 
     /// Resolve every configured implementation kind from a captured
     /// environment snapshot. Ollama remains the first/default provider for
-    /// compatibility, while OpenRouter is retained as an additional
-    /// selectable provider when both configurations are present.
+    /// compatibility, while OpenRouter, EdenAI and Copilot follow, in that
+    /// order, as additional selectable providers when configured.
     pub fn all_from_environment(env: &ProviderEnv) -> Vec<ProviderSelection> {
         let mut selections = Vec::new();
         if let Some(base_url) = env.ollama_base_url.as_ref().filter(|url| !url.is_empty()) {
@@ -408,6 +422,29 @@ impl ProviderRegistry {
                 base_url,
                 model,
                 api_key: env.openrouter_api_key.clone(),
+            });
+        }
+
+        let edenai_requested = [&env.edenai_base_url, &env.edenai_model, &env.edenai_api_key]
+            .into_iter()
+            .any(|value| value.as_ref().is_some_and(|value| !value.is_empty()));
+        if edenai_requested {
+            let base_url = env
+                .edenai_base_url
+                .clone()
+                .filter(|url| !url.is_empty())
+                .unwrap_or_else(|| DEFAULT_EDENAI_BASE_URL.to_string());
+            let model = env
+                .edenai_model
+                .clone()
+                .filter(|model| !model.is_empty())
+                .unwrap_or_else(|| DEFAULT_EDENAI_MODEL.to_string());
+            selections.push(ProviderSelection::OpenAiCompatible {
+                provider_kind: ProviderKind::Edenai,
+                provider_connection: ProviderKind::Edenai.as_str().to_string(),
+                base_url,
+                model,
+                api_key: env.edenai_api_key.clone(),
             });
         }
 
@@ -474,6 +511,12 @@ impl ProviderRegistry {
                     api_key,
                 ))),
                 ProviderKind::Openrouter => Ok(Arc::new(OpenRouterProvider::new(
+                    provider_connection,
+                    base_url,
+                    model,
+                    api_key,
+                ))),
+                ProviderKind::Edenai => Ok(Arc::new(EdenAiProvider::new(
                     provider_connection,
                     base_url,
                     model,
@@ -573,6 +616,65 @@ mod tests {
         assert_eq!(selections[1].provider_connection(), "openrouter");
         assert_eq!(selections[0].model(), "local-model");
         assert_eq!(selections[1].model(), "hosted/model");
+    }
+
+    #[test]
+    fn environment_resolution_uses_edenai_defaults_and_ranks_after_openrouter() {
+        let env = ProviderEnv {
+            edenai_api_key: Some("eden-key".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ProviderRegistry::from_environment(&env),
+            Some(ProviderSelection::OpenAiCompatible {
+                provider_kind: ProviderKind::Edenai,
+                provider_connection: "edenai".to_string(),
+                base_url: DEFAULT_EDENAI_BASE_URL.to_string(),
+                model: DEFAULT_EDENAI_MODEL.to_string(),
+                api_key: Some("eden-key".to_string()),
+            })
+        );
+
+        let env = ProviderEnv {
+            openrouter_api_key: Some("sk-or-key".to_string()),
+            edenai_api_key: Some("eden-key".to_string()),
+            copilot_github_token: Some("ghu_token".to_string()),
+            ..Default::default()
+        };
+        let names: Vec<_> = ProviderRegistry::all_from_environment(&env)
+            .iter()
+            .map(|selection| selection.provider_connection().to_string())
+            .collect();
+        assert_eq!(names, ["openrouter", "edenai", "copilot"]);
+    }
+
+    #[test]
+    fn edenai_connection_requires_base_url_takes_env_key_and_builds() {
+        let mut provider_config = ProviderConnectionConfig {
+            provider: ProviderKind::Edenai,
+            api_base_url: None,
+            api_key: None,
+            favorite_models: Vec::new(),
+            allowed_models: None,
+        };
+        let engine_config = ProviderSelection::Mock.engine_config(Some("openai/gpt-latest"));
+        assert!(
+            ProviderRegistry::from_provider_config("eden", &provider_config, &engine_config)
+                .is_err()
+        );
+
+        provider_config.api_base_url = Some("https://api.edenai.run".to_string());
+        ProviderEnv::from_values(&HashMap::from([(
+            "EDENAI_API_KEY".to_string(),
+            "eden-key".to_string(),
+        )]))
+        .apply_missing_api_key_to_provider(&mut provider_config);
+        assert_eq!(provider_config.api_key.as_deref(), Some("eden-key"));
+        let selection =
+            ProviderRegistry::from_provider_config("eden", &provider_config, &engine_config)
+                .expect("resolves");
+        assert_eq!(selection.provider_connection(), "eden");
+        assert!(ProviderRegistry::build(selection).is_ok());
     }
 
     #[test]

@@ -13,159 +13,48 @@
 // limitations under the License.
 
 use super::*;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 #[test]
-fn parse_model_list_preserves_context_length() {
+fn default_catalog_reads_generic_model_metadata() {
     let body = serde_json::json!({
         "data": [
             {
                 "id": "openai/gpt-oss-120b",
-                "name": "OpenAI: GPT OSS 120B",
-                "context_length": 131072
+                "context_length": 131072,
+                "reasoning": {"supported_efforts": ["low"], "default_effort": "low"},
+                "architecture": {"input_modalities": ["image"]},
+                "supported_endpoints": ["/responses"]
             },
+            {"id": "plain"},
             {"name": "missing-id"}
         ]
     });
 
     assert_eq!(
-        parse_model_list(&body),
-        vec![crate::llm::ModelInfo {
-            id: "openai/gpt-oss-120b".to_string(),
-            context_length: Some(131072),
-            reasoning_efforts: None,
-            reasoning_default: None,
-            input_modalities: None,
-        }]
-    );
-}
-
-#[test]
-fn parse_model_list_orders_reasoning_efforts_weakest_to_strongest() {
-    let body = serde_json::json!({
-        "data": [{
-            "id": "provider/unordered",
-            "reasoning": { "supported_efforts": ["high", "none", "xhigh", "low"] }
-        }]
-    });
-
-    assert_eq!(
-        parse_model_list(&body)[0].reasoning_efforts,
-        Some(vec![
-            "none".to_string(),
-            "low".to_string(),
-            "high".to_string(),
-            "xhigh".to_string(),
-        ])
-    );
-}
-
-#[test]
-fn parse_model_list_reads_copilot_capability_reasoning_efforts() {
-    let body = serde_json::json!({
-        "data": [
-            {
-                "id": "gpt-6-sol",
-                "capabilities": {"supports": {"reasoning_effort": ["high", "none", "low"]}}
+        DefaultModelCatalog.parse(&body),
+        vec![
+            crate::llm::ModelInfo {
+                id: "openai/gpt-oss-120b".to_string(),
+                context_length: Some(131072),
+                reasoning_efforts: Some(vec!["low".to_string()]),
+                reasoning_default: Some("low".to_string()),
+                input_modalities: Some(vec![crate::llm::InputModality::Image]),
             },
-            {"id": "gpt-4o", "capabilities": {"supports": {"streaming": true}}}
-        ]
-    });
-
-    let models = parse_model_list(&body);
-
-    assert_eq!(
-        models[0].reasoning_efforts,
-        Some(vec![
-            "none".to_string(),
-            "low".to_string(),
-            "high".to_string()
-        ])
-    );
-    assert_eq!(models[1].reasoning_efforts, None);
-}
-
-#[test]
-fn parse_model_list_reads_copilot_capability_limits_and_vision() {
-    let body = serde_json::json!({
-        "data": [
-            {
-                "id": "with-prompt-limit",
-                "capabilities": {
-                    "limits": {
-                        "max_context_window_tokens": 200000,
-                        "max_prompt_tokens": 100000,
-                        "vision": {"supported_media_types": ["image/png", "application/pdf"]}
-                    },
-                    "supports": {"vision": true}
-                }
+            crate::llm::ModelInfo {
+                id: "plain".to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
             },
-            {
-                "id": "window-only",
-                "capabilities": {
-                    "limits": {"max_context_window_tokens": 64000},
-                    "supports": {"vision": true}
-                }
-            },
-            {"id": "text-only", "capabilities": {"supports": {"streaming": true}}},
-            {"id": "unknown"}
         ]
-    });
-
-    let models = parse_model_list(&body);
-
-    assert_eq!(models[0].context_length, Some(100000));
-    assert_eq!(
-        models[0].input_modalities,
-        Some(vec![InputModality::Image, InputModality::File])
     );
-    assert_eq!(models[1].context_length, Some(64000));
-    assert_eq!(models[1].input_modalities, Some(vec![InputModality::Image]));
-    assert_eq!(models[2].input_modalities, Some(vec![]));
-    assert_eq!(models[3].context_length, None);
-    assert_eq!(models[3].input_modalities, None);
-}
-
-#[test]
-fn parse_model_list_drops_models_without_a_chat_endpoint() {
-    let body = serde_json::json!({
-        "data": [
-            {"id": "chat", "supported_endpoints": ["/v1/messages", "/chat/completions"]},
-            {"id": "responses-only", "supported_endpoints": ["/responses", "ws:/responses"]},
-            {"id": "other-endpoint", "supported_endpoints": ["/v1/messages"]},
-            {"id": "embedding", "capabilities": {"type": "embeddings"}},
-            {"id": "typed-chat", "capabilities": {"type": "chat"}},
-            {"id": "no-metadata"}
-        ]
-    });
-
-    let ids: Vec<String> = parse_model_list(&body)
-        .into_iter()
-        .map(|model| model.id)
-        .collect();
-
-    assert_eq!(
-        ids,
-        vec!["chat", "responses-only", "typed-chat", "no-metadata"]
-    );
-}
-
-#[test]
-fn responses_only_models_are_those_listed_without_chat_completions() {
-    let known = ResponsesOnlyModels::default();
-    assert!(!known.is_loaded());
-
-    known.replace_from_catalog(&serde_json::json!({
-        "data": [
-            {"id": "chat", "supported_endpoints": ["/chat/completions", "/responses"]},
-            {"id": "responses-only", "supported_endpoints": ["/responses", "ws:/responses"]},
-            {"id": "no-metadata"}
-        ]
-    }));
-
-    assert!(known.is_loaded());
-    assert!(known.contains("responses-only"));
-    assert!(!known.contains("chat"));
-    assert!(!known.contains("no-metadata"));
+    assert!(DefaultModelCatalog.is_loaded());
+    assert!(!DefaultModelCatalog.uses_responses_api("openai/gpt-oss-120b"));
 }
 
 #[test]
@@ -180,107 +69,89 @@ fn reported_input_tokens_are_read_from_responses_completion_frames() {
     );
 }
 
-#[test]
-fn parse_model_list_extracts_reasoning_effort_scenarios() {
-    let body = serde_json::json!({
-        "data": [
-            {
-                "id": "provider/with-efforts",
-                "reasoning": {
-                    "supported_efforts": ["low", "high"]
-                }
-            },
-            {
-                "id": "provider/without-selector",
-                "reasoning": {}
-            },
-            {"id": "provider/without-reasoning"}
-        ]
-    });
+/// Marks every model as `/responses`-only once a listing was parsed.
+#[derive(Debug, Default)]
+struct StubCatalog {
+    loaded: AtomicBool,
+    parse_calls: AtomicUsize,
+}
 
-    let models = parse_model_list(&body);
-    assert_eq!(
-        models
-            .iter()
-            .map(|model| model.reasoning_efforts.clone())
-            .collect::<Vec<_>>(),
-        vec![
-            Some(vec!["low".to_string(), "high".to_string()]),
-            Some(Vec::new()),
-            None,
-        ]
-    );
+impl ModelCatalog for StubCatalog {
+    fn parse(&self, _body: &serde_json::Value) -> Vec<crate::llm::ModelInfo> {
+        self.parse_calls.fetch_add(1, Ordering::SeqCst);
+        self.loaded.store(true, Ordering::SeqCst);
+        Vec::new()
+    }
+
+    fn is_loaded(&self) -> bool {
+        self.loaded.load(Ordering::SeqCst)
+    }
+
+    fn uses_responses_api(&self, _model: &str) -> bool {
+        true
+    }
 }
 
 #[test]
-fn parse_model_list_extracts_the_provider_advertised_default_effort() {
-    let body = serde_json::json!({
-        "data": [
-            {
-                "id": "provider/with-default",
-                "reasoning": {
-                    "supported_efforts": ["low", "high"],
-                    "default_effort": "high"
-                }
-            },
-            {
-                "id": "provider/without-default",
-                "reasoning": {"supported_efforts": ["low"]}
-            },
-            {
-                "id": "provider/non-string-default",
-                "reasoning": {"default_effort": 3}
-            },
-            {
-                "id": "provider/empty-default",
-                "reasoning": {"default_effort": ""}
-            },
-            {"id": "provider/no-reasoning"}
-        ]
-    });
-
-    let models = parse_model_list(&body);
-    assert_eq!(
-        models
-            .iter()
-            .map(|model| model.reasoning_default.clone())
-            .collect::<Vec<_>>(),
-        vec![Some("high".to_string()), None, None, None, None,],
-        "only a non-empty string default_effort becomes a reasoning_default"
-    );
-    assert_eq!(
-        models[0].reasoning_efforts,
-        Some(vec!["low".to_string(), "high".to_string()]),
-        "supported_efforts parsing must be unchanged"
-    );
-}
-
-#[test]
-fn parse_model_list_extracts_supported_input_modalities_conservatively() {
-    let body = serde_json::json!({
-        "data": [
-            {
-                "id": "vision-and-files",
-                "architecture": {"input_modalities": ["text", "image", "file"]}
-            },
-            {
-                "id": "known-text-only",
-                "architecture": {"input_modalities": ["text", "audio"]}
-            },
-            {"id": "unknown"}
-        ]
-    });
-
-    let models = parse_model_list(&body);
-    assert_eq!(
-        models
-            .iter()
-            .map(|model| model.input_modalities.clone())
-            .collect::<Vec<_>>(),
-        vec![
-            Some(vec![InputModality::Image, InputModality::File]),
-            Some(vec![]),
+fn unloaded_catalog_is_listed_once_before_chat_and_selects_the_responses_endpoint() {
+    crate::test_support::run_locked(async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let mut request_lines = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut buffer = vec![0_u8; 16384];
+                let bytes_read = stream.read(&mut buffer).await.expect("read");
+                let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+                request_lines.push(request.lines().next().unwrap_or_default().to_string());
+                let (content_type, body) = if request.starts_with("GET /models") {
+                    ("application/json", "{\"data\":[]}")
+                } else {
+                    ("text/event-stream", "data: [DONE]\n\n")
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.expect("write");
+            }
+            request_lines
+        });
+        let catalog = Arc::new(StubCatalog::default());
+        let provider = OpenAiCompatibleProvider::new(
+            "stub".to_string(),
+            format!("http://{address}"),
+            "any-model".to_string(),
             None,
-        ]
-    );
+        )
+        .with_model_catalog(catalog.clone());
+
+        for _ in 0..2 {
+            let mut events = provider
+                .chat(Vec::new(), Vec::new(), CancellationToken::new())
+                .await
+                .expect("chat");
+            while let Some(event) = events.recv().await {
+                if matches!(event, StreamEvent::Done) {
+                    break;
+                }
+            }
+        }
+
+        let request_lines = server.await.expect("server");
+        assert!(
+            request_lines[0].starts_with("GET /models"),
+            "{request_lines:?}"
+        );
+        assert!(
+            request_lines[1].starts_with("POST /responses"),
+            "{request_lines:?}"
+        );
+        assert!(
+            request_lines[2].starts_with("POST /responses"),
+            "{request_lines:?}"
+        );
+        assert_eq!(catalog.parse_calls.load(Ordering::SeqCst), 1);
+    });
 }

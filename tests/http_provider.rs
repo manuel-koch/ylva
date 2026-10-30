@@ -22,8 +22,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use ylva::llm::ProviderRegistry;
 use ylva::{
-    AgentCommand, AgentLoop, AssistantStatus, Engine, EngineConfig, EngineImpl, InputModality,
-    Message, OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider, Provider,
+    AgentCommand, AgentLoop, AssistantStatus, EdenAiProvider, Engine, EngineConfig, EngineImpl,
+    InputModality, Message, OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider, Provider,
     ProviderConnectionConfig, ProviderModelOption, StreamEvent, ToolAttachment, ToolRegistry,
     ToolResult, UiUpdate, UserMessageKind, DEFAULT_SOUL, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
@@ -1293,11 +1293,19 @@ fn is_lingering_line(line: &str) -> bool {
     line.contains("ESTABLISHED") || line.contains("CLOSE_WAIT")
 }
 
+/// Header names OpenRouter sends for app attribution. Deliberate copies of the
+/// private constants in `src/llm/openrouter_provider.rs`, kept independent so a
+/// careless rename there fails these tests instead of silently passing.
 const OPENROUTER_ATTRIBUTION_HEADER_NAMES: [&str; 3] = [
     "http-referer",
     "x-openrouter-title",
     "x-openrouter-categories",
 ];
+
+/// Header name EdenAI uses for its usage tag. Deliberate copy of
+/// `USAGE_TAGS_HEADER` in `src/llm/edenai_provider.rs`, kept independent so a
+/// careless rename there fails these tests instead of silently passing.
+const EDENAI_TAGS_HEADER_NAME: &str = "x-edenai-tags";
 
 fn finite_chat_config() -> MockLlmConfig {
     MockLlmConfig {
@@ -1320,9 +1328,14 @@ fn captured_header_value(server: &MockLlmServer, header_name: &str) -> Vec<Optio
         .collect()
 }
 
+/// Asserts that a provider without app attribution (e.g. Ollama) sent none of
+/// the attribution headers used by other providers.
 fn assert_no_attribution_headers(server: &MockLlmServer) {
     assert!(!server.request_headers().is_empty());
-    for header_name in OPENROUTER_ATTRIBUTION_HEADER_NAMES {
+    for header_name in OPENROUTER_ATTRIBUTION_HEADER_NAMES
+        .iter()
+        .chain(&[EDENAI_TAGS_HEADER_NAME])
+    {
         assert!(
             captured_header_value(server, header_name)
                 .iter()
@@ -1423,4 +1436,87 @@ async fn non_openrouter_providers_send_no_attribution_headers() {
     );
     ollama.list_models().await.expect("model listing");
     assert_no_attribution_headers(&ollama_server);
+}
+
+#[tokio::test]
+async fn edenai_provider_lists_models_from_its_v3_catalog() {
+    let config = MockLlmConfig {
+        models: vec!["openai/gpt-latest".to_string()],
+        model_path: Some("/v3/models".to_string()),
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = EdenAiProvider::new(
+        "edenai".to_string(),
+        server.base_url(),
+        "openai/gpt-latest".to_string(),
+        None,
+    );
+
+    let models = provider.list_models().await.expect("EdenAI catalog");
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "openai/gpt-latest");
+}
+
+#[tokio::test]
+async fn edenai_provider_sends_usage_tags_on_chat_and_model_listing() {
+    let config = MockLlmConfig {
+        models: vec!["some/model".to_string()],
+        model_path: Some("/v3/models".to_string()),
+        ..finite_chat_config()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = EdenAiProvider::new(
+        "edenai".to_string(),
+        server.base_url(),
+        "some/model".to_string(),
+        Some("test-key".to_string()),
+    );
+
+    provider.list_models().await.expect("model listing");
+    let mut receiver = provider
+        .chat(Vec::new(), Vec::new(), CancellationToken::new())
+        .await
+        .expect("chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+
+    let expected_tags = format!("app=ylva,version={}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        captured_header_value(&server, EDENAI_TAGS_HEADER_NAME),
+        vec![Some(expected_tags); 2],
+        "tags must be sent on chat and model listing"
+    );
+    for header_name in OPENROUTER_ATTRIBUTION_HEADER_NAMES {
+        assert!(captured_header_value(&server, header_name)
+            .iter()
+            .all(Option::is_none));
+    }
+}
+
+#[tokio::test]
+async fn edenai_usage_tags_survive_runtime_config_cloning() {
+    let server = MockLlmServer::start(finite_chat_config())
+        .await
+        .expect("bind failed");
+    let provider = EdenAiProvider::new(
+        "edenai".to_string(),
+        server.base_url(),
+        "some/model".to_string(),
+        None,
+    );
+    let handle = provider.runtime_config_handle().expect("runtime config");
+    let cloned = provider
+        .with_runtime_config(handle)
+        .expect("runtime config clone");
+
+    let mut receiver = cloned
+        .chat(Vec::new(), Vec::new(), CancellationToken::new())
+        .await
+        .expect("chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+
+    assert!(captured_header_value(&server, EDENAI_TAGS_HEADER_NAME)[0]
+        .as_deref()
+        .is_some_and(|tags| tags.starts_with("app=ylva,")));
 }

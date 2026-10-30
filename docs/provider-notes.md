@@ -12,7 +12,7 @@ Keep these three things apart:
   streaming, tool calls, usage reporting), described in the sections below.
   Provider APIs can change; integrations are best-effort.
 - **Observed limitations:** known gaps, such as the unverified live behavior of
-  GitHub Copilot noted below.
+  Copilot noted below.
 - **Model quality:** not guaranteed or measured. Ylva designates no primary
   provider, claims no compatibility with "most" models, and keeps no results
   catalogue. The maintainer's experience is anecdotal: frontier models via
@@ -28,9 +28,10 @@ from a price table.
 | Provider | Tokens in final stream frame | Cost reported per request | Counted in the cost total |
 | --- | --- | --- | --- |
 | OpenRouter | yes | yes: `usage.cost`, in USD | yes |
-| GitHub Copilot | yes | yes: `usage.copilot_usage.total_nano_aiu`, in AI credits (`AIC`) | yes |
+| EdenAI | yes | yes: top-level `cost`, in USD | yes |
+| Copilot | yes | yes: `usage.copilot_usage.total_nano_aiu`, in AI credits (`AIC`) | yes |
 | Ollama (local) | yes | no | no |
-| Ollama Cloud | yes | no | no |
+| Ollama-Cloud | yes | no | no |
 | Plain OpenAI-compatible | yes | no (not part of the OpenAI Chat Completions protocol) | no |
 
 ### OpenRouter
@@ -53,7 +54,35 @@ from a price table.
   copy is ignored), pauses all requests of the connection for that delay,
   adds jitter and retries up to 6 times within about 90 s.
 
-### GitHub Copilot
+### EdenAI
+
+- Chat and model listing use EdenAI's OpenAI-compatible API at
+  `https://api.edenai.run/v3` (Ylva derives `/v3` from the configured origin).
+  `GET /v3/models` is public; the key is needed for chat.
+- The cost is the top-level `cost` of a response; with `include_usage` the
+  final usage frame of a stream carries it (`usage.cost` is accepted too). The
+  currency is USD. EdenAI bills the provider price plus a 5.5 % platform fee;
+  whether the reported `cost` already includes that fee is unverified, and
+  Ylva shows the reported value as-is. The parsers follow the public docs and
+  have not been checked against a live account.
+- EdenAI has no application-attribution feature. Every chat and model-listing
+  request carries the tag header `X-EdenAI-Tags: app=ylva,version=<version>`,
+  which only labels the user's own usage in their EdenAI dashboard and does
+  not advertise Ylva. It is always sent, contains no user data, and no other
+  provider sends it.
+- Chat requests carry the Ylva session id as the body field `session_id` (when known).
+  EdenAI uses it as the sticky-routing key so requests for unprefixed model
+  names stay on the provider holding the prompt cache; it is never forwarded to
+  the provider. Models addressed as `provider/model` are pinned already.
+- Model discovery keeps entries that output text and do not explicitly lack
+  function calling (alias entries such as the default `openai/gpt-latest` are
+  kept), and reads `context_length` and `capabilities.input_modalities`.
+  Reasoning efforts are never offered: `/v3/models` lists an empty
+  `capabilities.reasoning.supported_efforts` for every model and the docs
+  define no effort request shape, so Ylva sends no reasoning parameters.
+- The API allows 10 requests per second per account, shared across keys.
+
+### Copilot
 
 - Chat and model listing use the OpenAI-compatible API at the base URL the
   token exchange returns (fallback `https://api.githubcopilot.com`). Ylva
@@ -107,12 +136,12 @@ from a price table.
   service by the implementer; a captured Responses stream carries the cost as
   a top-level `copilot_usage` on the `response.completed` event.
 
-### Ollama and Ollama Cloud
+### Ollama and Ollama-Cloud
 
 - Chat responses carry token counts only (`prompt_tokens`, `completion_tokens`,
   `prompt_tokens_details.cached_tokens`) and, on the native API, durations. No
   request option enables a cost field.
-- Ollama Cloud prices usage in USD per model and token class (input, cached
+- Ollama-Cloud prices usage in USD per model and token class (input, cached
   input, output per million tokens; some models have off-peak rates). The
   rates are published as an HTML table on <https://ollama.com/pricing>, not as
   an API.

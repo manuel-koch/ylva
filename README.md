@@ -41,27 +41,29 @@ ylva
 ```
 
 A model provider must be configured before a conversation can start; without
-one, Ylva exits with setup guidance (exit code 2). Configure Ollama, OpenRouter
-or GitHub Copilot using
-the
+one, Ylva exits with setup guidance (exit code 2). Configure EdenAI,
+Copilot, Ollama or OpenRouter using the
 [provider environment variables](docs/cli-options.md#environment-variables)
 or [profile configuration](docs/configuration.md#profile-file).
 To add a provider interactively instead, run `ylva connect <provider> [--name <name>]`
-(use provider `ollama`, `openrouter` or `copilot`); see
+(use provider `copilot`, `edenai`, `ollama` or `openrouter`); see
 [connect commands](docs/cli-options.md#connect-commands).
 Help, version, and the `profile`, `connect`, `init` and `session` commands work
 without a provider.
 
-Provider setup: [Ollama](https://ollama.com/) (local or cloud) via
-`ylva connect ollama`, or [OpenRouter](https://openrouter.ai/) via
-`ylva connect openrouter`.
+Provider setup:
+
+- [Copilot](https://github.com/features/copilot) via `ylva connect copilot`
+- [EdenAI](https://www.edenai.co/) via `ylva connect edenai`
+- [Ollama](https://ollama.com/) (local or cloud) via `ylva connect ollama`
+- [OpenRouter](https://openrouter.ai/) via `ylva connect openrouter`
 
 > [!WARNING]
-> The GitHub Copilot integration is unofficial. It relies on an undocumented
+> The Copilot integration is unofficial. It relies on an undocumented
 > API and impersonates the VS Code Copilot Chat client (client id and editor
 > headers). It may break without notice and may conflict with GitHub's terms;
 > GitHub can suspend Copilot access for abuse or excessive requests. Use it at
-> your own risk; see [provider notes](docs/provider-notes.md#github-copilot).
+> your own risk; see [provider notes](docs/provider-notes.md#copilot).
 
 ## Safety and data
 
@@ -74,11 +76,12 @@ Provider setup: [Ollama](https://ollama.com/) (local or cloud) via
 - **Auto-approval removes the human check.** `--auto-approve-*` flags and
   catch-all approval rules let the model act without asking. Use them only in
   disposable or otherwise trusted environments.
-- **Provider data sharing.** With a hosted provider (OpenRouter, Ollama Cloud,
-  Copilot), prompts, file contents read by tools, tool output, and web results
+- **Provider data sharing.** With a hosted provider (Copilot, EdenAI, Ollama-Cloud,
+  OpenRouter), prompts, file contents read by tools, tool output, and web results
   are sent to that provider. Only a local Ollama server keeps them on your
   machine. OpenRouter requests also carry attribution headers that identify
-  Ylva as the calling application.
+  Ylva as the calling application, and EdenAI requests carry a usage tag
+  with the application name and version only (no user data).
 - **Local transcripts.** Sessions are stored unencrypted under `~/.ylva/chats`
   (workspace-scoped profiles may use `<workspace>/.ylva/chats`) and may contain
   secrets that appeared in a conversation; see
@@ -121,10 +124,11 @@ Ylva is highly customizable to adapt to user needs.
       files folded into the system prompt
 - [x] Local Agent Skills with per-agent catalogs
 - [x] Multiple LLM providers built-in
+  - [ ] Anthropic
+  - [x] Copilot
+  - [x] EdenAI
   - [x] Ollama
   - [x] Openrouter
-  - [x] Copilot
-  - [ ] Anthropic
 - [x] Configurable `engines` ( combination of provider + model + config )
 - [x] Tracking billed token usage and cost totals
 - [x] Session / context compaction
