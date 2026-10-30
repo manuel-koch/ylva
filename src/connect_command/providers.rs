@@ -115,6 +115,15 @@ impl EndpointConnect {
         }
     }
 
+    pub(super) fn edenai() -> Self {
+        Self {
+            kind: "edenai",
+            secret_variable_prefix: "EDENAI_API_KEY",
+            default_base_url: crate::llm::provider_registry::DEFAULT_EDENAI_BASE_URL,
+            secret_is_optional: false,
+        }
+    }
+
     fn prompt_endpoint(&self, io: &mut ConnectIo<'_>) -> anyhow::Result<(String, Option<String>)> {
         let default_base_url = self.default_base_url;
         let answer = io
@@ -266,6 +275,31 @@ mod tests {
 
         let (connection, _) =
             connect_endpoint(&EndpointConnect::openrouter(), "openrouter", &["", ""]);
+        assert!(connection.is_err());
+    }
+
+    #[test]
+    fn edenai_prompt_uses_the_default_url_requires_a_key_and_names_the_variable() {
+        let (connection, prompter) =
+            connect_endpoint(&EndpointConnect::edenai(), "edenai", &["", "eden-1"]);
+        let connection = connection.expect("edenai");
+        assert_eq!(
+            connection.settings["api_base_url"].as_str(),
+            Some("https://api.edenai.run")
+        );
+        assert_eq!(
+            connection.env_entries,
+            vec![("EDENAI_API_KEY".to_string(), "eden-1".to_string())]
+        );
+        assert!(prompter.questions[0].contains("https://api.edenai.run"));
+
+        let (connection, _) = connect_endpoint(&EndpointConnect::edenai(), "team", &["", "eden-2"]);
+        assert_eq!(
+            connection.expect("named").env_entries,
+            vec![("EDENAI_API_KEY_TEAM".to_string(), "eden-2".to_string())]
+        );
+
+        let (connection, _) = connect_endpoint(&EndpointConnect::edenai(), "edenai", &["", ""]);
         assert!(connection.is_err());
     }
 

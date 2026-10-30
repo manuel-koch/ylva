@@ -22,6 +22,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 pub mod copilot_provider;
+pub mod edenai_provider;
 pub mod engine;
 pub mod mock_provider;
 pub mod ollama_provider;
@@ -56,6 +57,7 @@ pub(crate) fn provider_request_limiter(
 }
 
 pub use copilot_provider::CopilotProvider;
+pub use edenai_provider::EdenAiProvider;
 pub use engine::{
     CompactionEngineDisplayInfo, Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter,
     EngineRuntimeConfig, EngineRuntimeConfigHandle, ModelSelectionTarget, ProviderModelOption,
@@ -176,6 +178,55 @@ fn reasoning_effort_rank(effort: &str) -> usize {
 pub enum InputModality {
     Image,
     File,
+}
+
+/// Map a JSON array of provider modality names to [`InputModality`] values.
+/// Names other than `image` and `file` are ignored; `None` when `values` is
+/// not an array.
+pub(crate) fn parse_input_modality_names(values: &serde_json::Value) -> Option<Vec<InputModality>> {
+    Some(
+        values
+            .as_array()?
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|modality| match modality {
+                "image" => Some(InputModality::Image),
+                "file" => Some(InputModality::File),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// Read the selectable efforts and the advertised default from a
+/// `{supported_efforts, default_effort}` reasoning object, the shape shared by
+/// OpenRouter and EdenAI. `None` for the efforts means no reasoning object;
+/// an object without usable efforts yields `Some([])`. A default is kept only
+/// as a non-empty string.
+pub(crate) fn parse_reasoning_object(
+    reasoning: Option<&serde_json::Value>,
+) -> (Option<Vec<String>>, Option<String>) {
+    let Some(reasoning) = reasoning.filter(|reasoning| reasoning.is_object()) else {
+        return (None, None);
+    };
+    let efforts = reasoning
+        .get("supported_efforts")
+        .and_then(serde_json::Value::as_array)
+        .map(|efforts| {
+            efforts
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|effort| !effort.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let default_effort = reasoning
+        .get("default_effort")
+        .and_then(serde_json::Value::as_str)
+        .filter(|effort| !effort.is_empty())
+        .map(String::from);
+    (Some(order_reasoning_efforts(efforts)), default_effort)
 }
 
 /// Render the active reasoning effort for a `tracing` field.

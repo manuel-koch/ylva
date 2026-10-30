@@ -997,6 +997,32 @@ fn load_with_environment(
 }
 
 #[test]
+fn provider_connection_accepts_edenai_and_rejects_unknown_kinds() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_profile_config(
+        temp.path(),
+        "eden",
+        r#"
+[provider_connections.gateway]
+provider = "edenai"
+api_base_url = "https://api.edenai.run"
+"#,
+    );
+    let profile = load_with_environment(temp.path(), "eden", &HashMap::new()).expect("loads");
+    assert_eq!(
+        profile.provider_connections["gateway"].provider,
+        crate::config::ProviderKind::Edenai
+    );
+
+    write_profile_config(
+        temp.path(),
+        "unknown",
+        "[provider_connections.gateway]\nprovider = \"nonexistent\"\n",
+    );
+    assert!(load_with_environment(temp.path(), "unknown", &HashMap::new()).is_err());
+}
+
+#[test]
 fn provider_connection_favorites_and_allowed_models_load_in_order() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_profile_config(

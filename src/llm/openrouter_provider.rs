@@ -20,7 +20,8 @@ use crate::agent::{Message, StreamEvent};
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle};
 use crate::llm::{ModelInfo, Provider, RequestCost, ToolSchema};
 
-use super::OpenAiCompatibleProvider;
+use super::openai_compatible_provider::{model_list_entries, ModelCatalog};
+use super::{parse_input_modality_names, parse_reasoning_object, OpenAiCompatibleProvider};
 
 // OpenRouter app attribution (https://openrouter.ai/docs/app-attribution).
 // Header names are lowercase because `HeaderName::from_static` requires it.
@@ -41,6 +42,35 @@ fn parse_reported_cost(data: &str) -> Option<RequestCost> {
         .and_then(serde_json::Value::as_f64)
         .filter(|amount| amount.is_finite() && *amount >= 0.0)?;
     Some(RequestCost::new(amount, "USD"))
+}
+
+/// Reads OpenRouter's `/models` shape: `context_length`,
+/// `architecture.input_modalities` and `reasoning`.
+#[derive(Debug, Default)]
+struct OpenRouterModelCatalog;
+
+impl ModelCatalog for OpenRouterModelCatalog {
+    fn parse(&self, body: &serde_json::Value) -> Vec<ModelInfo> {
+        model_list_entries(body)
+            .filter_map(|entry| {
+                let id = entry.get("id")?.as_str()?;
+                let (reasoning_efforts, reasoning_default) =
+                    parse_reasoning_object(entry.get("reasoning"));
+                Some(ModelInfo {
+                    id: id.to_string(),
+                    context_length: entry
+                        .get("context_length")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|length| length as usize),
+                    reasoning_efforts,
+                    reasoning_default,
+                    input_modalities: entry
+                        .pointer("/architecture/input_modalities")
+                        .and_then(parse_input_modality_names),
+                })
+            })
+            .collect()
+    }
 }
 
 /// OpenRouter provider.
@@ -69,6 +99,7 @@ impl OpenRouterProvider {
                 super::openai_compatible_provider::redact_chat_completion_request_body,
             )
             .with_provider_kind("openrouter")
+            .with_model_catalog(std::sync::Arc::new(OpenRouterModelCatalog))
             .with_usage_cost_parser(parse_reported_cost)
             .with_extra_headers(vec![
                 (APP_ATTRIBUTION_REFERER_HEADER, APP_ATTRIBUTION_REFERER),
@@ -193,6 +224,92 @@ mod tests {
         assert_eq!(
             APP_ATTRIBUTION_REFERER,
             "https://github.com/manuel-koch/ylva"
+        );
+    }
+
+    fn parse_models(body: serde_json::Value) -> Vec<ModelInfo> {
+        OpenRouterModelCatalog.parse(&body)
+    }
+
+    #[test]
+    fn model_list_preserves_context_length_and_drops_entries_without_id() {
+        let models = parse_models(serde_json::json!({
+            "data": [
+                {"id": "openai/gpt-oss-120b", "name": "x", "context_length": 131072},
+                {"name": "missing-id"}
+            ]
+        }));
+        assert_eq!(
+            models,
+            vec![ModelInfo {
+                id: "openai/gpt-oss-120b".to_string(),
+                context_length: Some(131072),
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn model_list_reads_ordered_efforts_and_conservative_defaults() {
+        let models = parse_models(serde_json::json!({
+            "data": [
+                {"id": "unordered", "reasoning": {
+                    "supported_efforts": ["high", "none", "xhigh", "low"],
+                    "default_effort": "high"}},
+                {"id": "no-selector", "reasoning": {}},
+                {"id": "bad-default", "reasoning": {"default_effort": 3}},
+                {"id": "empty-default", "reasoning": {"default_effort": ""}},
+                {"id": "no-reasoning"}
+            ]
+        }));
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.reasoning_efforts.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(["none", "low", "high", "xhigh"].map(String::from).to_vec()),
+                Some(Vec::new()),
+                Some(Vec::new()),
+                Some(Vec::new()),
+                None,
+            ]
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.reasoning_default.clone())
+                .collect::<Vec<_>>(),
+            vec![Some("high".to_string()), None, None, None, None]
+        );
+    }
+
+    #[test]
+    fn model_list_reads_input_modalities_conservatively() {
+        let models = parse_models(serde_json::json!({
+            "data": [
+                {"id": "vision-and-files",
+                 "architecture": {"input_modalities": ["text", "image", "file"]}},
+                {"id": "known-text-only",
+                 "architecture": {"input_modalities": ["text", "audio"]}},
+                {"id": "unknown"}
+            ]
+        }));
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.input_modalities.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(vec![
+                    crate::llm::InputModality::Image,
+                    crate::llm::InputModality::File
+                ]),
+                Some(vec![]),
+                None,
+            ]
         );
     }
 

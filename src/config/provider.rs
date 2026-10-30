@@ -22,6 +22,7 @@ pub enum ProviderKind {
     Mock,
     Ollama,
     Openrouter,
+    Edenai,
     Copilot,
 }
 
@@ -31,6 +32,7 @@ impl ProviderKind {
             Self::Mock => "mock",
             Self::Ollama => "ollama",
             Self::Openrouter => "openrouter",
+            Self::Edenai => "edenai",
             Self::Copilot => "copilot",
         }
     }
@@ -48,7 +50,8 @@ pub struct ProviderConnectionConfig {
     pub provider: ProviderKind,
     /// Provider base URL. Ollama uses the server origin and derives its
     /// OpenAI-compatible `/v1` and native `/api` paths; OpenRouter uses its
-    /// origin and derives the OpenAI-compatible `/api/v1` path. GitHub Copilot
+    /// origin and derives the OpenAI-compatible `/api/v1` path; EdenAI uses its
+    /// origin and derives `/v3`. Copilot
     /// needs none: its API base is derived from the session token exchange.
     #[serde(default)]
     pub api_base_url: Option<String>,

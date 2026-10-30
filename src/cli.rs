@@ -223,7 +223,7 @@ pub enum CliCommand {
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum ConnectCommand {
-    /// Log in to GitHub Copilot with the device flow and add a `copilot` connection to the profile
+    /// Log in to Copilot with the device flow and add a `copilot` connection to the profile
     Copilot {
         /// Connection name (default `copilot`; other names store the token as COPILOT_GITHUB_TOKEN_<NAME>)
         #[arg(long, value_name = "name", value_parser = parse_profile_name)]
@@ -250,6 +250,18 @@ pub enum ConnectCommand {
     /// Ask for an OpenRouter URL and API key and add an `openrouter` connection to the profile
     Openrouter {
         /// Connection name (default `openrouter`; other names store the key as OPENROUTER_API_KEY_<NAME>)
+        #[arg(long, value_name = "name", value_parser = parse_profile_name)]
+        name: Option<String>,
+        /// Use the profile in the current workspace instead of the Ylva home's
+        #[arg(long)]
+        workspace: bool,
+        /// Replace an existing connection of that name and overwrite its `.env` variables
+        #[arg(long)]
+        force: bool,
+    },
+    /// Ask for an EdenAI URL and API key and add an `edenai` connection to the profile
+    Edenai {
+        /// Connection name (default `edenai`; other names store the key as EDENAI_API_KEY_<NAME>)
         #[arg(long, value_name = "name", value_parser = parse_profile_name)]
         name: Option<String>,
         /// Use the profile in the current workspace instead of the Ylva home's
@@ -971,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_ollama_and_openrouter_parse_an_optional_name() {
+    fn connect_ollama_openrouter_and_edenai_parse_an_optional_name() {
         let cli = parse(["connect", "ollama"]).expect("parses");
         assert_eq!(
             cli.command,
@@ -992,6 +1004,17 @@ mod tests {
                     name: Some("paid".to_string()),
                     workspace: true,
                     force: false
+                }
+            })
+        );
+        let cli = parse(["connect", "edenai", "--name", "team", "--force"]).expect("parses");
+        assert_eq!(
+            cli.command,
+            Some(CliCommand::Connect {
+                command: ConnectCommand::Edenai {
+                    name: Some("team".to_string()),
+                    workspace: false,
+                    force: true
                 }
             })
         );

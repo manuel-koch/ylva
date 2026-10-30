@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! GitHub Copilot credentials: validation of the long-lived GitHub token and
+//! Copilot credentials: validation of the long-lived GitHub token and
 //! lazy exchange/caching of the short-lived Copilot session token.
 
 use std::time::{Duration, Instant};

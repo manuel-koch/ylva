@@ -23,6 +23,7 @@ use crate::agent::{Message, StreamEvent};
 use crate::llm::copilot_provider::auth::{
     copilot_request_headers, CopilotAuth, COPILOT_MIN_REQUEST_INTERVAL,
 };
+use crate::llm::copilot_provider::catalog::CopilotModelCatalog;
 use crate::llm::copilot_provider::github_protocol::{
     COPILOT_FALLBACK_API_BASE, COPILOT_TOKEN_EXCHANGE_URL,
 };
@@ -56,7 +57,7 @@ fn parse_reported_cost(data: &str) -> Option<RequestCost> {
     ))
 }
 
-/// GitHub Copilot provider.
+/// Copilot provider.
 ///
 /// Wraps the shared OpenAI-compatible transport. The base URL and bearer
 /// token are resolved per request from a [`CopilotAuth`], which exchanges the
@@ -101,7 +102,7 @@ impl CopilotProvider {
             super::openai_compatible_provider::redact_chat_completion_request_body,
         )
         .with_provider_kind("copilot")
-        .with_responses_only_models()
+        .with_model_catalog(Arc::new(CopilotModelCatalog::default()))
         .with_usage_cost_parser(parse_reported_cost);
         let auth = CopilotAuth::with_urls(
             github_token,
@@ -220,6 +221,7 @@ impl Provider for CopilotProvider {
 }
 
 pub mod auth;
+mod catalog;
 pub mod device_flow;
 pub mod github_protocol;
 

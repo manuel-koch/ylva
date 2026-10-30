@@ -784,6 +784,9 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             }
         }
         DomainEvent::AgentIdle => {
+            // The agent drops its queued steers on stop; mirror that here.
+            state.commit_queued_steer_messages(UserMessageState::Cancelled);
+            state.steer_indicator = false;
             state.mode = TuiMode::Idle;
             state.focus = Focus::MainInput;
             if std::mem::replace(&mut state.aborting_exit, false) {

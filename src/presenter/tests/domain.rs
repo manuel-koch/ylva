@@ -1184,3 +1184,25 @@ fn subagent_done_records_outcome_and_freezes_elapsed_duration() {
         assert!(conversation.finished_at.is_some(), "{status}");
     }
 }
+
+#[test]
+fn domain_agent_idle_while_aborting_cancels_queued_steers() {
+    let mut state = AppState::new();
+    state.mode = TuiMode::Aborting;
+    state.queue_steer_message("steer me".to_string());
+    state.steer_indicator = true;
+
+    update(
+        &mut state,
+        TuiEvent::Domain(DomainEvent::AgentIdle),
+        &empty_textarea(),
+    );
+
+    assert_eq!(state.mode, TuiMode::Idle);
+    assert!(state.queued_steer_texts.is_empty());
+    assert!(!state.steer_indicator);
+    assert!(state.chat_entries.iter().any(|entry| matches!(
+        entry,
+        ChatEntry::UserMessage { text, state: UserMessageState::Cancelled } if text == "steer me"
+    )));
+}

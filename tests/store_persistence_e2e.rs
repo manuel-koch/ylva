@@ -1123,7 +1123,7 @@ fn persistence_e2e_ollama_local() {
 }
 
 #[test]
-#[ignore = "requires Ollama Cloud credentials (see tests/e2e/ollama-cloud/.envrc)"]
+#[ignore = "requires Ollama-Cloud credentials (see tests/e2e/ollama-cloud/.envrc)"]
 fn persistence_e2e_ollama_cloud() {
     run_live_provider_variant(
         "persistence_e2e_ollama_cloud",

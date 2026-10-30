@@ -325,8 +325,10 @@ fn conversation_without_provider_is_a_usage_error_with_setup_guidance() {
         Some(i32::from(u8::from(ExitCode::UsageError))),
         "stdout: {stdout}\nstderr: {stderr}"
     );
-    assert!(stderr.contains("ylva connect ollama"), "{stderr}");
-    assert!(stderr.contains("ylva connect openrouter"), "{stderr}");
+    assert!(stderr.contains("ylva connect <provider>"), "{stderr}");
+    for provider in ["copilot", "edenai", "ollama", "openrouter"] {
+        assert!(stderr.contains(provider), "{provider}: {stderr}");
+    }
     assert!(!stdout.contains("mock response"), "{stdout}");
 }
 

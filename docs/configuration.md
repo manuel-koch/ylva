@@ -223,8 +223,7 @@ over values from either profile environment file.
     backend then comes from the environment variables in
     `docs/cli-options.md`, so Ylva runs without writing a config file. With
     neither engines nor environment providers, an ordinary conversation fails
-    at startup with setup guidance (`ylva connect ollama`,
-    `ylva connect openrouter`); there is no mock fallback.
+    at startup with setup guidance (`ylva connect <provider>`); there is no mock fallback.
 - An **unreadable or malformed** file is always a hard error (a startup error,
   see [exit codes](./cli-options.md#exit-codes)) naming the file and the parse
   problem, explicit or implicit; a config the user did write is never silently
@@ -270,6 +269,11 @@ provider = "openrouter"
 api_base_url = "https://openrouter.ai"
 api_key = "${OPENROUTER_API_KEY}"
 
+[provider_connections.edenai]
+provider = "edenai"
+api_base_url = "https://api.edenai.run"
+api_key = "${EDENAI_API_KEY}"
+
 [engines."ollama/local"]
 provider_connection = "ollama-local"
 model = "gemma4:e4b-mlx"
@@ -303,7 +307,7 @@ engine = "ollama/local"
 | `max_concurrent_subagents` | integer or integer string | Profile-level cap on simultaneously running subagents across the delegation tree. Defaults to `4`; values `<= 0` mean unlimited. `--max-concurrent-subagents <N>` overrides this for one run. The cap limits subagent runs, not the root request. Provider request concurrency is separately limited per connection (4 open requests, held for the whole streamed response, shared by root, subagents, title generation and compaction); excess agents wait for a free permit. |
 | `[tui]` | table | TUI presentation settings — see [TUI configuration](#tui-configuration) below. |
 | `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
-| `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind (`mock`, `ollama`, `openrouter` or `copilot`; any other value fails at load); its endpoint and credentials belong to this connection. |
+| `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind (`copilot`, `edenai`, `mock`, `ollama` or `openrouter`; any other value fails at load); its endpoint and credentials belong to this connection. |
 | `[engines.<name>]` | table | A named engine — see [Engine configuration](#engine-configuration) below. |
 | `[agents.<type>]` | table | Per-agent-type settings — see [Per-agent configuration](#per-agent-configuration) below. |
 
@@ -448,14 +452,14 @@ serializing the resolved configuration:
   Only the favorite list changes: the active model, engine settings and other
   profile values are not reloaded.
 
-### GitHub Copilot connection
+### Copilot connection
 
 `ylva connect copilot` creates this table and stores the token for you (see
 [CLI options — connect commands](./cli-options.md#connect-commands)). The
 token must be a GitHub OAuth device-flow token (`ghu_…`); personal access
 tokens (`github_pat_…`, `ghp_…`) are rejected. Setting `COPILOT_GITHUB_TOKEN`
 alone auto-detects a `copilot` connection without any config. See
-[provider notes — GitHub Copilot](./provider-notes.md#github-copilot) for
+[provider notes — Copilot](./provider-notes.md#copilot) for
 risks and limits.
 
 ### Managing profiles and shims
@@ -720,7 +724,7 @@ rebuilding the provider.
 
 | Field | Type | Description |
 |---|---|---|
-| `provider_connection` | string | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"mock"`, `"ollama"`, `"openrouter"`, or `"copilot"`. `copilot` needs no `api_base_url`: its API base comes from the session-token exchange, and `api_key` holds the long-lived GitHub OAuth token (see [GitHub Copilot connection](#github-copilot-connection)). Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
+| `provider_connection` | string | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"copilot"`, `"edenai"`, `"mock"`, `"ollama"`, or `"openrouter"`. `copilot` needs no `api_base_url`: its API base comes from the session-token exchange, and `api_key` holds the long-lived GitHub OAuth token (see [Copilot connection](#copilot-connection)). Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
 | `model` | string | Model identifier passed to the provider. May be omitted, in which case the profile's `default_model` fills it in. |
 | `temperature` | number (optional) | Sampling temperature. Omit to use the model's own default. |
 | `context_length` | number or string (optional) | Maximum token context window for this engine's configured model. Omitted means the profile doesn't limit it explicitly. Accepts a plain integer or a decimal string with a case-insensitive `K`/`M` suffix (e.g. `"128K"` = 128,000 tokens, `"1.2M"` = 1,200,000 tokens). Bare integer strings are also accepted. Fractional suffixed values must resolve to whole tokens without rounding; overflow and byte-unit suffixes (`kb`, `mb`, `KiB`, etc.) are rejected. Configuration and display both use decimal token units. For the configured model, this value takes precedence over the provider catalog. Switching to another model uses that model's catalog window, then the built-in default of `128 000`, without retaining the configured override or the previous model's window. Selecting the configured model again reapplies its override. Compaction budgeting uses the resolved window. |

@@ -1,4 +1,4 @@
-# Eden AI provider (`edenai`) with `ylva connect edenai`, model discovery and cost tracking
+# EdenAI provider (`edenai`) with `ylva connect edenai`, model discovery and cost tracking
 
 ## Context
 
@@ -8,17 +8,17 @@ Ylva is a Rust TUI/CLI agent harness. Providers are selected through named
 `copilot`. Ollama and OpenRouter are thin wrappers around the shared
 `OpenAiCompatibleProvider` transport.
 
-Goal: add provider kind `edenai` for [Eden AI](https://www.edenai.co/), a hosted
+Goal: add provider kind `edenai` for [EdenAI](https://www.edenai.co/), a hosted
 AI gateway with an OpenAI-compatible LLM API (`POST /v3/chat/completions`,
 `GET /v3/models`, base `https://api.edenai.run`). Scope:
 
 - the provider implementation (chat, streaming, tools, model discovery);
 - onboarding through `ylva connect edenai`;
 - cost tracking per request through the existing run-scoped `CostLedger`
-  (Eden AI reports `cost` in USD);
+  (EdenAI reports `cost` in USD);
 - Ylva attribution on requests, in addition to the `User-Agent` header that
   `src/http.rs` already sends on every outbound request, like OpenRouter's
-  app-attribution headers — if Eden AI offers a mechanism for it.
+  app-attribution headers — if EdenAI offers a mechanism for it.
 
 Acceptance criteria:
 
@@ -26,8 +26,8 @@ Acceptance criteria:
   fails at load.
 - `ylva connect edenai [--name N] [--workspace] [--force]` writes the connection
   and stores the API key in `.env` as `EDENAI_API_KEY` (or `EDENAI_API_KEY_<NAME>`).
-- `/models` lists Eden AI chat-capable models with context length and input
-  modalities; reasoning efforts are shown only where Eden AI advertises them.
+- `/models` lists EdenAI chat-capable models with context length and input
+  modalities; reasoning efforts are shown only where EdenAI advertises them.
 - Streaming and non-streaming chat with tool calls work through the shared
   transport; the final usage frame's `cost` is added to the process `CostLedger`
   in `USD` (footer total and exit `Costs:` line).
@@ -43,7 +43,7 @@ Constraints:
 - Follow the AGENTS rules: full descriptive names, Apache-2.0 header on every
   new source file, file-per-module layout (no `mod.rs`), thin `main.rs`,
   anything tests in `tests/` need is re-exported via `src/lib.rs`.
-- Eden AI facts below are from public docs (researched 2026-10-30), not tested
+- EdenAI facts below are from public docs (researched 2026-10-30), not tested
   against a live account. Verify streaming cost shape and reasoning parameters
   with one live call before finalizing the parsers.
 - No file edits beyond this plan until the user consents to implementation.
@@ -54,28 +54,28 @@ An implementing agent must flip `[ ]` to `[x]` immediately after completing
 each step and rewrite this file in place, so progress is resumable across
 sessions. Work test-first (TDD); each step bundles its tests.
 
-1. [ ] Check the change against `docs/architecture-design-records/` (ADR 0003
+1. [x] Check the change against `docs/architecture-design-records/` (ADR 0003
    trust-by-content-hash covers `.env`/`config.toml` of workspace profiles; the
    connect flow must keep honoring it with `--workspace`). Record a new ADR only
    if the design deviates.
-2. [ ] Add `Edenai` to `ProviderKind` in `src/config/provider.rs`
+2. [x] Add `Edenai` to `ProviderKind` in `src/config/provider.rs`
    (`as_str()` → `"edenai"`; serde lowercase gives `edenai`). Update the
-   `api_base_url` doc comment (Eden AI: origin, `/v3` derived). Add a loading
+   `api_base_url` doc comment (EdenAI: origin, `/v3` derived). Add a loading
    test next to the existing ones in `src/config/profile/tests/loading.rs`.
-3. [ ] Add `DEFAULT_EDENAI_BASE_URL = "https://api.edenai.run"` and
+3. [x] Add `DEFAULT_EDENAI_BASE_URL = "https://api.edenai.run"` and
    `DEFAULT_EDENAI_MODEL = "openai/gpt-latest"` to
    `src/llm/provider_registry.rs`. Extend `ProviderEnv` with
-   `edenai_base_url`, `edenai_model`, `edenai_api_key` (Eden AI is requested
+   `edenai_base_url`, `edenai_model`, `edenai_api_key` (EdenAI is requested
    when any of `EDENAI_BASE_URL`, `EDENAI_MODEL`, `EDENAI_API_KEY` is non-empty,
    like OpenRouter), the API-key lookup
    helpers at lines ~88/109, `all_from_environment` (order: Ollama, OpenRouter,
-   Eden AI, Copilot — update its doc comments), `from_engine_config`
+   EdenAI, Copilot — update its doc comments), `from_engine_config`
    (`"edenai"` arm) and `from_provider_config` (`ProviderKind::Edenai` joins the
    Ollama/OpenRouter arm), and `build` (construct `EdenAiProvider`). Add unit
    tests beside the existing OpenRouter ones in that file. Update the
-   documented auto-detection precedence (Ollama > OpenRouter > Eden AI >
+   documented auto-detection precedence (Ollama > OpenRouter > EdenAI >
    Copilot) in code comments and any tests asserting the default-provider order.
-4. [ ] Refactor model-catalog handling out of the shared transport
+4. [x] Refactor model-catalog handling out of the shared transport
    (behavior-preserving, do first; existing tests must keep passing). Today
    `parse_model_list`/`parse_context_length`/`parse_reasoning_efforts`/
    `parse_reasoning_default`/`parse_input_modalities`/
@@ -118,7 +118,7 @@ sessions. Work test-first (TDD); each step bundles its tests.
      the Responses request body).
    - Update `docs/implementation-notes.md` where it describes model discovery and
      the Responses routing.
-5. [ ] Create `src/llm/edenai_provider.rs` modeled on
+5. [x] Create `src/llm/edenai_provider.rs` modeled on
    `src/llm/openrouter_provider.rs`:
    - `EdenAiProvider::new(name, base_url, model, api_key)` derives
      `{base_url}/v3` and builds `OpenAiCompatibleProvider` with
@@ -126,14 +126,14 @@ sessions. Work test-first (TDD); each step bundles its tests.
      and the attribution tag header (see step 7).
    - `parse_reported_cost` reads top-level `/cost` (USD), also accepting
      `/usage/cost` defensively; rejects negative/non-finite values.
-   - Request-body customizer: pass reasoning parameters only in the shape Eden AI
+   - Request-body customizer: pass reasoning parameters only in the shape EdenAI
      documents (see Implementation Hints); otherwise leave the body untouched.
    - Delegate all `Provider` methods to `inner` exactly like OpenRouter
      (including `with_runtime_config`, `chat_with_session_id_and_diagnostics`).
    - Register in `src/llm.rs` (`pub mod edenai_provider;`,
      `pub use edenai_provider::EdenAiProvider;`).
    - Unit tests: cost parsing, attribution constant values.
-6. [ ] Eden AI model discovery: implement `EdenAiModelCatalog` (the step 4 trait)
+6. [x] EdenAI model discovery: implement `EdenAiModelCatalog` (the step 4 trait)
    in `src/llm/edenai_provider.rs` and register it with `with_model_catalog`.
    Read `context_length`, `capabilities.input_modalities` (`image`/`file` map to
    `InputModality`; others ignored); skip entries whose
@@ -142,46 +142,45 @@ sessions. Work test-first (TDD); each step bundles its tests.
    entries (user decision; the default `openai/gpt-latest` is one); map
    `capabilities.reasoning` (`supported_efforts`, `default_effort`) into
    `reasoning_efforts` / `reasoning_default` when present and send no reasoning
-   parameters otherwise. Test with catalog fixtures in `edenai_provider.rs`
-   tests.
-7. [ ] Send `x-edenai-tags: app=ylva,version=<CARGO_PKG_VERSION>` on chat and
+   parameters otherwise (superseded after review: no efforts are reported).
+   Test with catalog fixtures in `edenai_provider.rs` tests.
+7. [x] Send `x-edenai-tags: app=ylva,version=<CARGO_PKG_VERSION>` on chat and
    model listing through `with_extra_headers` (lowercase name:
    `HeaderName::from_static` panics on uppercase; values must be
    `&'static str`, so build it with `concat!` and `env!("CARGO_PKG_VERSION")`).
-   Add a unit test that the resulting value satisfies Eden AI's tag value rules
+   Add a unit test that the resulting value satisfies EdenAI's tag value rules
    value rules (see Implementation Hints), since pre-release versions may not.
-8. [ ] Add the connect flow. In `src/connect_command/providers.rs` add
+8. [x] Add the connect flow. In `src/connect_command/providers.rs` add
    `EndpointConnect::edenai()` (kind `"edenai"`, secret prefix
    `EDENAI_API_KEY`, default base URL `DEFAULT_EDENAI_BASE_URL`,
    `secret_is_optional: false`); add `ConnectCommand::Edenai` in `src/cli.rs`
-   (same flags as `Openrouter`, doc comment "Ask for an Eden AI URL and API key
+   (same flags as `Openrouter`, doc comment "Ask for an EdenAI URL and API key
    and add an `edenai` connection to the profile") and the match arm in
    `src/connect_command.rs` (~line 181). Mirror the OpenRouter tests in
    `providers.rs` (default URL, required key, named-connection variable
    `EDENAI_API_KEY_<NAME>`) and the parse test in `src/cli.rs` (~line 974).
-9. [ ] Integration tests in `tests/http_provider.rs`: model listing from
+9. [x] Integration tests in `tests/http_provider.rs`: model listing from
    `/v3/models` (set `model_path: Some("/v3/models")` on `MockLlmConfig`),
    attribution on chat + listing, survival across `with_runtime_config`, and
    absence on Ollama/OpenRouter (extend `assert_no_attribution_headers` names).
-   Extend `tests/usage_cost.rs` with an Eden AI cost frame (top-level `cost`)
+   Extend `tests/usage_cost.rs` with an EdenAI cost frame (top-level `cost`)
    accumulating in the shared ledger; extend `tests/common/mock_llm_server.rs`
    only if the frame shape needs it.
-10. [ ] Update `src/init_command.rs` scaffold comments and the "no provider
+10. [x] Update `src/init_command.rs` scaffold comments and the "no provider
    configured" guidance (pointing to `ylva connect ollama` / `openrouter`) to
    mention `edenai`; update affected tests (`tests/cli_exit_codes.rs`,
    `tests/cli_help.rs` if they assert the text).
-11. [ ] Documentation (same change set, run `rumdl fmt` then `rumdl check` on
+11. [x] Documentation (same change set, run `rumdl fmt` then `rumdl check` on
     changed files):
     - `README.md`: provider list (lines ~44–57), data-sharing note (~77–80,
-      reword "headers identify the application only" to also cover the Eden AI
-      tag header: application name and version only, no user data), feature checklist (~125, add Eden
-      AI).
+      reword "headers identify the application only" to also cover the EdenAI
+      tag header: application name and version only, no user data), feature checklist (~125, add EdenAI).
     - `docs/features.md`: provider list (~line 404), connect paragraph (~411),
       model-discovery capabilities (~646), cost section (~367).
-    - `docs/provider-notes.md`: usage/cost table (~30) and a new `### Eden AI`
+    - `docs/provider-notes.md`: usage/cost table (~30) and a new `### EdenAI`
       section (cost field, currency USD, 5.5% platform fee included in the
       reported cost? — verify, attribution, `/v3/models` is public, rate limit
-      10 req/s per account); state that Eden AI has no app-attribution feature,
+      10 req/s per account); state that EdenAI has no app-attribution feature,
       so the tag only labels the user's own usage and does not advertise Ylva;
       reword "No other provider sends them" for the OpenRouter headers.
     - `docs/implementation-notes.md`: cost-ledger section (~414–430), attribution
@@ -193,10 +192,10 @@ sessions. Work test-first (TDD); each step bundles its tests.
       (~487), environment variables table (~502).
     - `CONTEXT.md`: only if a new domain term is introduced.
     - `CHANGELOG.md` is generated by release-plz; do not edit.
-12. [ ] Run `make format lint`, then `make test-coverage` (single mandatory test
+12. [x] Run `make format lint`, then `make test-coverage` (single mandatory test
     gate; maintain the coverage threshold from `docs/development-workflow.md`).
     Run `make audit` only if `Cargo.toml`/`Cargo.lock` changed.
-13. [ ] Manual verification by the user with a real Eden AI key (no live test in
+13. [ ] Manual verification by the user with a real EdenAI key (no live test in
     the suite, no key stored in the repo): `ylva connect edenai`, `/models`, one
     tool-calling turn; confirm the footer cost and the final-stream-frame cost
     shape; fix parsers if the shapes differ from the docs.
@@ -206,7 +205,7 @@ sessions. Work test-first (TDD); each step bundles its tests.
 - Show per-model pricing in the `/models` picker for every provider that
   advertises it, as informational text only (never to compute costs; Ylva totals
   only provider-reported costs). Add an optional `ModelInfo.pricing` filled by
-  each `ModelCatalog` (step 4): Eden AI `pricing.input_cost_per_token` /
+  each `ModelCatalog` (step 4): EdenAI `pricing.input_cost_per_token` /
   `output_cost_per_token`, OpenRouter `pricing.prompt` / `pricing.completion`
   (USD per token, strings). Copilot (billing multiplier only) and Ollama (no
   pricing) render nothing when unknown.
@@ -217,7 +216,7 @@ sessions. Work test-first (TDD); each step bundles its tests.
 
 ## Implementation Hints
 
-Eden AI facts (public docs, <https://www.edenai.co/docs>):
+EdenAI facts (public docs, <https://www.edenai.co/docs>):
 
 - Base `https://api.edenai.run`; chat `POST /v3/chat/completions`; models
   `GET /v3/models` (public, no key needed; `view=models` gives grouped routable
@@ -234,7 +233,7 @@ Eden AI facts (public docs, <https://www.edenai.co/docs>):
 - Cost: every response carries a top-level `cost` (USD) next to `usage`; in
   streams, with `stream_options.include_usage: true` (already sent by the shared
   transport) the final usage event before `[DONE]` carries `cost` (prompt-caching
-  docs). The reported cost includes cache prices; Eden AI bills provider price
+  docs). The reported cost includes cache prices; EdenAI bills provider price
   plus a 5.5 % platform fee (verify whether `cost` includes the fee).
 - Live catalog check (2026-10-30, `GET /v3/models`): 1292 entries, 15 with
   `alias_of`, 128 without `supports_function_calling`, output modalities only
@@ -250,6 +249,8 @@ Eden AI facts (public docs, <https://www.edenai.co/docs>):
 - Reasoning: only Anthropic models take a `thinking` object; map
   `capabilities.reasoning.supported_efforts` to `ModelInfo.reasoning_efforts`
   and `default_effort` to `reasoning_default` when present; never invent values.
+  (Superseded after review: efforts are not reported at all, as no request
+  shape is documented and an unsent effort would have no effect.)
 - Rate limit: 10 requests/second per account, shared across keys. Sandbox tokens
   exist for no-cost testing.
 
@@ -277,8 +278,8 @@ Codebase facts:
   helpers); read `docs/known-test-issues.md` before tests involving tracing,
   cwd or integration side-effects.
 - Decisions: no zero-data-retention (ZDR) marker for now (deferred by the user;
-  Eden AI exposes per-model `zero_data_retention` true/false/null, OpenRouter
+  EdenAI exposes per-model `zero_data_retention` true/false/null, OpenRouter
   and Ollama have no comparable per-model field in their model lists). The
   reported `cost` is shown
-  as-is; Eden AI charges a 5.5 % platform fee, and whether `cost` includes it is
+  as-is; EdenAI charges a 5.5 % platform fee, and whether `cost` includes it is
   unverified — document that uncertainty in `docs/provider-notes.md`.

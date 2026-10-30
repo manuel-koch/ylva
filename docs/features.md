@@ -365,7 +365,7 @@ requests during one run.
 
 - **What counts.** Only provider-reported costs; there are no price tables and
   no token-based estimates. Currently OpenRouter reports a cost (USD,
-  `usage.cost`) and GitHub Copilot one in AI credits (`AIC`,
+  `usage.cost`), EdenAI one (USD, top-level `cost`) and Copilot one in AI credits (`AIC`,
   `usage.copilot_usage.total_nano_aiu`); Ollama (local and Cloud) and plain OpenAI-compatible
   providers report none and contribute nothing; see
   [provider notes](./provider-notes.md#usage-and-cost-reporting). Root, subagent, session-title and compaction requests all
@@ -404,12 +404,15 @@ Currently the following AI model providers are supported:
 - OpenRouter ( via OpenAI compatible endpoints; requests carry app
   attribution headers identifying Ylva, see
   [provider notes](./provider-notes.md#openrouter) )
-- GitHub Copilot ( via OpenAI compatible endpoints, using the Responses API for
+- EdenAI ( via its OpenAI compatible `/v3` endpoints; requests carry a usage
+  tag with the application name and version, see
+  [provider notes](./provider-notes.md#edenai) )
+- Copilot ( via OpenAI compatible endpoints, using the Responses API for
   models that only support it; log in with `ylva connect copilot` )
 
 `ylva connect <provider>` sets up a connection for any of them: Copilot with a
-device-flow login, Ollama and OpenRouter by asking for the base URL and API
-key. It updates the profile's `config.toml` and `.env`; see
+device-flow login, EdenAI, Ollama and OpenRouter by asking for the base URL
+and API key. It updates the profile's `config.toml` and `.env`; see
 [connect commands](./cli-options.md#connect-commands).
 
 A provider connection's `allowed_models` list (see
@@ -422,7 +425,7 @@ restriction, unbound) model fails before anything is sent.
 
 Named provider connections are constructed independently, so multiple
 connections can use the same implementation (for example, local Ollama and
-Ollama Cloud). The conversation footer shows the active named engine and model
+Ollama-Cloud). The conversation footer shows the active named engine and model
 when a profile engine name is available; direct unnamed engines show only the
 model. `/models` queries each connection once, reuses a successful result
 for 30 minutes within the run (failures are retried on the next `/models`),
@@ -644,7 +647,8 @@ with provider-aware input for explicit Base64 `read` results added on top:
 - `ToolResult` stores a provider-neutral image or PDF/file descriptor that
   references the existing Base64 result. It does not own a second payload.
 - Model discovery supplies conservative input capabilities. OpenRouter reads
-  `architecture.input_modalities`; Ollama maps `/api/show`'s `vision`
+  `architecture.input_modalities`, EdenAI `capabilities.input_modalities`;
+  plain OpenAI-compatible backends advertise none; Ollama maps `/api/show`'s `vision`
   capability to image support only. The active model's capabilities are
   discovered automatically before the first chat request, so recognized
   attachments are projected without requiring a `/models` re-selection.
