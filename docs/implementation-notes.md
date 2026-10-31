@@ -249,7 +249,9 @@ See [configuration](./configuration.md#sandbox-tool-approval-rules).
 ### Argument-conditioned command rules
 
 - Shell extraction remains in `sandbox/bash_command_extractor.rs`; unsupported
-  shell structures still contribute approval-required outcomes. Private
+  shell structures still contribute approval-required outcomes. Only literal
+  fd duplication/closing and redirection to/from the exact `/dev/null` are
+  ignored for rule matching; all other redirects remain unsupported. Private
   `sandbox/command_arguments.rs` owns static command grammars, alias identities,
   option arity and command-specific placement. It never executes tools or
   resolves their binaries. Tables cite their tool/OS documentation and review

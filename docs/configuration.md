@@ -1200,11 +1200,16 @@ table may reference `bash`'s named rules or a `command` rule. Config loading
 hard-validates this at startup, naming the offending agent type (or
 "profile-level"), the tool, the rule index, and which rule kind was expected.
 
-Each command in the given script is parsed and evaluated on its own. A
-construct Ylva doesn't structurally understand (subshells, redirections,
-command/process substitutions, control flow, function definitions, heredocs)
-is treated as `user_approval_required` rather than silently letting it
-through. A script that fails to parse at all is left to `bash`'s own default
+Each command in the given script is parsed and evaluated on its own. File
+redirections and other constructs Ylva doesn't structurally understand
+(subshells, command/process substitutions, control flow, function definitions,
+heredocs) are treated as `user_approval_required` rather than silently letting
+them through. For rule matching, fd duplication/closing (for example `2>&1`,
+`>&-` or `3<&0`) and redirection to or from the exact, unquoted literal
+`/dev/null` (`>/dev/null`, `>>/dev/null`, `&>/dev/null`, `&>>/dev/null`,
+`</dev/null`) are ignored. Quoted paths, expansions, other file targets, and a
+mix of harmless and non-harmless redirects remain approval-required. A script
+that fails to parse at all is left to `bash`'s own default
 (`user_approval_required`).
 
 **`bash`-only named rules:**

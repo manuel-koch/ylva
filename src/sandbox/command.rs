@@ -29,9 +29,12 @@ impl SandboxContext {
     /// **Extraction:** `command` is parsed via [`bash_command_extractor::extract`]
     /// into its top-level statements (see that module's doc comment for the
     /// exact `tree-sitter-bash` grammar facts this relies on). A statement
-    /// outside the fixed scanning scope (`list`/`pipeline`/`command`
-    /// only — subshells, redirections, substitutions, control flow,
-    /// function definitions, heredocs) contributes `UserApprovalRequired`.
+    /// outside the fixed scanning scope (`list`/`pipeline`/`command`, plus
+    /// redirected statements containing only fd duplication/closing or
+    /// literal `/dev/null` redirects) contributes `UserApprovalRequired`
+    /// unless its redirects are in that harmless closed set. File redirects,
+    /// substitutions, subshells, control flow, function definitions and
+    /// heredocs remain approval-required.
     ///
     /// **Per-command evaluation:** each extracted `command` is evaluated
     /// independently against this tool's resolved rule list — a configured

@@ -17,12 +17,12 @@
 //! [`super::SandboxRuleConfig::CommandGlob`]/named command rules without
 //! executing anything.
 //!
-//! **Scanning scope is fixed, not organically expanded**: only `list`,
-//! `pipeline` and `command` nodes are walked. Anything else (subshells,
-//! redirections, command/
-//! parameter substitution, control-flow constructs, function definitions,
-//! heredocs) makes the enclosing statement [`ExtractedStatement::Unanalysable`],
-//! never partially supported.
+//! **Scanning scope is fixed, not organically expanded**: `list`, `pipeline`,
+//! `command` and redirected statements with only the closed harmless redirect
+//! set below are walked. Other constructs (subshells, unsafe redirections,
+//! command/parameter substitution, control-flow constructs, function
+//! definitions, heredocs) make the enclosing statement
+//! [`ExtractedStatement::Unanalysable`], never partially supported.
 //!
 //! # Grammar facts (empirically confirmed against `tree-sitter-bash` v0.25.1)
 //!
@@ -65,11 +65,17 @@
 //!   construct.
 //! - `tree.root_node().has_error()` reliably flags a script-wide parse
 //!   failure (e.g. a dangling trailing `|`).
-//! - A redirect (`cmd > file`) wraps the `command` node in a
-//!   `redirected_statement` sibling node, rather than attaching the
-//!   redirect as a child of `command` itself — since `redirected_statement`
-//!   is not one of the three walked node kinds, the whole statement becomes
-//!   un-analysable, exactly as intended.
+//! - A redirect wraps the command in a `redirected_statement`, with the
+//!   command under field `body` and one or more `file_redirect` children under
+//!   field `redirect`. A `file_redirect` has an optional `descriptor` field
+//!   (`file_descriptor`), an anonymous operator token (`>`, `>>`, `<`, `>&`,
+//!   `<&`, `&>`, `&>>`, `>&-` or `<&-`), and an optional `destination` field
+//!   (`word` or `number`). Only fd duplication/closing with literal digits or
+//!   `-`, and the operators `>`, `>>`, `&>`, `&>>`, `<` with the exact bare
+//!   word destination `/dev/null`, are ignored for extraction. Quoted strings,
+//!   file destinations and all other redirect nodes remain unanalysable.
+//!   `<<<` is a `herestring_redirect`, and heredocs are distinct redirect
+//!   nodes; neither is included in the harmless set.
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -113,8 +119,8 @@ pub(super) enum ExtractedStatement {
     /// A fully-analysable `command` node.
     Command(ExtractedCommand),
     /// A statement containing a node type outside the fixed scanning scope
-    /// (subshell, redirection, substitution, control flow, function
-    /// definition, heredoc, or any other unsupported construct).
+    /// (subshell, non-harmless redirection, substitution, control flow,
+    /// function definition, heredoc, or any other unsupported construct).
     Unanalysable,
 }
 
@@ -200,7 +206,102 @@ fn collect_statement(node: Node, source: &str, out: &mut Vec<ExtractedStatement>
                 collect_statement(child, source, out);
             }
         }
+        "redirected_statement" => {
+            let body = node.child_by_field_name("body");
+            let mut has_redirect = false;
+            let mut all_redirects_harmless = true;
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                match child.kind() {
+                    "file_redirect" => {
+                        has_redirect = true;
+                        all_redirects_harmless &= is_harmless_redirect(child, source);
+                    }
+                    "command" | "list" | "pipeline" => {}
+                    _ => all_redirects_harmless = false,
+                }
+            }
+            if let Some(body) = body.filter(|body| {
+                matches!(body.kind(), "command" | "list" | "pipeline")
+                    && has_redirect
+                    && all_redirects_harmless
+            }) {
+                collect_statement(body, source, out);
+            } else {
+                out.push(ExtractedStatement::Unanalysable);
+            }
+        }
         _ => out.push(ExtractedStatement::Unanalysable),
+    }
+}
+
+/// Return whether a `file_redirect` belongs to the literal harmless set.
+fn is_harmless_redirect(node: Node, source: &str) -> bool {
+    let mut operator = None;
+    let mut descriptor = None;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "file_descriptor" => descriptor = Some(node_text(child, source)),
+            kind if !child.is_named() => operator = Some(kind),
+            _ => {}
+        }
+    }
+    let destination = node.child_by_field_name("destination");
+    let mut cursor = node.walk();
+    if node
+        .named_children(&mut cursor)
+        .any(|child| !matches!(child.kind(), "file_descriptor" | "word" | "number"))
+    {
+        return false;
+    }
+    if operator.is_none_or(|kind| {
+        !matches!(
+            kind,
+            ">" | ">>" | "<" | ">&" | "<&" | "&>" | "&>>" | ">&-" | "<&-"
+        )
+    }) {
+        return false;
+    }
+    let descriptor_is_digits = descriptor
+        .is_none_or(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()));
+    if !descriptor_is_digits {
+        return false;
+    }
+    match operator {
+        Some(">&") => match destination {
+            Some(destination) => {
+                destination.kind() == "number"
+                    && !node_text(destination, source).is_empty()
+                    && node_text(destination, source)
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+            }
+            None => false,
+        },
+        Some("<&") if descriptor.is_some() => match destination {
+            Some(destination) => {
+                destination.kind() == "number"
+                    && !node_text(destination, source).is_empty()
+                    && node_text(destination, source)
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit())
+            }
+            None => false,
+        },
+        Some(">&-") => destination.is_none(),
+        Some(">") => destination.is_some_and(|destination| {
+            destination.kind() == "word" && node_text(destination, source) == "/dev/null"
+        }),
+        Some(">>") if descriptor.is_none() => destination.is_some_and(|destination| {
+            destination.kind() == "word" && node_text(destination, source) == "/dev/null"
+        }),
+        Some("&>" | "&>>" | "<") if descriptor.is_none() => {
+            destination.is_some_and(|destination| {
+                destination.kind() == "word" && node_text(destination, source) == "/dev/null"
+            })
+        }
+        _ => false,
     }
 }
 
@@ -501,6 +602,87 @@ mod tests {
         assert_eq!(statements, vec![ExtractedStatement::Unanalysable]);
     }
 
+    #[test]
+    fn harmless_redirects_extract_the_wrapped_command() {
+        for source in [
+            "git status 2>&1",
+            "git log 2>/dev/null",
+            "cmd >/dev/null 2>&1",
+            "cmd </dev/null",
+            "cmd >&2",
+            "cmd 3<&0",
+            "cmd >&-",
+            "cmd 2>&-",
+            "cmd 3>&4",
+            "cmd >>/dev/null",
+            "cmd &>/dev/null",
+            "cmd &>>/dev/null",
+            "cmd 9>/dev/null",
+        ] {
+            let command = extract_single_command(source);
+            assert_eq!(
+                command.argv[0].text,
+                source.split_whitespace().next().unwrap(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn harmless_redirects_are_supported_in_compound_commands() {
+        let statements =
+            match extract("cmd 2>&1 | grep x && git status 2>/dev/null || git log >/dev/null") {
+                ExtractionResult::Statements(statements) => statements,
+                ExtractionResult::ParseFailed => panic!("expected a parse"),
+            };
+        assert_eq!(statements.len(), 4);
+        assert!(statements
+            .iter()
+            .all(|statement| matches!(statement, ExtractedStatement::Command(_))));
+    }
+
+    #[test]
+    fn unsafe_and_quoted_redirects_remain_unanalysable() {
+        for source in [
+            "cmd > file",
+            "cmd >> file",
+            "cmd 2> file",
+            "cmd &> file",
+            "cmd >&file",
+            "cmd > $VAR",
+            "cmd > \"/dev/null\"",
+            "cmd <<EOF\nx\nEOF",
+            "cmd <<< hi",
+            "cmd > /dev/nullx",
+            "cmd > ../dev/null",
+            "cmd >&$FD",
+            "cmd <(echo hi)",
+            "cmd > >(cat)",
+            "cmd >/dev/null > file",
+            "cmd 2>&1 > file",
+            "cmd 9>>/dev/null",
+            "cmd <&0",
+            "cmd 2<&-",
+            "cmd >\"/dev/null\"",
+        ] {
+            let statements = match extract(source) {
+                ExtractionResult::Statements(statements) => statements,
+                ExtractionResult::ParseFailed => panic!("expected a parse for {source:?}"),
+            };
+            assert_eq!(
+                statements,
+                vec![ExtractedStatement::Unanalysable],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn harmless_redirect_does_not_hide_backgrounding() {
+        let command = extract_single_command("sleep 10 2>&1 &");
+        assert!(command.backgrounded);
+    }
+
     // --- backgrounding ---
 
     #[test]
@@ -669,6 +851,57 @@ mod tests {
                 .set_language(&tree_sitter_bash::LANGUAGE.into())
                 .unwrap();
             parser.parse(source, None).unwrap()
+        }
+
+        #[test]
+        fn redirects_wrap_body_and_expose_operator_fields() {
+            for (source, operator, destination_kind, descriptor) in [
+                ("git status 2>&1", ">&", Some("number"), Some("2")),
+                ("cmd >/dev/null", ">", Some("word"), None),
+                ("cmd &>/dev/null", "&>", Some("word"), None),
+                ("cmd </dev/null", "<", Some("word"), None),
+                ("cmd >&2", ">&", Some("number"), None),
+                ("cmd 3<&0", "<&", Some("number"), Some("3")),
+                ("cmd 2>&-", ">&-", None, Some("2")),
+                ("cmd >&file", ">&", Some("word"), None),
+                ("cmd > file", ">", Some("word"), None),
+            ] {
+                let tree = parse(source);
+                let statement = tree.root_node().named_child(0).unwrap();
+                assert_eq!(statement.kind(), "redirected_statement", "{source}");
+                assert_eq!(
+                    statement.child_by_field_name("body").unwrap().kind(),
+                    "command"
+                );
+                let redirect = statement.child_by_field_name("redirect").unwrap();
+                assert_eq!(redirect.kind(), "file_redirect");
+                assert_eq!(
+                    redirect
+                        .child_by_field_name("destination")
+                        .map(|node| node.kind()),
+                    destination_kind
+                );
+                assert_eq!(
+                    redirect
+                        .child_by_field_name("descriptor")
+                        .map(|node| node.utf8_text(source.as_bytes()).unwrap()),
+                    descriptor
+                );
+                let mut cursor = redirect.walk();
+                let operators: Vec<&str> = redirect
+                    .children(&mut cursor)
+                    .filter(|child| !child.is_named())
+                    .map(|child| child.kind())
+                    .collect();
+                assert!(operators.contains(&operator), "{source}: {operators:?}");
+            }
+            let tree = parse("cmd 2>&1 | grep x");
+            let pipeline = tree.root_node().named_child(0).unwrap();
+            assert_eq!(pipeline.kind(), "pipeline");
+            assert_eq!(
+                pipeline.named_child(0).unwrap().kind(),
+                "redirected_statement"
+            );
         }
 
         #[test]

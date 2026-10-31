@@ -6,9 +6,10 @@ Ylva's `bash` tool statically parses each command script
 (`src/sandbox/bash_command_extractor.rs`, `tree-sitter-bash`) and evaluates every
 extracted `command` against the `[tools.bash]` rule list (or the default floor). Any
 construct outside the fixed scanning scope (`list`/`pipeline`/`command` nodes) makes the
-statement `Unanalysable`, which yields `user_approval_required`. Redirections are in that
-bucket: `git status 2>&1` or `cmd 2>/dev/null` is wrapped in a `redirected_statement` node
-and therefore prompts the user, even when the command itself is auto-approved.
+statement `Unanalysable`, which yields `user_approval_required`. Before this change,
+redirections were in that bucket: `git status 2>&1` or `cmd 2>/dev/null` was wrapped in a
+`redirected_statement` node and therefore prompted the user, even when the command itself
+was auto-approved.
 
 Observed problem: in a real session several read-only-like commands still required user
 approval only because they carried trivial redirections (stderr-to-stdout, stderr-to-devnull).
@@ -44,49 +45,49 @@ Acceptance criteria:
 Implementing agent: flip `[ ]` to `[x]` immediately after completing each step and rewrite
 this file in place so progress is resumable across sessions.
 
-1. [ ] Read `docs/development-workflow.md` (*Plan execution*, testing, license headers) and
+1. [x] Read `docs/development-workflow.md` (*Plan execution*, testing, license headers) and
    `docs/known-test-issues.md`; follow TDD (tests first for steps 2–3).
-2. [ ] In `src/sandbox/bash_command_extractor.rs`, add a grammar-fact test (in the existing
-   `grammar` test module at the end of the file) that dumps/asserts the `tree-sitter-bash`
+2. [x] In `src/sandbox/bash_command_extractor.rs`, add a grammar-fact test (in the existing
+   `grammar_assumptions` test module at the end of the file) that asserts the `tree-sitter-bash`
    node shape for `git status 2>&1`, `cmd >/dev/null`, `cmd &>/dev/null`, `cmd </dev/null`,
    `cmd >&2`, `cmd >&file`, `cmd > file` and a piped form (`cmd 2>&1 | grep x`): the
    `redirected_statement` node with its `body`/`redirect` fields, `file_redirect`
    `descriptor`/`destination` fields, and the operator token kinds. Record the confirmed
    facts in the module doc "Grammar facts" list (replacing the current bullet that says a
    redirect always makes the statement un-analysable).
-3. [ ] Add failing extractor unit tests (next to `heredoc_is_unanalysable`) for every case in
+3. [x] Add extractor unit tests (next to `heredoc_is_unanalysable`) for every case in
    the acceptance criteria above, including inside pipelines and `&&`/`||` lists and a
    trailing `&` (backgrounding must still be flagged on the unwrapped command).
-4. [ ] Implement the unwrap: in `collect_statement`, handle `redirected_statement` by
+4. [x] Implement the unwrap: in `collect_statement`, handle `redirected_statement` by
    checking every redirect child with a small helper (e.g. `is_harmless_redirect`) and, only
    if all are harmless and the `body` is a supported node, recursing into the body;
    otherwise push `ExtractedStatement::Unanalysable`. Keep the helper strict: operator must
    be in the closed set, destination a bare unquoted `word`/`number` node exactly equal to
    `/dev/null` (or digits/`-` for fd duplication). Use descriptive names (no
    abbreviations).
-5. [ ] Check `src/sandbox/command.rs` / `src/sandbox/command/tests.rs`: add an end-to-end
+5. [x] Check `src/sandbox/command.rs` / `src/sandbox/command/tests.rs`: add an end-to-end
    test that `git status 2>&1` and `git log 2>/dev/null` get the same verdict as without the
    redirection under the default floor and under an explicit `{ command = [...] }` rule, and
    that `git status > out.txt` is still `UserApprovalRequired`.
-6. [ ] Update the doc comments in `src/sandbox/command.rs` (the "Extraction" paragraph
+6. [x] Update the doc comments in `src/sandbox/command.rs` (the "Extraction" paragraph
    mentioning redirections) and the module docs in `bash_command_extractor.rs` (scanning
    scope paragraph and `ExtractedStatement::Unanalysable` doc).
-7. [ ] Update `docs/configuration.md` (*`bash` command rules*, the paragraph listing
+7. [x] Update `docs/configuration.md` (*`bash` command rules*, the paragraph listing
    unsupported constructs) to state that fd duplication and redirection to/from the literal
    `/dev/null` are ignored for rule matching while all other redirections remain
    `user_approval_required`. Update `docs/implementation-notes.md` if it describes the
    extractor's scope (grep first); update `docs/features.md` only if it describes bash
    approval behaviour.
-8. [ ] Re-run the offline replay (`tests/sandbox_evaluation/README.md`, `make` target for
-   the sample report) against the corpus
-   `tests/sandbox_evaluation/data/copilot-bash-commands-1792598338.json` and compare the
-   verdict diff to the committed `*.report.json` files; only commands containing harmless
-   redirections should change. Regenerate the committed reports only if the repository
-   convention requires it (ask the user first).
-9. [ ] Run `rumdl fmt` on changed markdown, then `make format lint` and
+8. [x] Re-run the offline replay against
+   `tests/sandbox_evaluation/data/copilot-bash-commands-1792598338.json`. A generated report
+   was compared with a baseline from the unmodified extractor: 414 verdicts changed and every
+   changed command contained a harmless-redirection token. The reports are local/git-ignored,
+   so no tracked report was regenerated.
+9. [x] Run `rumdl fmt` on changed markdown, then `make format lint` and
    `make test-coverage` (mandatory gate; no dependency change, so no `make audit`).
-10. [ ] Mark this plan's steps done and, per *Plan execution*, update any plan statement that
-    turned out to be out of date.
+10. [x] Mark this plan's steps done and update stale statements: harmless redirects are now
+    unwrapped; report artifacts are local/git-ignored, so replay results were compared against
+    a baseline rather than rewriting corpus reports.
 
 ## Proposed Improvements
 
@@ -99,15 +100,14 @@ this file in place so progress is resumable across sessions.
 
 ## Implementation Hints
 
-- Extraction scope today: `collect_statement` in `src/sandbox/bash_command_extractor.rs`
-  walks only `command`, `list` and `pipeline`; every other node kind (including
-  `redirected_statement`) becomes `ExtractedStatement::Unanalysable`.
+- Extraction scope today: `collect_statement` walks `command`, `list`, `pipeline` and
+  redirected statements whose every `file_redirect` belongs to the exact harmless set;
+  unsafe redirects and other node kinds become `ExtractedStatement::Unanalysable`.
 - `collect_top_level_statements` sets `backgrounded` on the `ExtractedCommand`s produced
   since the last `;`/`&`, so an unwrapped command inside a `redirected_statement` is
   flagged correctly provided it is pushed via the same `out` vector.
-- The extractor's module doc explicitly states that a redirect wraps the `command` in a
-  `redirected_statement` sibling node (not a child of `command`); the grammar-fact tests in
-  the `grammar` submodule at the bottom of the file are the project's pattern for pinning
+- The extractor's module doc states that a redirect wraps the `command` in a
+  `redirected_statement`; grammar-assumption tests at the bottom pin
   `tree-sitter-bash` v0.25.1 behaviour. Field names (`body`, `redirect`, `descriptor`,
   `destination`) and operator token kinds are expected from the grammar but must be
   confirmed by step 2 before implementing.
@@ -118,7 +118,7 @@ this file in place so progress is resumable across sessions.
   sandbox (0001 git conventions, 0002 release automation, 0003 workspace trust).
 - Offline replay tooling: `tests/sandbox_evaluation/` (`bash_policy_replay.rs`, `Makefile`,
   `README.md`, `sample.config.toml`, recorded corpus under `data/`). Recorded commands are
-  never executed.
+  never executed. Reports are git-ignored local artifacts.
 - Bash semantics to respect: `>&word` and `&>word` redirect to a *file* named `word`; only
   digits or `-` after `>&`/`<&` mean fd duplication/closing. `/dev/null` must match exactly
   (no `/dev/nullx`, no quoting, no expansion, no path normalisation).
