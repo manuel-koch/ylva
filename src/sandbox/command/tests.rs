@@ -103,6 +103,52 @@ fn check_command_unanalysable_construct_requires_approval() {
 }
 
 #[test]
+fn harmless_redirects_preserve_default_floor_and_configured_command_verdicts() {
+    let temporary_dir = tempfile::tempdir().unwrap();
+    let sandbox = make_sandbox(temporary_dir.path());
+    let default_context = SandboxContext::new(Arc::clone(&sandbox));
+    for (bare, redirected) in [
+        ("git status", "git status 2>&1"),
+        ("git log", "git log 2>/dev/null"),
+    ] {
+        assert_eq!(
+            default_context.check_command(redirected),
+            default_context.check_command(bare),
+            "default floor should treat {redirected:?} as {bare:?}"
+        );
+    }
+
+    let configured_context = SandboxContext::new(Arc::clone(&sandbox))
+        .with_configured_rules(vec![SandboxRuleConfig::CommandGlob {
+            with_arguments: None,
+            only_arguments: None,
+            allowed_scripts: None,
+            command: vec!["git".to_string(), "**".to_string()],
+            verdict: ApprovalVerdictConfig::AutoApproved,
+            reason: None,
+        }])
+        .expect("valid sandbox fixture");
+    for (bare, redirected) in [
+        ("git status", "git status 2>&1"),
+        ("git log", "git log 2>/dev/null"),
+    ] {
+        assert_eq!(
+            configured_context.check_command(redirected),
+            configured_context.check_command(bare),
+            "configured command rule should treat {redirected:?} as {bare:?}"
+        );
+        assert_eq!(
+            configured_context.check_command(redirected),
+            Some(ApprovalCheck::AutoApproved)
+        );
+    }
+    assert_eq!(
+        configured_context.check_command("git status > out.txt"),
+        Some(ApprovalCheck::UserApprovalRequired)
+    );
+}
+
+#[test]
 fn check_command_parse_failure_returns_none() {
     let temporary_dir = tempfile::tempdir().unwrap();
     let sandbox = make_sandbox(temporary_dir.path());
