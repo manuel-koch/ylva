@@ -263,6 +263,7 @@ fn assemble_model_choices(
 ) -> Vec<ModelChoice> {
     let active_config = engine.config();
     let active_reasoning_effort = engine.reasoning_effort();
+    let active_runtime = engine.runtime_snapshot();
     let active_engine_name = engine.active_engine_name();
     let favorite_ranks = favorite_ranks(engine);
     let favorite_rank_of = |provider_connection: &str, model_id: &str| {
@@ -304,15 +305,27 @@ fn assemble_model_choices(
             let engine_config = named_engine.config;
             let initial_reasoning_effort = named_engine.reasoning_effort;
             let is_active = active_engine_name.as_deref() == Some(&engine_name);
-            let catalog_model = catalog_by_identity.get(&(
-                engine_config.provider_connection.clone(),
-                engine_config.model.clone(),
-            ));
+            let catalog_model = catalog_by_identity
+                .get(&(
+                    engine_config.provider_connection.clone(),
+                    engine_config.model.clone(),
+                ))
+                .or(named_engine.model_info.as_ref())
+                .or_else(|| {
+                    active_runtime
+                        .as_ref()
+                        .filter(|runtime| is_active && runtime.model == engine_config.model)
+                        .and_then(|runtime| runtime.model_info.as_ref())
+                        .filter(|model| model.id == engine_config.model)
+                });
             let model = crate::llm::ModelInfo {
                 id: engine_config.model.clone(),
                 context_length: engine_config
                     .context_length
                     .or_else(|| catalog_model.and_then(|model| model.context_length)),
+                reasoning_evidence: catalog_model
+                    .map(|model| model.reasoning_evidence)
+                    .unwrap_or_default(),
                 reasoning_efforts: catalog_model.and_then(|model| model.reasoning_efforts.clone()),
                 reasoning_default: catalog_model.and_then(|model| model.reasoning_default.clone()),
                 input_modalities: catalog_model.and_then(|model| model.input_modalities.clone()),
@@ -327,6 +340,13 @@ fn assemble_model_choices(
             let mut choice = ModelChoice {
                 label: engine_choice_parts(&engine_name, &selection),
                 initial_reasoning_effort,
+                reasoning_options: engine
+                    .selection_reasoning_options(&ModelSelection::NamedEngine {
+                        engine_name: engine_name.clone(),
+                        option: selection.clone(),
+                        reasoning_effort: crate::llm::ReasoningEffortChange::Unchanged,
+                    })
+                    .unwrap_or_default(),
                 selection,
                 is_active,
                 engine_name: Some(engine_name),
@@ -348,6 +368,9 @@ fn assemble_model_choices(
         let mut choice = ModelChoice {
             label: model_choice_parts(&option),
             initial_reasoning_effort: option.reasoning_effort.clone(),
+            reasoning_options: engine
+                .selection_reasoning_options(&ModelSelection::ProviderModel(option.clone()))
+                .unwrap_or_default(),
             catalog_context_length: option.model.context_length,
             selection: option,
             is_active,
@@ -498,7 +521,7 @@ pub(super) async fn switch_model(
     match engine.select_model(selection) {
         Ok(()) => {
             let config = engine.config();
-            let mut confirmation = match selection {
+            let confirmation = match selection {
                 ModelSelection::NamedEngine { engine_name, .. } => format!(
                     "Switched to engine '{engine_name}' ({}/{}).",
                     config.provider_connection, config.model
@@ -518,26 +541,37 @@ pub(super) async fn switch_model(
                     }
                 }
             };
+            let mut confirmation_parts = vec![confirmation];
+            if let Some(effort) = engine.reasoning_effort() {
+                if engine.effective_reasoning_provenance()
+                    == crate::llm::ReasoningEffortProvenance::Unverified
+                {
+                    confirmation_parts.push(format!("Reasoning effort: {effort} (unverified)."));
+                } else if matches!(selection, ModelSelection::NamedEngine { .. })
+                    || matches!(selection, ModelSelection::ProviderModel(option) if option.model.reasoning_efforts.is_none())
+                {
+                    confirmation_parts.push(format!("Reasoning effort: {effort}."));
+                }
+            }
             match preview {
                 Ok(target) => {
                     if let Some(effect) =
                         compaction_switch_notice(&state.engine_display, &target, selection)
                     {
-                        confirmation.push(' ');
-                        confirmation.push_str(&effect);
+                        confirmation_parts.push(effect);
                     }
                     refresh_engine_display_after_selection(state, engine, &target);
                 }
                 Err(error) => {
-                    confirmation
-                        .push_str(&format!(" Could not resolve compaction effect: {error}."));
+                    confirmation_parts
+                        .push(format!("Could not resolve compaction effect: {error}."));
                 }
             }
             // TUI-only: never injected into the conversation, since a
             // mid-conversation `role:"system"` message is rejected by
             // some providers/chat templates and the switch is already
             // durably recorded below via `RecordModelChanged`.
-            state.push_notice(confirmation);
+            state.push_notice(confirmation_parts.join(" "));
             // Read both values from the live engine because a
             // selection may have changed the active provider as well
             // as its model.

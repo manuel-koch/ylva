@@ -586,7 +586,7 @@ fn bash_exit_error_collapsed_shows_header_only_and_expanded_output_is_neutral() 
     use crate::tui_reducer_state::ToolCallState;
 
     let state = ToolCallState::Error {
-        error: "Tool 'bash' failed: command exited with code 1:".to_string(),
+        error: "Tool 'bash' failed: command exited with code 1".to_string(),
         title_arguments: vec![],
         duration: std::time::Duration::ZERO,
         content_sections: vec![Section::Content(ContentSection {
@@ -628,7 +628,7 @@ fn bash_exit_error_collapsed_shows_header_only_and_expanded_output_is_neutral() 
     let collapsed = render(true);
     let collapsed_text = text_of(&collapsed);
     assert!(
-        collapsed_text.contains("command exited with code 1:"),
+        collapsed_text.contains("command exited with code 1"),
         "collapsed bubble must show the header, got: {collapsed_text:?}"
     );
     assert!(

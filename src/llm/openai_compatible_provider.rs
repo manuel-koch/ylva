@@ -305,6 +305,20 @@ pub struct OpenAiCompatibleProvider {
 /// which models need the Responses API. Implementations hold any state they
 /// learn from the listing, shared by all clones of a provider.
 pub(crate) trait ModelCatalog: Send + Sync + std::fmt::Debug {
+    fn cached_model_info(&self, _model: &str) -> Option<crate::llm::ModelInfo> {
+        None
+    }
+    fn validate_runtime(&self, _runtime: &EngineRuntimeConfig) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn contextualize_error(
+        &self,
+        _runtime: &EngineRuntimeConfig,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        error
+    }
+
     /// Translate a `/models` body; may record state for later routing.
     fn parse(&self, body: &serde_json::Value) -> Vec<crate::llm::ModelInfo>;
 
@@ -333,6 +347,7 @@ impl ModelCatalog for DefaultModelCatalog {
                 let (reasoning_efforts, reasoning_default) =
                     crate::llm::parse_reasoning_object(entry.get("reasoning"));
                 Some(crate::llm::ModelInfo {
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: id.to_string(),
                     context_length: entry
                         .get("context_length")
@@ -426,6 +441,7 @@ impl OpenAiCompatibleProvider {
             name,
             base_url,
             runtime_config: std::sync::Arc::new(std::sync::RwLock::new(EngineRuntimeConfig {
+                model_info: None,
                 context_length_override: None,
                 model,
                 temperature: None,
@@ -532,6 +548,22 @@ impl OpenAiCompatibleProvider {
     /// Return the API key for a provider-specific request.
     pub(crate) fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref()
+    }
+
+    /// Look up metadata fetched on this connection.
+    pub(crate) fn cached_model_info(&self, model: &str) -> Option<crate::llm::ModelInfo> {
+        self.model_catalog.cached_model_info(model)
+    }
+
+    pub(crate) fn update_runtime_config(
+        &self,
+        update: impl FnOnce(&mut EngineRuntimeConfig) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let mut runtime = self
+            .runtime_config
+            .write()
+            .map_err(|_| anyhow::anyhow!("the provider runtime configuration lock is poisoned"))?;
+        update(&mut runtime)
     }
 
     /// Snapshot all mutable request-level settings before starting a request.
@@ -671,6 +703,9 @@ impl Provider for OpenAiCompatibleProvider {
             Ok(runtime_config) => runtime_config,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
+        if let Err(error) = self.model_catalog.validate_runtime(&runtime_config) {
+            return Box::pin(async move { Err(error) });
+        }
         let provider_connection = self.name.clone();
         let base_url = self.base_url.clone();
         let model_catalog = std::sync::Arc::clone(&self.model_catalog);
@@ -703,6 +738,7 @@ impl Provider for OpenAiCompatibleProvider {
                     tracing::debug!(%error, "model catalog unavailable for endpoint selection");
                 }
             }
+            model_catalog.validate_runtime(&runtime_config)?;
             let use_responses = model_catalog.uses_responses_api(&runtime_config.model);
             let serialized_messages = serialize_messages_with_policy(
                 &messages,
@@ -842,7 +878,7 @@ impl Provider for OpenAiCompatibleProvider {
                     let response_dump_path =
                         dump_context.response_path_for_content_type(None, "jsonl");
                     crate::http::dump_response_transport_error(&response_dump_path, &error);
-                    return Err(error);
+                    return Err(model_catalog.contextualize_error(&runtime_config, error));
                 }
             };
             tracing::debug!(
@@ -966,6 +1002,7 @@ impl Provider for OpenAiCompatibleProvider {
                                                 break 'stream;
                                             }
                                             StreamEvent::Error(error) => {
+                                                let error = model_catalog.contextualize_error(&runtime_config, error);
                                                 let _ = tx.send(StreamEvent::Error(error)).await;
                                                 break 'stream;
                                             }

@@ -84,6 +84,7 @@ fn configured_copies_keep_provider_runtimes_independent_and_restore_original_set
                 context_length_override: None,
                 provider_connection: "mock".to_string(),
                 model: ModelInfo {
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: "larger-model".to_string(),
                     context_length: Some(262_144),
                     reasoning_efforts: Some(vec!["high".to_string()]),
@@ -644,4 +645,432 @@ fn unrestricted_empty_engine_stays_chat_capable_for_existing_behavior() {
 
     assert!(engine.ensure_model_allowed("anything").is_ok());
     assert!(engine.ensure_model_allowed("").is_ok());
+}
+
+struct EdenCatalogProvider {
+    runtime: Option<EngineRuntimeConfigHandle>,
+    catalog: CatalogProvider,
+    started: Option<Arc<tokio::sync::Notify>>,
+    release: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl Provider for EdenCatalogProvider {
+    fn reasoning_effort_policy(&self) -> std::sync::Arc<dyn crate::llm::ReasoningEffortPolicy> {
+        std::sync::Arc::new(crate::llm::edenai_provider::EdenAiReasoningEffortPolicy)
+    }
+    fn bind_engine_runtime(&self, runtime: EngineRuntimeConfigHandle) -> Option<Arc<dyn Provider>> {
+        Some(Arc::new(EdenCatalogProvider {
+            catalog: self.catalog.clone(),
+            started: self.started.clone(),
+            release: self.release.clone(),
+            runtime: Some(runtime),
+        }))
+    }
+    fn runtime_config_handle(&self) -> Option<EngineRuntimeConfigHandle> {
+        self.runtime.clone()
+    }
+    fn name(&self) -> &str {
+        "arbitrary-connection"
+    }
+    fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async {
+            let (_, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        })
+    }
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        Box::pin(async move {
+            if let Some(started) = &self.started {
+                started.notify_one();
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            self.catalog.list_models().await
+        })
+    }
+}
+
+fn eden_catalog_provider(models: Vec<ModelInfo>, failing: bool) -> Arc<EdenCatalogProvider> {
+    Arc::new(EdenCatalogProvider {
+        catalog: if failing {
+            CatalogProvider::failing()
+        } else {
+            CatalogProvider::new(models)
+        },
+        runtime: None,
+        started: None,
+        release: None,
+    })
+}
+
+#[tokio::test]
+async fn edenai_profile_hydration_keeps_unverified_for_incomplete_missing_or_failed_catalog() {
+    for (models, failing, known_modalities) in [
+        (
+            vec![model_info_with_modalities("test-model", Some(vec![]))],
+            false,
+            false,
+        ),
+        (vec![], false, false),
+        (vec![], true, false),
+        (
+            vec![model_info_with_modalities("test-model", Some(vec![]))],
+            false,
+            true,
+        ),
+    ] {
+        let provider = eden_catalog_provider(models, failing);
+        let engine = engine_with_profile_reasoning(provider.clone(), "medium");
+        if known_modalities {
+            engine.set_input_modalities(Some(vec![]));
+        }
+        for _ in 0..2 {
+            engine
+                .chat(vec![], vec![], CancellationToken::new())
+                .await
+                .unwrap();
+        }
+        assert_eq!(engine.reasoning_effort().as_deref(), Some("medium"));
+        assert_eq!(
+            engine.effective_reasoning_provenance(),
+            crate::llm::ReasoningEffortProvenance::Unverified
+        );
+        assert_eq!(provider.catalog.list_models_calls(), 1);
+        assert_eq!(engine.take_pending_notices().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn edenai_invalid_profile_is_rejected_without_catalog_fetch_even_with_known_modalities() {
+    for known_modalities in [true, false] {
+        let provider = eden_catalog_provider(vec![], true);
+        let engine = engine_with_profile_reasoning(provider.clone(), "med");
+        if known_modalities {
+            engine.set_input_modalities(Some(vec![]));
+        }
+        let error = engine
+            .chat(vec![], vec![], CancellationToken::new())
+            .await
+            .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("mock")
+                && rendered.contains("test-model")
+                && rendered.contains("med")
+        );
+        assert_eq!(provider.catalog.list_models_calls(), 0);
+        assert_eq!(engine.reasoning_effort().as_deref(), Some("med"));
+    }
+}
+
+#[tokio::test]
+async fn edenai_unsupported_profile_fails_repeated_chats_without_resetting_effort() {
+    let mut unsupported = model_info_with_modalities("test-model", Some(vec![]));
+    unsupported.reasoning_evidence = crate::llm::ReasoningEvidence::Unsupported;
+    let provider = eden_catalog_provider(vec![unsupported], false);
+    let engine = engine_with_profile_reasoning(provider.clone(), "medium");
+    for _ in 0..2 {
+        let error = engine
+            .chat(vec![], vec![], CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("Unsupported"));
+    }
+    assert_eq!(engine.reasoning_effort().as_deref(), Some("medium"));
+    assert_eq!(provider.catalog.list_models_calls(), 1);
+}
+
+#[tokio::test]
+async fn stale_hydration_cannot_overwrite_a_new_selection() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut old_model = model_info_with_modalities("test-model", Some(vec![InputModality::Image]));
+    old_model.context_length = Some(11);
+    old_model.reasoning_evidence = crate::llm::ReasoningEvidence::Unsupported;
+    let provider = Arc::new(EdenCatalogProvider {
+        catalog: CatalogProvider::new(vec![old_model]),
+        runtime: None,
+        started: Some(started.clone()),
+        release: Some(release.clone()),
+    });
+    let engine = Arc::new(engine_with_profile_reasoning(provider, "medium"));
+    let hydration_engine = engine.clone();
+    let hydration = tokio::spawn(async move {
+        hydration_engine.hydrate_catalog_metadata().await;
+    });
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .unwrap();
+    engine
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "mock".into(),
+            model: model_info_with_modalities("new-model", Some(vec![])),
+            reasoning_effort: Some("low".into()),
+            context_length_override: Some(999),
+        })
+        .unwrap();
+    let selected = engine.runtime_snapshot().unwrap();
+    release.notify_one();
+    hydration.await.unwrap();
+    assert_eq!(engine.runtime_snapshot().unwrap(), selected);
+}
+
+#[test]
+fn edenai_handles_and_warning_state_are_independent_but_shared_engine_deduplicates() {
+    let provider = Arc::new(crate::llm::EdenAiProvider::new(
+        "shared".into(),
+        "http://localhost:1".into(),
+        "test-model".into(),
+        None,
+    ));
+    let first = engine_with_profile_reasoning(provider.clone(), "medium");
+    let second = engine_with_profile_reasoning(provider, "high");
+    assert_eq!(first.reasoning_effort().as_deref(), Some("medium"));
+    assert_eq!(second.reasoning_effort().as_deref(), Some("high"));
+    for engine in [&first, &second] {
+        engine.prepare_request_notices().unwrap();
+        engine.prepare_request_notices().unwrap();
+        assert_eq!(engine.take_pending_notices().len(), 1);
+        engine.set_reasoning_effort(None).unwrap();
+        engine.set_reasoning_effort(Some("medium")).unwrap();
+        engine.prepare_request_notices().unwrap();
+        assert_eq!(engine.take_pending_notices().len(), 1);
+    }
+    let copy = first.configured_copy().unwrap();
+    assert_eq!(copy.reasoning_effort().as_deref(), Some("medium"));
+    copy.set_reasoning_effort(Some("low")).unwrap();
+    assert_eq!(first.reasoning_effort().as_deref(), Some("medium"));
+    copy.prepare_request_notices().unwrap();
+    assert_eq!(copy.take_pending_notices().len(), 1);
+}
+
+#[tokio::test]
+async fn edenai_omitted_profile_stays_default_even_with_unsupported_catalog() {
+    let mut unsupported = model_info_with_modalities("test-model", Some(vec![]));
+    unsupported.reasoning_evidence = crate::llm::ReasoningEvidence::Unsupported;
+    let provider = eden_catalog_provider(vec![unsupported], false);
+    let engine = EngineImpl::new(provider.clone(), make_engine_config());
+    engine
+        .chat(vec![], vec![], CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(engine.reasoning_effort(), None);
+    assert_eq!(
+        engine.effective_reasoning_provenance(),
+        crate::llm::ReasoningEffortProvenance::ProviderDefault
+    );
+    assert!(engine.take_pending_notices().is_empty());
+    assert_eq!(provider.catalog.list_models_calls(), 1);
+}
+
+#[test]
+fn independent_runtime_binding_does_not_depend_on_reasoning_policy() {
+    let provider = Arc::new(RuntimeBoundProvider {
+        runtime: Arc::new(RwLock::new(
+            EngineRuntimeConfig::from(&make_engine_config()),
+        )),
+    });
+    let first = engine_with_profile_reasoning(provider.clone(), "first");
+    let second = engine_with_profile_reasoning(provider, "second");
+    assert_eq!(first.reasoning_effort().as_deref(), Some("first"));
+    assert_eq!(second.reasoning_effort().as_deref(), Some("second"));
+    first.switch_model("first-model").unwrap();
+    assert_eq!(second.config().model, "test-model");
+}
+
+struct RuntimeBoundProvider {
+    runtime: EngineRuntimeConfigHandle,
+}
+
+impl Provider for RuntimeBoundProvider {
+    fn bind_engine_runtime(&self, runtime: EngineRuntimeConfigHandle) -> Option<Arc<dyn Provider>> {
+        Some(Arc::new(Self { runtime }))
+    }
+
+    fn runtime_config_handle(&self) -> Option<EngineRuntimeConfigHandle> {
+        Some(self.runtime.clone())
+    }
+
+    fn name(&self) -> &str {
+        "neutral-runtime"
+    }
+
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async { anyhow::bail!("not used") })
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        Box::pin(async { Ok(vec![model_info_with_modalities("test-model", Some(vec![]))]) })
+    }
+}
+
+#[derive(Debug)]
+struct NeutralReasoningPolicy;
+
+impl crate::llm::ReasoningEffortPolicy for NeutralReasoningPolicy {
+    fn resolve(
+        &self,
+        _model_id: &str,
+        _model: Option<&ModelInfo>,
+        effort: Option<&str>,
+    ) -> anyhow::Result<crate::llm::ReasoningEffortProvenance> {
+        match effort {
+            None => Ok(crate::llm::ReasoningEffortProvenance::ProviderDefault),
+            Some("custom") => Ok(crate::llm::ReasoningEffortProvenance::Unverified),
+            Some(_) => anyhow::bail!("neutral contract rejection"),
+        }
+    }
+
+    fn validate_request(
+        &self,
+        model_id: &str,
+        model: Option<&ModelInfo>,
+        effort: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.resolve(model_id, model, effort).map(|_| ())
+    }
+
+    fn requires_catalog_evidence(&self) -> bool {
+        true
+    }
+
+    fn shows_capability_evidence(&self) -> bool {
+        true
+    }
+
+    fn retain_profile_effort(&self, _model: &ModelInfo, _effort: &str) -> bool {
+        true
+    }
+
+    fn unverified_choices(&self, _model: Option<&ModelInfo>) -> &'static [&'static str] {
+        &["custom"]
+    }
+
+    fn unverified_notice(&self, model: &str, effort: &str) -> Option<String> {
+        Some(format!("Neutral selection {model}/{effort} is unverified"))
+    }
+}
+
+struct NeutralPolicyProvider(CatalogProvider);
+
+impl Provider for NeutralPolicyProvider {
+    fn reasoning_effort_policy(&self) -> std::sync::Arc<dyn crate::llm::ReasoningEffortPolicy> {
+        std::sync::Arc::new(NeutralReasoningPolicy)
+    }
+
+    fn set_reasoning_effort(&self, _effort: Option<&str>) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn name(&self) -> &str {
+        "neutral-contract"
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        self.0.list_models()
+    }
+
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async {
+            let (_, receiver) = mpsc::channel(1);
+            Ok(receiver)
+        })
+    }
+}
+
+#[tokio::test]
+async fn neutral_reasoning_contract_controls_validation_hydration_and_notices_without_runtime_binding(
+) {
+    let provider = Arc::new(NeutralPolicyProvider(CatalogProvider::new(vec![
+        model_info_with_modalities("test-model", Some(vec![])),
+    ])));
+    let engine = engine_with_profile_reasoning(provider.clone(), "custom");
+    engine.set_input_modalities(Some(vec![]));
+    for _ in 0..2 {
+        engine
+            .chat(vec![], vec![], CancellationToken::new())
+            .await
+            .unwrap();
+    }
+    assert_eq!(engine.reasoning_effort().as_deref(), Some("custom"));
+    assert_eq!(provider.0.list_models_calls(), 1);
+    assert_eq!(
+        engine.take_pending_notices(),
+        vec!["Neutral selection test-model/custom is unverified"]
+    );
+    let before = engine.runtime_snapshot();
+    assert!(engine.set_reasoning_effort(Some("medium")).is_err());
+    assert_eq!(engine.runtime_snapshot(), before);
+    engine.set_reasoning_effort(None).unwrap();
+    engine.set_reasoning_effort(Some("custom")).unwrap();
+    engine.prepare_request_notices().unwrap();
+    assert_eq!(engine.take_pending_notices().len(), 1);
+    let option = ProviderModelOption {
+        provider_connection: "mock".into(),
+        model: model_info_with_modalities("test-model", None),
+        reasoning_effort: Some("custom".into()),
+        context_length_override: None,
+    };
+    let options = engine
+        .selection_reasoning_options(&ModelSelection::ProviderModel(option.clone()))
+        .unwrap();
+    assert_eq!(options.unverified_efforts, ["custom"]);
+    assert!(options.show_capability);
+    assert_eq!(
+        engine
+            .resolve_selection_reasoning(&ModelSelection::ProviderModel(option))
+            .unwrap(),
+        crate::llm::ReasoningEffortProvenance::Unverified
+    );
+
+    let invalid_provider = Arc::new(NeutralPolicyProvider(CatalogProvider::failing()));
+    let invalid = engine_with_profile_reasoning(invalid_provider.clone(), "medium");
+    invalid.hydrate_catalog_metadata().await;
+    assert!(invalid
+        .chat(vec![], vec![], CancellationToken::new())
+        .await
+        .is_err());
+    assert_eq!(invalid_provider.0.list_models_calls(), 0);
+    assert_eq!(invalid.reasoning_effort().as_deref(), Some("medium"));
+}
+
+#[tokio::test]
+async fn independently_bound_runtime_retains_strict_profile_fallback_and_atomic_rejection() {
+    let provider = Arc::new(RuntimeBoundProvider {
+        runtime: Arc::new(RwLock::new(
+            EngineRuntimeConfig::from(&make_engine_config()),
+        )),
+    });
+    let engine = engine_with_profile_reasoning(provider, "unadvertised");
+    let before = engine.runtime_snapshot();
+    assert!(engine
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "mock".into(),
+            model: model_info_with_modalities("new-model", Some(vec![])),
+            reasoning_effort: Some("unadvertised".into()),
+            context_length_override: Some(999),
+        })
+        .is_err());
+    assert_eq!(engine.runtime_snapshot(), before);
+    engine.hydrate_catalog_metadata().await;
+    assert_eq!(engine.reasoning_effort(), None);
+    assert_eq!(engine.take_pending_notices().len(), 1);
 }

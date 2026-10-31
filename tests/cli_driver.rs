@@ -307,6 +307,7 @@ impl Engine for SwitchableTestEngine {
                 context_length: None,
                 reasoning_efforts: None,
                 reasoning_default: None,
+                reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                 input_modalities: None,
             }])
         })
@@ -494,6 +495,7 @@ async fn catalog_context_length_rebudgets_the_first_request_before_dispatch() {
                     context_length: Some(4_096),
                     reasoning_efforts: None,
                     reasoning_default: None,
+                    reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                     input_modalities: None,
                 }])
             })
@@ -608,6 +610,7 @@ async fn subagent_spawn_after_root_model_switch_uses_the_root_active_engine() {
                     context_length: None,
                     reasoning_efforts: None,
                     reasoning_default: None,
+                    reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                     input_modalities: None,
                 },
                 reasoning_effort: None,
@@ -731,6 +734,7 @@ async fn running_subagent_uses_a_shared_engine_switch_on_its_next_request() {
                 context_length: None,
                 reasoning_efforts: None,
                 reasoning_default: None,
+                reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                 input_modalities: None,
             },
             reasoning_effort: None,
@@ -843,6 +847,7 @@ async fn subagent_with_explicit_engine_override_keeps_its_named_engine() {
                 context_length: None,
                 reasoning_efforts: None,
                 reasoning_default: None,
+                reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                 input_modalities: None,
             },
             reasoning_effort: None,
@@ -1579,4 +1584,221 @@ async fn spawned_subagent_bash_approval_is_routed_to_the_subagent_not_the_root()
         "expected exactly 2 subagent provider calls: the bash call, then agent_finish \
          after the denial is fed back, output: {output}"
     );
+}
+
+fn edenai_cli_config(server: &common::mock_llm_server::MockLlmServer) -> EngineConfig {
+    let mut config = common::test_engine_config();
+    config.provider_connection = "gateway-work".to_string();
+    config.model = "upstream/reasoning".to_string();
+    config.reasoning = Some("medium".to_string());
+    config.api_base_url = Some(server.base_url());
+    config.api_key = Some("test-key".to_string());
+    config
+}
+
+fn edenai_cli_server_config() -> common::mock_llm_server::MockLlmConfig {
+    common::mock_llm_server::MockLlmConfig {
+        model_path: Some("/v3/models".to_string()),
+        model_catalog_body: Some(serde_json::json!({"data": [{
+            "id": "upstream/reasoning",
+            "capabilities": {"supports_reasoning": true, "output_modalities": ["text"]}
+        }]})),
+        frames: vec![common::mock_llm_server::content_frame("answer-sentinel")],
+        end_after_frames: true,
+        ..Default::default()
+    }
+}
+
+struct EdenaiWarningOutput<'a> {
+    server: &'a common::mock_llm_server::MockLlmServer,
+    bytes: Vec<u8>,
+    checked_warning: bool,
+    initial_post_count: usize,
+}
+
+impl std::io::Write for EdenaiWarningOutput<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes.extend_from_slice(bytes);
+        if !self.checked_warning
+            && String::from_utf8_lossy(&self.bytes)
+                .to_ascii_lowercase()
+                .contains("unverified")
+        {
+            assert_eq!(
+                self.server.request_bodies().len(),
+                self.initial_post_count,
+                "unverified warning must reach CLI output before any chat POST"
+            );
+            self.checked_warning = true;
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn run_edenai_cli(
+    engine: Arc<dyn Engine>,
+    server: &common::mock_llm_server::MockLlmServer,
+) -> String {
+    let registry = Arc::new(ToolRegistry::new());
+    let (agent, receiver) = AgentLoop::new(engine, Arc::clone(&registry));
+    let mut output = EdenaiWarningOutput {
+        server,
+        bytes: Vec::new(),
+        checked_warning: false,
+        initial_post_count: server.request_bodies().len(),
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        run_cli_to(
+            agent,
+            receiver,
+            registry,
+            "question".to_string(),
+            &mut output,
+        ),
+    )
+    .await
+    .expect("CLI completion deadline")
+    .expect("CLI driver completes");
+    String::from_utf8(output.bytes).expect("UTF-8 CLI output")
+}
+
+#[tokio::test]
+async fn edenai_cli_warns_once_per_live_selection_and_default_reset_allows_warning_again() {
+    let server = common::mock_llm_server::MockLlmServer::start(edenai_cli_server_config())
+        .await
+        .expect("bind server");
+    let provider = Arc::new(ylva::EdenAiProvider::new(
+        "gateway-work".to_string(),
+        server.base_url(),
+        "upstream/reasoning".to_string(),
+        Some("test-key".to_string()),
+    ));
+    let engine = Arc::new(EngineImpl::new(provider, edenai_cli_config(&server)));
+    let independent = engine.configured_copy().expect("independent runtime");
+    let first = run_edenai_cli(engine.clone(), &server).await;
+    let warning_position = first
+        .to_ascii_lowercase()
+        .find("unverified")
+        .unwrap_or_else(|| panic!("missing warning: {first}"));
+    assert!(
+        warning_position < first.find("answer-sentinel").expect("answer"),
+        "warning must precede response: {first}"
+    );
+    assert_eq!(
+        first.to_ascii_lowercase().matches("unverified").count(),
+        1,
+        "warning must not repeat: {first}"
+    );
+    let second = run_edenai_cli(engine.clone(), &server).await;
+    assert!(
+        !second.to_ascii_lowercase().contains("unverified"),
+        "same live engine must share warning state: {second}"
+    );
+    let separate = run_edenai_cli(independent, &server).await;
+    assert!(
+        separate.to_ascii_lowercase().contains("unverified"),
+        "independent engine must warn independently: {separate}"
+    );
+    engine.set_reasoning_effort(None).expect("default reset");
+    let default_output = run_edenai_cli(engine.clone(), &server).await;
+    assert!(
+        !default_output.to_ascii_lowercase().contains("unverified"),
+        "default must clear the warning: {default_output}"
+    );
+    engine
+        .set_reasoning_effort(Some("medium"))
+        .expect("restore explicit effort");
+    let restored = run_edenai_cli(engine, &server).await;
+    assert!(
+        restored.to_ascii_lowercase().contains("unverified"),
+        "restored effort must warn again: {restored}"
+    );
+}
+
+#[tokio::test]
+async fn edenai_cli_prints_unverified_warning_before_failed_request_details() {
+    let server = common::mock_llm_server::MockLlmServer::start(common::mock_llm_server::MockLlmConfig {
+        statuses: vec![200, 422],
+        error_body: Some(serde_json::json!({"error": {"message": "backend-cli-sentinel rejects reasoning_effort"}})),
+        ..edenai_cli_server_config()
+    }).await.expect("bind server");
+    let provider = Arc::new(ylva::EdenAiProvider::new(
+        "gateway-work".to_string(),
+        server.base_url(),
+        "upstream/reasoning".to_string(),
+        Some("test-key".to_string()),
+    ));
+    let engine = Arc::new(EngineImpl::new(provider, edenai_cli_config(&server)));
+    let output = run_edenai_cli(engine, &server).await;
+    let warning_position = output
+        .to_ascii_lowercase()
+        .find("unverified")
+        .unwrap_or_else(|| panic!("missing warning on failed request: {output}"));
+    let error_position = output
+        .find("backend-cli-sentinel")
+        .unwrap_or_else(|| panic!("missing backend details: {output}"));
+    assert!(
+        warning_position < error_position,
+        "failure must not hide or reorder warning: {output}"
+    );
+    assert!(
+        output.contains("medium") && output.contains("upstream/reasoning"),
+        "context must survive CLI assembly: {output}"
+    );
+    assert_eq!(
+        server.request_bodies().len(),
+        1,
+        "parameter errors must not trigger fallback requests"
+    );
+}
+
+#[tokio::test]
+async fn edenai_cli_tool_continuation_does_not_repeat_the_unverified_warning() {
+    let server = common::mock_llm_server::MockLlmServer::start_with_connection_frames(
+        edenai_cli_server_config(),
+        vec![
+            vec![common::mock_llm_server::tool_call_frame(
+                0,
+                "test_tool",
+                "{}",
+            )],
+            vec![common::mock_llm_server::content_frame(
+                "continuation-sentinel",
+            )],
+        ],
+    )
+    .await
+    .expect("bind server");
+    let provider = Arc::new(ylva::EdenAiProvider::new(
+        "gateway-work".to_string(),
+        server.base_url(),
+        "upstream/reasoning".to_string(),
+        Some("test-key".to_string()),
+    ));
+    let engine = Arc::new(EngineImpl::new(provider, edenai_cli_config(&server)));
+    let output = run_edenai_cli(engine, &server).await;
+    assert!(
+        output.contains("continuation-sentinel"),
+        "tool continuation must complete: {output}"
+    );
+    assert_eq!(
+        output.to_ascii_lowercase().matches("unverified").count(),
+        1,
+        "continuation must retain warning state: {output}"
+    );
+    let bodies = server.request_bodies();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "tool rejection must lead to one continuation"
+    );
+    for body in bodies {
+        let request: serde_json::Value = serde_json::from_str(&body).expect("chat body");
+        assert_eq!(request["reasoning_effort"], "medium");
+    }
 }

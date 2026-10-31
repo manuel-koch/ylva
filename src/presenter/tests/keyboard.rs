@@ -18,6 +18,7 @@ use crate::tui_reducer_state::{ChoiceLabel, ModelChoice, PromptButton};
 
 fn picker_choice(connection: &str, model: &str, favorite_rank: Option<usize>) -> ModelChoice {
     let mut choice = ModelChoice {
+        reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         label: ChoiceLabel {
             identity: format!("{connection}/{model}"),
             details: Vec::new(),
@@ -27,6 +28,7 @@ fn picker_choice(connection: &str, model: &str, favorite_rank: Option<usize>) ->
             context_length_override: None,
             provider_connection: connection.to_string(),
             model: ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: model.to_string(),
                 context_length: Some(65_536),
                 reasoning_efforts: Some(vec!["low".to_string(), "medium".to_string()]),
@@ -379,6 +381,7 @@ fn model_picker_pages_selection_with_page_keys() {
         parameters: None,
         choices: (0..10)
             .map(|index| ModelChoice {
+                reasoning_options: crate::llm::ReasoningEffortOptions::default(),
                 label: crate::tui_reducer_state::ChoiceLabel {
                     identity: format!("stub/model-{index}"),
                     details: Vec::new(),
@@ -388,6 +391,7 @@ fn model_picker_pages_selection_with_page_keys() {
                     context_length_override: None,
                     provider_connection: "stub".to_string(),
                     model: crate::llm::ModelInfo {
+                        reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                         id: format!("model-{index}"),
                         context_length: None,
                         reasoning_efforts: None,

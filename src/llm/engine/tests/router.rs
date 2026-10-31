@@ -192,6 +192,7 @@ fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection()
         context_length_override: None,
         provider_connection: connection.to_string(),
         model: ModelInfo {
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             id: model.to_string(),
             context_length: Some(64_000),
             reasoning_efforts: None,
@@ -294,6 +295,7 @@ fn named_engine_selection_rejects_invalid_targets_without_switching() {
             context_length_override: None,
             provider_connection: provider_connection.to_string(),
             model: ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: id.to_string(),
                 context_length: None,
                 reasoning_efforts: reasoning_efforts
@@ -647,4 +649,76 @@ fn named_engine_selection_rechecks_policy() {
 
     assert!(router.preview_model_selection(&selection).is_ok());
     assert!(router.select_model(&selection).is_ok());
+}
+
+#[test]
+fn edenai_router_raw_and_named_preview_match_transactional_confirmation() {
+    let gateway_provider = Arc::new(crate::llm::EdenAiProvider::new(
+        "gateway".into(),
+        "http://localhost:1".into(),
+        "test-model".into(),
+        None,
+    ));
+    let mut config = make_engine_config();
+    config.provider_connection = "gateway".into();
+    config.reasoning = Some("medium".into());
+    let gateway = Arc::new(EngineImpl::new(gateway_provider, config));
+    let other = Arc::new(EngineImpl::new(
+        Arc::new(MockProvider::new(vec![], Duration::ZERO)),
+        make_engine_config(),
+    ));
+    let router = EngineRouter::new(
+        HashMap::from([
+            ("gateway-engine".into(), gateway.clone() as Arc<dyn Engine>),
+            ("other".into(), other as Arc<dyn Engine>),
+        ]),
+        "other",
+    )
+    .unwrap();
+    let option = ProviderModelOption {
+        provider_connection: "gateway".into(),
+        model: model_info_with_modalities("test-model", Some(vec![])),
+        reasoning_effort: None,
+        context_length_override: Some(333),
+    };
+    let named = ModelSelection::NamedEngine {
+        engine_name: "gateway-engine".into(),
+        option: option.clone(),
+        reasoning_effort: super::super::ReasoningEffortChange::Unchanged,
+    };
+    router.preview_model_selection(&named).unwrap();
+    router.select_model(&named).unwrap();
+    assert_eq!(router.reasoning_effort().as_deref(), Some("medium"));
+    let mut unsupported = option.clone();
+    unsupported.model.reasoning_evidence = crate::llm::ReasoningEvidence::Unsupported;
+    let rejected = ModelSelection::NamedEngine {
+        engine_name: "gateway-engine".into(),
+        option: unsupported,
+        reasoning_effort: super::super::ReasoningEffortChange::Unchanged,
+    };
+    let before = gateway.runtime_snapshot().unwrap();
+    assert!(router.preview_model_selection(&rejected).is_err());
+    assert!(router.select_model(&rejected).is_err());
+    assert_eq!(gateway.runtime_snapshot().unwrap(), before);
+    assert_eq!(
+        router.active_engine_name().as_deref(),
+        Some("gateway-engine")
+    );
+    let reset = ModelSelection::NamedEngine {
+        engine_name: "gateway-engine".into(),
+        option: option.clone(),
+        reasoning_effort: super::super::ReasoningEffortChange::Set(None),
+    };
+    router.select_model(&reset).unwrap();
+    assert_eq!(router.reasoning_effort(), None);
+    let mut raw = option;
+    raw.model.id = "new-model".into();
+    raw.reasoning_effort = Some("low".into());
+    let preview = router
+        .preview_model_selection(&ModelSelection::ProviderModel(raw.clone()))
+        .unwrap();
+    assert_eq!(preview.context_length, 333);
+    router.switch_model_option(&raw).unwrap();
+    assert_eq!(router.config().model, "new-model");
+    assert_eq!(router.reasoning_effort().as_deref(), Some("low"));
 }

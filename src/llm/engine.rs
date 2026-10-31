@@ -41,6 +41,94 @@ use tokio_util::sync::CancellationToken;
 /// Keeps `AgentLoop` independent of concrete provider implementations while
 /// allowing the agent factory to construct root and subagent engines consistently.
 pub trait Engine: Send + Sync {
+    /// Coherent live settings, for display and diagnostics rather than mutation.
+    fn runtime_snapshot(&self) -> Option<EngineRuntimeConfig> {
+        None
+    }
+
+    /// Provider implementation owns reasoning policy; routers delegate to the target.
+    fn reasoning_effort_policy(&self) -> std::sync::Arc<dyn crate::llm::ReasoningEffortPolicy> {
+        std::sync::Arc::new(crate::llm::AdvertisedReasoningEffortPolicy)
+    }
+
+    fn effective_reasoning_provenance(&self) -> crate::llm::ReasoningEffortProvenance {
+        crate::llm::ReasoningEffortProvenance::ProviderDefault
+    }
+
+    /// Validate effort for a particular selection's target provider.
+    fn resolve_selection_reasoning(
+        &self,
+        selection: &ModelSelection,
+    ) -> anyhow::Result<crate::llm::ReasoningEffortProvenance> {
+        let (option, effort) = match selection {
+            ModelSelection::ProviderModel(option) => (option, option.reasoning_effort.clone()),
+            ModelSelection::NamedEngine {
+                option,
+                reasoning_effort,
+                ..
+            } => (
+                option,
+                match reasoning_effort {
+                    ReasoningEffortChange::Unchanged => self.reasoning_effort(),
+                    ReasoningEffortChange::Set(effort) => effort.clone(),
+                },
+            ),
+        };
+        self.reasoning_effort_policy().resolve(
+            &option.model.id,
+            Some(&option.model),
+            effort.as_deref(),
+        )
+    }
+
+    /// Choices for deliberately labelled unverified overrides on the target provider.
+    fn unverified_reasoning_choices(
+        &self,
+        _provider_connection: &str,
+        model: Option<&ModelInfo>,
+    ) -> Vec<String> {
+        self.reasoning_effort_policy()
+            .unverified_choices(model)
+            .iter()
+            .map(|effort| (*effort).to_string())
+            .collect()
+    }
+
+    /// Resolve display choices using the same target as selection and preview.
+    fn selection_reasoning_options(
+        &self,
+        selection: &ModelSelection,
+    ) -> anyhow::Result<crate::llm::ReasoningEffortOptions> {
+        let model = match selection {
+            ModelSelection::NamedEngine { option, .. } | ModelSelection::ProviderModel(option) => {
+                &option.model
+            }
+        };
+        Ok(self.reasoning_effort_policy().picker_options(model))
+    }
+
+    /// Queue a deduplicated uncertainty warning before network dispatch.
+    /// Call after hydration and drain notices even if chat subsequently fails.
+    fn prepare_request_notices(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Apply a named shortcut's complete settings before the router publishes routing.
+    fn apply_named_model_option(
+        &self,
+        option: &ProviderModelOption,
+        change: &ReasoningEffortChange,
+    ) -> anyhow::Result<()> {
+        validate_named_engine_option(self, option, change)?;
+        if let ReasoningEffortChange::Set(effort) = change {
+            self.set_reasoning_effort(effort.as_deref())?;
+        }
+        if let Some(context_length) = option.context_length_override {
+            self.set_context_length_override(Some(context_length))?;
+        }
+        Ok(())
+    }
+
     /// Create an independent runtime from the engine's original configuration.
     fn configured_copy(&self) -> anyhow::Result<Arc<dyn Engine>> {
         anyhow::bail!("engine does not support creating an independent configured runtime")
@@ -226,6 +314,7 @@ pub trait Engine: Send + Sync {
         self.named_engines()
             .into_iter()
             .map(|(name, config)| NamedEngineInfo {
+                model_info: None,
                 reasoning_effort: config.reasoning.clone(),
                 name,
                 config,
@@ -340,15 +429,9 @@ pub trait Engine: Send + Sync {
                     self.active_engine_name().as_deref() == Some(engine_name),
                     "engine '{engine_name}' is not available for named selection"
                 );
-                validate_named_engine_option(&self.config(), option, reasoning_effort)?;
+                validate_named_engine_option(self, option, reasoning_effort)?;
                 self.ensure_model_allowed(&option.model.id)?;
-                if let ReasoningEffortChange::Set(reasoning_effort) = reasoning_effort {
-                    self.set_reasoning_effort(reasoning_effort.as_deref())?;
-                }
-                if let Some(context_length) = option.context_length_override {
-                    self.set_context_length_override(Some(context_length))?;
-                }
-                Ok(())
+                self.apply_named_model_option(option, reasoning_effort)
             }
         }
     }
@@ -371,7 +454,7 @@ pub trait Engine: Send + Sync {
                     self.active_engine_name().as_deref() == Some(engine_name),
                     "engine '{engine_name}' is not available for named selection"
                 );
-                validate_named_engine_option(&config, option, reasoning_effort)?;
+                validate_named_engine_option(self, option, reasoning_effort)?;
                 self.ensure_model_allowed(&option.model.id)?;
                 Some(engine_name.clone())
             }
@@ -383,6 +466,11 @@ pub trait Engine: Send + Sync {
                     option.provider_connection
                 );
                 self.ensure_model_allowed(&option.model.id)?;
+                self.reasoning_effort_policy().resolve(
+                    &option.model.id,
+                    Some(&option.model),
+                    option.reasoning_effort.as_deref(),
+                )?;
                 self.active_engine_name()
             }
         };
@@ -418,14 +506,11 @@ pub(super) fn apply_model_option(
     );
     // Policy is checked before any reasoning/model/window mutation.
     engine.ensure_model_allowed(&option.model.id)?;
-    if let Some(reasoning_effort) = option.reasoning_effort.as_deref() {
-        anyhow::ensure!(
-            option.model.advertises_reasoning_effort(reasoning_effort),
-            "model '{}' does not advertise reasoning effort '{}'",
-            option.model.id,
-            reasoning_effort
-        );
-    }
+    engine.reasoning_effort_policy().resolve(
+        &option.model.id,
+        Some(&option.model),
+        option.reasoning_effort.as_deref(),
+    )?;
     engine.set_reasoning_effort(option.reasoning_effort.as_deref())?;
     engine.switch_model(&option.model.id)?;
     engine.set_input_modalities(option.model.input_modalities.clone());

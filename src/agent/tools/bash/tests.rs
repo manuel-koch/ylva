@@ -267,7 +267,7 @@ fn bash_non_zero_exit_keeps_header_single_line_and_output_separate() {
         let error = result.expect_err("non-zero exit must be an error");
         assert_eq!(
             error.to_string(),
-            "Tool 'bash' failed: command exited with code 1:",
+            "Tool 'bash' failed: command exited with code 1",
             "header must be a single line without output"
         );
         assert!(

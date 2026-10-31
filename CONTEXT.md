@@ -231,6 +231,12 @@ it is shared by engines and agents using that connection.
 A reusable model configuration that binds a model to a provider connection
 and engine settings.
 
+**Reasoning effort provenance**:
+Live evidence for an effective explicit effort on the selected model. An advertised effort
+is an exact catalog member; an unverified effort is gateway-valid without model-specific
+confirmation. Provider default means no explicit effort is sent. Provenance is not persisted
+in session metadata and does not establish upstream acceptance or visible thinking.
+
 **Engine runtime**:
 The live model selection and effective settings an agent uses for model
 requests. It starts from the engine's profile configuration and can change

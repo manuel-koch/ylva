@@ -153,16 +153,19 @@ pub struct ModelSelectionTarget {
 /// Engine runtime settings displayed for one named engine.
 #[derive(Clone, Debug)]
 pub struct NamedEngineInfo {
+    /// Cached live catalog evidence for this named engine's selected model.
+    pub model_info: Option<ModelInfo>,
     pub name: String,
     pub config: EngineConfig,
     pub reasoning_effort: Option<String>,
 }
 
 pub(super) fn validate_named_engine_option(
-    config: &EngineConfig,
+    engine: &(impl Engine + ?Sized),
     option: &ProviderModelOption,
     reasoning_effort: &ReasoningEffortChange,
 ) -> anyhow::Result<()> {
+    let config = engine.config();
     anyhow::ensure!(
         config.provider_connection == option.provider_connection,
         "engine uses provider connection '{}', not '{}'",
@@ -175,23 +178,10 @@ pub(super) fn validate_named_engine_option(
         config.model,
         option.model.id
     );
-    match reasoning_effort {
-        ReasoningEffortChange::Unchanged => {}
-        ReasoningEffortChange::Set(Some(effort)) => anyhow::ensure!(
-            option.model.advertises_reasoning_effort(effort),
-            "model '{}' does not advertise reasoning effort '{}'",
-            option.model.id,
-            effort
-        ),
-        ReasoningEffortChange::Set(None) => anyhow::ensure!(
-            option
-                .model
-                .reasoning_efforts
-                .as_ref()
-                .is_some_and(|efforts| !efforts.is_empty()),
-            "model '{}' does not advertise selectable reasoning efforts",
-            option.model.id
-        ),
-    }
+    engine.reasoning_effort_policy().validate_named_change(
+        &option.model,
+        engine.reasoning_effort().as_deref(),
+        reasoning_effort,
+    )?;
     Ok(())
 }

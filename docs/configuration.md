@@ -730,7 +730,7 @@ rebuilding the provider.
 | `context_length` | number or string (optional) | Maximum token context window for this engine's configured model. Omitted means the profile doesn't limit it explicitly. Accepts a plain integer or a decimal string with a case-insensitive `K`/`M` suffix (e.g. `"128K"` = 128,000 tokens, `"1.2M"` = 1,200,000 tokens). Bare integer strings are also accepted. Fractional suffixed values must resolve to whole tokens without rounding; overflow and byte-unit suffixes (`kb`, `mb`, `KiB`, etc.) are rejected. Configuration and display both use decimal token units. For the configured model, this value takes precedence over the provider catalog. Switching to another model uses that model's catalog window, then the built-in default of `128 000`, without retaining the configured override or the previous model's window. Selecting the configured model again reapplies its override. Compaction budgeting uses the resolved window. |
 | `api_base_url` | string (optional) | Optional engine-level override for the connection's base URL. |
 | `api_key` | string (optional) | Optional engine-level override for the connection's API key. |
-| `reasoning` | string (optional) | Initial explicit reasoning effort applied when the engine is constructed. Omitted uses the provider's own default. Validated once, lazily before the first chat, against the model catalog: an advertised value is kept; a value the model does not advertise (including models that expose no selectable alternatives at all) is dropped to the provider default with a warning naming the model and effort; when the model is absent from the catalog or the catalog fetch fails, the value is kept unvalidated. Later changes go through `/models`, which validates the effort against the model's advertised options before switching. |
+| `reasoning` | string (optional) | Initial explicit reasoning effort. Omitted uses the provider default. See [reasoning validation](#reasoning-validation). |
 | `compact_target_ratio` | number (optional) | Best-effort model-view target as a fraction of the effective window (default `0.5`). Task continuity takes priority when the separate safe request ceiling already fits. Must be `> 0` and `≤ 1`, and strictly below `soft_compaction_threshold`. |
 | `soft_compaction_threshold` | number (optional) | Fraction of the effective window at or above which a completed turn or tool outcome schedules a useful completed-prefix summary (default `0.7`). Soft pressure alone does not cancel running tools. Must be `> 0` and `≤ 1`, and strictly below `hard_compaction_threshold`. |
 | `hard_compaction_threshold` | number (optional) | Fraction above which a continuation waits for an existing summary within its remaining original deadline, then recovers lossily if necessary (default `0.9`). Every request also fits the separate local safe ceiling. Must be `> 0` and `≤ 1`. |
@@ -758,6 +758,27 @@ outside `(0, 1]` or a pair that is out of order (`compact_target_ratio` at or
 above `soft_compaction_threshold`, or `soft_compaction_threshold` at or above
 `hard_compaction_threshold`) is a startup error naming the engine and the
 violated rule.
+
+### Reasoning validation
+
+An explicit EdenAI `reasoning` profile value or a deliberately selected labelled override
+in `/models` is sufficient opt-in. There is no additional configuration key. Workspace
+configuration still passes the existing trust checks.
+
+EdenAI keeps model-advertised efforts separate from gateway-valid unverified values.
+Missing capability, missing models, catalog failures, and incomplete enumeration permit
+unverified explicit values. Explicit unsupported, contradictory, or malformed evidence
+rejects explicit effort. Invalid values cannot bypass validation through known modalities
+or direct runtime writes. Errors name the model and effort and do not fall back to default.
+
+Omission uses provider default and sends neither null nor the literal `default`.
+Selecting default in `/models` clears the explicit value. An unverified selection warns
+before dispatch, including failure, once per current live engine/model/effort selection.
+Default resets that warning; returning to an unverified value warns again. Agents sharing
+one live engine share warning state; independent configured copies do not.
+
+Other providers retain their existing strict picker validation and lazy profile behavior.
+Effort and its provenance remain live-only and are not restored from session metadata.
 
 ## Profile configuration
 

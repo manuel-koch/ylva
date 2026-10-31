@@ -32,6 +32,8 @@ pub struct ModelChoice {
     /// Engine runtime effort when the picker was populated. Used to distinguish an
     /// untouched named-engine shortcut from an explicit user edit.
     pub initial_reasoning_effort: Option<String>,
+    /// Display-only choices resolved by the routing target, without provider identity.
+    pub reasoning_options: crate::llm::ReasoningEffortOptions,
     /// Row text shown in the picker, kept as its identity and detail segments.
     pub label: ChoiceLabel,
     /// Whether this choice is the model currently serving the conversation.
@@ -105,12 +107,81 @@ impl ModelChoice {
         }
     }
 
+    fn reasoning_choices(&self) -> Vec<String> {
+        if self.reasoning_options.unverified_efforts.is_empty() {
+            self.reasoning_options
+                .selectable_efforts
+                .clone()
+                .unwrap_or_else(|| {
+                    self.selection
+                        .model
+                        .reasoning_efforts
+                        .clone()
+                        .unwrap_or_default()
+                })
+        } else {
+            self.reasoning_options.unverified_efforts.clone()
+        }
+    }
+
+    fn reasoning_cycle_default(&self) -> Option<&str> {
+        if self.reasoning_options.unverified_efforts.is_empty() {
+            self.selection.model.reasoning_default.as_deref()
+        } else {
+            None
+        }
+    }
+
+    fn reasoning_value_label(&self, effort: Option<&str>) -> String {
+        match effort {
+            Some(effort) => {
+                let unverified = self
+                    .reasoning_options
+                    .unverified_efforts
+                    .iter()
+                    .any(|choice| choice == effort);
+                if unverified {
+                    format!("{effort} (unverified)")
+                } else {
+                    effort.to_string()
+                }
+            }
+            None => default_effort_label(&self.reasoning_choices(), self.reasoning_cycle_default()),
+        }
+    }
+
     /// Refresh the row text after changing its selected reasoning effort.
     pub fn refresh_label(&mut self) {
         self.label = match &self.engine_name {
             Some(engine_name) => engine_choice_parts(engine_name, &self.selection),
             None => model_choice_parts(&self.selection),
         };
+        if let Some(effort) = self.selection.reasoning_effort.as_deref() {
+            let value = self.reasoning_value_label(Some(effort));
+            for detail in &mut self.label.details {
+                if detail.starts_with("reasoning: ") {
+                    *detail = format!("reasoning: {value}");
+                }
+            }
+        } else if !self.reasoning_options.unverified_efforts.is_empty() {
+            for detail in &mut self.label.details {
+                if detail.starts_with("reasoning: ") {
+                    *detail = "reasoning: default".to_string();
+                }
+            }
+        }
+        if self.reasoning_options.show_capability {
+            let capability = match self.selection.model.reasoning_evidence {
+                crate::llm::ReasoningEvidence::Unknown => "unknown",
+                crate::llm::ReasoningEvidence::Unsupported => "unsupported",
+                crate::llm::ReasoningEvidence::Supported => "supported",
+                crate::llm::ReasoningEvidence::Invalid => "invalid metadata",
+                crate::llm::ReasoningEvidence::Conflicting => "conflicting metadata",
+            };
+            self.label
+                .details
+                .push(format!("reasoning capability: {capability}"));
+        }
         if self.is_favorite() {
             self.label.identity.insert_str(0, FAVORITE_MARKER);
         }
@@ -181,17 +252,13 @@ fn format_model_choice_label(identity: String, option: &ProviderModelOption) -> 
             format_token_estimate(context_length)
         ));
     }
-    details.push(match option.model.reasoning_efforts.as_deref() {
-        None => "reasoning: unavailable".to_string(),
-        Some([]) => format!(
-            "reasoning: {}",
-            default_effort_label(&[], reasoning_default)
-        ),
-        Some(reasoning_efforts) => match option.reasoning_effort.as_deref() {
-            Some(reasoning_effort) => format!("reasoning: {reasoning_effort}"),
-            None => format!(
+    details.push(match option.reasoning_effort.as_deref() {
+        Some(effort) => format!("reasoning: {effort}"),
+        None => match option.model.reasoning_efforts.as_deref() {
+            None => "reasoning: unavailable".to_string(),
+            Some(efforts) => format!(
                 "reasoning: {}",
-                default_effort_label(reasoning_efforts, reasoning_default)
+                default_effort_label(efforts, reasoning_default)
             ),
         },
     });
@@ -417,7 +484,7 @@ impl SlashOverlay {
 pub enum ParameterField {
     /// Effective context window, in tokens.
     ContextLength,
-    /// Reasoning effort, cycled through the model's advertised efforts.
+    /// Reasoning effort, cycled through advertised choices or labelled unverified overrides.
     ReasoningEffort,
 }
 
@@ -427,8 +494,7 @@ pub enum ParameterField {
 pub struct ModelParameterEdit {
     /// Index into the picker's `choices` of the model being edited.
     pub choice_index: usize,
-    /// Rows shown in the popup. The reasoning row is only present when the
-    /// model advertises selectable efforts.
+    /// Rows shown in the popup. Explicit efforts remain resettable even without choices.
     pub fields: Vec<ParameterField>,
     /// Index into `fields` of the highlighted row.
     pub cursor: usize,
@@ -566,7 +632,12 @@ fn reasoning_effort_directions(
 ) -> (bool, bool) {
     let slots = reasoning_effort_slots(reasoning_efforts, reasoning_default);
     let position = reasoning_effort_position(&slots, current);
-    (position > 0, position + 1 < slots.len())
+    let explicit_without_slot =
+        current.is_some_and(|effort| !slots.iter().any(|slot| slot.as_deref() == Some(effort)));
+    (
+        position > 0 || explicit_without_slot,
+        position + 1 < slots.len(),
+    )
 }
 
 /// Wrap a parameter value in the direction glyphs. The left slot keeps its
@@ -710,22 +781,13 @@ pub(crate) fn model_parameter_rows(edit: &ModelParameterEdit, choice: &ModelChoi
                 None => "Context length:  unknown".to_string(),
             },
             ParameterField::ReasoningEffort => {
-                let reasoning_default = choice.selection.model.reasoning_default.as_deref();
-                let reasoning_efforts = choice
-                    .selection
-                    .model
-                    .reasoning_efforts
-                    .as_deref()
-                    .unwrap_or_default();
+                let reasoning_efforts = choice.reasoning_choices();
                 let directions = reasoning_effort_directions(
-                    reasoning_efforts,
-                    reasoning_default,
+                    &reasoning_efforts,
+                    choice.reasoning_cycle_default(),
                     edit.reasoning_effort.as_deref(),
                 );
-                let value = edit
-                    .reasoning_effort
-                    .clone()
-                    .unwrap_or_else(|| default_effort_label(reasoning_efforts, reasoning_default));
+                let value = choice.reasoning_value_label(edit.reasoning_effort.as_deref());
                 format!(
                     "Reasoning effort:  {}",
                     format_parameter_value(&value, directions)
@@ -975,14 +1037,8 @@ impl AppState {
             return;
         };
         let choice = &choices[choice_index];
-        let reasoning_efforts = choice
-            .selection
-            .model
-            .reasoning_efforts
-            .as_deref()
-            .filter(|efforts| !efforts.is_empty());
         let mut fields = vec![ParameterField::ContextLength];
-        if reasoning_efforts.is_some() {
+        if !choice.reasoning_choices().is_empty() || choice.selection.reasoning_effort.is_some() {
             fields.push(ParameterField::ReasoningEffort);
         }
         *parameters = Some(ModelParameterEdit {
@@ -1020,16 +1076,12 @@ impl AppState {
             None => return,
         };
         let reasoning_cycle = match &self.slash_overlay {
-            SlashOverlay::ModelPicker { choices, .. } => {
-                choices.get(choice_index).and_then(|choice| {
-                    choice
-                        .selection
-                        .model
-                        .reasoning_efforts
-                        .clone()
-                        .map(|efforts| (efforts, choice.selection.model.reasoning_default.clone()))
-                })
-            }
+            SlashOverlay::ModelPicker { choices, .. } => choices.get(choice_index).map(|choice| {
+                (
+                    choice.reasoning_choices(),
+                    choice.reasoning_cycle_default().map(str::to_string),
+                )
+            }),
             _ => None,
         };
         let Some(edit) = self.model_parameters_mut() else {

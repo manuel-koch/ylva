@@ -17,7 +17,7 @@
 use super::selection::validate_named_engine_option;
 use super::{
     Engine, EngineConfig, ModelSelection, ModelSelectionTarget, NamedEngineInfo,
-    ProviderModelOption, ReasoningEffortChange,
+    ProviderModelOption,
 };
 use crate::agent::{Message, StreamEvent};
 use crate::llm::{InputModality, ModelInfo, ToolSchema};
@@ -135,6 +135,26 @@ impl EngineRouter {
         providers
     }
 
+    fn provider_engine_for_active(
+        &self,
+        connection: &str,
+        active: &str,
+    ) -> anyhow::Result<(String, Arc<dyn Engine>)> {
+        if let Some(engine) = self
+            .engines
+            .get(active)
+            .filter(|engine| engine.config().provider_connection == connection)
+        {
+            return Ok((active.to_string(), engine.clone()));
+        }
+        self.engines
+            .iter()
+            .filter(|(_, engine)| engine.config().provider_connection == connection)
+            .min_by_key(|(name, _)| *name)
+            .map(|(name, engine)| (name.clone(), engine.clone()))
+            .ok_or_else(|| anyhow::anyhow!("provider connection '{connection}' is not configured"))
+    }
+
     fn provider_engine_for(
         &self,
         provider_connection: &str,
@@ -150,6 +170,61 @@ impl EngineRouter {
 }
 
 impl Engine for EngineRouter {
+    fn runtime_snapshot(&self) -> Option<super::EngineRuntimeConfig> {
+        self.active_engine().runtime_snapshot()
+    }
+    fn reasoning_effort_policy(&self) -> Arc<dyn crate::llm::ReasoningEffortPolicy> {
+        self.active_engine().reasoning_effort_policy()
+    }
+    fn effective_reasoning_provenance(&self) -> crate::llm::ReasoningEffortProvenance {
+        self.active_engine().effective_reasoning_provenance()
+    }
+    fn prepare_request_notices(&self) -> anyhow::Result<()> {
+        self.active_engine().prepare_request_notices()
+    }
+    fn unverified_reasoning_choices(
+        &self,
+        provider_connection: &str,
+        model: Option<&ModelInfo>,
+    ) -> Vec<String> {
+        self.provider_engine_for(provider_connection)
+            .map(|(_, engine)| engine.unverified_reasoning_choices(provider_connection, model))
+            .unwrap_or_default()
+    }
+    fn selection_reasoning_options(
+        &self,
+        selection: &super::ModelSelection,
+    ) -> anyhow::Result<crate::llm::ReasoningEffortOptions> {
+        let engine = match selection {
+            ModelSelection::NamedEngine { engine_name, .. } => {
+                self.engines.get(engine_name).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("named engine '{engine_name}' is not configured")
+                })?
+            }
+            ModelSelection::ProviderModel(option) => {
+                self.provider_engine_for(&option.provider_connection)?.1
+            }
+        };
+        engine.selection_reasoning_options(selection)
+    }
+
+    fn resolve_selection_reasoning(
+        &self,
+        selection: &ModelSelection,
+    ) -> anyhow::Result<crate::llm::ReasoningEffortProvenance> {
+        let engine = match selection {
+            ModelSelection::NamedEngine { engine_name, .. } => {
+                self.engines.get(engine_name).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("named engine '{engine_name}' is not configured")
+                })?
+            }
+            ModelSelection::ProviderModel(option) => {
+                self.provider_engine_for(&option.provider_connection)?.1
+            }
+        };
+        engine.resolve_selection_reasoning(selection)
+    }
+
     fn chat<'a>(
         &'a self,
         messages: Vec<Message>,
@@ -449,6 +524,9 @@ impl Engine for EngineRouter {
             .engines
             .iter()
             .map(|(name, engine)| NamedEngineInfo {
+                model_info: engine
+                    .runtime_snapshot()
+                    .and_then(|runtime| runtime.model_info),
                 name: name.clone(),
                 config: engine.config(),
                 reasoning_effort: engine.reasoning_effort(),
@@ -459,13 +537,15 @@ impl Engine for EngineRouter {
     }
 
     fn switch_model_option(&self, option: &ProviderModelOption) -> anyhow::Result<()> {
-        let (engine_name, engine) = self.provider_engine_for(&option.provider_connection)?;
-        engine.ensure_model_allowed(&option.model.id)?;
-        engine.switch_model_option(option)?;
-        *self
+        let mut active_engine = self
             .active_engine
             .write()
-            .map_err(|_| anyhow::anyhow!("the active engine lock is poisoned"))? = engine_name;
+            .map_err(|_| anyhow::anyhow!("the active engine lock is poisoned"))?;
+        let (engine_name, engine) =
+            self.provider_engine_for_active(&option.provider_connection, &active_engine)?;
+        engine.ensure_model_allowed(&option.model.id)?;
+        engine.switch_model_option(option)?;
+        *active_engine = engine_name;
         Ok(())
     }
 
@@ -482,13 +562,18 @@ impl Engine for EngineRouter {
                 let target_engine = self.engines.get(engine_name).ok_or_else(|| {
                     anyhow::anyhow!("named engine '{engine_name}' is not configured")
                 })?;
-                validate_named_engine_option(&target_engine.config(), option, reasoning_effort)?;
+                validate_named_engine_option(target_engine.as_ref(), option, reasoning_effort)?;
                 target_engine.ensure_model_allowed(&option.model.id)?;
                 (engine_name.clone(), target_engine.clone())
             }
             ModelSelection::ProviderModel(option) => {
                 let target = self.provider_engine_for(&option.provider_connection)?;
                 target.1.ensure_model_allowed(&option.model.id)?;
+                target.1.reasoning_effort_policy().resolve(
+                    &option.model.id,
+                    Some(&option.model),
+                    option.reasoning_effort.as_deref(),
+                )?;
                 target
             }
         };
@@ -523,18 +608,13 @@ impl Engine for EngineRouter {
                 let engine = self.engines.get(engine_name).ok_or_else(|| {
                     anyhow::anyhow!("named engine '{engine_name}' is not configured")
                 })?;
-                validate_named_engine_option(&engine.config(), option, reasoning_effort)?;
+                validate_named_engine_option(engine.as_ref(), option, reasoning_effort)?;
                 engine.ensure_model_allowed(&option.model.id)?;
                 let mut active_engine = self
                     .active_engine
                     .write()
                     .map_err(|_| anyhow::anyhow!("the active engine lock is poisoned"))?;
-                if let ReasoningEffortChange::Set(reasoning_effort) = reasoning_effort {
-                    engine.set_reasoning_effort(reasoning_effort.as_deref())?;
-                }
-                if let Some(context_length) = option.context_length_override {
-                    engine.set_context_length_override(Some(context_length))?;
-                }
+                engine.apply_named_model_option(option, reasoning_effort)?;
                 *active_engine = engine_name.clone();
                 Ok(())
             }

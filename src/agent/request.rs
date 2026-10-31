@@ -165,9 +165,20 @@ pub(super) fn start_request(
     context.persist_model_projection();
     let request_tools = tools.clone();
     let usage_update_sender = ui_tx.clone();
+    let notice_engine = engine.clone();
+    let notice_sender = agent_tx.clone();
+    let notice_cancel = cancel.clone();
     let on_request_estimate = Box::new(move |estimated_tokens, request_context_length| {
         let usage_update_sender = usage_update_sender.clone();
         Box::pin(async move {
+            // Hydration queues notices before the provider reports its estimate.
+            // Wait until the outer loop publishes them before network dispatch.
+            for notice in notice_engine.take_pending_notices() {
+                if !send_preflight_notice(&notice_sender, generation, notice).await {
+                    notice_cancel.cancel();
+                    return;
+                }
+            }
             send_context_usage_estimate(
                 &usage_update_sender,
                 estimated_tokens,
@@ -236,6 +247,13 @@ pub(super) fn start_request(
             {
                 Ok(stream) => stream,
                 Err(error) => {
+                    // Validation or request construction may fail before the
+                    // estimate callback runs. Do not hide its queued notices.
+                    for notice in engine.take_pending_notices() {
+                        if !send_preflight_notice(&agent_tx, generation, notice).await {
+                            return;
+                        }
+                    }
                     // If the cancel token was already fired (e.g. user aborted
                     // while the server was still thinking), treat the resulting
                     // error as a cancellation rather than a hard error so
@@ -254,7 +272,7 @@ pub(super) fn start_request(
                             ))
                             .await;
                     } else {
-                        let message = format!("{error}");
+                        let message = format!("{error:#}");
                         tracing::debug!(
                             message = %message,
                             "engine chat failed; forwarding stream failure"
@@ -269,10 +287,8 @@ pub(super) fn start_request(
                     return;
                 }
             };
-            // `engine.chat` completed the one-shot catalog hydration, so any
-            // notices it queued (e.g. a dropped profile reasoning effort) are
-            // ready — surface them before the stream events so they render
-            // above this turn's response.
+            // Engines without an estimate callback can still queue notices.
+            // Surface the remainder before the stream events.
             for text in engine.take_pending_notices() {
                 let _ = ui_tx
                     .send(UiUpdate::Notice {
@@ -369,7 +385,7 @@ pub(super) fn start_request(
                         break;
                     }
                     StreamEvent::Error(error) => {
-                        let message = format!("{error}");
+                        let message = format!("{error:#}");
                         let event = if !retrying
                             && partial.is_empty()
                             && accumulators.is_empty()

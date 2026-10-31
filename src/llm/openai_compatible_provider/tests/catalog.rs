@@ -38,6 +38,7 @@ fn default_catalog_reads_generic_model_metadata() {
         DefaultModelCatalog.parse(&body),
         vec![
             crate::llm::ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "openai/gpt-oss-120b".to_string(),
                 context_length: Some(131072),
                 reasoning_efforts: Some(vec!["low".to_string()]),
@@ -45,6 +46,7 @@ fn default_catalog_reads_generic_model_metadata() {
                 input_modalities: Some(vec![crate::llm::InputModality::Image]),
             },
             crate::llm::ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "plain".to_string(),
                 context_length: None,
                 reasoning_efforts: None,

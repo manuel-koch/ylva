@@ -101,6 +101,8 @@ pub struct OllamaThinking {
 #[derive(Debug, Clone)]
 struct Behavior {
     status: u16,
+    model_catalog_body: Option<serde_json::Value>,
+    error_body: Option<serde_json::Value>,
     frames: Vec<String>,
     /// Loop `frames` (or generated frames) forever instead of ending.
     end_after_frames: bool,
@@ -129,6 +131,10 @@ struct Behavior {
 #[derive(Debug, Clone)]
 pub struct MockLlmConfig {
     pub statuses: Vec<u16>,
+    /// Exact JSON served by the model catalog, replacing generated entries.
+    pub model_catalog_body: Option<serde_json::Value>,
+    /// Exact JSON served for non-success responses.
+    pub error_body: Option<serde_json::Value>,
     pub frames: Vec<String>,
     /// When true, emit `[DONE]` after `frames` are exhausted; when false (or
     /// frames empty) stream until the client disconnects.
@@ -157,6 +163,8 @@ impl Default for MockLlmConfig {
     fn default() -> Self {
         MockLlmConfig {
             statuses: Vec::new(),
+            model_catalog_body: None,
+            error_body: None,
             frames: Vec::new(),
             end_after_frames: false,
             fallback_status: 200,
@@ -175,6 +183,8 @@ impl MockLlmConfig {
         let status = *self.statuses.get(position).unwrap_or(&self.fallback_status);
         Behavior {
             status,
+            model_catalog_body: self.model_catalog_body.clone(),
+            error_body: self.error_body.clone(),
             frames: self.frames.clone(),
             end_after_frames: self.end_after_frames,
             models: self.models.clone(),
@@ -482,12 +492,16 @@ async fn handle_connection(
         .as_deref()
         .is_none_or(|model_path| request_target == model_path);
     if request_target.ends_with("/models") && model_path_matches && behavior.status == 200 {
-        write_model_list_response(
-            &mut writer,
-            &behavior.models,
-            behavior.model_input_modalities.as_deref(),
-        )
-        .await;
+        if let Some(body) = &behavior.model_catalog_body {
+            write_json_response(&mut writer, 200, &body.to_string()).await;
+        } else {
+            write_model_list_response(
+                &mut writer,
+                &behavior.models,
+                behavior.model_input_modalities.as_deref(),
+            )
+            .await;
+        }
         live_connections.fetch_sub(1, Ordering::SeqCst);
         return;
     }
@@ -514,7 +528,11 @@ async fn handle_connection(
     }
 
     if behavior.status != 200 {
-        write_error_response(&mut writer, behavior.status).await;
+        if let Some(body) = &behavior.error_body {
+            write_json_response(&mut writer, behavior.status, &body.to_string()).await;
+        } else {
+            write_error_response(&mut writer, behavior.status).await;
+        }
         live_connections.fetch_sub(1, Ordering::SeqCst);
         return;
     }
@@ -563,14 +581,22 @@ async fn write_error_response(writer: &mut tokio::net::tcp::OwnedWriteHalf, stat
         .and_then(|status| status.canonical_reason())
         .unwrap_or("Error");
     let body = format!("{{\"error\":{{\"message\":\"mock {status} {reason}\"}}}}");
+    write_json_response(writer, status, &body).await;
+}
+
+async fn write_json_response(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    status: u16,
+    body: &str,
+) {
+    let reason = reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|status| status.canonical_reason())
+        .unwrap_or("Error");
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\n\
-Content-Type: application/json\r\n\
-Content-Length: {}\r\n\
-\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    // Combine head and body into one write to avoid interleaving.
     let _ = writer.write_all(head.as_bytes()).await;
     let _ = writer.write_all(body.as_bytes()).await;
 }
@@ -639,7 +665,7 @@ async fn write_ollama_tags_response(
             })
             .collect::<Vec<serde_json::Value>>(),
     });
-    write_json_response(writer, &payload).await;
+    write_success_json_response(writer, &payload).await;
 }
 
 /// Write a minimal native Ollama `POST /api/show` response.
@@ -662,10 +688,10 @@ async fn write_ollama_show_response(
             "default": thinking.default,
         });
     }
-    write_json_response(writer, &payload).await;
+    write_success_json_response(writer, &payload).await;
 }
 
-async fn write_json_response(
+async fn write_success_json_response(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     payload: &serde_json::Value,
 ) {
