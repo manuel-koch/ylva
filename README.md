@@ -109,7 +109,7 @@ Provider setup:
 
 ## Ylva's features
 
-Ylva aims to support lean set of features.
+Ylva aims to support a lean set of features.
 
 Ylva is highly customizable to adapt to user needs.
 
@@ -139,7 +139,7 @@ Ylva is highly customizable to adapt to user needs.
   - [x] `glob` for path search using glob-pattern
   - [x] `bash` to run arbitrary commands in a shell
   - [x] `clarify` to ask user interactive question
-  - [x] `spawn_subagent` to deligate workload to a spawned subagents
+  - [x] `spawn_subagent` to deligate workload to spawned subagents
   - [x] `web_search` to search for terms in www, using backends
     - [x] DuckDuckGo
     - [x] SearXNG
