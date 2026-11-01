@@ -90,8 +90,13 @@ from a price table.
   runtime handles do not share warning state; agents sharing a live engine do.
 - Gateway validation does not prove upstream acceptance or that a model honors the effort.
   Parameter rejections keep backend details and the selected model/effort; Ylva does not retry
-  with a different effort. Higher effort does not guarantee readable thinking, and hidden
-  or encrypted reasoning is not converted into visible thinking.
+  with a different effort. Higher effort does not guarantee readable thinking. EdenAI's Chat
+  Completions reference documents a generic `thinking` request object but does not specify a
+  reasoning-summary request field (checked 2026-11-01). When returned, non-empty
+  `reasoning_items[].summary[].text` fragments are rendered as thinking;
+  empty summaries and encrypted-only reasoning are ignored. Empty summaries observed on a
+  deployment may be deployment-specific, and readable summaries are not guaranteed. Hidden or
+  encrypted reasoning is never displayed as prose.
 - The API allows 10 requests per second per account, shared across keys.
 
 ### Copilot

@@ -36,6 +36,11 @@ pub(crate) mod messages;
 /// costs are not part of the OpenAI Chat Completions protocol, so each backend
 /// that reports them supplies its own parser.
 pub(crate) type UsageCostParser = fn(&str) -> Option<RequestCost>;
+pub(crate) type StreamPayloadParser = fn(&str) -> Vec<StreamEvent>;
+
+fn parse_openai_compatible_sse_payload(data: &str) -> Vec<StreamEvent> {
+    parse_sse_payload(data).into_iter().collect()
+}
 
 type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig, Option<uuid::Uuid>);
 pub(crate) type RequestBodyRedactor = fn(&serde_json::Value) -> serde_json::Value;
@@ -290,6 +295,7 @@ pub struct OpenAiCompatibleProvider {
     request_dump_source: crate::http::RequestDumpSource,
     request_limiter: RequestConcurrencyLimiter,
     provider_kind: &'static str,
+    stream_payload_parser: StreamPayloadParser,
     cost_ledger: CostLedger,
     /// `None` when the backend does not report request costs.
     usage_cost_parser: Option<UsageCostParser>,
@@ -463,6 +469,7 @@ impl OpenAiCompatibleProvider {
             request_dump_source: crate::http::RequestDumpSource::default(),
             request_limiter,
             provider_kind: "openai_compatible",
+            stream_payload_parser: parse_openai_compatible_sse_payload,
             cost_ledger: CostLedger::process(),
             usage_cost_parser: None,
             request_authorizer: None,
@@ -505,6 +512,14 @@ impl OpenAiCompatibleProvider {
 
     pub(crate) fn with_provider_kind(mut self, provider_kind: &'static str) -> Self {
         self.provider_kind = provider_kind;
+        self
+    }
+
+    pub(crate) fn with_stream_payload_parser(
+        mut self,
+        stream_payload_parser: StreamPayloadParser,
+    ) -> Self {
+        self.stream_payload_parser = stream_payload_parser;
         self
     }
 
@@ -716,6 +731,7 @@ impl Provider for OpenAiCompatibleProvider {
         let request_body_redactor = self.request_body_redactor;
         let content_part_format = self.content_part_format;
         let provider_kind = self.provider_kind;
+        let stream_payload_parser = self.stream_payload_parser;
         let cost_ledger = self.cost_ledger.clone();
         let usage_cost_parser = self.usage_cost_parser;
         let request_limiter = self.request_limiter.clone();
@@ -988,7 +1004,7 @@ impl Provider for OpenAiCompatibleProvider {
                                     }
                                     let stream_events = match responses_decoder.as_mut() {
                                         Some(decoder) => decoder.decode(&event.data),
-                                        None => parse_sse_payload(&event.data).into_iter().collect(),
+                                        None => stream_payload_parser(&event.data),
                                     };
                                     for stream_event in stream_events {
                                         match stream_event {

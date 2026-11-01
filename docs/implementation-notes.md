@@ -142,7 +142,9 @@ See [configuration](./configuration.md),
   `reasoning_effort` alongside `session_id`. Default omits the field. A fallible request
   boundary checks the same snapshot before network I/O, including direct provider calls and
   writes through runtime handles. Backend rejections retain model/effort and backend details,
-  without a changed-effort retry.
+  without a changed-effort retry. EdenAI's stream adapter also projects readable
+  `reasoning_items[].summary[].text` fragments into `StreamEvent::Thinking`; it ignores encrypted
+  payloads and empty summaries. The shared Chat Completions parser remains provider-neutral.
 - Unverified notice state belongs to a live engine, not the shared connection. The agent's
   pre-dispatch callback forwards notices with acknowledgment before chat I/O; failed chat
   also drains pending notices. Default resets deduplication. Independent runtime handles

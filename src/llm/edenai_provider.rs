@@ -29,8 +29,34 @@ use super::{parse_input_modality_names, OpenAiCompatibleProvider};
 const USAGE_TAGS_HEADER: &str = "x-edenai-tags";
 const USAGE_TAGS: &str = concat!("app=ylva,version=", env!("CARGO_PKG_VERSION"));
 
-/// Parse the request cost Eden AI reports as a top-level `cost` (USD) in a
-/// response or final stream frame; `usage.cost` is accepted defensively.
+/// Project readable Eden AI reasoning summaries before the shared stream event
+/// is sent to the existing thinking UI path. Encrypted content is never read.
+pub(crate) fn parse_edenai_sse_payload(data: &str) -> Vec<StreamEvent> {
+    let standard_events = super::openai_compatible_provider::parse_sse_payload(data);
+    if standard_events.is_some() {
+        return standard_events.into_iter().collect();
+    }
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Vec::new();
+    };
+    value
+        .pointer("/choices/0/delta/reasoning_items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|item| {
+            item.get("summary")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|summary| summary.get("text").and_then(serde_json::Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| StreamEvent::Thinking(text.to_owned()))
+        .collect()
+}
+
 fn parse_reported_cost(data: &str) -> Option<RequestCost> {
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
     let amount = ["/cost", "/usage/cost"]
@@ -339,6 +365,7 @@ impl EdenAiProvider {
                 super::openai_compatible_provider::redact_chat_completion_request_body,
             )
             .with_provider_kind("edenai")
+            .with_stream_payload_parser(parse_edenai_sse_payload)
             .with_usage_cost_parser(parse_reported_cost)
             .with_model_catalog(std::sync::Arc::new(EdenAiModelCatalog::default()))
             .with_extra_headers(vec![(USAGE_TAGS_HEADER, USAGE_TAGS)]),
@@ -485,6 +512,36 @@ impl Provider for EdenAiProvider {
 mod tests {
     use super::*;
     use crate::llm::InputModality;
+
+    #[test]
+    fn parses_readable_reasoning_item_summary_entries() {
+        let events = parse_edenai_sse_payload(
+            r#"{"choices":[{"delta":{"reasoning_items":[{"encrypted_content":"secret","summary":[{"text":"First."},{"text":" Second."}]}]}}]}"#,
+        );
+        assert!(
+            matches!(events.as_slice(), [StreamEvent::Thinking(first), StreamEvent::Thinking(second)] if first == "First." && second == " Second.")
+        );
+    }
+
+    #[test]
+    fn skips_empty_and_encrypted_only_reasoning_items() {
+        for payload in [
+            r#"{"choices":[{"delta":{"reasoning_items":[{"summary":[]}]}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_items":[{"summary":[{"text":""}]}]}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_items":[{"encrypted_content":"secret"}]}}]}"#,
+            r#"{"choices":[{"delta":{"other_field":"unrelated"}}]}"#,
+        ] {
+            assert!(parse_edenai_sse_payload(payload).is_empty());
+        }
+    }
+
+    #[test]
+    fn standard_openai_compatible_events_keep_existing_precedence() {
+        let events = parse_edenai_sse_payload(
+            r#"{"choices":[{"delta":{"content":"answer","reasoning_items":[{"summary":[{"text":"summary"}]}]}}]}"#,
+        );
+        assert!(matches!(events.as_slice(), [StreamEvent::Text(text)] if text == "answer"));
+    }
 
     #[test]
     fn usage_tags_satisfy_eden_ai_tag_rules() {
