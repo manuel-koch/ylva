@@ -377,10 +377,11 @@ requests during one run.
   provider's own billing is authoritative.
 - **Footer.** The TUI footer shows the total left of the context usage
   readout (`0.12 USD · 64.2K (45%)`) in every view, including subagent views.
-  Amounts use two decimals, currencies are joined with ` + `, a non-zero total
-  below 0.01 shows as `<0.01 USD`, and nothing is shown until a request
-  reported a cost. On narrow widths the cost is dropped before the context
-  usage readout.
+  In the narrow single-line layout, the engine/model label and cost/context
+  readout are separated by ` · `. Amounts use two decimals, currencies are
+  joined with ` + `, a non-zero total below 0.01 shows as `<0.01 USD`, and
+  nothing is shown until a request reported a cost. On narrow widths the cost
+  is dropped before the context usage readout.
 - **Exit.** When at least one cost was recorded, the exit output (TUI and
   headless CLI) adds a `Costs:   <value> <currency>` line between `Title:` and
   `Resume with:`.
@@ -1011,8 +1012,10 @@ for the full mechanics.
   bold, action text is normal, and multiple hints use a ` · ` separator. The
   mode/hint row also shows the
   active `named-engine → selected model-id` engine label for the transcript on
-  screen, including an explicit reasoning effort in parentheses and the
-  selected subagent while drilled in. The engine label is shortened to fit the row. In the main conversation
+  screen, including an explicit reasoning effort in parentheses when it fits
+  and the selected subagent while drilled in. When the full provider/model
+  label does not fit, the provider is omitted; the model is elided from its
+  beginning only if it does not fit by itself. In the main conversation
   it also shows separate counts for running and queued subagents in a compact
   `Subagents: <running> running,
   <queued> queued` label; finished subagents are excluded, zero-valued

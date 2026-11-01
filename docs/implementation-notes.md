@@ -457,7 +457,11 @@ See [features](./features.md#cli-mode).
   model, amount, currency).
 - The TUI render state carries `cost_total_text`, read from the ledger on every
   redraw (no event of its own); the footer places it left of the context
-  usage and drops it first when the row is narrow. `resume_hint_text` appends
+  usage and drops it first when the row is narrow. In the narrow single-line
+  footer layout, the engine/model label is separated from the cost/context
+  readout with ` · `. If the full provider/model label does not fit, the
+  provider is omitted; an oversized model is elided from its beginning.
+  Reasoning effort appears only when it fits in full. `resume_hint_text` appends
   the `Costs:` line from the same ledger at exit. Costs never enter
   `SessionExitSnapshot` or the store.
 - `MockProvider::with_reported_cost` scripts a cost for tests.

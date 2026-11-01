@@ -60,7 +60,7 @@ fn elide_balanced_tokens_never_elides_separator_characters() {
     assert_eq!(elided.chars().count(), 30);
     assert!(elided.contains(" → "), "{elided:?}");
     assert!(elided.contains('/') && elided.contains(':'), "{elided:?}");
-    assert!(!elided.contains("..."));
+    assert!(elided.matches('…').count() >= 1, "{elided:?}");
 }
 
 #[test]
@@ -80,8 +80,69 @@ fn elide_balanced_tokens_balances_the_budget_across_tokens() {
 }
 
 #[test]
+fn footer_shows_full_provider_model_when_identity_fits() {
+    let state = TuiState {
+        engine_display: crate::llm::engine::EngineDisplayInfo {
+            engine_name: "openrouter".to_string(),
+            model: "model".to_string(),
+            ..crate::llm::engine::EngineDisplayInfo::default()
+        },
+        ..TuiState::new()
+    };
+
+    assert_eq!(engine_label_text(&state, 19), "openrouter → model");
+}
+
+#[test]
+fn footer_shows_only_model_when_full_provider_model_identity_does_not_fit() {
+    let state = TuiState {
+        engine_display: crate::llm::engine::EngineDisplayInfo {
+            engine_name: "openrouter".to_string(),
+            model: "anthropic/claude-fable-5.1:batch".to_string(),
+            ..crate::llm::engine::EngineDisplayInfo::default()
+        },
+        ..TuiState::new()
+    };
+
+    assert_eq!(engine_label_text(&state, 35), state.engine_display.model);
+}
+
+#[test]
+fn footer_elides_model_from_the_start_when_model_alone_does_not_fit() {
+    let state = TuiState {
+        engine_display: crate::llm::engine::EngineDisplayInfo {
+            engine_name: "openrouter".to_string(),
+            model: "anthropic/claude-fable-5.1:batch".to_string(),
+            ..crate::llm::engine::EngineDisplayInfo::default()
+        },
+        ..TuiState::new()
+    };
+
+    let label = engine_label_text(&state, 20);
+    assert!(label.starts_with('…'), "{label:?}");
+    assert!(label.ends_with("-5.1:batch"), "{label:?}");
+}
+
+#[test]
 fn elide_balanced_tokens_with_budget_of_one_is_just_the_ellipsis() {
     assert_eq!(elide_balanced_tokens("openrouter", 1), "…");
+}
+
+#[test]
+fn footer_omits_reasoning_effort_when_it_would_be_elided() {
+    let state = TuiState {
+        engine_display: crate::llm::engine::EngineDisplayInfo {
+            engine_name: "provider".to_string(),
+            model: "model".to_string(),
+            reasoning_effort: Some("high".to_string()),
+            ..crate::llm::engine::EngineDisplayInfo::default()
+        },
+        ..TuiState::new()
+    };
+
+    let label = engine_label_text(&state, 10);
+    assert!(!label.contains("high"), "{label:?}");
+    assert!(!label.contains('('), "{label:?}");
 }
 
 #[test]
@@ -129,14 +190,28 @@ fn context_usage_row_shows_cost_without_context_usage() {
 }
 
 #[test]
-fn narrow_meta_row_shows_cost_before_usage_and_drops_cost_when_too_narrow() {
+fn narrow_meta_row_separates_engine_identity_from_cost_and_usage() {
+    let state = TuiState {
+        engine_display: crate::llm::engine::EngineDisplayInfo {
+            engine_name: "e".to_string(),
+            model: "m".to_string(),
+            ..crate::llm::engine::EngineDisplayInfo::default()
+        },
+        cost_total_text: Some("0.12 USD".to_string()),
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        ..TuiState::new()
+    };
+    let line = render_row(40, |frame, area| draw_footer_meta(frame, area, &state));
+    assert_eq!(line.trim(), "e → m · 0.12 USD · 64.2K (45%)");
+}
+
+#[test]
+fn narrow_meta_row_drops_cost_when_too_narrow() {
     let state = TuiState {
         cost_total_text: Some("0.12 USD".to_string()),
         context_usage_text: Some("64.2K (45%)".to_string()),
         ..TuiState::new()
     };
-    let wide = render_row(40, |frame, area| draw_footer_meta(frame, area, &state));
-    assert!(wide.contains("0.12 USD · 64.2K (45%)"), "{wide:?}");
     let tight = render_row(14, |frame, area| draw_footer_meta(frame, area, &state));
     assert!(
         !tight.contains("USD") && tight.contains("64.2K (45%)"),

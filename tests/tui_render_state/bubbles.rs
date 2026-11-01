@@ -2032,7 +2032,7 @@ fn narrow_footer_splits_status_meta_and_hints_onto_three_rows() {
         rows[status_row]
     );
     assert!(
-        rows[meta_row].contains("openrouter → claude-haiku 64.2K (45%)"),
+        rows[meta_row].contains("openrouter → claude-haiku · 64.2K (45%)"),
         "meta row carries label then usage: {:?}",
         rows[meta_row]
     );
@@ -2059,16 +2059,16 @@ fn narrow_footer_keeps_status_visible_with_long_model_label() {
     let status_row = row_index_containing(&rows, "Streaming…");
     let meta_row = &rows[status_row + 1];
     assert!(
-        meta_row.trim_end().starts_with(" a-ver…"),
-        "engine token keeps its head: {meta_row:?}"
+        !meta_row.contains(" → "),
+        "provider is omitted when the full identity does not fit: {meta_row:?}"
     );
     assert!(
-        meta_row.contains(" → "),
-        "separator is never elided: {meta_row:?}"
+        meta_row.trim_end().starts_with(" …mely-long-model"),
+        "model is elided from its beginning: {meta_row:?}"
     );
     assert!(
         meta_row.trim_end().ends_with("-for-testing"),
-        "model token keeps its tail: {meta_row:?}"
+        "model elision keeps its suffix: {meta_row:?}"
     );
 }
 
@@ -2160,17 +2160,15 @@ fn wide_footer_elides_label_before_truncating_status() {
         "anthropic/claude-fable-5.1:batch-extra-long-name-that-goes-on-and-on".to_string();
 
     let rows = render_tui_rows(&mut state, 80, 14);
-
     let status_row = row_index_containing(&rows, "Streaming…");
     let row = rows[status_row].trim_end();
     assert!(row.contains("Streaming…"), "status intact: {row:?}");
     assert!(
-        row.starts_with(" ") && row.contains("openrouter → "),
-        "{row:?}"
+        row.contains(" …hropic/claude-fable-5.1:batch-extra-long-name-that-goes-on-and-on"),
+        "only model is shown when identity does not fit: {row:?}"
     );
-    assert!(row.contains('…'), "label is elided: {row:?}");
+    assert!(!row.contains(" → "), "{row:?}");
     assert!(row.ends_with("on-and-on"), "label keeps its tail: {row:?}");
-    assert!(!row.contains("anthropic/claude-fable-5.1:batch-extra-long-name-that-goes-on-and-on"));
 }
 
 #[test]
@@ -2188,8 +2186,14 @@ fn narrow_meta_row_elides_label_before_context_usage() {
 
     let meta_row = &rows[row_index_containing(&rows, "64.2K (45%)")];
     let row = meta_row.trim_end();
-    assert!(row.starts_with(" o…"), "{row:?}");
-    assert!(row.contains(" → "), "separator is never elided: {row:?}");
-    assert!(row.ends_with("-5.1:batch 64.2K (45%)"), "{row:?}");
+    assert!(
+        !row.contains(" → "),
+        "provider is omitted when the full identity does not fit: {row:?}"
+    );
+    assert!(row.starts_with(" …c/claude-fable-5.1:batch"), "{row:?}");
+    assert!(
+        row.ends_with("claude-fable-5.1:batch · 64.2K (45%)"),
+        "{row:?}"
+    );
     assert!(row.chars().count() <= 40, "{row:?}");
 }

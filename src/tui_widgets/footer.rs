@@ -288,51 +288,104 @@ pub(super) fn split_footer_rows(area: Rect) -> FooterRows {
     }
 }
 
-/// Active engine label, with an explicit reasoning effort in
-/// parentheses. Empty when no engine is active.
-fn engine_label_text(state: &TuiState) -> String {
-    let model_label = state.engine_display.model.clone();
-    let engine_label = if state.engine_display.engine_name.is_empty() {
-        model_label
-    } else if model_label.is_empty() {
-        state.engine_display.engine_name.clone()
-    } else {
-        format!("{} → {}", state.engine_display.engine_name, model_label)
-    };
-    if engine_label.is_empty() {
-        return engine_label;
-    }
-    match state
+/// Active provider/model label. The full identity is shown when it fits;
+/// otherwise the provider-only or model-only variant is shown, elided from its
+/// beginning if necessary.
+fn engine_label_text(state: &TuiState, max_chars: usize) -> String {
+    let provider = state.engine_display.engine_name.as_str();
+    let model = state.engine_display.model.as_str();
+    let reasoning_effort = state
         .engine_display
         .reasoning_effort
         .as_deref()
-        .filter(|reasoning_effort| *reasoning_effort != "default")
-    {
-        Some(reasoning_effort) => format!("{engine_label} ({reasoning_effort})"),
-        None => engine_label,
+        .filter(|reasoning_effort| *reasoning_effort != "default");
+
+    match (provider.is_empty(), model.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => elide_model_with_optional_effort(model, reasoning_effort, max_chars),
+        (false, true) => elide_identity_with_optional_effort(provider, reasoning_effort, max_chars),
+        (false, false) => {
+            let identity = format!("{provider} → {model}");
+            let full_label = append_effort_if_it_fits(&identity, reasoning_effort, max_chars);
+            if full_label.chars().count() <= max_chars {
+                full_label
+            } else {
+                elide_model_with_optional_effort(model, reasoning_effort, max_chars)
+            }
+        }
     }
 }
 
-/// Characters that delimit label tokens (`openrouter → anthropic/model:tag`).
-/// They are never elided; the runs of other characters between them are.
-const LABEL_SEPARATOR_CHARS: &[char] = &[' ', '→', '/', ':', '(', ')'];
+fn append_effort_if_it_fits(
+    identity: &str,
+    reasoning_effort: Option<&str>,
+    max_chars: usize,
+) -> String {
+    let Some(reasoning_effort) = reasoning_effort else {
+        return identity.to_string();
+    };
+    let effort_suffix = format!(" ({reasoning_effort})");
+    let with_effort = format!("{identity}{effort_suffix}");
+    if with_effort.chars().count() <= max_chars {
+        with_effort
+    } else {
+        identity.to_string()
+    }
+}
 
-/// Shorten `text` to at most `max_chars` characters. Separator characters are
-/// kept verbatim. Each token between separators is shortened individually: the
-/// widest token is shrunk one column at a time until the text fits, so the
-/// budget is balanced across tokens. A shortened token keeps a head (about a
-/// third of its kept characters) and a tail around a single `…`.
-pub(super) fn elide_balanced_tokens(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
+fn elide_identity_with_optional_effort(
+    identity: &str,
+    reasoning_effort: Option<&str>,
+    max_chars: usize,
+) -> String {
+    let full_label = append_effort_if_it_fits(identity, reasoning_effort, max_chars);
+    if full_label.chars().count() <= max_chars {
+        full_label
+    } else {
+        elide_balanced_tokens(identity, max_chars)
+    }
+}
+
+fn elide_model_with_optional_effort(
+    model: &str,
+    reasoning_effort: Option<&str>,
+    max_chars: usize,
+) -> String {
+    let full_label = append_effort_if_it_fits(model, reasoning_effort, max_chars);
+    if full_label.chars().count() <= max_chars {
+        full_label
+    } else {
+        elide_from_start(model, max_chars)
+    }
+}
+
+fn elide_from_start(text: &str, max_chars: usize) -> String {
+    let character_count = text.chars().count();
+    if character_count <= max_chars {
         return text.to_string();
     }
     if max_chars == 0 {
         return String::new();
     }
+    let visible_suffix: String = text
+        .chars()
+        .skip(character_count - max_chars.saturating_sub(1))
+        .collect();
+    format!("…{visible_suffix}")
+}
 
-    // Split into alternating separator and token pieces, remembering the
-    // original token length and the display width each token is shrunk to.
+/// Delimiters preserved verbatim when eliding a label.
+const LABEL_SEPARATOR_CHARS: &[char] = &[' ', '→', '/', ':', '(', ')'];
+
+/// Shorten label tokens evenly while preserving separators.
+pub(super) fn elide_balanced_tokens(text: &str, max_chars: usize) -> String {
+    let character_count = text.chars().count();
+    if character_count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
     let mut pieces: Vec<Piece> = Vec::new();
     for character in text.chars() {
         let is_separator = LABEL_SEPARATOR_CHARS.contains(&character);
@@ -388,7 +441,6 @@ pub(super) fn elide_balanced_tokens(text: &str, max_chars: usize) -> String {
         total_width -= 1;
     }
     if total_width > max_chars {
-        // Separators alone do not fit: fall back to a plain head truncation.
         let head: String = text.chars().take(max_chars - 1).collect();
         return format!("{head}…");
     }
@@ -405,8 +457,6 @@ pub(super) fn elide_balanced_tokens(text: &str, max_chars: usize) -> String {
         .collect()
 }
 
-/// One element of an label string: a separator kept verbatim, or a token
-/// that may be shortened to `display_width` columns.
 enum Piece {
     Separator(char),
     Token {
@@ -415,8 +465,6 @@ enum Piece {
     },
 }
 
-/// Render `chars` in `display_width` columns. Full-width tokens are returned
-/// unchanged; narrower ones keep a head and a tail around a single `…`.
 fn elide_token(chars: &[char], display_width: usize) -> String {
     if display_width >= chars.len() {
         return chars.iter().collect();
@@ -445,12 +493,12 @@ fn draw_footer_row(
     left_color: Color,
     state: &TuiState,
 ) {
-    let engine_label = engine_label_text(state);
     // The status text keeps its full width; the label gets the rest of the
     // row minus one leading separator column and is elided to fit.
     let label_budget = (area.width as usize)
         .saturating_sub(left_text.chars().count())
         .saturating_sub(1);
+    let engine_label = engine_label_text(state, label_budget);
     if engine_label.is_empty() || label_budget == 0 {
         draw_footer_status(frame, area, left_text, left_color);
         return;
@@ -485,7 +533,6 @@ fn join_cost_and_usage(cost: Option<&str>, usage: Option<&str>) -> Option<String
 /// Narrow-layout meta row: the engine label followed by the context
 /// usage, left-aligned. Renders nothing when neither is available.
 fn draw_footer_meta(frame: &mut Frame, area: Rect, state: &TuiState) {
-    let engine_label = engine_label_text(state);
     let usage = state.context_usage_text.as_deref();
     // One leading column precedes everything; the readout (plus its
     // separator) is reserved at the end. The label is elided to the remaining
@@ -497,21 +544,20 @@ fn draw_footer_meta(frame: &mut Frame, area: Rect, state: &TuiState) {
         .cost_total_text
         .as_deref()
         .filter(|cost| (area.width as usize) > 1 + suffix_width(Some(cost)));
-    let label_budget = (area.width as usize).saturating_sub(1 + suffix_width(cost));
-    let label = (!engine_label.is_empty() && label_budget > 0)
-        .then(|| elide_balanced_tokens(&engine_label, label_budget));
-    let parts: Vec<String> = label
-        .into_iter()
-        .chain(join_cost_and_usage(cost, usage))
-        .collect();
-    if parts.is_empty() {
-        return;
-    }
+    let readout = join_cost_and_usage(cost, usage);
+    let label_budget = (area.width as usize)
+        .saturating_sub(1 + suffix_width(cost))
+        .saturating_sub(usize::from(readout.is_some()) * 2);
+    let label = (label_budget > 0).then(|| engine_label_text(state, label_budget));
+    let label = label.filter(|label| !label.is_empty());
+    let text = match (label, readout) {
+        (Some(label), Some(readout)) => format!(" {label} · {readout}"),
+        (Some(label), None) => format!(" {label}"),
+        (None, Some(readout)) => format!(" {readout}"),
+        (None, None) => return,
+    };
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            format!(" {}", parts.join(" ")),
-            Style::default().fg(muted_text_color()),
-        )),
+        Paragraph::new(Line::styled(text, Style::default().fg(muted_text_color()))),
         area,
     );
 }
