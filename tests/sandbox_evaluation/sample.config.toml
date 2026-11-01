@@ -10,6 +10,9 @@ rules = [
     { command = ["test", "**"],   verdict = "auto_approved" },
     { command = ["uname"],        verdict = "auto_approved" },
     { command = ["uname", "**"],  verdict = "auto_approved" },
+    { command = ["rumdl", "check", "**"], verdict = "auto_approved" },
+    { command = ["pwd"],          verdict = "auto_approved" },
+    { command = ["pwd", "**"],    verdict = "auto_approved" },
 
     # printf has a grammar without options, so `only_arguments = []` matches only plain
     # forms; `printf -v var` (assigns shell state) is incomplete and never matches.
@@ -25,8 +28,9 @@ rules = [
 
     # One subcommand identity per filter also permits global --no-pager.
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["check-ignore", "--no-pager", "--verbose"] },
-    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["diff", "--no-pager", "--stat", "--check", "--cached", "--numstat", "--name-only", "--unified"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["diff", "--no-pager", "--stat", "--check", "--no-index", "--cached", "--numstat", "--name-only", "--unified"] },
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["status", "--no-pager", "--short", "--branch", "--untracked-files"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["branch", "--no-pager", "--show-current"] },
     # Git log -N (ASCII digits only) shares the -n/--max-count identity.
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["log", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["show", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },
