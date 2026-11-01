@@ -388,6 +388,7 @@ fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
         parameters: None,
         choices: (0..3)
             .map(|index| ModelChoice {
+                reasoning_options: crate::llm::ReasoningEffortOptions::default(),
                 label: crate::tui_reducer_state::ChoiceLabel {
                     identity: format!("stub/model-{index}"),
                     details: Vec::new(),
@@ -397,6 +398,7 @@ fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
                     context_length_override: None,
                     provider_connection: "stub".to_string(),
                     model: crate::llm::ModelInfo {
+                        reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                         id: format!("model-{index}"),
                         context_length: None,
                         reasoning_efforts: None,
@@ -476,6 +478,7 @@ fn mouse_click_on_model_picker_entry_selects_without_switching() {
 #[test]
 fn slash_overlay_model_drag_copies_the_filtered_model_label() {
     let model_choice = |label: &str, provider_connection: &str, model_id: &str| ModelChoice {
+        reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         label: crate::tui_reducer_state::ChoiceLabel {
             identity: label.to_string(),
             details: Vec::new(),
@@ -486,6 +489,7 @@ fn slash_overlay_model_drag_copies_the_filtered_model_label() {
             context_length_override: None,
             provider_connection: provider_connection.to_string(),
             model: crate::llm::ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: model_id.to_string(),
                 context_length: None,
                 reasoning_efforts: None,
@@ -1346,6 +1350,7 @@ fn agents_popup_mouse_click_selects_double_click_activates_outside_closes() {
 
 fn model_choice(model_id: &str) -> ModelChoice {
     ModelChoice {
+        reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         label: crate::tui_reducer_state::ChoiceLabel {
             identity: format!("stub/{model_id}"),
             details: Vec::new(),
@@ -1356,6 +1361,7 @@ fn model_choice(model_id: &str) -> ModelChoice {
             context_length_override: None,
             provider_connection: "stub".to_string(),
             model: crate::llm::ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: model_id.to_string(),
                 context_length: None,
                 reasoning_efforts: None,

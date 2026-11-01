@@ -1440,23 +1440,36 @@ async fn non_openrouter_providers_send_no_attribution_headers() {
 
 #[tokio::test]
 async fn edenai_provider_lists_models_from_its_v3_catalog() {
-    let config = MockLlmConfig {
-        models: vec!["openai/gpt-latest".to_string()],
-        model_path: Some("/v3/models".to_string()),
-        ..Default::default()
-    };
-    let server = MockLlmServer::start(config).await.expect("bind failed");
-    let provider = EdenAiProvider::new(
-        "edenai".to_string(),
-        server.base_url(),
-        "openai/gpt-latest".to_string(),
-        None,
+    let server = MockLlmServer::start(edenai_reasoning_server_config())
+        .await
+        .expect("bind server");
+    let models = edenai_provider_for(&server)
+        .list_models()
+        .await
+        .expect("EdenAI catalog");
+
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "upstream/reasoning");
+    assert_eq!(models[0].context_length, Some(32768));
+    assert_eq!(models[0].input_modalities, Some(vec![InputModality::Image]));
+    assert_eq!(
+        models[0].reasoning_evidence,
+        ylva::llm::ReasoningEvidence::Supported
     );
-
-    let models = provider.list_models().await.expect("EdenAI catalog");
-
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0].id, "openai/gpt-latest");
+    assert_eq!(models[0].reasoning_efforts, Some(vec![]));
+    assert!(
+        !models[0].advertises_reasoning_effort("medium"),
+        "unverified gateway choices cannot become model advertisement"
+    );
+    assert_eq!(
+        models[1].reasoning_efforts,
+        Some(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string()
+        ])
+    );
+    assert_eq!(models[1].reasoning_default.as_deref(), Some("low"));
 }
 
 #[tokio::test]
@@ -1519,4 +1532,548 @@ async fn edenai_usage_tags_survive_runtime_config_cloning() {
     assert!(captured_header_value(&server, EDENAI_TAGS_HEADER_NAME)[0]
         .as_deref()
         .is_some_and(|tags| tags.starts_with("app=ylva,")));
+}
+
+fn edenai_reasoning_catalog() -> serde_json::Value {
+    serde_json::json!({"data": [
+        {
+            "id": "upstream/reasoning",
+            "context_length": 32768,
+            "capabilities": {
+                "supports_reasoning": true,
+                "supports_function_calling": true,
+                "input_modalities": ["text", "image"],
+                "output_modalities": ["text"]
+            }
+        },
+        {
+            "id": "upstream/advertised",
+            "context_length": 65536,
+            "capabilities": {
+                "supports_reasoning": true,
+                "supports_function_calling": true,
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "reasoning": {"supported_efforts": ["low", "medium", "high"], "default_effort": "low"}
+            }
+        }
+    ]})
+}
+
+fn edenai_reasoning_server_config() -> MockLlmConfig {
+    MockLlmConfig {
+        model_path: Some("/v3/models".to_string()),
+        model_catalog_body: Some(edenai_reasoning_catalog()),
+        ..finite_chat_config()
+    }
+}
+
+fn edenai_engine_config(server: &MockLlmServer, model: &str, effort: Option<&str>) -> EngineConfig {
+    let reasoning = effort
+        .map(|effort| format!("reasoning = {effort:?}\n"))
+        .unwrap_or_default();
+    toml::from_str(&format!(
+        "provider_connection = \"gateway-work\"\nmodel = {model:?}\ntemperature = 0.25\napi_base_url = {:?}\napi_key = \"test-key\"\n{reasoning}",
+        server.base_url()
+    ))
+    .expect("profile engine configuration")
+}
+
+fn edenai_provider_for(server: &MockLlmServer) -> Arc<dyn Provider> {
+    Arc::new(EdenAiProvider::new(
+        "gateway-work".to_string(),
+        server.base_url(),
+        "upstream/reasoning".to_string(),
+        Some("test-key".to_string()),
+    ))
+}
+
+fn captured_chat_requests(server: &MockLlmServer) -> Vec<serde_json::Value> {
+    server
+        .request_bodies()
+        .iter()
+        .filter_map(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+        .filter(|body| body.get("messages").is_some())
+        .collect()
+}
+
+#[tokio::test]
+async fn edenai_profile_and_typed_selections_serialize_effort_and_preserve_request_metadata() {
+    let server = MockLlmServer::start(edenai_reasoning_server_config())
+        .await
+        .expect("bind server");
+    let engine = EngineImpl::new(
+        edenai_provider_for(&server),
+        edenai_engine_config(&server, "upstream/reasoning", Some("medium")),
+    );
+    let session_id = uuid::Uuid::new_v4();
+    #[derive(schemars::JsonSchema)]
+    struct ToolArguments {}
+    let tools = vec![ylva::ToolSchema {
+        name: "inspect".to_string(),
+        description: "Inspect the fixture".to_string(),
+        parameters: serde_json::to_value(schemars::schema_for!(ToolArguments))
+            .expect("tool schema"),
+    }];
+    assert!(
+        !tools.is_empty(),
+        "fixture must exercise tool serialization"
+    );
+    let mut receiver = engine
+        .chat_with_session_id(
+            vec![],
+            tools.clone(),
+            CancellationToken::new(),
+            Some(session_id),
+        )
+        .await
+        .expect("configured effort request");
+    drain_text_until_done(&mut receiver).await;
+
+    let models = engine.list_models().await.expect("catalog");
+    let model = models
+        .iter()
+        .find(|model| model.id == "upstream/reasoning")
+        .expect("reasoning model");
+    let mut selection = ProviderModelOption {
+        provider_connection: "gateway-work".to_string(),
+        model: model.clone(),
+        reasoning_effort: Some("medium".to_string()),
+        context_length_override: None,
+    };
+    engine
+        .switch_model_option(&selection)
+        .expect("unverified typed selection");
+    let mut receiver = engine
+        .chat_with_session_id(
+            vec![],
+            tools.clone(),
+            CancellationToken::new(),
+            Some(session_id),
+        )
+        .await
+        .expect("selected effort request");
+    drain_text_until_done(&mut receiver).await;
+    selection.reasoning_effort = None;
+    engine
+        .switch_model_option(&selection)
+        .expect("default reset");
+    let mut receiver = engine
+        .chat_with_session_id(
+            vec![],
+            tools.clone(),
+            CancellationToken::new(),
+            Some(session_id),
+        )
+        .await
+        .expect("default request");
+    drain_text_until_done(&mut receiver).await;
+
+    let requests = captured_chat_requests(&server);
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0], requests[1],
+        "profile and selection must construct the same request"
+    );
+    assert_eq!(requests[0]["reasoning_effort"], "medium");
+    assert!(
+        requests[2].get("reasoning_effort").is_none(),
+        "default must omit the field: {}",
+        requests[2]
+    );
+    for request in &requests {
+        assert_eq!(request["model"], "upstream/reasoning");
+        assert_eq!(request["session_id"], session_id.to_string());
+        assert_eq!(request["stream"], true);
+        assert_eq!(request["stream_options"]["include_usage"], true);
+        assert_eq!(request["temperature"], 0.25);
+        assert_eq!(
+            request["tools"],
+            serde_json::json!(tools
+                .iter()
+                .map(ylva::ToolSchema::to_request_value)
+                .collect::<Vec<_>>())
+        );
+    }
+    assert!(captured_header_value(&server, "authorization")
+        .iter()
+        .all(|value| value.as_deref() == Some("Bearer test-key")));
+    let expected_tags = format!("app=ylva,version={}", env!("CARGO_PKG_VERSION"));
+    assert!(captured_header_value(&server, EDENAI_TAGS_HEADER_NAME)
+        .iter()
+        .all(|value| value.as_ref() == Some(&expected_tags)));
+}
+
+#[tokio::test]
+async fn edenai_invalid_profile_effort_never_posts_even_with_known_modalities_or_failed_catalog() {
+    for known_modalities in [false, true] {
+        for failed_catalog in [false, true] {
+            let server = MockLlmServer::start(MockLlmConfig {
+                fallback_status: if failed_catalog { 400 } else { 200 },
+                ..edenai_reasoning_server_config()
+            })
+            .await
+            .expect("bind server");
+            let engine = EngineImpl::new(
+                edenai_provider_for(&server),
+                edenai_engine_config(&server, "upstream/reasoning", Some("ultra")),
+            );
+            if known_modalities {
+                engine.set_input_modalities(Some(vec![InputModality::Image]));
+            }
+            for _ in 0..2 {
+                let error = engine
+                    .chat(vec![], vec![], CancellationToken::new())
+                    .await
+                    .expect_err("invalid effort");
+                let error = format!("{error:#}");
+                assert!(
+                    error.contains("ultra") && error.contains("upstream/reasoning"),
+                    "context must identify model and effort: {error}"
+                );
+            }
+            assert!(
+                captured_chat_requests(&server).is_empty(),
+                "invalid profile cannot fall back or POST"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn edenai_direct_runtime_writes_cannot_bypass_gateway_validation() {
+    let server = MockLlmServer::start(edenai_reasoning_server_config())
+        .await
+        .expect("bind server");
+    let provider = edenai_provider_for(&server);
+    let handle = provider.runtime_config_handle().expect("runtime config");
+    handle.write().expect("runtime lock").reasoning_effort = Some("ultra".to_string());
+    let error = provider
+        .chat(vec![], vec![], CancellationToken::new())
+        .await
+        .expect_err("invalid direct call");
+    assert!(format!("{error:#}").contains("ultra"));
+    assert!(captured_chat_requests(&server).is_empty());
+}
+
+#[tokio::test]
+async fn edenai_http_parameter_rejections_preserve_context_and_do_not_retry_with_default() {
+    for status in [400, 422] {
+        let server = MockLlmServer::start(MockLlmConfig {
+            statuses: vec![200, status],
+            error_body: Some(serde_json::json!({"error": {"message": "adapter rejected reasoning_effort", "code": "unsupported_parameter", "detail": "backend-detail-sentinel"}})),
+            ..edenai_reasoning_server_config()
+        }).await.expect("bind server");
+        let engine = EngineImpl::new(
+            edenai_provider_for(&server),
+            edenai_engine_config(&server, "upstream/reasoning", Some("medium")),
+        );
+        let error = engine
+            .chat(vec![], vec![], CancellationToken::new())
+            .await
+            .expect_err("parameter rejection");
+        let error = format!("{error:#}");
+        for expected in [
+            "upstream/reasoning",
+            "medium",
+            "backend-detail-sentinel",
+            &status.to_string(),
+        ] {
+            assert!(
+                error.contains(expected),
+                "missing {expected:?} in error: {error}"
+            );
+        }
+        let requests = captured_chat_requests(&server);
+        assert_eq!(requests.len(), 1, "parameter rejection must not retry");
+        assert_eq!(requests[0]["reasoning_effort"], "medium");
+        assert_eq!(engine.reasoning_effort().as_deref(), Some("medium"));
+    }
+}
+
+#[tokio::test]
+async fn edenai_streamed_parameter_rejection_preserves_context_without_fallback() {
+    let server = MockLlmServer::start(MockLlmConfig {
+        frames: vec![format!("data: {}\n\n", serde_json::json!({"error": {"message": "backend-stream-sentinel unsupported reasoning_effort", "code": "unsupported_parameter"}}))],
+        ..edenai_reasoning_server_config()
+    }).await.expect("bind server");
+    let engine = EngineImpl::new(
+        edenai_provider_for(&server),
+        edenai_engine_config(&server, "upstream/reasoning", Some("medium")),
+    );
+    let mut receiver = engine
+        .chat(vec![], vec![], CancellationToken::new())
+        .await
+        .expect("stream headers");
+    let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("stream error deadline")
+        .expect("stream error event");
+    let StreamEvent::Error(error) = event else {
+        panic!("expected error, got {event:?}");
+    };
+    let error = format!("{error:#}");
+    for expected in ["upstream/reasoning", "medium", "backend-stream-sentinel"] {
+        assert!(
+            error.contains(expected),
+            "missing {expected:?} in error: {error}"
+        );
+    }
+    assert_eq!(captured_chat_requests(&server).len(), 1);
+    assert_eq!(engine.reasoning_effort().as_deref(), Some("medium"));
+}
+
+#[tokio::test]
+async fn edenai_configured_copies_share_connection_without_leaking_live_selections() {
+    let server = MockLlmServer::start(edenai_reasoning_server_config())
+        .await
+        .expect("bind server");
+    let engine = EngineImpl::new(
+        edenai_provider_for(&server),
+        edenai_engine_config(&server, "upstream/reasoning", Some("medium")),
+    );
+    let copy = engine
+        .configured_copy()
+        .expect("independent configured runtime");
+    let models = engine.list_models().await.expect("catalog");
+    engine
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "gateway-work".to_string(),
+            model: models
+                .iter()
+                .find(|model| model.id == "upstream/advertised")
+                .expect("advertised model")
+                .clone(),
+            reasoning_effort: Some("high".to_string()),
+            context_length_override: Some(8192),
+        })
+        .expect("change original runtime");
+    let (original_result, copy_result) = tokio::join!(
+        engine.chat(vec![], vec![], CancellationToken::new()),
+        copy.chat(vec![], vec![], CancellationToken::new())
+    );
+    drain_text_until_done(&mut original_result.expect("original request")).await;
+    drain_text_until_done(&mut copy_result.expect("copy request")).await;
+    let requests = captured_chat_requests(&server);
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .any(|request| request["model"] == "upstream/advertised"
+            && request["reasoning_effort"] == "high"));
+    assert!(requests
+        .iter()
+        .any(|request| request["model"] == "upstream/reasoning"
+            && request["reasoning_effort"] == "medium"));
+    assert_eq!(copy.config().model, "upstream/reasoning");
+    assert_eq!(copy.reasoning_effort().as_deref(), Some("medium"));
+    assert_eq!(engine.effective_context_length(), 8192);
+    assert_ne!(copy.effective_context_length(), 8192);
+}
+
+#[tokio::test]
+async fn edenai_in_flight_request_keeps_the_model_and_effort_snapshot_after_selection_changes() {
+    let server = MockLlmServer::start(edenai_reasoning_server_config())
+        .await
+        .expect("bind server");
+    let engine = Arc::new(EngineImpl::new(
+        edenai_provider_for(&server),
+        edenai_engine_config(&server, "upstream/reasoning", Some("medium")),
+    ));
+    let models = engine.list_models().await.expect("catalog");
+    let request_serialized = Arc::new(tokio::sync::Notify::new());
+    let release_request = Arc::new(tokio::sync::Notify::new());
+    let request_engine = Arc::clone(&engine);
+    let request_started = Arc::clone(&request_serialized);
+    let request_release = Arc::clone(&release_request);
+    let in_flight = tokio::spawn(async move {
+        request_engine
+            .chat_with_session_id_and_estimate(
+                vec![],
+                vec![],
+                CancellationToken::new(),
+                None,
+                Box::new(move |_, _| {
+                    Box::pin(async move {
+                        request_started.notify_one();
+                        request_release.notified().await;
+                    })
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), request_serialized.notified())
+        .await
+        .expect("request serialization deadline");
+    engine
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "gateway-work".to_string(),
+            model: models
+                .iter()
+                .find(|model| model.id == "upstream/advertised")
+                .expect("target model")
+                .clone(),
+            reasoning_effort: Some("high".to_string()),
+            context_length_override: None,
+        })
+        .expect("switch while first request is pending");
+    release_request.notify_one();
+    let mut receiver = in_flight
+        .await
+        .expect("request task")
+        .expect("in-flight request");
+    drain_text_until_done(&mut receiver).await;
+    let mut receiver = engine
+        .chat(vec![], vec![], CancellationToken::new())
+        .await
+        .expect("new selection request");
+    drain_text_until_done(&mut receiver).await;
+    let requests = captured_chat_requests(&server);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["model"], "upstream/reasoning");
+    assert_eq!(requests[0]["reasoning_effort"], "medium");
+    assert_eq!(requests[1]["model"], "upstream/advertised");
+    assert_eq!(requests[1]["reasoning_effort"], "high");
+}
+
+#[tokio::test]
+async fn edenai_gateway_efforts_remain_exact_when_model_or_catalog_is_unavailable() {
+    for failed_catalog in [false, true] {
+        let server = MockLlmServer::start(MockLlmConfig {
+            statuses: if failed_catalog { vec![400] } else { vec![] },
+            ..edenai_reasoning_server_config()
+        })
+        .await
+        .expect("bind server");
+        let engine = EngineImpl::new(
+            edenai_provider_for(&server),
+            edenai_engine_config(&server, "upstream/absent", Some("disable")),
+        );
+        for effort in [
+            "disable", "none", "minimal", "low", "medium", "high", "max", "xhigh",
+        ] {
+            engine
+                .set_reasoning_effort(Some(effort))
+                .expect("gateway effort selection");
+            let mut receiver = engine
+                .chat(vec![], vec![], CancellationToken::new())
+                .await
+                .expect("unavailable evidence must permit explicit gateway value");
+            drain_text_until_done(&mut receiver).await;
+            assert_eq!(
+                captured_chat_requests(&server)
+                    .last()
+                    .expect("captured request")["reasoning_effort"],
+                effort
+            );
+        }
+        assert_eq!(
+            captured_chat_requests(&server).len(),
+            8,
+            "each explicit value must make one request, without aliases or fallback"
+        );
+    }
+}
+
+#[tokio::test]
+async fn edenai_rejected_typed_or_direct_model_switch_leaves_runtime_and_next_body_unchanged() {
+    let mut catalog = edenai_reasoning_catalog();
+    catalog["data"].as_array_mut().expect("models").push(serde_json::json!({
+        "id": "upstream/unsupported",
+        "context_length": 1024,
+        "capabilities": {"supports_reasoning": false, "input_modalities": ["text"], "output_modalities": ["text"]}
+    }));
+    let server = MockLlmServer::start(MockLlmConfig {
+        model_catalog_body: Some(catalog),
+        ..edenai_reasoning_server_config()
+    })
+    .await
+    .expect("bind server");
+    let engine = EngineImpl::new(
+        edenai_provider_for(&server),
+        edenai_engine_config(&server, "upstream/reasoning", Some("medium")),
+    );
+    let models = engine.list_models().await.expect("catalog");
+    let original = models
+        .iter()
+        .find(|model| model.id == "upstream/reasoning")
+        .expect("original model");
+    engine
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "gateway-work".to_string(),
+            model: original.clone(),
+            reasoning_effort: Some("medium".to_string()),
+            context_length_override: Some(16384),
+        })
+        .expect("initial complete selection");
+    let model_before = engine.config().model;
+    let effort_before = engine.reasoning_effort();
+    let modalities_before = engine.input_modalities();
+    let context_before = engine.effective_context_length();
+    let unsupported = models
+        .iter()
+        .find(|model| model.id == "upstream/unsupported")
+        .expect("unsupported target");
+    engine
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "gateway-work".to_string(),
+            model: unsupported.clone(),
+            reasoning_effort: Some("high".to_string()),
+            context_length_override: Some(512),
+        })
+        .expect_err("typed selection rejected");
+    engine
+        .switch_model("upstream/unsupported")
+        .expect_err("direct switch rejected");
+    assert_eq!(engine.config().model, model_before);
+    assert_eq!(engine.reasoning_effort(), effort_before);
+    assert_eq!(engine.input_modalities(), modalities_before);
+    assert_eq!(engine.effective_context_length(), context_before);
+    assert!(captured_chat_requests(&server).is_empty());
+    let mut receiver = engine
+        .chat(vec![], vec![], CancellationToken::new())
+        .await
+        .expect("original selection remains usable");
+    drain_text_until_done(&mut receiver).await;
+    let requests = captured_chat_requests(&server);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["model"], "upstream/reasoning");
+    assert_eq!(requests[0]["reasoning_effort"], "medium");
+}
+
+#[tokio::test]
+async fn edenai_engines_constructed_from_the_same_provider_have_independent_runtime_handles() {
+    let server = MockLlmServer::start(edenai_reasoning_server_config())
+        .await
+        .expect("bind server");
+    let connection = edenai_provider_for(&server);
+    let original = EngineImpl::new(
+        Arc::clone(&connection),
+        edenai_engine_config(&server, "upstream/reasoning", Some("medium")),
+    );
+    let sibling = EngineImpl::new(
+        connection,
+        edenai_engine_config(&server, "upstream/advertised", Some("low")),
+    );
+    original
+        .set_reasoning_effort(Some("high"))
+        .expect("original runtime effort");
+    let (original_result, sibling_result) = tokio::join!(
+        original.chat(vec![], vec![], CancellationToken::new()),
+        sibling.chat(vec![], vec![], CancellationToken::new()),
+    );
+    drain_text_until_done(&mut original_result.expect("original request")).await;
+    drain_text_until_done(&mut sibling_result.expect("sibling request")).await;
+    let requests = captured_chat_requests(&server);
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .any(|request| request["model"] == "upstream/reasoning"
+            && request["reasoning_effort"] == "high"));
+    assert!(requests
+        .iter()
+        .any(|request| request["model"] == "upstream/advertised"
+            && request["reasoning_effort"] == "low"));
+    assert_eq!(original.config().model, "upstream/reasoning");
+    assert_eq!(sibling.config().model, "upstream/advertised");
+    assert_eq!(sibling.reasoning_effort().as_deref(), Some("low"));
 }

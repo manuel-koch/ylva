@@ -77,9 +77,26 @@ from a price table.
 - Model discovery keeps entries that output text and do not explicitly lack
   function calling (alias entries such as the default `openai/gpt-latest` are
   kept), and reads `context_length` and `capabilities.input_modalities`.
-  Reasoning efforts are never offered: `/v3/models` lists an empty
-  `capabilities.reasoning.supported_efforts` for every model and the docs
-  define no effort request shape, so Ylva sends no reasoning parameters.
+  Reasoning capability and actual effort lists are kept as catalog evidence.
+  Explicit effort uses top-level `reasoning_effort` on Chat Completions; omission
+  uses the provider default and sends no effort field. `disable` and `none` are distinct.
+- EdenAI gateway-valid values come from its public OpenAPI schema, not a model-family
+  compatibility table. An advertised member is distinguished from an unverified override.
+  When capability or enumeration is unavailable, an explicit gateway-valid choice is allowed
+  but labelled unverified. Explicit unsupported, contradictory, or malformed evidence rejects
+  explicit effort. Invalid values fail before chat dispatch, without default fallback.
+- Unverified selections warn before dispatch, including failed requests, once per current
+  live engine/model/effort selection. Selecting default resets the warning. Independent
+  runtime handles do not share warning state; agents sharing a live engine do.
+- Gateway validation does not prove upstream acceptance or that a model honors the effort.
+  Parameter rejections keep backend details and the selected model/effort; Ylva does not retry
+  with a different effort. Higher effort does not guarantee readable thinking. EdenAI's Chat
+  Completions reference documents a generic `thinking` request object but does not specify a
+  reasoning-summary request field (checked 2026-11-01). When returned, non-empty
+  `reasoning_items[].summary[].text` fragments are rendered as thinking;
+  empty summaries and encrypted-only reasoning are ignored. Empty summaries observed on a
+  deployment may be deployment-specific, and readable summaries are not guaranteed. Hidden or
+  encrypted reasoning is never displayed as prose.
 - The API allows 10 requests per second per account, shared across keys.
 
 ### Copilot

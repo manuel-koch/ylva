@@ -331,6 +331,7 @@ impl Backend for InspectableTestBackend {
 fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::ModelChoice> {
     (0..choice_count)
         .map(|index| ylva::tui_reducer_state::ModelChoice {
+            reasoning_options: ylva::llm::ReasoningEffortOptions::default(),
             catalog_context_length: None,
             label: ylva::tui_reducer_state::ChoiceLabel {
                 identity: format!("stub/model-{index}"),
@@ -341,6 +342,7 @@ fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::Mod
                 context_length_override: None,
                 provider_connection: "stub".to_string(),
                 model: ylva::ModelInfo {
+                    reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                     id: format!("model-{index}"),
                     context_length: None,
                     reasoning_efforts: None,
@@ -491,6 +493,7 @@ impl Engine for DelayedCatalogEngine {
             catalog_started.notify_one();
             release_catalog.notified().await;
             Ok(vec![ModelInfo {
+                reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                 id: "delayed-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,

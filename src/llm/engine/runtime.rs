@@ -19,7 +19,7 @@ use crate::agent::{Message, StreamEvent};
 use crate::config::ModelPolicy;
 use crate::llm::{InputModality, ModelInfo, Provider, ToolSchema};
 use futures::future::BoxFuture;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -27,6 +27,8 @@ use tokio_util::sync::CancellationToken;
 /// Default `Engine` implementation — thin wrapper around an `Arc<dyn Provider>`.
 pub struct EngineImpl {
     provider: Arc<dyn Provider>,
+    /// Bound providers consume this engine-owned runtime directly, without legacy setters.
+    owns_provider_runtime: bool,
     /// Connection settings are immutable after construction.
     config: EngineConfig,
     /// Shared with providers that support Engine runtime settings.
@@ -35,12 +37,15 @@ pub struct EngineImpl {
     /// whether the attempt succeeds or fails. A direct model switch resets
     /// the guard; a `/models` selection supplies metadata and marks it done.
     catalog_hydrated: AtomicBool,
-    /// One-shot notices accumulated by the engine — currently only a
-    /// profile reasoning effort dropped by the pre-chat validation — and
+    /// One-shot notices for dropped profile efforts and unverified selections,
+    /// accumulated by the engine and
     /// handed out via [`Engine::take_pending_notices`], so the agent loop
     /// can surface them as transcript notices without the engine knowing
     /// anything about the UI.
     pending_notices: Mutex<Vec<String>>,
+    warned_selection: Mutex<Option<(String, String)>>,
+    hydration_lock: tokio::sync::Mutex<()>,
+    selection_revision: AtomicU64,
     /// Immutable allowed-model restriction of this engine's provider
     /// connection. Unrestricted unless set by [`EngineImpl::with_model_policy`].
     model_policy: ModelPolicy,
@@ -52,22 +57,154 @@ pub struct EngineImpl {
 
 impl EngineImpl {
     pub fn new(provider: Arc<dyn Provider>, config: EngineConfig) -> Self {
+        let independent_runtime = Arc::new(RwLock::new(EngineRuntimeConfig::from(&config)));
+        let bound_provider = provider.bind_engine_runtime(independent_runtime.clone());
+        let owns_provider_runtime = bound_provider.is_some();
+        let provider = bound_provider.unwrap_or(provider);
         let runtime_config = provider
             .runtime_config_handle()
-            .unwrap_or_else(|| Arc::new(RwLock::new(EngineRuntimeConfig::from(&config))));
+            .unwrap_or(independent_runtime);
         *runtime_config
             .write()
             .expect("the engine runtime configuration lock is poisoned") =
             EngineRuntimeConfig::from(&config);
         EngineImpl {
             provider,
+            owns_provider_runtime,
             config,
             runtime_config,
             catalog_hydrated: AtomicBool::new(false),
             pending_notices: Mutex::new(Vec::new()),
+            warned_selection: Mutex::new(None),
+            hydration_lock: tokio::sync::Mutex::new(()),
+            selection_revision: AtomicU64::new(0),
             model_policy: ModelPolicy::unrestricted(),
             favorite_models: RwLock::new(Vec::new()),
         }
+    }
+
+    fn snapshot(&self) -> EngineRuntimeConfig {
+        self.runtime_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn resolve_runtime(
+        &self,
+        runtime: &EngineRuntimeConfig,
+    ) -> anyhow::Result<crate::llm::ReasoningEffortProvenance> {
+        let cached = self.provider.cached_model_info(&runtime.model);
+        let model = cached.as_ref().or_else(|| {
+            runtime
+                .model_info
+                .as_ref()
+                .filter(|model| model.id == runtime.model)
+        });
+        self.reasoning_effort_policy()
+            .resolve(&runtime.model, model, runtime.reasoning_effort.as_deref())
+            .map_err(|error| {
+                error.context(format!(
+                    "engine on provider connection '{}' model '{}' reasoning effort '{}'",
+                    self.config.provider_connection,
+                    runtime.model,
+                    runtime.reasoning_effort.as_deref().unwrap_or("default")
+                ))
+            })
+    }
+
+    fn validate_request_runtime(&self, runtime: &EngineRuntimeConfig) -> anyhow::Result<()> {
+        let cached = self.provider.cached_model_info(&runtime.model);
+        let model = cached.as_ref().or_else(|| {
+            runtime
+                .model_info
+                .as_ref()
+                .filter(|model| model.id == runtime.model)
+        });
+        self.reasoning_effort_policy()
+            .validate_request(&runtime.model, model, runtime.reasoning_effort.as_deref())
+            .map_err(|error| {
+                error.context(format!(
+                    "engine on provider connection '{}' model '{}' reasoning effort '{}'",
+                    self.config.provider_connection,
+                    runtime.model,
+                    runtime.reasoning_effort.as_deref().unwrap_or("default")
+                ))
+            })
+    }
+
+    fn apply_runtime_option(
+        &self,
+        option: &super::ProviderModelOption,
+        change: Option<&super::ReasoningEffortChange>,
+    ) -> anyhow::Result<()> {
+        let mut runtime = self
+            .runtime_config
+            .write()
+            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))?;
+        anyhow::ensure!(
+            self.config.provider_connection == option.provider_connection,
+            "engine uses provider connection '{}', not '{}'",
+            self.config.provider_connection,
+            option.provider_connection
+        );
+        self.ensure_model_allowed(&option.model.id)?;
+        if change.is_some() {
+            anyhow::ensure!(
+                runtime.model == option.model.id,
+                "engine uses model '{}', not '{}'",
+                runtime.model,
+                option.model.id
+            );
+        }
+        let effort = match change {
+            Some(super::ReasoningEffortChange::Unchanged) => runtime.reasoning_effort.clone(),
+            Some(super::ReasoningEffortChange::Set(effort)) => effort.clone(),
+            None => option.reasoning_effort.clone(),
+        };
+        if let Some(change) = change {
+            self.reasoning_effort_policy().validate_named_change(
+                &option.model,
+                runtime.reasoning_effort.as_deref(),
+                change,
+            )?;
+        } else {
+            self.reasoning_effort_policy().resolve(
+                &option.model.id,
+                Some(&option.model),
+                effort.as_deref(),
+            )?;
+        }
+        let context_override = if change.is_some() {
+            option
+                .context_length_override
+                .or(runtime.context_length_override)
+        } else {
+            option.context_length_override
+        };
+        runtime.model = option.model.id.clone();
+        runtime.reasoning_effort = effort;
+        runtime.model_info = Some(option.model.clone());
+        runtime.input_modalities = option.model.input_modalities.clone();
+        runtime.context_length_override = context_override;
+        runtime.context_length = context_override.unwrap_or_else(|| {
+            self.context_length_for_model(&option.model.id, option.model.context_length)
+        });
+        // Reset warning when the actual effective selection changes, including default.
+        let selection = runtime
+            .reasoning_effort
+            .as_ref()
+            .map(|effort| (runtime.model.clone(), effort.clone()));
+        let mut warned = self
+            .warned_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *warned != selection {
+            *warned = None;
+        }
+        self.selection_revision.fetch_add(1, Ordering::AcqRel);
+        self.catalog_hydrated.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Seed the favorite model IDs of this engine's provider connection, in
@@ -88,65 +225,6 @@ impl EngineImpl {
         self.model_policy = model_policy;
         self
     }
-
-    /// Validate the current (profile-seeded) reasoning effort against the
-    /// catalog, once, lazily before the first chat.
-    ///
-    /// - `active_model` advertises the effort as a member of its
-    ///   `Some(values)` list → keep it silently;
-    /// - `active_model` is present but does not advertise it (including
-    ///   `None` / `Some([])`, which advertise no sendable alternative) →
-    ///   drop to the provider default with a warning, strictly matching the
-    ///   `/models` switch rule, and queue a notice for
-    ///   [`Engine::take_pending_notices`];
-    /// - `active_model` is absent from the catalog → keep the effort (the
-    ///   catalog cannot disprove it) and log at debug level.
-    ///
-    /// A failed catalog fetch never reaches this method — the hydration
-    /// caller keeps its existing warn-and-set-guard behavior, so the effort
-    /// is then validated only by a later `/models` switch.
-    fn validate_profile_reasoning_effort(&self, active_model: Option<&ModelInfo>) {
-        let Some(reasoning_effort) = self.reasoning_effort() else {
-            return;
-        };
-        let Some(model) = active_model else {
-            tracing::debug!(
-                model = %self.config().model,
-                reasoning_effort = %reasoning_effort,
-                "profile reasoning effort kept: the catalog does not list the active model"
-            );
-            return;
-        };
-        if model.advertises_reasoning_effort(&reasoning_effort) {
-            return;
-        }
-        tracing::warn!(
-            model = %model.id,
-            reasoning_effort = %reasoning_effort,
-            advertised_reasoning_efforts = ?model.reasoning_efforts,
-            "profile reasoning effort is not advertised by the model; \
-             falling back to the provider default"
-        );
-        match self.set_reasoning_effort(None) {
-            Ok(()) => {
-                self.pending_notices
-                    .lock()
-                    .expect("the engine pending-notices lock is poisoned")
-                    .push(format!(
-                        "Model {}/{} does not advertise reasoning effort \"{}\"; \
-                         using the provider default.",
-                        self.config.provider_connection, model.id, reasoning_effort
-                    ));
-            }
-            Err(error) => {
-                tracing::warn!(
-                    model = %model.id,
-                    %error,
-                    "failed to reset the unadvertised profile reasoning effort"
-                );
-            }
-        }
-    }
 }
 
 impl EngineImpl {
@@ -159,6 +237,68 @@ impl EngineImpl {
 }
 
 impl Engine for EngineImpl {
+    fn runtime_snapshot(&self) -> Option<EngineRuntimeConfig> {
+        Some(self.snapshot())
+    }
+    fn reasoning_effort_policy(&self) -> std::sync::Arc<dyn crate::llm::ReasoningEffortPolicy> {
+        self.provider.reasoning_effort_policy()
+    }
+
+    fn effective_reasoning_provenance(&self) -> crate::llm::ReasoningEffortProvenance {
+        self.resolve_runtime(&self.snapshot()).unwrap_or_default()
+    }
+
+    fn prepare_request_notices(&self) -> anyhow::Result<()> {
+        let runtime = self
+            .runtime_config
+            .read()
+            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))?;
+        self.validate_request_runtime(&runtime)?;
+        let provenance = self.resolve_runtime(&runtime).unwrap_or_default();
+        let mut warned = self
+            .warned_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if provenance == crate::llm::ReasoningEffortProvenance::Unverified {
+            if let Some(effort) = runtime.reasoning_effort.as_ref() {
+                let selection = (runtime.model.clone(), effort.clone());
+                if warned.as_ref() != Some(&selection) {
+                    if let Some(notice) = self
+                        .reasoning_effort_policy()
+                        .unverified_notice(&runtime.model, effort)
+                    {
+                        self.pending_notices
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(notice);
+                    }
+                    *warned = Some(selection);
+                }
+            }
+        } else {
+            *warned = None;
+        }
+        Ok(())
+    }
+
+    fn apply_named_model_option(
+        &self,
+        option: &super::ProviderModelOption,
+        change: &super::ReasoningEffortChange,
+    ) -> anyhow::Result<()> {
+        if self.owns_provider_runtime {
+            return self.apply_runtime_option(option, Some(change));
+        }
+        super::validate_named_engine_option(self, option, change)?;
+        if let super::ReasoningEffortChange::Set(effort) = change {
+            self.set_reasoning_effort(effort.as_deref())?;
+        }
+        if let Some(context_length) = option.context_length_override {
+            self.set_context_length_override(Some(context_length))?;
+        }
+        Ok(())
+    }
+
     fn favorite_models(&self) -> Vec<(String, Vec<String>)> {
         let favorite_models = self.configured_favorite_models();
         if favorite_models.is_empty() {
@@ -202,6 +342,9 @@ impl Engine for EngineImpl {
     }
 
     fn switch_model_option(&self, option: &super::ProviderModelOption) -> anyhow::Result<()> {
+        if self.owns_provider_runtime {
+            return self.apply_runtime_option(option, None);
+        }
         super::apply_model_option(self, option)?;
         self.catalog_hydrated.store(true, Ordering::Release);
         Ok(())
@@ -234,7 +377,10 @@ impl Engine for EngineImpl {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
             self.ensure_active_model_allowed()?;
+            // Validate request policy before catalog I/O as well as chat dispatch.
+            self.validate_request_runtime(&self.snapshot())?;
             self.hydrate_catalog_metadata().await;
+            self.prepare_request_notices()?;
             self.provider.chat(messages, tools, cancel).await
         })
     }
@@ -248,7 +394,10 @@ impl Engine for EngineImpl {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
             self.ensure_active_model_allowed()?;
+            // Validate request policy before catalog I/O as well as chat dispatch.
+            self.validate_request_runtime(&self.snapshot())?;
             self.hydrate_catalog_metadata().await;
+            self.prepare_request_notices()?;
             self.provider
                 .chat_with_session_id(messages, tools, cancel, session_id)
                 .await
@@ -265,7 +414,10 @@ impl Engine for EngineImpl {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
             self.ensure_active_model_allowed()?;
+            // Validate request policy before catalog I/O as well as chat dispatch.
+            self.validate_request_runtime(&self.snapshot())?;
             self.hydrate_catalog_metadata().await;
+            self.prepare_request_notices()?;
             self.provider
                 .chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
                 .await
@@ -283,7 +435,10 @@ impl Engine for EngineImpl {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
             self.ensure_active_model_allowed()?;
+            // Validate request policy before catalog I/O as well as chat dispatch.
+            self.validate_request_runtime(&self.snapshot())?;
             self.hydrate_catalog_metadata().await;
+            self.prepare_request_notices()?;
             self.provider
                 .chat_with_session_id_and_diagnostics(
                     messages,
@@ -324,8 +479,44 @@ impl Engine for EngineImpl {
     }
 
     fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        if self.owns_provider_runtime {
+            self.ensure_model_allowed(model)?;
+            let mut runtime = self.runtime_config.write().map_err(|_| {
+                anyhow::anyhow!("the engine runtime configuration lock is poisoned")
+            })?;
+            if runtime.model == model {
+                return Ok(());
+            }
+            let info = self.provider.cached_model_info(model);
+            self.reasoning_effort_policy().validate_request(
+                model,
+                info.as_ref(),
+                runtime.reasoning_effort.as_deref(),
+            )?;
+            runtime.model = model.to_string();
+            runtime.model_info = info.clone();
+            runtime.context_length_override = None;
+            runtime.context_length = self.context_length_for_model(
+                model,
+                info.as_ref().and_then(|info| info.context_length),
+            );
+            runtime.input_modalities = info.and_then(|info| info.input_modalities);
+            *self
+                .warned_selection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            self.selection_revision.fetch_add(1, Ordering::AcqRel);
+            self.catalog_hydrated.store(false, Ordering::Release);
+            return Ok(());
+        }
         self.ensure_model_allowed(model)?;
-        let model_changed = self.config().model != model;
+        let mut candidate = self.snapshot();
+        let model_changed = candidate.model != model;
+        candidate.model = model.to_string();
+        if model_changed {
+            candidate.model_info = self.provider.cached_model_info(model);
+        }
+        self.validate_request_runtime(&candidate)?;
         self.provider.set_model(model)?;
         let mut runtime_config = self
             .runtime_config
@@ -337,6 +528,13 @@ impl Engine for EngineImpl {
             self.catalog_hydrated.store(false, Ordering::Release);
         }
         runtime_config.model = model.to_string();
+        if model_changed {
+            *self
+                .warned_selection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            self.selection_revision.fetch_add(1, Ordering::AcqRel);
+        }
         Ok(())
     }
 
@@ -407,46 +605,88 @@ impl Engine for EngineImpl {
 
     fn hydrate_catalog_metadata(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            let _hydration_guard = self.hydration_lock.lock().await;
+            // Hydration may also be called before chat by routers and attachment projection.
+            if self.validate_request_runtime(&self.snapshot()).is_err() {
+                return;
+            }
             if self.catalog_hydrated.load(Ordering::Acquire) {
                 return;
             }
-            if self.input_modalities().is_some() {
-                // A `/models` selection already supplied the state — and it
-                // validated the reasoning effort, so neither needs a fetch.
+            let captured_revision = self.selection_revision.load(Ordering::Acquire);
+            let captured = self.snapshot();
+            let requires_evidence = self.reasoning_effort_policy().requires_catalog_evidence();
+            if captured.input_modalities.is_some() && !requires_evidence {
                 self.catalog_hydrated.store(true, Ordering::Release);
                 return;
             }
-            let active_model = self.config().model;
-            match self.list_models().await {
-                Ok(models) => {
-                    let active_model_info = models.iter().find(|model| model.id == active_model);
-                    if let Some(context_length) =
-                        active_model_info.and_then(|model| model.context_length)
-                    {
-                        self.adopt_catalog_context_length(Some(context_length));
-                    }
-                    if let Some(input_modalities) =
-                        active_model_info.and_then(|model| model.input_modalities.clone())
-                    {
-                        self.set_input_modalities(Some(input_modalities));
-                        tracing::debug!(
-                            model = %active_model,
-                            input_modalities = %crate::llm::format_input_modalities_for_log(
-                                self.input_modalities().as_deref()
-                            ),
-                            "active model input modalities discovered"
-                        );
-                    }
-                    self.validate_profile_reasoning_effort(active_model_info);
-                }
+            let models = match self.list_models().await {
+                Ok(models) => Some(models),
                 Err(error) => {
-                    tracing::warn!(
-                        model = %active_model,
-                        error = %error,
-                        "failed to discover active model input modalities; \
-                         staying unknown until a {} selection",
-                        crate::slash_command::MODELS_COMMAND_NAME
-                    );
+                    tracing::warn!(model = %captured.model, %error, "failed to discover active model input modalities");
+                    None
+                }
+            };
+            let model = models
+                .as_ref()
+                .and_then(|models| models.iter().find(|model| model.id == captured.model));
+            if model.is_none()
+                && !requires_evidence
+                && captured.reasoning_effort.is_some()
+                && models.is_some()
+            {
+                tracing::debug!(model = %captured.model, "profile reasoning effort kept: the catalog does not list the active model");
+            }
+            let mut runtime = self
+                .runtime_config
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Every setting was captured before await. An intervening selection invalidates it.
+            if *runtime != captured
+                || self.selection_revision.load(Ordering::Acquire) != captured_revision
+            {
+                return;
+            }
+            if let Some(model) = model {
+                runtime.model_info = Some(model.clone());
+                if runtime.context_length_override.is_none() {
+                    runtime.context_length =
+                        self.context_length_for_model(&captured.model, model.context_length);
+                }
+                if let Some(modalities) = model.input_modalities.as_ref() {
+                    runtime.input_modalities = Some(modalities.clone());
+                    tracing::debug!(model = %captured.model,
+                        input_modalities = %crate::llm::format_input_modalities_for_log(runtime.input_modalities.as_deref()),
+                        "active model input modalities discovered");
+                }
+                if runtime.reasoning_effort.as_ref().is_some_and(|effort| {
+                    !self
+                        .reasoning_effort_policy()
+                        .retain_profile_effort(model, effort)
+                }) {
+                    let effort = runtime.reasoning_effort.take().unwrap_or_default();
+                    tracing::warn!(model = %model.id, reasoning_effort = %effort,
+                        "profile reasoning effort is not advertised by the model; falling back to the provider default");
+                    // Legacy providers may not share our handle. Keep their setter behavior.
+                    if !self.owns_provider_runtime {
+                        drop(runtime);
+                        if let Err(error) = self.provider.set_reasoning_effort(None) {
+                            tracing::warn!(%error, "failed to reset unadvertised reasoning effort");
+                        }
+                        runtime = self
+                            .runtime_config
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // A setter callback must not clear a newer selection after releasing the lock.
+                        if self.selection_revision.load(Ordering::Acquire) != captured_revision
+                            || runtime.model != captured.model
+                            || runtime.reasoning_effort.is_some()
+                        {
+                            return;
+                        }
+                    }
+                    self.pending_notices.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(format!(
+                        "Model {}/{} does not advertise reasoning effort \"{}\"; using the provider default.", self.config.provider_connection, model.id, effort));
                 }
             }
             self.catalog_hydrated.store(true, Ordering::Release);
@@ -463,12 +703,40 @@ impl Engine for EngineImpl {
     }
 
     fn set_reasoning_effort(&self, reasoning_effort: Option<&str>) -> anyhow::Result<()> {
+        if self.owns_provider_runtime {
+            let mut runtime = self.runtime_config.write().map_err(|_| {
+                anyhow::anyhow!("the engine runtime configuration lock is poisoned")
+            })?;
+            let mut candidate = runtime.clone();
+            candidate.reasoning_effort = reasoning_effort.map(String::from);
+            self.validate_request_runtime(&candidate)?;
+            if runtime.reasoning_effort != candidate.reasoning_effort {
+                *self
+                    .warned_selection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            runtime.reasoning_effort = candidate.reasoning_effort;
+            self.selection_revision.fetch_add(1, Ordering::AcqRel);
+            return Ok(());
+        }
+        let mut candidate = self.snapshot();
+        let effort_changed = candidate.reasoning_effort.as_deref() != reasoning_effort;
+        candidate.reasoning_effort = reasoning_effort.map(String::from);
+        self.validate_request_runtime(&candidate)?;
         self.provider.set_reasoning_effort(reasoning_effort)?;
         let mut runtime_config = self
             .runtime_config
             .write()
             .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))?;
-        runtime_config.reasoning_effort = reasoning_effort.map(String::from);
+        if effort_changed {
+            *self
+                .warned_selection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+        runtime_config.reasoning_effort = candidate.reasoning_effort;
+        self.selection_revision.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 }

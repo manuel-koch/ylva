@@ -115,8 +115,40 @@ See [configuration](./configuration.md),
   requests, never an in-flight one.
 - Catalog hydration runs once per model selection before the first chat; a
   `/models` selection supplies the metadata itself and a direct model-only
-  switch invalidates it. If hydration rejects a profile reasoning value, the
-  engine queues a notice that `AgentLoop` forwards before `StreamStarted`.
+  switch invalidates it. Hydration checks request policy before catalog I/O, including calls
+  from routers or attachment projection. It rechecks the complete captured runtime and
+  selection revision before publishing evidence, so stale results cannot alter a newer
+  selection. Other providers retain
+  lazy drop-to-default profile validation.
+- `ReasoningEffortPolicy` is a provider-neutral trait. Its strict default preserves exact
+  advertised membership, untouched named shortcuts, and lazy profile drop-to-default.
+  `EdenAiReasoningEffortPolicy` owns schema validation, explicit/default named edits,
+  request checks, hydration requirements, profile retention, override choices and warning
+  wording. General engine code delegates these rules without inspecting provider identity.
+- Runtime ownership is separate from reasoning. `Provider::bind_engine_runtime` optionally
+  returns a connection clone bound to the fresh engine-owned handle. Bound engines publish
+  validated model/effort/metadata/context candidates atomically without provider setters.
+  Providers declining binding retain the legacy shared-handle/setter contract.
+  EdenAI opts into binding; selecting a reasoning policy never implies runtime ownership.
+- Picker rows carry `ReasoningEffortOptions`, immutable display data resolved from the exact
+  selection target. They contain filtered advertised values, separately labelled unverified
+  choices and capability visibility, not a provider-kind policy enum. Named rows resolve their
+  exact engine key, while raw rows retain representative-provider routing.
+- EdenAI owns one schema-derived gateway effort policy shared by profiles, target preview,
+  selection, and request validation. Catalog evidence distinguishes unavailable, unsupported,
+  supported, malformed, and contradictory data without inventing advertised members.
+  Effort provenance is live-only and belongs to the selected model in the runtime snapshot.
+- The EdenAI Chat Completions customizer sends the validated explicit effort at top-level
+  `reasoning_effort` alongside `session_id`. Default omits the field. A fallible request
+  boundary checks the same snapshot before network I/O, including direct provider calls and
+  writes through runtime handles. Backend rejections retain model/effort and backend details,
+  without a changed-effort retry. EdenAI's stream adapter also projects readable
+  `reasoning_items[].summary[].text` fragments into `StreamEvent::Thinking`; it ignores encrypted
+  payloads and empty summaries. The shared Chat Completions parser remains provider-neutral.
+- Unverified notice state belongs to a live engine, not the shared connection. The agent's
+  pre-dispatch callback forwards notices with acknowledgment before chat I/O; failed chat
+  also drains pending notices. Default resets deduplication. Independent runtime handles
+  keep independent settings and warning state while retaining shared concurrency limits.
 - `ModelSelection` keeps named-engine shortcuts distinct from raw catalog
   options. Preview and confirmation share one resolution: named choices
   activate their exact map key; raw catalog choices use the active engine for
@@ -133,7 +165,9 @@ See [configuration](./configuration.md),
 - Allowed-model policy is owned by the provider connection and travels with
   every engine built from it (including `configured_copy`), so subagent,
   utility and compaction engines inherit it. Checks must run before any state
-  mutation (`apply_model_option` edits reasoning before switching).
+  mutation. Independently bound engines validate a complete candidate before coherent runtime
+  publication. Routers publish active routing only after successful application; rejected
+  switches do not partially update settings.
 - One semaphore per provider connection bounds concurrency. Catalog calls hold
   a permit until the body is read; streamed chat until the stream closes.
   Retries of `429`/`5xx` (honoring `Retry-After`) stay under the same permit.

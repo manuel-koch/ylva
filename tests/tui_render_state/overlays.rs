@@ -400,6 +400,7 @@ async fn switching_models_rechecks_compaction_capacity_before_any_prompt() {
         let large_model = ModelInfo {
             id: "large-conversation".to_string(),
             context_length: Some(98_304),
+            reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
             reasoning_default: None,
             input_modalities: None,
@@ -572,6 +573,7 @@ async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pendi
                 model: ModelInfo {
                     id: model.clone(),
                     context_length: None,
+                    reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,
@@ -946,6 +948,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                     identity: "stub/thinking".to_string(),
                     details: vec!["reasoning: default".to_string()],
                 },
+                reasoning_options: ylva::llm::ReasoningEffortOptions::default(),
                 initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     context_length_override: None,
@@ -953,6 +956,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                     model: ModelInfo {
                         id: "thinking".to_string(),
                         context_length: None,
+                        reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                         reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
                         reasoning_default: None,
                         input_modalities: None,
@@ -1046,12 +1050,14 @@ fn model_picker_details_show_highlighted_compaction_effect() {
                     model: ModelInfo {
                         id: model_id.to_string(),
                         context_length: Some(context_length),
+                        reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                         reasoning_efforts: None,
                         reasoning_default: None,
                         input_modalities: None,
                     },
                     reasoning_effort: None,
                 },
+                reasoning_options: ylva::llm::ReasoningEffortOptions::default(),
                 initial_reasoning_effort: None,
                 is_active: name == "engine-a",
                 engine_name: Some(name.to_string()),
@@ -1684,6 +1690,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
                     identity: "stub/thinking".to_string(),
                     details: vec!["reasoning: default".to_string()],
                 },
+                reasoning_options: ylva::llm::ReasoningEffortOptions::default(),
                 initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     context_length_override: None,
@@ -1691,6 +1698,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
                     model: ModelInfo {
                         id: "thinking".to_string(),
                         context_length: None,
+                        reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                         reasoning_efforts: None,
                         reasoning_default: None,
                         input_modalities: None,
@@ -1968,6 +1976,7 @@ fn long_model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state
                     ],
                 }
             },
+            reasoning_options: ylva::llm::ReasoningEffortOptions::default(),
             initial_reasoning_effort: None,
             selection: ylva::ProviderModelOption {
                 context_length_override: None,
@@ -1975,6 +1984,7 @@ fn long_model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state
                 model: ylva::ModelInfo {
                     id: format!("model-{index}"),
                     context_length: Some(131_072),
+                    reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,
@@ -2388,4 +2398,57 @@ fn model_parameter_popup_renders_one_row_per_parameter_with_its_footer_hints() {
         !text.contains("effort") || !text.contains("←/→ effort"),
         "the list footer must no longer advertise reasoning cycling"
     );
+}
+
+#[test]
+fn gateway_reasoning_parameter_row_renders_unverified_and_default_reset() {
+    use ylva::tui_reducer_state::{ChoiceLabel, ModelChoice, SlashOverlay};
+    let mut state = ylva::AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: vec![ModelChoice {
+            selection: ylva::llm::ProviderModelOption {
+                provider_connection: "arbitrary".to_string(),
+                model: ylva::llm::ModelInfo {
+                    reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
+                    id: "upstream/model".to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: Some("medium".to_string()),
+                context_length_override: None,
+            },
+            initial_reasoning_effort: Some("medium".to_string()),
+            reasoning_options: ylva::llm::ReasoningEffortOptions {
+                selectable_efforts: Some(Vec::new()),
+                unverified_efforts: vec!["medium".to_string()],
+                show_capability: true,
+            },
+            label: ChoiceLabel {
+                identity: "arbitrary/upstream/model".to_string(),
+                details: Vec::new(),
+            },
+            is_active: true,
+            engine_name: None,
+            catalog_context_length: None,
+            selection_target: None,
+            selection_preview_error: None,
+            favorite_rank: None,
+        }],
+        filter: String::new(),
+        selected: 0,
+        parameters: None,
+    };
+    state.open_model_parameters();
+    let text = rendered_text(&render_offline(&mut state, 120, 40));
+    assert!(text.contains("medium (unverified)"), "{text}");
+    assert!(text.contains("enter"), "{text}");
+    assert!(text.contains("esc"), "{text}");
+    state.move_model_parameter_cursor(1);
+    state.adjust_model_parameter(-3);
+    let text = rendered_text(&render_offline(&mut state, 120, 40));
+    assert!(text.contains("Reasoning effort:"), "{text}");
+    assert!(text.contains("default"), "{text}");
+    assert!(!text.contains("(unverified)"), "{text}");
 }

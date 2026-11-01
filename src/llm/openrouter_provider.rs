@@ -57,6 +57,7 @@ impl ModelCatalog for OpenRouterModelCatalog {
                 let (reasoning_efforts, reasoning_default) =
                     parse_reasoning_object(entry.get("reasoning"));
                 Some(ModelInfo {
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: id.to_string(),
                     context_length: entry
                         .get("context_length")
@@ -243,6 +244,7 @@ mod tests {
         assert_eq!(
             models,
             vec![ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "openai/gpt-oss-120b".to_string(),
                 context_length: Some(131072),
                 reasoning_efforts: None,
@@ -423,6 +425,7 @@ mod tests {
     fn customizes_reasoning_request_body() {
         let mut request_body = serde_json::json!({});
         let runtime_config = crate::llm::engine::EngineRuntimeConfig {
+            model_info: None,
             context_length_override: None,
             model: "some/model".to_string(),
             temperature: None,

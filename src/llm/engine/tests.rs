@@ -67,6 +67,7 @@ impl CatalogEngine {
             models: models
                 .iter()
                 .map(|id| ModelInfo {
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: (*id).to_string(),
                     context_length: None,
                     reasoning_efforts: None,
@@ -127,9 +128,10 @@ impl Engine for CatalogEngine {
 /// Provider stub whose catalog can carry input modalities and reasoning
 /// efforts, for exercising [`EngineImpl::hydrate_catalog_metadata`]. `chat` always fails — the
 /// hydration tests only need the catalog fetch to run.
+#[derive(Clone)]
 struct CatalogProvider {
     models: Vec<ModelInfo>,
-    list_models_calls: std::sync::atomic::AtomicUsize,
+    list_models_calls: Arc<std::sync::atomic::AtomicUsize>,
     fail_list_models: bool,
 }
 
@@ -137,7 +139,7 @@ impl CatalogProvider {
     fn new(models: Vec<ModelInfo>) -> Self {
         CatalogProvider {
             models,
-            list_models_calls: std::sync::atomic::AtomicUsize::new(0),
+            list_models_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             fail_list_models: false,
         }
     }
@@ -145,7 +147,7 @@ impl CatalogProvider {
     fn failing() -> Self {
         CatalogProvider {
             models: Vec::new(),
-            list_models_calls: std::sync::atomic::AtomicUsize::new(0),
+            list_models_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             fail_list_models: true,
         }
     }
@@ -188,6 +190,7 @@ impl Provider for CatalogProvider {
 
 fn model_info_with_modalities(id: &str, input_modalities: Option<Vec<InputModality>>) -> ModelInfo {
     ModelInfo {
+        reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
         id: id.to_string(),
         context_length: None,
         reasoning_efforts: None,
@@ -201,6 +204,7 @@ fn model_info_with_reasoning_efforts(
     reasoning_efforts: Option<Vec<String>>,
 ) -> ModelInfo {
     ModelInfo {
+        reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
         id: id.to_string(),
         context_length: None,
         reasoning_efforts,
@@ -249,6 +253,7 @@ fn the_compaction_budget_is_read_off_the_active_engine() {
 #[test]
 fn a_models_switch_scopes_the_context_override_to_the_configured_model() {
     let catalog_model = ModelInfo {
+        reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
         id: "catalog-model".to_string(),
         context_length: Some(8_192),
         reasoning_efforts: None,
@@ -374,6 +379,7 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
             context_length_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "vision-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
@@ -390,6 +396,7 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
             context_length_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "text-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,

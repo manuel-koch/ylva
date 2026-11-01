@@ -44,6 +44,7 @@ fn direct_engine_previews_the_selected_effective_context_length() {
             context_length_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "candidate".to_string(),
                 context_length,
                 reasoning_efforts: None,
@@ -83,4 +84,53 @@ fn direct_engine_previews_the_selected_effective_context_length() {
             .context_length,
         DEFAULT_CONTEXT_LENGTH
     );
+}
+
+#[test]
+fn edenai_selection_and_preview_reject_invalid_without_mutation() {
+    let provider = Arc::new(crate::llm::EdenAiProvider::new(
+        "arbitrary-name".into(),
+        "http://localhost:1".into(),
+        "test-model".into(),
+        None,
+    ));
+    let mut config = make_engine_config();
+    config.provider_connection = "arbitrary-name".into();
+    let engine = EngineImpl::new(provider.clone(), config);
+    let option = ProviderModelOption {
+        provider_connection: "arbitrary-name".into(),
+        model: model_info_with_modalities("new-model", Some(vec![])),
+        reasoning_effort: Some("med".into()),
+        context_length_override: Some(77),
+    };
+    let before = engine.runtime_snapshot().unwrap();
+    assert!(engine
+        .preview_model_selection(&ModelSelection::ProviderModel(option.clone()))
+        .is_err());
+    assert!(engine.switch_model_option(&option).is_err());
+    assert_eq!(engine.runtime_snapshot().unwrap(), before);
+}
+
+#[test]
+fn edenai_selection_accepts_unverified_and_can_clear_to_default() {
+    let provider = Arc::new(crate::llm::EdenAiProvider::new(
+        "mock".into(),
+        "http://localhost:1".into(),
+        "test-model".into(),
+        None,
+    ));
+    let engine = EngineImpl::new(provider, make_engine_config());
+    let mut option = ProviderModelOption {
+        provider_connection: "mock".into(),
+        model: model_info_with_modalities("new-model", Some(vec![])),
+        reasoning_effort: Some("medium".into()),
+        context_length_override: Some(77),
+    };
+    engine.switch_model_option(&option).unwrap();
+    assert_eq!(engine.reasoning_effort().as_deref(), Some("medium"));
+    assert_eq!(engine.config().model, "new-model");
+    assert_eq!(engine.effective_context_length(), 77);
+    option.reasoning_effort = None;
+    engine.switch_model_option(&option).unwrap();
+    assert_eq!(engine.reasoning_effort(), None);
 }

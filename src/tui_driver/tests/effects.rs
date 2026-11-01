@@ -814,6 +814,7 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
                 identity: "stub/deepseek-v3".to_string(),
                 details: Vec::new(),
             },
+            reasoning_options: crate::llm::ReasoningEffortOptions::default(),
             initial_reasoning_effort: None,
             selection: crate::llm::ProviderModelOption {
                 context_length_override: None,
@@ -821,6 +822,7 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
                 model: crate::llm::ModelInfo {
                     id: "deepseek-v3".to_string(),
                     context_length: None,
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,

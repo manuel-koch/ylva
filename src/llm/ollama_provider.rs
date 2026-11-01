@@ -248,6 +248,7 @@ fn parse_tags(body: &serde_json::Value) -> Vec<ModelInfo> {
                         .and_then(json_usize)
                 });
             Some(ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: id.to_string(),
                 context_length,
                 reasoning_efforts: parse_reasoning_efforts(entry),
@@ -390,6 +391,7 @@ mod tests {
         assert_eq!(
             parse_tags(&body),
             vec![ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "gemma4:latest".to_string(),
                 context_length: Some(32768),
                 reasoning_efforts: None,
@@ -591,6 +593,7 @@ mod tests {
     fn customizes_openai_compatible_reasoning_request_body() {
         let mut request_body = serde_json::json!({});
         let runtime_config = crate::llm::engine::EngineRuntimeConfig {
+            model_info: None,
             model: "qwen3:8b".to_string(),
             temperature: None,
             context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,

@@ -567,6 +567,7 @@ impl StubEngine {
                 .map(|id| crate::llm::ModelInfo {
                     id: (*id).to_string(),
                     context_length: None,
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,
@@ -620,6 +621,7 @@ impl StubEngine {
                     } else {
                         None
                     },
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: if *id == engine_model {
                         Some(
                             reasoning_efforts

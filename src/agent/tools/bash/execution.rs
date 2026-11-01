@@ -134,7 +134,7 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
         // The one-line header is the error; the output is shown separately.
         return Err(ToolError::failed_with_output(
             "bash",
-            format!("command exited with code {exit_code}:"),
+            format!("command exited with code {exit_code}"),
             output,
             truncated,
         ));

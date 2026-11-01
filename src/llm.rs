@@ -61,7 +61,7 @@ pub use edenai_provider::EdenAiProvider;
 pub use engine::{
     CompactionEngineDisplayInfo, Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter,
     EngineRuntimeConfig, EngineRuntimeConfigHandle, ModelSelectionTarget, ProviderModelOption,
-    DEFAULT_CONTEXT_LENGTH,
+    ReasoningEffortChange, DEFAULT_CONTEXT_LENGTH,
 };
 pub use mock_provider::{MockEvent, MockProvider};
 pub use ollama_provider::OllamaProvider;
@@ -99,9 +99,168 @@ impl ToolSchema {
     }
 }
 
+/// Catalog evidence for reasoning support. Enumeration remains in `ModelInfo`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReasoningEvidence {
+    /// No usable capability evidence establishes whether reasoning is supported.
+    /// This includes missing or null metadata and providers that do not populate
+    /// this evidence separately from their advertised effort lists.
+    #[default]
+    Unknown,
+    /// The catalog explicitly reports that the model does not support reasoning,
+    /// without contradictory evidence advertising reasoning support.
+    Unsupported,
+    /// The catalog reports reasoning support or advertises valid reasoning efforts.
+    /// Support alone does not establish which explicit efforts the model accepts;
+    /// the advertised alternatives remain in [`ModelInfo::reasoning_efforts`].
+    Supported,
+    /// Reasoning metadata cannot be interpreted reliably because its structure,
+    /// field types, or effort entries violate the provider's catalog contract.
+    /// Missing optional metadata alone does not make evidence invalid.
+    Invalid,
+    /// Individually interpretable catalog claims disagree about reasoning support,
+    /// such as an explicit denial of support alongside advertised effort values.
+    Conflicting,
+}
+
+/// Provenance of an effective, explicit reasoning effort.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReasoningEffortProvenance {
+    /// No explicit effort is selected; the request leaves effort control to
+    /// the provider. This does not identify the provider's actual default value.
+    #[default]
+    ProviderDefault,
+    /// The selected explicit effort is an exact member of the model's
+    /// advertised effort list. Advertisement does not prove that the upstream
+    /// model honors the value or produces readable thinking.
+    Advertised,
+    /// The provider's validation contract permits the selected explicit effort,
+    /// but available catalog evidence does not confirm model-specific acceptance.
+    /// This is an opted-in override, not an invented advertised alternative.
+    Unverified,
+}
+
+/// Provider-neutral reasoning rules. Implementations own wire validation and evidence handling.
+pub trait ReasoningEffortPolicy: Send + Sync + std::fmt::Debug {
+    /// Validate a complete candidate without mutating its runtime.
+    fn resolve(
+        &self,
+        model_id: &str,
+        model: Option<&ModelInfo>,
+        effort: Option<&str>,
+    ) -> anyhow::Result<ReasoningEffortProvenance> {
+        let Some(effort) = effort else {
+            return Ok(ReasoningEffortProvenance::ProviderDefault);
+        };
+        anyhow::ensure!(
+            model.is_some_and(|model| model.advertises_reasoning_effort(effort)),
+            "model '{model_id}' does not advertise reasoning effort '{effort}'"
+        );
+        Ok(ReasoningEffortProvenance::Advertised)
+    }
+
+    /// Validate explicit named-picker edits. Untouched strict shortcuts retain legacy behavior.
+    fn validate_named_change(
+        &self,
+        model: &ModelInfo,
+        _current: Option<&str>,
+        change: &ReasoningEffortChange,
+    ) -> anyhow::Result<()> {
+        match change {
+            ReasoningEffortChange::Unchanged => Ok(()),
+            ReasoningEffortChange::Set(Some(effort)) => self
+                .resolve(&model.id, Some(model), Some(effort))
+                .map(|_| ()),
+            ReasoningEffortChange::Set(None) => {
+                anyhow::ensure!(
+                    model
+                        .reasoning_efforts
+                        .as_ref()
+                        .is_some_and(|efforts| !efforts.is_empty()),
+                    "model '{}' does not advertise selectable reasoning efforts",
+                    model.id
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Request-time validation is optional for legacy providers with lazy profile fallback.
+    fn validate_request(
+        &self,
+        _model_id: &str,
+        _model: Option<&ModelInfo>,
+        _effort: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Whether reasoning evidence requires hydration even when modalities are known.
+    fn requires_catalog_evidence(&self) -> bool {
+        false
+    }
+
+    /// Whether catalog capability evidence should be shown alongside effort choices.
+    fn shows_capability_evidence(&self) -> bool {
+        false
+    }
+
+    /// Whether an explicit profile effort survives successful catalog hydration.
+    fn retain_profile_effort(&self, model: &ModelInfo, effort: &str) -> bool {
+        model.advertises_reasoning_effort(effort)
+    }
+
+    /// Deliberately labelled choices, separate from advertised alternatives.
+    fn unverified_choices(&self, _model: Option<&ModelInfo>) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Provider-specific wording, with timing and deduplication owned by the engine.
+    fn unverified_notice(&self, _model: &str, _effort: &str) -> Option<String> {
+        None
+    }
+
+    /// Immutable display contract for a model-picker row, not provider identity.
+    fn picker_options(&self, model: &ModelInfo) -> ReasoningEffortOptions {
+        ReasoningEffortOptions {
+            selectable_efforts: Some(
+                model
+                    .reasoning_efforts
+                    .iter()
+                    .flatten()
+                    .filter(|effort| self.resolve(&model.id, Some(model), Some(effort)).is_ok())
+                    .cloned()
+                    .collect(),
+            ),
+            unverified_efforts: self
+                .unverified_choices(Some(model))
+                .iter()
+                .map(|effort| (*effort).to_string())
+                .collect(),
+            show_capability: self.shows_capability_evidence(),
+        }
+    }
+}
+
+/// Default exact-catalog validation for providers without specialized reasoning rules.
+#[derive(Debug)]
+pub struct AdvertisedReasoningEffortPolicy;
+impl ReasoningEffortPolicy for AdvertisedReasoningEffortPolicy {}
+
+/// Display-only reasoning choices resolved by the target's policy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReasoningEffortOptions {
+    /// None lets compatibility display callers use the model's advertised list.
+    pub selectable_efforts: Option<Vec<String>>,
+    pub unverified_efforts: Vec<String>,
+    pub show_capability: bool,
+}
+
 /// Metadata describing a single model available from a provider.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelInfo {
+    /// Capability evidence, neutral for providers using legacy strict enumeration.
+    pub reasoning_evidence: ReasoningEvidence,
     pub id: String,
     pub context_length: Option<usize>,
     /// Reasoning support advertised by the provider.
@@ -133,10 +292,9 @@ impl ModelInfo {
     /// efforts — the single membership rule shared by the `/models` switch
     /// validation and the pre-first-chat profile validation.
     ///
-    /// Only a populated [`ModelInfo::reasoning_efforts`] `Some(values)` list
-    /// containing the effort is sendable: `None` (not advertised) and
-    /// `Some([])` (supported without alternatives) both fail.
-    pub(crate) fn advertises_reasoning_effort(&self, reasoning_effort: &str) -> bool {
+    /// This is exact catalog membership, not acceptance of unverified gateway
+    /// overrides. `None` and `Some([])` both advertise no alternatives.
+    pub fn advertises_reasoning_effort(&self, reasoning_effort: &str) -> bool {
         self.reasoning_efforts
             .as_ref()
             .is_some_and(|efforts| efforts.iter().any(|effort| effort == reasoning_effort))
@@ -280,6 +438,26 @@ pub(crate) fn format_input_modalities_for_log(
 /// `delta.tool_calls`, surfaced as [`StreamEvent::Delta`] fragments that the
 /// agent's streaming task assembles. Tool assembly never happens here.
 pub trait Provider: Send + Sync {
+    /// Validation is selected by implementation, never by connection name.
+    fn reasoning_effort_policy(&self) -> std::sync::Arc<dyn ReasoningEffortPolicy> {
+        std::sync::Arc::new(AdvertisedReasoningEffortPolicy)
+    }
+
+    /// Bind a fresh engine-owned request runtime while retaining connection resources.
+    /// None preserves the legacy shared-handle/setter contract. This capability is
+    /// independent of reasoning validation, catalog support, and connection identity.
+    fn bind_engine_runtime(
+        &self,
+        _runtime: EngineRuntimeConfigHandle,
+    ) -> Option<std::sync::Arc<dyn Provider>> {
+        None
+    }
+
+    /// Previously fetched target metadata, available for synchronous model switches.
+    fn cached_model_info(&self, _model: &str) -> Option<ModelInfo> {
+        None
+    }
+
     /// Share connection resources with an independent set of request settings.
     fn with_runtime_config(
         &self,

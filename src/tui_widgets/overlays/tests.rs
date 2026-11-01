@@ -29,6 +29,7 @@ fn model_choice(context_length: usize) -> ModelChoice {
             model: ModelInfo {
                 id: "model".to_string(),
                 context_length: Some(context_length),
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
@@ -36,6 +37,7 @@ fn model_choice(context_length: usize) -> ModelChoice {
             reasoning_effort: None,
             context_length_override: None,
         },
+        reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         initial_reasoning_effort: None,
         label: ChoiceLabel {
             identity: "stub/model".to_string(),

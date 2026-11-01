@@ -31,6 +31,7 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
                 identity: format!("{provider_connection}/{model_id}"),
                 details: Vec::new(),
             },
+            reasoning_options: crate::llm::ReasoningEffortOptions::default(),
             initial_reasoning_effort: None,
             selection: ProviderModelOption {
                 context_length_override: None,
@@ -38,6 +39,7 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
                 model: crate::llm::ModelInfo {
                     id: model_id.to_string(),
                     context_length: None,
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,
@@ -247,6 +249,7 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_headers() {
             identity: label.to_string(),
             details: Vec::new(),
         },
+        reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         initial_reasoning_effort: None,
         catalog_context_length: None,
         selection: ProviderModelOption {
@@ -255,6 +258,7 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_headers() {
             model: crate::llm::ModelInfo {
                 id: label.to_string(),
                 context_length: None,
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
@@ -310,6 +314,7 @@ fn model_choice_label_explains_reasoning_effort_availability() {
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
             context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts,
             reasoning_default: None,
             input_modalities: None,
@@ -344,12 +349,14 @@ fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
             model: crate::llm::ModelInfo {
                 id: "model".to_string(),
                 context_length: None,
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
                 reasoning_default: None,
                 input_modalities: None,
             },
             reasoning_effort: Some("high".to_string()),
         },
+        reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         initial_reasoning_effort: Some("high".to_string()),
         is_active: false,
         engine_name: Some("reasoning".to_string()),
@@ -390,6 +397,7 @@ fn model_choice_label_shows_the_provider_advertised_default_effort() {
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
             context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts,
             reasoning_default: Some("medium".to_string()),
             input_modalities: None,
@@ -444,6 +452,7 @@ fn two_row_fixture_choices() -> Vec<ModelChoice> {
             identity: identity.to_string(),
             details: details.iter().map(|detail| detail.to_string()).collect(),
         },
+        reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         initial_reasoning_effort: None,
         catalog_context_length: None,
         selection: ProviderModelOption {
@@ -452,6 +461,7 @@ fn two_row_fixture_choices() -> Vec<ModelChoice> {
             model: crate::llm::ModelInfo {
                 id: "model".to_string(),
                 context_length: None,
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
@@ -619,6 +629,7 @@ fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
         model: crate::llm::ModelInfo {
             id: "openai/gpt-oss-120b".to_string(),
             context_length: Some(131_072),
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: Some(vec!["low".to_string()]),
             reasoning_default: None,
             input_modalities: None,
@@ -640,6 +651,7 @@ fn model_choice_label_formats_context_length_as_compact_decimal_tokens() {
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
             context_length: Some(context_length),
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
             reasoning_default: None,
             input_modalities: None,
@@ -672,6 +684,7 @@ fn model_choice_label_marks_advertised_non_text_input_modalities() {
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
             context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
             reasoning_default: None,
             input_modalities,
@@ -821,6 +834,7 @@ fn parameter_fixture(
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
             context_length,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts,
             reasoning_default: Some("medium".to_string()),
             input_modalities: None,
@@ -832,6 +846,7 @@ fn parameter_fixture(
     state.slash_overlay = SlashOverlay::ModelPicker {
         choices: vec![ModelChoice {
             label: model_choice_parts(&selection),
+            reasoning_options: crate::llm::ReasoningEffortOptions::default(),
             initial_reasoning_effort: None,
             catalog_context_length: context_length,
             selection_target: Some(crate::llm::ModelSelectionTarget {
@@ -862,6 +877,7 @@ fn engine_parameter_fixture(
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
             context_length: Some(configured_context_length),
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
             reasoning_default: None,
             input_modalities: None,
@@ -875,6 +891,7 @@ fn engine_parameter_fixture(
             label: crate::tui_reducer_state::model_picker::engine_choice_parts(
                 "engine", &selection,
             ),
+            reasoning_options: crate::llm::ReasoningEffortOptions::default(),
             initial_reasoning_effort: None,
             catalog_context_length,
             selection_target: Some(crate::llm::ModelSelectionTarget {
@@ -1195,6 +1212,7 @@ fn plain_choice(provider_connection: &str, model_id: &str) -> ModelChoice {
         model: crate::llm::ModelInfo {
             id: model_id.to_string(),
             context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
             reasoning_default: None,
             input_modalities: None,
@@ -1203,6 +1221,7 @@ fn plain_choice(provider_connection: &str, model_id: &str) -> ModelChoice {
     };
     ModelChoice {
         label: model_choice_parts(&selection),
+        reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         initial_reasoning_effort: None,
         selection,
         is_active: false,
@@ -1333,4 +1352,152 @@ fn favorites_follow_configured_rank_within_sorted_connections_and_filters_apply(
     assert_eq!(filtered, vec!["plain"]);
     let rows = model_picker_row_entries(&choices, "plain", PickerRowLayout::SingleRow);
     assert_eq!(rows.len(), 2, "only the non-empty group keeps its header");
+}
+
+#[test]
+fn model_choice_label_preserves_explicit_effort_without_selectable_capability() {
+    for reasoning_efforts in [None, Some(Vec::new())] {
+        let option = ProviderModelOption {
+            provider_connection: "arbitrary-connection".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "model".to_string(),
+                context_length: None,
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+                reasoning_efforts,
+                reasoning_default: None,
+                input_modalities: None,
+            },
+            reasoning_effort: Some("medium".to_string()),
+            context_length_override: None,
+        };
+        assert!(model_choice_parts(&option)
+            .details_text()
+            .contains("reasoning: medium"));
+    }
+}
+
+#[test]
+fn unverified_reasoning_popup_labels_drafts_and_resets_to_default() {
+    let mut state = parameter_fixture(Some(Vec::new()), None);
+    let SlashOverlay::ModelPicker { choices, .. } = &mut state.slash_overlay else {
+        panic!("picker");
+    };
+    choices[0].selection.model.reasoning_evidence = crate::llm::ReasoningEvidence::Supported;
+    choices[0].selection.model.reasoning_default = None;
+    choices[0].reasoning_options = crate::llm::ReasoningEffortPolicy::picker_options(
+        &crate::llm::edenai_provider::EdenAiReasoningEffortPolicy,
+        &choices[0].selection.model,
+    );
+    state.open_model_parameters();
+    assert_eq!(popup_rows(&state)[1], "Reasoning effort:    default ▸");
+    state.move_model_parameter_cursor(1);
+    state.adjust_model_parameter(1);
+    assert!(popup_rows(&state)[1].contains("(unverified)"));
+    assert_eq!(
+        state.selected_model().unwrap().selection.reasoning_effort,
+        None
+    );
+    state.leave_model_parameters();
+    assert_eq!(
+        state.selected_model().unwrap().selection.reasoning_effort,
+        None
+    );
+    state.open_model_parameters();
+    state.move_model_parameter_cursor(1);
+    state.adjust_model_parameter(1);
+    state.confirm_model_parameters();
+    let choice = state.selected_model().unwrap();
+    assert!(choice.selection.reasoning_effort.is_some());
+    assert!(choice.label.details_text().contains("(unverified)"));
+    assert_eq!(choice.selection.model.reasoning_efforts, Some(Vec::new()));
+    state.open_model_parameters();
+    state.move_model_parameter_cursor(1);
+    state.adjust_model_parameter(-1);
+    state.confirm_model_parameters();
+    assert_eq!(
+        state.selected_model().unwrap().selection.reasoning_effort,
+        None
+    );
+}
+
+#[test]
+fn advertised_gateway_choices_stay_strict_and_unknown_choices_remain_unverified() {
+    for evidence in [
+        crate::llm::ReasoningEvidence::Unknown,
+        crate::llm::ReasoningEvidence::Supported,
+    ] {
+        let mut state = parameter_fixture(None, None);
+        let SlashOverlay::ModelPicker { choices, .. } = &mut state.slash_overlay else {
+            panic!("picker");
+        };
+        choices[0].selection.model.reasoning_evidence = evidence;
+        choices[0].selection.model.reasoning_default = None;
+        choices[0].reasoning_options = crate::llm::ReasoningEffortPolicy::picker_options(
+            &crate::llm::edenai_provider::EdenAiReasoningEffortPolicy,
+            &choices[0].selection.model,
+        );
+        state.open_model_parameters();
+        state.move_model_parameter_cursor(1);
+        state.adjust_model_parameter(1);
+        assert_eq!(
+            popup_rows(&state)[1],
+            "Reasoning effort:  ◂ minimal (unverified) ▸"
+        );
+    }
+    let mut advertised = parameter_fixture(Some(vec!["low".to_string(), "high".to_string()]), None);
+    let SlashOverlay::ModelPicker { choices, .. } = &mut advertised.slash_overlay else {
+        panic!("picker");
+    };
+    choices[0].selection.model.reasoning_evidence = crate::llm::ReasoningEvidence::Supported;
+    choices[0].selection.model.reasoning_default = None;
+    choices[0].reasoning_options = crate::llm::ReasoningEffortPolicy::picker_options(
+        &crate::llm::edenai_provider::EdenAiReasoningEffortPolicy,
+        &choices[0].selection.model,
+    );
+    advertised.open_model_parameters();
+    advertised.move_model_parameter_cursor(1);
+    advertised.adjust_model_parameter(1);
+    assert_eq!(popup_rows(&advertised)[1], "Reasoning effort:  ◂ low ▸");
+    advertised.adjust_model_parameter(1);
+    advertised.adjust_model_parameter(1);
+    assert_eq!(popup_rows(&advertised)[1], "Reasoning effort:  ◂ high");
+}
+
+#[test]
+fn rejected_evidence_does_not_offer_gateway_overrides_but_explicit_effort_can_reset() {
+    for evidence in [
+        crate::llm::ReasoningEvidence::Unsupported,
+        crate::llm::ReasoningEvidence::Invalid,
+        crate::llm::ReasoningEvidence::Conflicting,
+    ] {
+        let mut state = parameter_fixture(None, None);
+        let SlashOverlay::ModelPicker { choices, .. } = &mut state.slash_overlay else {
+            panic!("picker");
+        };
+        choices[0].selection.model.reasoning_evidence = evidence;
+        choices[0].reasoning_options = crate::llm::ReasoningEffortPolicy::picker_options(
+            &crate::llm::edenai_provider::EdenAiReasoningEffortPolicy,
+            &choices[0].selection.model,
+        );
+        state.open_model_parameters();
+        assert_eq!(popup_rows(&state).len(), 1);
+        state.leave_model_parameters();
+        let SlashOverlay::ModelPicker { choices, .. } = &mut state.slash_overlay else {
+            panic!("picker");
+        };
+        choices[0].selection.reasoning_effort = Some("medium".to_string());
+        choices[0].initial_reasoning_effort = Some("medium".to_string());
+        choices[0].engine_name = Some("named".to_string());
+        state.open_model_parameters();
+        state.move_model_parameter_cursor(1);
+        state.adjust_model_parameter(-1);
+        state.confirm_model_parameters();
+        assert!(matches!(
+            state.selected_model().unwrap().to_model_selection(),
+            ModelSelection::NamedEngine {
+                reasoning_effort: ReasoningEffortChange::Set(None),
+                ..
+            }
+        ));
+    }
 }

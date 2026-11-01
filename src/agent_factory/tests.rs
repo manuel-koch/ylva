@@ -62,6 +62,7 @@ impl Provider for SelectableMockProvider {
             ]
             .into_iter()
             .map(|id| ModelInfo {
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: id.to_string(),
                 context_length: Some(32_000),
                 reasoning_efforts: None,

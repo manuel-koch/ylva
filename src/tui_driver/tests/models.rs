@@ -31,6 +31,7 @@ fn picker_preview_and_confirmation_keep_explicit_compaction_fixed_and_implicit_c
             model: crate::llm::ModelInfo {
                 id: model.to_string(),
                 context_length: Some(context_length),
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: Some(Vec::new()),
@@ -277,6 +278,7 @@ fn compaction_switch_notices_explain_engine_selection_effects() {
         model: crate::llm::ModelInfo {
             id: "model-b".to_string(),
             context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
             reasoning_default: None,
             input_modalities: None,
@@ -374,6 +376,7 @@ async fn interrupted_model_list_discovery_resumes_after_the_pause() {
             model: crate::llm::ModelInfo {
                 id: "available".to_string(),
                 context_length: None,
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
@@ -903,6 +906,7 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
         model: crate::llm::ModelInfo {
             id: "thinking".to_string(),
             context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
             reasoning_default: None,
             input_modalities: None,
@@ -916,6 +920,7 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
                 identity: "stub/thinking".to_string(),
                 details: vec!["reasoning: default".to_string()],
             },
+            reasoning_options: crate::llm::ReasoningEffortOptions::default(),
             initial_reasoning_effort: selection.reasoning_effort.clone(),
             catalog_context_length: None,
             selection,
@@ -998,6 +1003,7 @@ async fn model_picker_parameter_popup_esc_returns_to_the_list_and_discards_the_d
         model: crate::llm::ModelInfo {
             id: "thinking".to_string(),
             context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: Some(vec!["low".to_string()]),
             reasoning_default: None,
             input_modalities: None,
@@ -1011,6 +1017,7 @@ async fn model_picker_parameter_popup_esc_returns_to_the_list_and_discards_the_d
                 identity: "stub/thinking".to_string(),
                 details: vec!["reasoning: default".to_string()],
             },
+            reasoning_options: crate::llm::ReasoningEffortOptions::default(),
             initial_reasoning_effort: None,
             catalog_context_length: None,
             selection,
@@ -1354,6 +1361,7 @@ fn picker_orders_engines_then_favorites_in_configured_order_then_the_rest() {
                 model: crate::llm::ModelInfo {
                     id: id.to_string(),
                     context_length: None,
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,
@@ -1450,4 +1458,320 @@ fn a_filter_matching_nothing_keeps_the_picker_open_with_favorites_intact() {
     };
     assert_eq!(choices.len(), 1);
     assert!(picker_rows(&state).is_empty());
+}
+
+fn gateway_picker_engine(effort: Option<&str>) -> Arc<dyn Engine> {
+    let connection = "not-a-provider-kind";
+    let model = "upstream/model";
+    let config = EngineConfig {
+        provider_connection: connection.to_string(),
+        model: model.to_string(),
+        temperature: None,
+        context_length: Some(32_000),
+        api_base_url: Some("http://127.0.0.1:9".to_string()),
+        api_key: None,
+        reasoning: effort.map(str::to_string),
+        compact_target_ratio: 0.4,
+        soft_compaction_threshold: 0.5,
+        hard_compaction_threshold: 0.8,
+    };
+    let engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
+        Arc::new(crate::llm::EdenAiProvider::new(
+            connection.to_string(),
+            "http://127.0.0.1:9".to_string(),
+            model.to_string(),
+            None,
+        )),
+        config,
+    ));
+    Arc::new(
+        crate::llm::engine::EngineRouter::new(
+            HashMap::from([("gateway-shortcut".to_string(), engine)]),
+            "gateway-shortcut",
+        )
+        .expect("router"),
+    )
+}
+
+#[tokio::test]
+async fn gateway_shortcut_after_catalog_failure_applies_enter_without_acknowledgment() {
+    let engine = gateway_picker_engine(Some("medium"));
+    let (mut state, _textarea, commands, mut received_commands) = setup();
+    apply_model_list_result(&mut state, None, ModelListResult::Timeout, &engine);
+    let choice = state.selected_model().expect("shortcut");
+    assert!(choice
+        .label
+        .details_text()
+        .contains("reasoning: medium (unverified)"));
+    assert_eq!(choice.selection.model.reasoning_efforts, None);
+    assert!(matches!(
+        choice.to_model_selection(),
+        ModelSelection::NamedEngine {
+            reasoning_effort: crate::llm::engine::ReasoningEffortChange::Unchanged,
+            ..
+        }
+    ));
+    let context = TextareaContext {
+        is_empty: true,
+        text: String::new(),
+        cursor_row: 0,
+        cursor_row_is_last: true,
+    };
+    let first_enter = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &context,
+    );
+    assert!(first_enter.is_empty());
+    state.move_model_parameter_cursor(1);
+    state.adjust_model_parameter(1);
+    let confirm = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &context,
+    );
+    assert!(matches!(
+        confirm.as_slice(),
+        [Effect::ClearTextarea, Effect::SwitchModel(_)]
+    ));
+    execute_slash_effects(&mut state, confirm, &engine, &commands).await;
+    assert_eq!(engine.reasoning_effort().as_deref(), Some("high"));
+    assert!(matches!(
+        received_commands.try_recv(),
+        Ok(AgentCommand::RecordModelChanged { .. })
+    ));
+    assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+}
+
+#[tokio::test]
+async fn rejected_gateway_picker_selection_publishes_no_model_change_or_settings() {
+    let engine = gateway_picker_engine(Some("medium"));
+    let (mut state, _textarea, commands, mut received_commands) = setup();
+    apply_model_list_result(&mut state, None, ModelListResult::Timeout, &engine);
+    let mut choice = state.selected_model().expect("shortcut").clone();
+    let before = engine.config();
+    let before_runtime = engine.runtime_snapshot().expect("runtime snapshot");
+    choice.selection.reasoning_effort = Some("invalid".to_string());
+    choice.selection.context_length_override = Some(64_000);
+    execute_slash_effects(
+        &mut state,
+        vec![Effect::SwitchModel(choice.to_model_selection())],
+        &engine,
+        &commands,
+    )
+    .await;
+    assert!(received_commands.try_recv().is_err());
+    assert_eq!(engine.config().model, before.model);
+    assert_eq!(engine.config().context_length, before.context_length);
+    assert_eq!(engine.reasoning_effort().as_deref(), Some("medium"));
+    let after_runtime = engine.runtime_snapshot().expect("runtime snapshot");
+    assert_eq!(after_runtime.context_length, before_runtime.context_length);
+    assert_eq!(
+        after_runtime.context_length_override,
+        before_runtime.context_length_override
+    );
+    assert_eq!(
+        after_runtime.input_modalities,
+        before_runtime.input_modalities
+    );
+    assert_eq!(after_runtime.model_info, before_runtime.model_info);
+    assert_eq!(
+        engine.active_engine_name().as_deref(),
+        Some("gateway-shortcut")
+    );
+    assert!(
+        state.chat_entries.iter().any(|entry| matches!(entry,
+        crate::tui_reducer_state::ChatEntry::Notice { text } if text.contains("Could not switch")))
+    );
+}
+
+#[test]
+fn gateway_catalog_evidence_reaches_named_and_raw_picker_rows() {
+    let engine = gateway_picker_engine(Some("medium"));
+    let mut state = AppState::new();
+    let option = crate::llm::ProviderModelOption {
+        provider_connection: "not-a-provider-kind".to_string(),
+        model: crate::llm::ModelInfo {
+            id: "upstream/model".to_string(),
+            context_length: Some(128_000),
+            reasoning_evidence: crate::llm::ReasoningEvidence::Supported,
+            reasoning_efforts: Some(Vec::new()),
+            reasoning_default: None,
+            input_modalities: Some(vec![crate::llm::InputModality::Image]),
+        },
+        reasoning_effort: None,
+        context_length_override: None,
+    };
+    apply_model_list_result(
+        &mut state,
+        None,
+        ModelListResult::Models(vec![option]),
+        &engine,
+    );
+    let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+        panic!("picker");
+    };
+    assert_eq!(choices.len(), 2);
+    for choice in choices {
+        assert_eq!(
+            choice.selection.model.reasoning_evidence,
+            crate::llm::ReasoningEvidence::Supported
+        );
+        assert_eq!(choice.selection.model.reasoning_efforts, Some(Vec::new()));
+        assert!(choice
+            .label
+            .details_text()
+            .contains("reasoning: medium (unverified)"));
+        assert!(choice.label.details_text().contains("[I]"));
+    }
+}
+
+#[tokio::test]
+async fn gateway_shortcut_escape_keeps_profile_effort_and_default_reset_applies() {
+    let engine = gateway_picker_engine(Some("medium"));
+    let (mut state, _textarea, commands, mut received_commands) = setup();
+    apply_model_list_result(
+        &mut state,
+        None,
+        ModelListResult::ProviderError(anyhow::anyhow!("offline")),
+        &engine,
+    );
+    state.open_model_parameters();
+    state.move_model_parameter_cursor(1);
+    state.adjust_model_parameter(-3);
+    let context = TextareaContext {
+        is_empty: true,
+        text: String::new(),
+        cursor_row: 0,
+        cursor_row_is_last: true,
+    };
+    let escape = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Esc))),
+        &context,
+    );
+    assert!(escape.is_empty());
+    assert_eq!(
+        state
+            .selected_model()
+            .unwrap()
+            .selection
+            .reasoning_effort
+            .as_deref(),
+        Some("medium")
+    );
+    assert_eq!(engine.reasoning_effort().as_deref(), Some("medium"));
+    assert!(received_commands.try_recv().is_err());
+    state.open_model_parameters();
+    state.move_model_parameter_cursor(1);
+    state.adjust_model_parameter(-3);
+    let confirm = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &context,
+    );
+    execute_slash_effects(&mut state, confirm, &engine, &commands).await;
+    assert_eq!(engine.reasoning_effort(), None);
+    assert_eq!(
+        engine.effective_reasoning_provenance(),
+        crate::llm::ReasoningEffortProvenance::ProviderDefault
+    );
+    assert!(matches!(
+        received_commands.try_recv(),
+        Ok(AgentCommand::RecordModelChanged { .. })
+    ));
+}
+
+#[test]
+fn gateway_shortcut_outage_retains_active_runtime_capability_evidence() {
+    let engine = gateway_picker_engine(Some("medium"));
+    let option = crate::llm::ProviderModelOption {
+        provider_connection: "not-a-provider-kind".to_string(),
+        model: crate::llm::ModelInfo {
+            id: "upstream/model".to_string(),
+            context_length: Some(128_000),
+            reasoning_evidence: crate::llm::ReasoningEvidence::Supported,
+            reasoning_efforts: Some(vec!["medium".to_string(), "high".to_string()]),
+            reasoning_default: Some("medium".to_string()),
+            input_modalities: Some(vec![crate::llm::InputModality::Image]),
+        },
+        reasoning_effort: Some("medium".to_string()),
+        context_length_override: None,
+    };
+    engine
+        .select_model(&ModelSelection::ProviderModel(option))
+        .expect("advertised selection");
+    let mut state = AppState::new();
+    apply_model_list_result(&mut state, None, ModelListResult::Timeout, &engine);
+    let choice = state.selected_model().expect("shortcut");
+    assert_eq!(
+        choice.selection.model.reasoning_evidence,
+        crate::llm::ReasoningEvidence::Supported
+    );
+    assert_eq!(
+        choice.selection.model.reasoning_efforts,
+        Some(vec!["medium".to_string(), "high".to_string()])
+    );
+    assert!(choice.label.details_text().contains("reasoning: medium"));
+    assert!(!choice.label.details_text().contains("(unverified)"));
+    assert!(choice
+        .label
+        .details_text()
+        .contains("reasoning capability: supported"));
+}
+
+#[test]
+fn gateway_outage_retains_inactive_named_engine_evidence() {
+    let configured = gateway_picker_engine(Some("medium"));
+    let mut configuration = configured.config();
+    configuration.provider_connection = "inactive-connection".to_string();
+    let inactive: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
+        Arc::new(crate::llm::EdenAiProvider::new(
+            configuration.provider_connection.clone(),
+            "http://127.0.0.1:9".to_string(),
+            configuration.model.clone(),
+            None,
+        )),
+        configuration.clone(),
+    ));
+    let evidence = crate::llm::ModelInfo {
+        id: configuration.model.clone(),
+        context_length: Some(128_000),
+        reasoning_evidence: crate::llm::ReasoningEvidence::Supported,
+        reasoning_efforts: Some(vec!["medium".to_string(), "high".to_string()]),
+        reasoning_default: None,
+        input_modalities: Some(vec![crate::llm::InputModality::Image]),
+    };
+    inactive
+        .switch_model_option(&crate::llm::ProviderModelOption {
+            provider_connection: configuration.provider_connection,
+            model: evidence.clone(),
+            reasoning_effort: Some("medium".to_string()),
+            context_length_override: None,
+        })
+        .expect("advertised selection");
+    let engine: Arc<dyn Engine> = Arc::new(
+        crate::llm::engine::EngineRouter::new(
+            HashMap::from([
+                ("active".to_string(), configured),
+                ("inactive".to_string(), inactive),
+            ]),
+            "active",
+        )
+        .expect("router"),
+    );
+    let mut state = AppState::new();
+    apply_model_list_result(&mut state, None, ModelListResult::Timeout, &engine);
+    let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+        panic!("picker");
+    };
+    let choice = choices
+        .iter()
+        .find(|choice| choice.engine_name.as_deref() == Some("inactive"))
+        .expect("inactive shortcut");
+    let mut displayed_evidence = evidence;
+    displayed_evidence.context_length = Some(32_000);
+    assert_eq!(choice.selection.model, displayed_evidence);
+    assert_eq!(choice.catalog_context_length, Some(128_000));
+    assert!(!choice.label.details_text().contains("unverified"));
 }

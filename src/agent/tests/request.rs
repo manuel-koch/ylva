@@ -14,6 +14,300 @@
 
 use super::*;
 
+/// Queues a hydration notice and exposes dispatch through a bounded channel.
+struct HydrationNoticeEngine {
+    inner: Arc<dyn Engine>,
+    pending: Mutex<Vec<String>>,
+    dispatched: mpsc::Sender<()>,
+    fail_before_estimate: bool,
+}
+
+impl Engine for HydrationNoticeEngine {
+    fn config(&self) -> EngineConfig {
+        self.inner.config()
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        self.inner.list_models()
+    }
+
+    fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        self.inner.switch_model(model)
+    }
+
+    fn chat<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner.chat(messages, tools, cancel)
+    }
+
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        _session_id: Option<Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            self.pending.lock().expect("pending notices").push(
+                "EdenAI model upstream/test-model reasoning effort \"medium\" is unverified."
+                    .to_string(),
+            );
+            if !self.fail_before_estimate {
+                on_estimate(123, 64_000).await;
+                if cancel.is_cancelled() {
+                    anyhow::bail!("cancelled before dispatch");
+                }
+                self.dispatched.send(()).await.expect("dispatch observer");
+            }
+            anyhow::bail!("HTTP 422: backend rejected reasoning_effort medium");
+        })
+    }
+
+    fn take_pending_notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.pending.lock().expect("pending notices"))
+    }
+}
+
+#[test]
+fn hydration_notice_is_acknowledged_before_estimate_and_failed_network_dispatch() {
+    crate::test_support::run_locked(async {
+        let (dispatched, mut dispatches) = mpsc::channel(1);
+        let engine = Arc::new(HydrationNoticeEngine {
+            inner: test_engine(),
+            pending: Mutex::new(Vec::new()),
+            dispatched,
+            fail_before_estimate: false,
+        });
+        let mut context = Context::new();
+        context.push_user("hello".to_string());
+        let (sender, mut events) = mpsc::channel(4);
+        let (updates, mut usage_updates) = mpsc::channel(4);
+        start_request(
+            &mut context,
+            None,
+            engine,
+            Vec::new(),
+            updates,
+            sender,
+            7,
+            None,
+            None,
+        );
+
+        let (generation, event) = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("preflight event arrives")
+            .expect("event");
+        assert_eq!(generation, 7);
+        let AgentEvent::PreflightNotice {
+            text,
+            acknowledgement,
+        } = event
+        else {
+            panic!("hydration notice must precede failure, got {event:?}")
+        };
+        assert!(text.contains("unverified"));
+        assert!(
+            dispatches.try_recv().is_err(),
+            "no dispatch before acknowledgment"
+        );
+        assert!(
+            usage_updates.try_recv().is_err(),
+            "no estimate before acknowledgment"
+        );
+        acknowledgement
+            .lock()
+            .expect("acknowledgment")
+            .take()
+            .expect("sender")
+            .send(())
+            .expect("acknowledge notice");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), usage_updates.recv())
+                .await
+                .expect("estimate arrives"),
+            Some(UiUpdate::ContextUsage {
+                estimated_tokens: 123,
+                context_length: 64_000,
+                source: ContextUsageSource::SerializedRequest,
+            })
+        ));
+        tokio::time::timeout(Duration::from_secs(2), dispatches.recv())
+            .await
+            .expect("dispatch follows acknowledgment")
+            .expect("dispatch");
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await.expect("failure arrives"), Some((7, AgentEvent::StreamError(message)))
+                if message.contains("HTTP 422") && message.contains("backend rejected"))
+        );
+    });
+}
+
+#[test]
+fn hydration_notice_is_acknowledged_before_failure_without_an_estimate() {
+    crate::test_support::run_locked(async {
+        let (dispatched, mut dispatches) = mpsc::channel(1);
+        let engine = Arc::new(HydrationNoticeEngine {
+            inner: test_engine(),
+            pending: Mutex::new(Vec::new()),
+            dispatched,
+            fail_before_estimate: true,
+        });
+        let mut context = Context::new();
+        context.push_user("hello".to_string());
+        let (sender, mut events) = mpsc::channel(4);
+        let (updates, mut usage_updates) = mpsc::channel(4);
+        start_request(
+            &mut context,
+            None,
+            engine,
+            Vec::new(),
+            updates,
+            sender,
+            9,
+            None,
+            None,
+        );
+
+        let (generation, event) = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("notice arrives")
+            .expect("event");
+        assert_eq!(generation, 9);
+        let AgentEvent::PreflightNotice {
+            text,
+            acknowledgement,
+        } = event
+        else {
+            panic!("queued notice must precede validation failure, got {event:?}")
+        };
+        assert!(text.contains("unverified"));
+        assert!(
+            events.try_recv().is_err(),
+            "error waits for notice acknowledgment"
+        );
+        assert!(dispatches.try_recv().is_err(), "no network dispatch");
+        assert!(usage_updates.try_recv().is_err(), "no serialized estimate");
+        acknowledgement
+            .lock()
+            .expect("acknowledgment")
+            .take()
+            .expect("sender")
+            .send(())
+            .expect("acknowledge notice");
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await.expect("failure arrives"), Some((9, AgentEvent::StreamError(message)))
+                if message.contains("HTTP 422") && message.contains("backend rejected"))
+        );
+    });
+}
+
+#[test]
+fn discarded_hydration_notice_cancels_dispatch_before_the_estimate() {
+    crate::test_support::run_locked(async {
+        let (dispatched, mut dispatches) = mpsc::channel(1);
+        let engine = Arc::new(HydrationNoticeEngine {
+            inner: test_engine(),
+            pending: Mutex::new(Vec::new()),
+            dispatched,
+            fail_before_estimate: false,
+        });
+        let mut context = Context::new();
+        context.push_user("hello".to_string());
+        let (sender, mut events) = mpsc::channel(4);
+        let (updates, mut usage_updates) = mpsc::channel(4);
+        let cancel = start_request(
+            &mut context,
+            None,
+            engine,
+            Vec::new(),
+            updates,
+            sender,
+            11,
+            None,
+            None,
+        );
+        let (_, event) = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("notice arrives")
+            .expect("event");
+        let AgentEvent::PreflightNotice {
+            acknowledgement, ..
+        } = event
+        else {
+            panic!("notice must precede dispatch, got {event:?}")
+        };
+        drop(acknowledgement);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), events.recv())
+                .await
+                .expect("discarded request terminates"),
+            Some((11, AgentEvent::StreamCancelled { .. }))
+        ));
+        assert!(cancel.is_cancelled());
+        assert!(
+            dispatches.try_recv().is_err(),
+            "stale request never dispatches"
+        );
+        assert!(matches!(
+            usage_updates.try_recv(),
+            Ok(UiUpdate::StreamCancelled)
+        ));
+        assert!(
+            usage_updates.try_recv().is_err(),
+            "no serialized estimate for stale request"
+        );
+    });
+}
+
+#[test]
+fn failed_request_publishes_hydration_notice_to_the_ui_before_the_error() {
+    crate::test_support::run_locked(async {
+        let (dispatched, _dispatches) = mpsc::channel(1);
+        let engine = Arc::new(HydrationNoticeEngine {
+            inner: test_engine(),
+            pending: Mutex::new(Vec::new()),
+            dispatched,
+            fail_before_estimate: false,
+        });
+        let (mut agent, mut updates) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+        let handle = agent.run();
+        agent
+            .send_command(AgentCommand::Prompt("hello".to_string()))
+            .await;
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut observed = Vec::new();
+            while let Some(update) = updates.recv().await {
+                let failed = matches!(update, UiUpdate::Error { .. });
+                if matches!(update, UiUpdate::Notice { .. } | UiUpdate::Error { .. }) {
+                    observed.push(update);
+                }
+                if failed {
+                    break;
+                }
+            }
+            observed
+        })
+        .await
+        .expect("failure reaches the UI");
+        assert!(
+            matches!(observed.as_slice(), [
+            UiUpdate::Notice { text, run_id: None }, UiUpdate::Error { message, .. }
+        ] if text.contains("unverified") && message.contains("HTTP 422")),
+            "notice then error: {observed:?}"
+        );
+        drop(agent);
+        handle.await.expect("agent joins").expect("agent stops");
+    });
+}
+
 #[test]
 fn request_estimate_updates_footer_with_the_sent_request_window() {
     crate::test_support::run_locked(async {

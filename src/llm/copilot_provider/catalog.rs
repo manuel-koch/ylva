@@ -41,6 +41,7 @@ impl ModelCatalog for CopilotModelCatalog {
             .filter(|entry| serves_a_chat_endpoint(entry))
             .filter_map(|entry| {
                 Some(ModelInfo {
+                    reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: entry.get("id")?.as_str()?.to_string(),
                     context_length: parse_context_length(entry),
                     reasoning_efforts: parse_reasoning_efforts(entry),

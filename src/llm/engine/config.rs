@@ -249,6 +249,8 @@ fn parse_context_length(text: &str) -> Result<usize, String> {
 /// and are immutable for the lifetime of the engine.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineRuntimeConfig {
+    /// Evidence belongs to this snapshot's selected model; mismatched IDs are ignored.
+    pub model_info: Option<crate::llm::ModelInfo>,
     pub model: String,
     pub temperature: Option<f32>,
     pub context_length: usize,
@@ -264,6 +266,7 @@ pub struct EngineRuntimeConfig {
 impl From<&EngineConfig> for EngineRuntimeConfig {
     fn from(config: &EngineConfig) -> Self {
         EngineRuntimeConfig {
+            model_info: None,
             model: config.model.clone(),
             temperature: config.temperature,
             // No provider catalog is available yet at construction time, so

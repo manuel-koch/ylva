@@ -460,48 +460,44 @@ without a mismatch warning. Explicit compaction keeps its configured model and
 window across selections, even with the same engine name. Switch notices describe the resulting
 compaction-engine selection.
 
-Model discovery also advertises optional reasoning-effort support. Ylva keeps
-three provider-neutral states:
+Model discovery shows whether reasoning is supported, unsupported, or unknown, and
+which effort choices are available. Some reasoning-capable models expose no adjustable
+effort. Ollama models with selectable thinking levels offer those levels in the picker;
+models without them use their own default behavior.
 
-- `None`: the provider does not advertise reasoning support.
-- `Some([])`: reasoning is supported, but the provider exposes no selectable
-  effort alternatives; the provider's own default behavior is used.
-- `Some(values)`: reasoning is supported and `values` are the selectable
-  effort alternatives.
+For EdenAI, model-advertised choices are separate from unverified overrides. When model
+information is incomplete or unavailable, `/models` offers gateway-valid choices labelled
+`unverified`, plus a provider-default reset. These choices do not prove that the upstream
+model accepts or honors the effort. Explicitly unsupported or invalid model information
+prevents applying an explicit effort. Named-engine shortcuts remain available during a
+catalog outage. See [provider notes](./provider-notes.md#edenai) for provider limitations.
 
-Ollama models that advertise the `/api/show` `thinking` metadata expose
-concrete thinking levels as `Some(values)` (booleans map to `none`/`high`,
-level names pass through); models that only advertise the `thinking`
-capability keep `Some([])`.
+When the provider identifies a default among its choices, the picker marks that choice,
+for example `medium (default)`. Selecting it uses the provider default rather than an
+explicit override. Otherwise the picker has a separate `default` entry, with the known
+default shown when available.
 
-When a provider also advertises a default effort (Ollama's `thinking.default`,
-OpenRouter's `reasoning.default_effort`) that is one of the advertised efforts,
-the picker marks that effort as `medium (default)` instead of adding a separate
-default entry; stepping onto that entry selects the provider default (no effort
-is sent). When the default is not among the advertised efforts, a leading
-default slot reads `default (medium)`; without a default it reads `default`.
+The `/models` parameter popup steps through the default and available efforts using
+`←`/`→`, stopping at both ends. Ordinary advertised choices appear from weaker to stronger;
+EdenAI's unverified choices remain separately labelled. Each picker row shows the current
+effort or default, independently of reasoning capability. `◂`/`▸` mark the directions that
+can still move. The footer shows the controls for the open overlay.
 
-When alternatives are available, the `/models` parameter popup cycles
-reasoning effort through the provider default and the advertised values for the
-edited model, stopping at both ends rather than wrapping. Advertised values are
-sorted weakest to strongest (`none`, `min`/`minimal`, `low`, `medium`/`med`,
-`high`, `xhigh`/`extrahigh`, `max`) whatever order the provider returns; names
-outside that ladder follow in provider order. Each picker row labels
-reasoning as `unavailable`, its default label, or the current value. The parameter popup
-shows whether it can be adjusted: `◂`/`▸` mark each direction that can still
-move. While an overlay is open, the footer replaces the normal send
-hint with the controls for that overlay.
-`enter` activates the exact named-engine shortcut or applies the raw catalog
-model and selected effort to subsequent requests. On a named shortcut, the
-engine keeps its current Engine runtime model/settings; only a reasoning-effort edit
-in the picker is reapplied. The choice preview does not mutate an engine.
-The selected effort is live Engine runtime state and is not added to the session's
-provider/model metadata. A profile's `reasoning` value is validated against
-the catalog once, lazily before the first chat: a value the model does not
-advertise is dropped to the provider default and surfaced as a notice above
-the first response — a transcript notice in the TUI, a `---[ Notice ]---`
-marker in headless output — alongside a `tracing` warning in the log (see
-[configuration](./configuration.md#profile-configuration)).
+`enter` applies the selected model and parameter edits. A named-engine shortcut activates
+that exact engine and keeps its current settings unless edited. Previewing or cancelling
+does not change settings. Effort edits are session-only, are not saved to the profile,
+and are not restored when resuming a session.
+
+An explicit EdenAI profile effort or a deliberately selected unverified override is enough
+to opt in. No extra switch or confirmation dialog is required. Invalid choices fail without
+silently falling back to default. Other providers retain their existing validation behavior;
+see [reasoning validation](./configuration.md#reasoning-validation).
+
+Unverified warnings appear before requests in CLI and TUI, even if the request fails,
+without repeating for tool continuations. Selecting default clears the explicit effort;
+returning to an unverified effort warns again. Agents sharing the same live engine share
+this warning behavior; independently configured engines do not. Higher effort does not
+guarantee readable thinking.
 
 - Every outbound HTTP request (model listing, chat/SSE, and Ollama metadata
   calls) carries a dedicated `User-Agent: ylva/<version>` header so remote
@@ -731,7 +727,7 @@ and the expanded bubble body leads with a `Label` section followed by a
 `Command` section in every state (then an `Output` section with the
 command output once completed — or `Partial output` when the output cap
 truncated the capture). A non-zero exit fails the call with the one-line
-header `command exited with code N:` and the captured output as an `Output`
+header `command exited with code N` and the captured output as an `Output`
 section (`Partial output` when truncated); a timeout fails it with
 `command timed out after Ns` and any output captured before the kill, under
 the same section rules. Both headers are the only text shown when the bubble
@@ -1400,18 +1396,18 @@ The model currently serving the conversation is shown by its identity text in
 bold green instead of a text suffix.
 `enter` on a highlighted model opens its parameter popup instead of switching.
 The popup lists one row per parameter, each a label followed by its value: the
-effective context length and, when the model advertises selectable efforts, the
-reasoning effort. `↑`/`↓` move between the rows; `←`/`→` adjust the highlighted
-value. The context length moves by one eighth of the current window, rounded
-down to the fixed token-step multiple, and never exceeds the catalog's window
+effective context length and, when selectable efforts or EdenAI unverified overrides
+are available, the reasoning effort. `↑`/`↓` move between the rows; `←`/`→` adjust
+the highlighted value. The context length moves by one eighth of the current window,
+rounded down to the fixed token-step multiple, and never exceeds the catalog's window
 when one is reported. A `◂` before a value means it can move smaller and a `▸`
 after it means it can move greater; a missing arrow marks a bound (for example
 the minimum token-step floor or the advertised window). The step unit and floor
 remain 32,768 tokens; decimal display formatting does not change the values.
 Reasoning effort moves through the
-advertised efforts in order (and the provider default's slot, see above), without
-wrapping. When the advertised default is `medium`, that effort cannot be chosen
-on its own; its slot selects the provider default.
+advertised efforts in order, or separately labelled EdenAI gateway overrides, with
+a provider-default slot and without wrapping. When the advertised default is `medium`,
+that effort cannot be chosen on its own; its slot selects the provider default.
 Its edit is session-only and is not written to the profile. In the popup, `enter`
 confirms the model and parameters and switches; `esc` returns to the model list
 and discards the parameter edits. `esc` in the list cancels and clears the input.
