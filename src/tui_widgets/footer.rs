@@ -86,14 +86,14 @@ const LOADING_MODELS_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("F1", "help"),
 ];
 const MODEL_PICKER_FOOTER_HINTS: &[FooterHint] = &[
-    FooterHint::key("ctrl-f", "favorite"),
+    FooterHint::key("ctrl-x f", "favorite"),
     FooterHint::key("↑/↓", "select"),
     FooterHint::key("enter", "parameters"),
     FooterHint::key("esc", "cancel"),
     FooterHint::key("F1", "help"),
 ];
 const MODEL_PARAMETER_FOOTER_HINTS: &[FooterHint] = &[
-    FooterHint::key("ctrl-f", "favorite"),
+    FooterHint::key("ctrl-x f", "favorite"),
     FooterHint::key("↑/↓", "parameter"),
     FooterHint::key("←/→", "adjust"),
     FooterHint::key("enter", "switch"),
@@ -133,12 +133,11 @@ const SUBAGENT_VIEW_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("F1", "help"),
 ];
 const SUBAGENT_VIEW_BUSY_FOOTER_HINTS: &[FooterHint] = &[
-    FooterHint::key("ctrl-p", "back to conversation"),
-    FooterHint::key("ctrl-c", "cancel & quit"),
+    FooterHint::key("ctrl-x p", "back to conversation"),
     FooterHint::key("F1", "help"),
 ];
 const SUBAGENT_VIEW_IDLE_FOOTER_HINTS: &[FooterHint] = &[
-    FooterHint::key("ctrl-p", "back to conversation"),
+    FooterHint::key("ctrl-x p", "back to conversation"),
     FooterHint::key("ctrl-c", "quit"),
     FooterHint::key("F1", "help"),
 ];
@@ -179,7 +178,7 @@ pub(super) fn footer_keybinding_hints(
         return std::borrow::Cow::Borrowed(hints);
     }
     let mut with_agents = hints.to_vec();
-    with_agents.insert(hints.len() - 1, FooterHint::key("ctrl-a", "agents"));
+    with_agents.insert(hints.len() - 1, FooterHint::key("ctrl-x a", "agents"));
     std::borrow::Cow::Owned(with_agents)
 }
 
@@ -213,7 +212,7 @@ fn base_footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'sta
                 // no longer steers the root agent from here either.
                 SUBAGENT_VIEW_DRAFT_FOOTER_HINTS
             } else if in_subagent_view {
-                // ctrl-p navigates back to the root conversation.
+                // ctrl-x p navigates back to the root conversation.
                 if parent_agent_is_busy {
                     SUBAGENT_VIEW_BUSY_FOOTER_HINTS
                 } else {
@@ -891,7 +890,7 @@ pub(super) fn draw_approval_prompt(
     let title = if is_subagent {
         // The pending tool call belongs to a subagent, not the root agent —
         // this can be shown while viewing the root conversation (the user
-        // navigated back via ctrl-p while the subagent's own tool call is
+        // navigated back via ctrl-x p while the subagent's own tool call is
         // still awaiting approval), where the pending call is otherwise
         // invisible, so make the title unambiguous about which agent it's
         // asking on behalf of.

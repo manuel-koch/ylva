@@ -25,10 +25,13 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use super::effects::{execute_effects, execute_slash_effects, split_slash_effects, PendingRunIds};
+use super::effects::{
+    action_key, execute_effects, execute_slash_effects, split_slash_effects, PendingRunIds,
+};
 use super::favorites::{apply_favorite_completion, completion_notice, start_favorite_saves};
 use super::frame::draw_frame;
 use super::input::{app_action_to_tui_event, configure_textarea, scroll_input_at_mouse, MouseDrag};
+use super::leader::LeaderChord;
 use super::models::{
     abort_pending_model_list, apply_model_list_result, resume_interrupted_model_list,
     start_model_list, wait_for_model_list, PendingModelList,
@@ -139,6 +142,7 @@ where
     let mut mouse_pos: Option<(u16, u16)> = None;
     let mut mouse_drag = MouseDrag::default();
     let mut pending_run_ids = PendingRunIds::default();
+    let mut leader_chord = LeaderChord::default();
     let mut pending_model_list: Option<PendingModelList> = None;
     let mut session_tasks = SessionTasks::new();
     let mut title_updates_open = true;
@@ -329,7 +333,7 @@ where
             }
 
             action = action_rx.recv() => {
-                let Some(action) = action else { break };
+                let Some(mut action) = action else { break };
 
                 // Track mouse position for hover highlight in the footer.
                 if let AppAction::MouseInput(mouse) = &action {
@@ -389,6 +393,17 @@ where
                 if matches!(action, AppAction::StopSignal) {
                     pending_run_ids.record_stop_signal();
                 }
+                // The `ctrl-x` leader chord lives here, outside `AppState`
+                // (which `/clear` and `/session` replace), like the
+                // double-press confirm windows. Arming keys must not defer
+                // prompts; completed chords resolve to actions that are
+                // processed exactly as if they had arrived from the bridge.
+                let now = std::time::Instant::now();
+                if matches!(action, AppAction::Leader(_)) {
+                    leader_chord.arm(now);
+                } else if let Some(resolved) = leader_chord.key_event(action_key(&action), now) {
+                    action = resolved;
+                }
                 // Keys pressed in the help popup never edit the draft, so they
                 // must not defer prompts (closing help with Esc would
                 // otherwise hide the approval until the idle delay passes).
@@ -399,6 +414,10 @@ where
                     )
                 {
                     state.note_keystroke(std::time::Instant::now());
+                }
+                if matches!(action, AppAction::Leader(_)) {
+                    // Armed, nothing to route yet.
+                    continue;
                 }
                 let Some(event) = app_action_to_tui_event(action) else { continue };
                 let was_loading_models = matches!(state.slash_overlay, SlashOverlay::LoadingModels);

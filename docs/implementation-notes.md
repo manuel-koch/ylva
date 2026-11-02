@@ -643,8 +643,8 @@ See [persistence](./persistence.md) for on-disk contracts.
   offered only when the prompt's owner is not the viewed conversation; the
   owner is the conversation whose transcript holds the prompt's tool bubble.
   `InputEvent::ParentView`
-  (plain `ctrl-p`) navigates back from a subagent view and is otherwise
-  forwarded to the textarea as `ctrl-p`.
+  (`ctrl-x p`) navigates back from a subagent view and is otherwise
+  forwarded to the textarea as plain `ctrl-p` (cursor up).
 - **Double-click:** `DoubleClickTracker` is shared by the agents popup and
   the slash-overlay lists; the second click acts like `enter`.
 - **Agents popup:** `Focus::AgentsPopup` is modal. Awaiting-input is derived
@@ -756,6 +756,63 @@ terminal teardown and title restoration keep a fixed order.
 - Measured (release build, 100x40 terminal): a frame with a ~1 MB / 28,000
   line draft in the textarea takes ~27 ms, below the 50 ms budget, so the
   per-frame `lines().join("\n")` and measurement clones are left as is.
+
+### Keybinding budget and the `ctrl-x` leader
+
+The TUI keybinding budget is structurally cramped:
+
+- Bare `ctrl-<letter>` letters are reserved by readline/emacs-style line
+  editing (`ctrl-a` beginning-of-line, `ctrl-e` end-of-line, `ctrl-b`/`ctrl-f`
+  back/forward char, `ctrl-p`/`ctrl-n` previous/next line,
+  `ctrl-k`/`ctrl-u`/`ctrl-w` kill text, …), by flow control (`ctrl-s`/`ctrl-q`
+  XOFF/XON), by job control (`ctrl-z`) and by terminal emulators: Zed's
+  built-in terminal sends a literal `ctrl-a` keystroke for `cmd-left`
+  (Terminal.app emulation), and `cmd-a` is select-all in iTerm2. Users carry
+  those habits into the draft input, where `ratatui-textarea` already maps
+  the same bare `ctrl-*` keys to cursor movement. A Ylva binding on a bare
+  `ctrl-<letter>` therefore swallows a cursor-movement key exactly where
+  users expect it (the motivating case: `cmd-left` in Zed opened the agents
+  popup instead of jumping to the start of the draft line).
+- `ctrl-shift-<letter>` collides with no readline binding, but only terminals
+  with the kitty keyboard protocol (Ylva pushes
+  `DISAMBIGUATE_ESCAPE_CODES`) can deliver the SHIFT distinctly. Terminals
+  without it — Zed's embedded terminal, for one — encode
+  `ctrl-shift-<letter>` as the same legacy byte as bare `ctrl-<letter>`, so
+  the two are indistinguishable and undetectable from inside Ylva.
+- `alt-<letter>` is dead on macOS layouts: the Option key composes
+  characters (`option+a` → `å`) unless the user sacrifices composition
+  terminal-wide with `option_as_alt`.
+- `F9`–`F12` are grabbed by macOS (Mission Control, volume, brightness);
+  `cmd-*` never reaches the pty.
+- `F1`–`F8` survive everywhere (laptops need `fn`), but the pool is finite.
+
+Given that, the policy is:
+
+- **`F1` is help** — a very common, mnemonic-free function; the F-key family
+  (`F2`–`F8`) stays reserved for other equally common, letter-agnostic
+  actions, should any arise.
+- **`ctrl-x` is Ylva's leader key** for everything else. The bare `ctrl-x`
+  byte reaches the pty unchanged in every terminal, collides with nothing
+  Ylva or readline needs (emacs binds it only to rarely-remembered macro
+  commands), and composes with ordinary letters — an effectively unlimited
+  two-key budget. The chord state lives in the Driver
+  (`tui_driver/leader.rs`), outside `AppState` (which `/clear` and `/session`
+  replace), and expires after two seconds; `esc` and `ctrl-c` cancel it and
+  a second `ctrl-x` re-arms. Completed chords are re-injected as their
+  resolved `AppAction`, so every context (modal popups, approvals, clarify)
+  handles them through the normal path.
+- **Every keybound feature must also exist as a slash command** (one
+  action, many paths): `/agents`, `/models`, `/compact`, `/session` already
+  do, so any keybinding that turns out to be undeliverable in some terminal
+  is an inconvenience, never a lockout.
+
+Current leader chords: `ctrl-x a` (agents popup, same as `/agents`),
+`ctrl-x f` (toggle `/models` favorite), `ctrl-x p` (back to the parent
+conversation from a subagent drill-in view). Completed chords re-enter the
+presenter as dedicated `InputEvent`s (`ShowAgents`, `ToggleFavoriteModel`,
+`ParentView`), not as synthesized raw keys, so bare `ctrl-a`/`ctrl-f`/`ctrl-p`
+keep their readline meanings in every draft. `ctrl-c` (the universal
+interrupt/quit convention) is the one intentional bare-`ctrl` exception.
 
 ### Conversation layout cache
 

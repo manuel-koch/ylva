@@ -61,10 +61,10 @@ conversation. The original draft returns after all approvals are resolved.
 | `ctrl-c` | Clarify sub-mode | Abort the clarify prompt; sends a tool error to the model |
 | `esc` | Clarify sub-mode | Remove button focus and clear the input field (never aborts) |
 | `F1` | Any | Toggle Help popup |
-| `ctrl-a` | Any (including approval, clarify and Help popup) | Toggle the Agents popup; the draft is untouched |
+| `ctrl-x a` | Any (including approval, clarify and Help popup) | Toggle the Agents popup; the draft is untouched |
 | `↑` / `↓`, `page-up` / `page-down` | Agents popup open | Move the highlight (queued rows are skipped) |
 | `enter` | Agents popup open | Switch to the highlighted conversation |
-| `esc` / `ctrl-a` | Agents popup open | Close popup |
+| `esc` / `ctrl-x a` | Agents popup open | Close popup |
 | `F1` | Agents popup open | Switch to the Help popup |
 | Left-click row | Agents popup open | Highlight; a second click within 250 ms switches |
 | Mouse wheel | Agents popup open | Scroll popup |
@@ -84,8 +84,8 @@ conversation. The original draft returns after all approvals are resolved.
 | Left-drag | Chat or subagent-view header bubble | Select visible text; release copies a non-empty selection to the clipboard |
 | Left-click on tool bubble title / border | Any | Toggle tool bubble expand (`▼`) / collapse (`▶`); expansion shows `Expanding…` before body layout |
 | Double-click on a `spawn_subagent` tool bubble's title | Any | Drill in to the subagent's conversation view (manual navigation; does not auto-return; still works after the subagent has finished) |
-| `ctrl-p` | Subagent drill-in view | Go back to the root conversation (does not cancel/interrupt the root agent's turn); restores the scroll position from before drilling in |
-| Left-click `← Back` | Subagent drill-in view | Same as `ctrl-p` |
+| `ctrl-x p` | Subagent drill-in view | Go back to the root conversation (does not cancel/interrupt the root agent's turn); restores the scroll position from before drilling in |
+| Left-click `← Back` | Subagent drill-in view | Same as `ctrl-x p` |
 | `ctrl-p` | Any other view | Forwarded to the input field (cursor up) |
 | `esc` (input non-empty) | Subagent drill-in view | Clear the input field (same as elsewhere; does not navigate back) |
 | `enter` | Subagent drill-in view | No-op; the subagent conversation doesn't accept input and Enter no longer steers the root agent from here (footer omits `enter send`) |
@@ -108,7 +108,7 @@ conversation. The original draft returns after all approvals are resolved.
 | double-click on an entry | `/models` picker open | Same as `enter`: open the parameter popup |
 | `left-drag` | Slash-command overlay open | Select visible popup text; release copies it to the clipboard. A drag stays within its region: the list rows or the footer text (e.g. the compaction preview) |
 | any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices by engine name, provider connection, or model ID; no re-query |
-| `ctrl-f` | `/models` picker list or parameter popup | Save the highlighted provider-connection/model as a favorite, or remove it if already marked; does not switch models or edit parameter drafts |
+| `ctrl-x f` | `/models` picker list or parameter popup | Save the highlighted provider-connection/model as a favorite, or remove it if already marked; does not switch models or edit parameter drafts. |
 | `enter` | `/models` picker open | Open the parameter popup for the highlighted model; nothing switches yet |
 | `esc` | `/models` picker open | Cancel without switching and clear the input |
 | `↑` / `↓` | `/models` parameter popup open | Move between the parameter rows (context length, reasoning effort) |

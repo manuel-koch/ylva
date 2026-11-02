@@ -210,15 +210,12 @@ fn session_picker_owns_keyboard_action_selection_confirmation_and_cancellation()
 }
 
 #[test]
-fn control_f_toggles_the_filtered_model_pair_and_preserves_input_state() {
+fn toggle_favorite_chord_toggles_the_filtered_model_pair_and_preserves_input_state() {
     let mut state = model_picker_state(false);
     let textarea = textarea_with("/models connection");
     let effects = update(
         &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
-            KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
-        ))),
+        TuiEvent::Input(InputEvent::ToggleFavoriteModel),
         &textarea,
     );
     assert_eq!(
@@ -234,9 +231,8 @@ fn control_f_toggles_the_filtered_model_pair_and_preserves_input_state() {
     assert_eq!(state.engine_display.model, "");
     assert!(state.queued_steer_texts.is_empty());
 }
-
 #[test]
-fn control_f_toggles_the_parameter_popup_choice_without_editing_its_draft() {
+fn toggle_favorite_chord_toggles_the_parameter_popup_choice_without_editing_its_draft() {
     let mut state = model_picker_state(true);
     let SlashOverlay::ModelPicker {
         parameters: Some(edit_before),
@@ -248,10 +244,7 @@ fn control_f_toggles_the_parameter_popup_choice_without_editing_its_draft() {
     let edit_before = edit_before.clone();
     let effects = update(
         &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
-            KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
-        ))),
+        TuiEvent::Input(InputEvent::ToggleFavoriteModel),
         &textarea_with("/models first"),
     );
     assert_eq!(
@@ -273,32 +266,41 @@ fn control_f_toggles_the_parameter_popup_choice_without_editing_its_draft() {
 }
 
 #[test]
-fn control_f_requires_the_exact_control_modifier() {
-    for (character, modifiers) in [
-        ('f', KeyModifiers::CONTROL | KeyModifiers::SHIFT),
-        ('f', KeyModifiers::CONTROL | KeyModifiers::ALT),
-        ('F', KeyModifiers::CONTROL),
-        ('f', KeyModifiers::NONE),
-        ('F', KeyModifiers::NONE),
-    ] {
-        let mut state = model_picker_state(false);
-        let effects = update(
-            &mut state,
-            TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
-                KeyCode::Char(character),
-                modifiers,
-            ))),
-            &textarea_with("/models connection"),
-        );
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::SetFavoriteModel { .. })));
-        assert!(!effects.contains(&Effect::SubmitPrompt { steer: false }));
-    }
+fn plain_control_f_stays_filter_typing_everywhere() {
+    // The favorite chord is exclusively `ctrl-x f` (resolved by the driver's
+    // leader state and re-entering the presenter as
+    // `InputEvent::ToggleFavoriteModel`). Plain `ctrl-f` keeps its readline
+    // forward-char meaning in the filter draft; only a missing CONTROL
+    // modifier (typing plain `f`) was never a toggle.
+    let mut state = model_picker_state(false);
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ))),
+        &textarea_with("/models connection"),
+    );
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::SetFavoriteModel { .. })));
+
+    let mut state = model_picker_state(false);
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        ))),
+        &textarea_with("/models connection"),
+    );
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::SetFavoriteModel { .. })));
 }
 
 #[test]
-fn control_f_is_consumed_when_no_model_matches() {
+fn toggle_favorite_chord_is_consumed_when_no_model_matches() {
     let mut state = model_picker_state(false);
     if let SlashOverlay::ModelPicker {
         filter, selected, ..
@@ -309,10 +311,7 @@ fn control_f_is_consumed_when_no_model_matches() {
     }
     let effects = update(
         &mut state,
-        TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
-            KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
-        ))),
+        TuiEvent::Input(InputEvent::ToggleFavoriteModel),
         &textarea_with("/models missing"),
     );
     assert!(effects.is_empty());
@@ -1273,7 +1272,6 @@ fn agents_popup_esc_closes_and_help_key_switches_to_help() {
     );
     assert_eq!(state.focus, Focus::MainInput);
 
-    show_agents(&mut state);
     update(
         &mut state,
         TuiEvent::Input(InputEvent::ShowHelp),

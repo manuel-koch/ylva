@@ -35,6 +35,7 @@ mod event_loop;
 mod favorites;
 mod frame;
 mod input;
+mod leader;
 mod models;
 mod runtime;
 mod sessions;

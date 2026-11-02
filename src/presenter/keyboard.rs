@@ -62,6 +62,7 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
         }
         InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => handle_ctrl_c_generic(state, true),
+        InputEvent::ToggleFavoriteModel => vec![],
         InputEvent::ParentView => vec![],
         InputEvent::KeyInput(key_event) => {
             match key_event.code {
@@ -97,6 +98,7 @@ fn keyboard_agents_popup(state: &mut AppState, event: InputEvent) -> Vec<Effect>
             state.close_agents_popup();
             vec![]
         }
+        InputEvent::ToggleFavoriteModel => vec![],
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
             state.clear_help_selection();
@@ -126,7 +128,12 @@ fn keyboard_agents_popup(state: &mut AppState, event: InputEvent) -> Vec<Effect>
     }
 }
 
-/// `ctrl-p` as the textarea sees it, for contexts where it does not navigate.
+/// Plain `ctrl-p` as the textarea sees it, for contexts where the
+/// `ctrl-x p` parent-view chord does not navigate.
+///
+/// Outside a subagent view the ParentView input is forwarded to the
+/// textarea as this event, which `ratatui-textarea` maps to cursor-up
+/// (readline "previous line").
 fn parent_view_key_event() -> crossterm::event::KeyEvent {
     crossterm::event::KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)
 }
@@ -205,6 +212,7 @@ fn keyboard_approval(
         }
         InputEvent::KeyInput(key_event) => vec![Effect::TextareaKey(key_event)],
         InputEvent::ParentView => vec![Effect::TextareaKey(parent_view_key_event())],
+        InputEvent::ToggleFavoriteModel => vec![],
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
             state.clear_help_selection();
@@ -241,6 +249,7 @@ fn keyboard_main(
         }
         InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => handle_ctrl_c_generic(state, textarea.is_empty),
+        InputEvent::ToggleFavoriteModel => toggle_highlighted_model_favorite(state),
         InputEvent::ParentView
             if matches!(state.active_view, ConversationView::Subagent { .. }) =>
         {
@@ -303,6 +312,7 @@ fn keyboard_clarify(
             vec![]
         }
         InputEvent::ParentView => vec![Effect::TextareaKey(parent_view_key_event())],
+        InputEvent::ToggleFavoriteModel => vec![],
         InputEvent::KeyInput(key_event) if is_focus_cycle_key(&key_event).is_some() => {
             state.cycle_prompt_button(is_focus_cycle_key(&key_event) == Some(true));
             vec![]
@@ -591,6 +601,7 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
             state.open_agents_popup();
             vec![]
         }
+        InputEvent::ToggleFavoriteModel => vec![],
         InputEvent::ParentView => vec![],
         InputEvent::KeyInput(key) => {
             let page_entry_count = state.layout.slash_overlay.page_entry_count();
@@ -648,6 +659,22 @@ pub(super) fn activate_selected_slash_suggestion(state: &mut AppState) -> Vec<Ef
     )
 }
 
+/// Toggle the favorite of the highlighted `/models` picker row
+/// (`ctrl-x f`). A no-op when no model is highlighted — including when the
+/// picker is not open at all.
+fn toggle_highlighted_model_favorite(state: &mut AppState) -> Vec<Effect> {
+    state
+        .highlighted_model_identity()
+        .map(|(provider_connection, model_id, is_favorite)| {
+            vec![Effect::SetFavoriteModel {
+                provider_connection,
+                model_id,
+                favorite: !is_favorite,
+            }]
+        })
+        .unwrap_or_default()
+}
+
 /// Keys while the `/models` picker is open. The list selects and opens the
 /// parameter popup, and typing falls through to the draft so it narrows the
 /// list. The popup owns every key, so the filter cannot change under it.
@@ -656,20 +683,6 @@ fn handle_model_picker_key(
     state: &mut AppState,
     key_event: crossterm::event::KeyEvent,
 ) -> Option<Vec<Effect>> {
-    if key_event.modifiers == KeyModifiers::CONTROL && key_event.code == KeyCode::Char('f') {
-        return Some(
-            state
-                .highlighted_model_identity()
-                .map(|(provider_connection, model_id, is_favorite)| {
-                    vec![Effect::SetFavoriteModel {
-                        provider_connection,
-                        model_id,
-                        favorite: !is_favorite,
-                    }]
-                })
-                .unwrap_or_default(),
-        );
-    }
     let code = key_event.code;
     let parameters_open = matches!(
         state.slash_overlay,

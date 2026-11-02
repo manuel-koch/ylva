@@ -67,7 +67,7 @@ pub struct HelpPopupState {
     pub help_drag_active: bool,
 }
 
-/// Agents popup (`/agents`, `ctrl-a`) render state.
+/// Agents popup (`/agents`, `ctrl-x a`) render state.
 #[derive(Default)]
 pub struct AgentsPopupRenderState {
     pub show: bool,

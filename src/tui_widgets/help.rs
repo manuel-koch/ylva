@@ -66,8 +66,11 @@ fn help_sections() -> Vec<HelpSection> {
                     "Interrupt generation, then quit",
                 ),
                 help_entry("esc", "Close popup"),
-                help_entry("ctrl-a", "Toggle the agents popup (same as /agents)"),
-                help_entry("ctrl-p", "Back to the parent conversation (subagent view)"),
+                help_entry("ctrl-x a", "Toggle the agents popup (same as /agents)"),
+                help_entry(
+                    "ctrl-x p",
+                    "Back to the parent conversation (subagent view)",
+                ),
             ],
         },
         HelpSection {

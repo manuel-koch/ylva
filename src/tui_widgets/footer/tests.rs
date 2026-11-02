@@ -230,7 +230,7 @@ fn agents_hint_appears_before_help_only_once_a_subagent_exists() {
     let mut state = TuiState::new();
     assert_eq!(keys(&state), ["enter", "ctrl-c", "F1"]);
     state.has_subagents = true;
-    assert_eq!(keys(&state), ["enter", "ctrl-c", "ctrl-a", "F1"]);
+    assert_eq!(keys(&state), ["enter", "ctrl-c", "ctrl-x a", "F1"]);
 }
 
 #[test]

@@ -204,6 +204,30 @@ pub(super) async fn execute_effects(
     ActionOutcome::Continue
 }
 
+/// The key event a chord decision needs: `ctrl-x` arms (handled before),
+/// any other key may complete or cancel the armed chord. Mouse, resize and
+/// paste actions carry no chord key and are passed as `Null` so they never
+/// consume an armed chord.
+pub(super) fn action_key(action: &crate::events::AppAction) -> crossterm::event::KeyEvent {
+    use crate::events::AppAction;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    match action {
+        AppAction::KeyInput(key) => *key,
+        AppAction::Leader(_) => KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        AppAction::CtrlC => KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        AppAction::Escape => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        AppAction::ShowHelp => KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+        AppAction::LeaderAgents => KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        AppAction::LeaderFavoriteModel => KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+        AppAction::LeaderParentView => KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        // `Null` keys are unknown to the chord and leave it armed.
+        AppAction::StopSignal
+        | AppAction::MouseInput(_)
+        | AppAction::Resize { .. }
+        | AppAction::Paste(_) => KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
+    }
+}
+
 /// Split `effects` into the slash-command effects and everything else,
 /// preserving each group's original order.
 pub(super) fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Effect>) {

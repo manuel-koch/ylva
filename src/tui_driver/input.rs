@@ -28,9 +28,12 @@ pub(super) fn configure_textarea(textarea: &mut TextArea<'_>) {
     textarea.set_cursor_line_style(Style::default());
 }
 
+/// A plain `ctrl-p` event is what ParentView forwarding uses in contexts
+/// where the chord does not navigate (see `parent_view_key_event` in the
+/// presenter); the leader itself resolves `ctrl-x p` before that.
 fn is_parent_view_key(event: &crossterm::event::KeyEvent) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
-    event.code == KeyCode::Char('p') && event.modifiers == KeyModifiers::CONTROL
+    event.code == KeyCode::Char('p') && event.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Map an [`AppAction`] to the typed [`TuiEvent`] the Presenter accepts.
@@ -40,7 +43,10 @@ pub(super) fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent> {
         AppAction::CtrlC => Some(TuiEvent::Input(InputEvent::CtrlC)),
         AppAction::Escape => Some(TuiEvent::Input(InputEvent::Escape)),
         AppAction::ShowHelp => Some(TuiEvent::Input(InputEvent::ShowHelp)),
-        AppAction::ShowAgents => Some(TuiEvent::Input(InputEvent::ShowAgents)),
+        AppAction::Leader(_) => Some(TuiEvent::Input(InputEvent::ShowAgents)),
+        AppAction::LeaderAgents => Some(TuiEvent::Input(InputEvent::ShowAgents)),
+        AppAction::LeaderFavoriteModel => Some(TuiEvent::Input(InputEvent::ToggleFavoriteModel)),
+        AppAction::LeaderParentView => Some(TuiEvent::Input(InputEvent::ParentView)),
         AppAction::StopSignal => Some(TuiEvent::Input(InputEvent::StopSignal)),
         AppAction::KeyInput(event) if is_parent_view_key(&event) => {
             Some(TuiEvent::Input(InputEvent::ParentView))

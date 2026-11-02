@@ -38,8 +38,22 @@ pub enum AppAction {
     Escape,
     /// F1 pressed — toggle Help popup.
     ShowHelp,
-    /// ctrl-a pressed — toggle the agents popup.
-    ShowAgents,
+    /// A `ctrl-x <key>` prefix chord completed — run the chord action.
+    ///
+    /// `ctrl-x` is Ylva's leader key: it is delivered reliably by every
+    /// terminal (bare control byte), collides with nothing Ylva or readline
+    /// uses, and composes with ordinary letters, giving the keybinding
+    /// budget effectively unlimited two-key slots. See the keybinding
+    /// budget in `docs/implementation-notes.md`.
+    Leader(KeyEvent),
+    /// `ctrl-x a` completed — toggle the agents popup (same as `/agents`).
+    LeaderAgents,
+    /// `ctrl-x f` completed — toggle the favorite of the highlighted
+    /// `/models` picker row.
+    LeaderFavoriteModel,
+    /// `ctrl-x p` completed — step back to the parent conversation from a
+    /// subagent drill-in view.
+    LeaderParentView,
     /// External SIGINT or SIGTERM (e.g. `kill -INT`): stop immediately, no
     /// double-press. Distinct from `CtrlC`, which is a terminal key event that
     /// follows the double-press confirm.
@@ -82,7 +96,9 @@ fn map_key_event(key: KeyEvent) -> Option<AppAction> {
         }
         KeyCode::Esc => Some(AppAction::Escape),
         KeyCode::F(1) => Some(AppAction::ShowHelp),
-        KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => Some(AppAction::ShowAgents),
+        KeyCode::Char('x') if key.modifiers == KeyModifiers::CONTROL => {
+            Some(AppAction::Leader(key))
+        }
         _ => Some(AppAction::KeyInput(key)),
     }
 }
@@ -165,11 +181,37 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_a_maps_to_show_agents_action_but_plain_and_alt_a_do_not() {
-        let action = map_event(Event::Key(press(KeyCode::Char('a'), KeyModifiers::CONTROL)));
-        assert_eq!(action, Some(AppAction::ShowAgents));
-        for modifiers in [KeyModifiers::NONE, KeyModifiers::ALT] {
+    fn ctrl_x_opens_a_leader_chord_but_a_variants_do_not() {
+        let leader_key = press(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert_eq!(
+            map_event(Event::Key(leader_key)),
+            Some(AppAction::Leader(leader_key))
+        );
+        // `ctrl-a` must stay a plain key event so it reaches the textarea as
+        // readline "beginning of line" (also what Zed's terminal sends for
+        // cmd-left) instead of toggling the agents popup.
+        for modifiers in [
+            KeyModifiers::NONE,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ] {
             let key = press(KeyCode::Char('a'), modifiers);
+            assert_eq!(map_event(Event::Key(key)), Some(AppAction::KeyInput(key)));
+        }
+    }
+
+    #[test]
+    fn x_without_exact_control_modifier_is_not_a_leader() {
+        for modifiers in [
+            KeyModifiers::NONE,
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ] {
+            let key = press(KeyCode::Char('x'), modifiers);
             assert_eq!(map_event(Event::Key(key)), Some(AppAction::KeyInput(key)));
         }
     }

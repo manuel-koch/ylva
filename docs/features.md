@@ -1096,7 +1096,7 @@ for the full mechanics.
   behavior. An external
   SIGINT or SIGTERM skips the double-press: an idle TUI quits at once, and a
   running turn is stopped before the TUI quits with exit code `130`.
-- **Agents popup (`ctrl-a` or `/agents`):** a modal tree of the root
+- **Agents popup (`ctrl-x a` or `/agents`):** a modal tree of the root
   conversation and the session's subagent runs, one level deep (`├─`/`└─`).
   Order: root, running (oldest first), queued, finished (newest first;
   replayed runs last). Each agent is one line: a marker for the viewed
@@ -1113,7 +1113,7 @@ for the full mechanics.
   - **Actions:** `enter` or a double-click switches to the row's conversation
     (replayed transcripts load on demand); queued rows are not selectable.
   - **Side effects:** none on the draft or a pending approval/clarify, whose
-    prompt stays drawn beneath the popup. The footer shows `ctrl-a agents`
+    prompt stays drawn beneath the popup. The footer shows `ctrl-x a agents`
     (before `F1`) once the session has a subagent run.
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
   table, the selected profile and its config path, the resolved Ylva
@@ -1420,7 +1420,7 @@ and discards the parameter edits. `esc` in the list cancels and clears the input
 | `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights; a double-click acts like `enter`); page keys move by a page; `enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |
 | `/session` | Opens the recent-session picker in either conversation view. Select Resume or Clone, then confirm a root session. | Transient; activation and subsequent work use the selected persisted identity |
-| `/agents` | Opens the Agents popup (same as `ctrl-a`); available while busy and in either conversation view. | Transient |
+| `/agents` | Opens the Agents popup (same as `ctrl-x a`); available while busy and in either conversation view. | Transient |
 | `/compact` | Requests a useful completed-prefix summary in the root conversation, regardless of automatic thresholds. | Transient outcomes; an applied summary is persisted |
 
 `/session` and `/compact` are TUI-only; they do not change headless CLI parsing

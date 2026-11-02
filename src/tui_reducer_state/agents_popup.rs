@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Agents popup (`/agents`, `ctrl-a`): row model, selection and activation.
+//! Agents popup (`/agents`, `ctrl-x a`): row model, selection and activation.
 
 use super::{
     AppState, ChatEntry, ConversationView, DoubleClickTracker, Effect, Focus, SubagentOutcome,

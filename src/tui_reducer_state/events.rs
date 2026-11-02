@@ -90,7 +90,7 @@ pub enum Focus {
     MainInput,
     /// Modal help overlay; captures all keyboard and mouse input.
     HelpPopup,
-    /// Modal agents popup (`/agents`, `ctrl-a`); captures all keyboard and
+    /// Modal agents popup (`/agents`, `ctrl-x a`); captures all keyboard and
     /// mouse input, like [`Focus::HelpPopup`].
     AgentsPopup,
     /// Tool-approval banner; captures keyboard only (non-modal).
@@ -116,7 +116,7 @@ impl Focus {
 pub enum InputEvent {
     /// F1 pressed — toggle help popup.
     ShowHelp,
-    /// `ctrl-a` pressed (or `/agents` submitted) — toggle the agents popup.
+    /// `ctrl-x a` completed (or `/agents` submitted) — toggle the agents popup.
     ShowAgents,
     /// External SIGINT or SIGTERM: stop immediately, no confirm.
     StopSignal,
@@ -128,9 +128,14 @@ pub enum InputEvent {
     KeyInput(KeyEvent),
     /// Bracketed paste text.
     Paste(String),
-    /// `ctrl-p`: step out of a subagent view to its parent conversation.
-    /// Outside a subagent view it is the textarea's own "cursor up" key.
+    /// A completed `ctrl-x p` chord (or plain `ctrl-p` from a terminal
+    /// reporting legacy modifiers): step out of a subagent view to its
+    /// parent conversation. Outside a subagent view it is the textarea's
+    /// own "cursor up" key.
     ParentView,
+    /// A completed `ctrl-x f` chord: toggle the favorite of the highlighted
+    /// `/models` picker row. A no-op when no picker is open.
+    ToggleFavoriteModel,
 }
 
 // ─── DomainEvent ──────────────────────────────────────────────────────────────
