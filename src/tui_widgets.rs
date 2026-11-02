@@ -110,6 +110,13 @@ const USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION: u16 = 3;
 /// Braille spinner animation frames, cycled while the agent is busy.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Cap on the content rows every panel floating above the input box (the
+/// slash-command overlay and the agents popup) may use: two thirds of the
+/// space above the input, so a long list cannot hide the conversation.
+pub(crate) fn maximum_panel_content_height(input_area: Rect) -> u16 {
+    (input_area.y.saturating_sub(1) * 2 / 3).max(1)
+}
+
 /// Clickable approval button rects returned by `draw` when in approval sub-mode.
 pub struct ButtonAreas {
     pub approve: Rect,
@@ -722,7 +729,7 @@ fn draw_internal(
         draw_help_popup(frame, state);
     }
     if state.agents_popup.show {
-        draw_agents_popup(frame, state);
+        draw_agents_popup(frame, state, input_area);
     }
 
     // Dismiss any toast whose display window has elapsed, then render it.

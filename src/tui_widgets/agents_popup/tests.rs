@@ -34,9 +34,19 @@ fn row(label: &str, status: AgentRowStatus) -> AgentRow {
 }
 
 fn draw(state: &mut TuiState, width: u16, height: u16) -> String {
+    draw_with_input(state, width, height, input_rect(width, height))
+}
+
+/// The input box as `tui_widgets::draw` lays it out: full width, one row tall,
+/// with the two-row footer below it.
+fn input_rect(width: u16, height: u16) -> Rect {
+    Rect::new(0, height.saturating_sub(3), width, 1)
+}
+
+fn draw_with_input(state: &mut TuiState, width: u16, height: u16, input_area: Rect) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
     terminal
-        .draw(|frame| draw_agents_popup(frame, state))
+        .draw(|frame| draw_agents_popup(frame, state, input_area))
         .expect("draw");
     let buffer = terminal.backend().buffer().clone();
     (0..height)
@@ -134,7 +144,7 @@ fn status_and_duration_are_flush_right_with_a_three_space_gap() {
     finished.elapsed = Some(Duration::from_secs(15));
     let mut state = TuiState::new();
     state.agents_popup.rows = vec![waiting, running, finished];
-    let text = draw(&mut state, 100, 8);
+    let text = draw(&mut state, 100, 12);
     let lines: Vec<&str> = text.lines().filter(|line| line.contains("s│")).collect();
     assert_eq!(lines.len(), 3);
     assert!(
@@ -163,4 +173,55 @@ fn overflowing_rows_reserve_a_scrollbar_column_at_the_right_edge() {
     state.agents_popup.rows.truncate(3);
     let text = draw(&mut state, 100, 10);
     assert!(!text.contains("↑") && !text.contains("┃"), "{text}");
+}
+
+#[test]
+fn panel_sits_flush_above_the_input_with_its_width_and_grows_upward() {
+    let mut state = TuiState::new();
+    state.agents_popup.rows = vec![row("first", AgentRowStatus::Running)];
+    let input_area = Rect::new(0, 20, 60, 1);
+    draw_with_input(&mut state, 60, 24, input_area);
+    let popup = state.agents_popup.popup_rect;
+    assert_eq!(popup.x, input_area.x);
+    assert_eq!(popup.width, input_area.width);
+    assert_eq!(popup.bottom(), input_area.y);
+    assert_eq!(popup.height, 3, "one content row plus both border rows");
+
+    // One more row adds one row of height, keeping the bottom edge in place.
+    state
+        .agents_popup
+        .rows
+        .push(row("second", AgentRowStatus::Running));
+    draw_with_input(&mut state, 60, 24, input_area);
+    let grown = state.agents_popup.popup_rect;
+    assert_eq!(grown.height, 4);
+    assert_eq!(grown.bottom(), input_area.y);
+}
+
+#[test]
+fn panel_content_is_capped_at_two_thirds_of_the_space_above_the_input() {
+    let mut state = TuiState::new();
+    state.agents_popup.rows = (0..40)
+        .map(|index| row(&format!("run {index}"), AgentRowStatus::Running))
+        .collect();
+    let input_area = Rect::new(0, 30, 80, 1);
+    draw_with_input(&mut state, 80, 40, input_area);
+    // (30 - 1) * 2 / 3 == 19 content rows within a 21-row panel.
+    assert_eq!(state.agents_popup.popup_rect.height, 21);
+    assert_eq!(state.agents_popup.visible_rows, 19);
+}
+
+#[test]
+fn panel_is_skipped_when_the_input_leaves_no_room() {
+    let mut state = TuiState::new();
+    state.agents_popup.rows = vec![row("first", AgentRowStatus::Running)];
+    for (width, height, input_area) in [
+        (3, 24, Rect::new(0, 20, 3, 1)),
+        (60, 24, Rect::new(0, 2, 60, 1)),
+    ] {
+        draw_with_input(&mut state, width, height, input_area);
+        assert_eq!(state.agents_popup.popup_rect, Rect::default());
+        assert!(state.agents_popup.row_hitboxes.is_empty());
+        assert_eq!(state.agents_popup.visible_rows, 0);
+    }
 }

@@ -184,6 +184,29 @@ fn session_picker_status_and_errors_are_shown_once_without_popup_keybindings() {
     }
 }
 
+#[test]
+fn agents_popup_panel_sits_above_the_input_rather_than_centered() {
+    for (width, height) in [(120, 40), (60, 15), (30, 9)] {
+        let mut state = ylva::AppState::new();
+        state.open_agents_popup();
+        let buffer = render_offline(&mut state, width, height);
+        let text = rendered_text(&buffer);
+        let input_area = state.layout.input_area.rect;
+        let popup = state.layout.agents_popup.rect;
+        assert!(popup.width > 0 && popup.height > 0, "{text}");
+        assert_eq!(popup.x, input_area.x, "{text}");
+        assert_eq!(popup.width, input_area.width, "{text}");
+        assert_eq!(popup.bottom(), input_area.y, "{text}");
+        assert_eq!(state.layout.agents_popup.visible_rows, 1, "{text}");
+        let popup_rows = text
+            .lines()
+            .skip(usize::from(popup.y))
+            .take(usize::from(popup.height))
+            .collect::<Vec<_>>();
+        assert!(popup_rows[0].contains("Agents"), "{text}");
+    }
+}
+
 #[tokio::test]
 async fn typed_manual_compaction_preserves_persisted_transcript_and_replays_marker() {
     let directory = tempfile::tempdir().unwrap();

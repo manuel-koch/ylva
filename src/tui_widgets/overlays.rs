@@ -163,7 +163,7 @@ pub(super) fn draw_slash_overlay(
 
     // Cap the panel at two thirds of the space above the input so a provider
     // with hundreds of models cannot hide the conversation entirely.
-    let max_content_height = (input_area.y.saturating_sub(1) * 2 / 3).max(1);
+    let max_content_height = super::maximum_panel_content_height(input_area);
     let detail_lines = if let SlashOverlay::SessionPicker(picker) = overlay {
         let mut details = Vec::new();
         if input_area.y >= 4 {

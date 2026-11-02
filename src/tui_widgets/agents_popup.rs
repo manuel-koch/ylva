@@ -21,6 +21,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::agent::subagent_manager::{STATUS_QUEUED, STATUS_RUNNING};
+use crate::saturating_cast::saturating_u16;
 use crate::theme::{
     active_model_color, chat_scrollbar_color, error_color, help_popup_border_color,
     list_selection_background_color, list_selection_foreground_color, list_text_color,
@@ -31,6 +32,7 @@ use crate::tui_render_state::TuiState;
 
 use super::chat::render_chat_scrollbar;
 use super::elapsed::format_elapsed;
+use super::maximum_panel_content_height;
 
 const MARKER_COLUMN_WIDTH: usize = 2;
 const STATUS_DURATION_GAP: &str = "   ";
@@ -38,10 +40,14 @@ const AWAITING_INPUT_TEXT: &str = "waiting for user input";
 const CURRENT_MARKER: &str = "▶ ";
 const NO_DURATION: &str = "–";
 const MINIMUM_LABEL_WIDTH: usize = 4;
-const POPUP_WIDTH_PERCENT: u16 = 80;
-const POPUP_MINIMUM_WIDTH: u16 = 40;
-const POPUP_HEIGHT_PERCENT: u16 = 70;
-const POPUP_MINIMUM_MAXIMUM_HEIGHT: u16 = 5;
+/// Border rows of the panel, above and below the list.
+const PANEL_BORDER_HEIGHT: u16 = 2;
+/// Narrowest input box the panel still renders in; below this it is skipped,
+/// like the slash overlay.
+const MINIMUM_PANEL_WIDTH: u16 = 4;
+/// Rows the terminal must leave above the input for the panel to render: the
+/// border plus one content row.
+const MINIMUM_PANEL_TOP: u16 = 3;
 
 /// Shortens `text` to at most `max_width` columns, ending in `…` when cut.
 fn elide(text: &str, max_width: usize) -> String {
@@ -169,22 +175,26 @@ fn row_line(
     ])
 }
 
-pub(super) fn draw_agents_popup(frame: &mut Frame, state: &mut TuiState) {
-    let area = frame.area();
-    let popup_width = (area.width * POPUP_WIDTH_PERCENT / 100)
-        .max(POPUP_MINIMUM_WIDTH)
-        .min(area.width);
+/// Draw the agents popup as a floating panel whose bottom edge sits directly
+/// above the input box, positioned and sized like the slash-command overlay:
+/// same left edge and width as the input, a list that grows upward, and the
+/// shared cap on the space above the input so a session with many subagents
+/// cannot hide the conversation entirely.
+pub(super) fn draw_agents_popup(frame: &mut Frame, state: &mut TuiState, input_area: Rect) {
     let row_count = state.agents_popup.rows.len();
-    let maximum_height = (area.height * POPUP_HEIGHT_PERCENT / 100)
-        .max(POPUP_MINIMUM_MAXIMUM_HEIGHT)
-        .min(area.height);
-    let popup_height = (row_count as u16)
-        .saturating_add(2)
-        .clamp(3, maximum_height.max(3));
+    if input_area.width < MINIMUM_PANEL_WIDTH || input_area.y < MINIMUM_PANEL_TOP {
+        state.agents_popup.popup_rect = Rect::default();
+        state.agents_popup.row_hitboxes.clear();
+        state.agents_popup.visible_rows = 0;
+        return;
+    }
+    let content_height =
+        saturating_u16(row_count).min(maximum_panel_content_height(input_area).max(1));
+    let popup_height = content_height.saturating_add(PANEL_BORDER_HEIGHT);
     let popup = Rect::new(
-        area.x + area.width.saturating_sub(popup_width) / 2,
-        area.y + area.height.saturating_sub(popup_height) / 2,
-        popup_width,
+        input_area.x,
+        input_area.y.saturating_sub(popup_height),
+        input_area.width,
         popup_height,
     );
 
