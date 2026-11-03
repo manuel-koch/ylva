@@ -39,6 +39,7 @@ const STATUS_DURATION_GAP: &str = "   ";
 const AWAITING_INPUT_TEXT: &str = "waiting for user input";
 const CURRENT_MARKER: &str = "▶ ";
 const NO_DURATION: &str = "–";
+const TOOL_COUNT_SUFFIX: &str = " tools";
 const MINIMUM_LABEL_WIDTH: usize = 4;
 /// Border rows of the panel, above and below the list.
 const PANEL_BORDER_HEIGHT: u16 = 2;
@@ -89,6 +90,10 @@ fn duration_text(row: &AgentRow) -> String {
     }
 }
 
+fn tool_count_text(row: &AgentRow) -> String {
+    format!("{}{}", row.tool_call_count, TOOL_COUNT_SUFFIX)
+}
+
 fn tree_prefix(row: &AgentRow) -> &'static str {
     match (row.depth, row.is_last_sibling) {
         (0, _) => "",
@@ -97,22 +102,28 @@ fn tree_prefix(row: &AgentRow) -> &'static str {
     }
 }
 
-/// One line per agent: marker, label, then the status and the duration flush
-/// right. The status takes only the width it needs; durations share one
-/// right-aligned column of `duration_width`.
+/// One line per agent: marker, label, then the status, the tool-call count and
+/// the duration flush right. The status takes only the width it needs; the
+/// tool-call counts share one right-aligned column of `tool_count_width` and
+/// the durations one of `duration_width`.
 fn row_line(
     row: &AgentRow,
     inner_width: usize,
+    tool_count_width: usize,
     duration_width: usize,
     selected: bool,
 ) -> Line<'static> {
     let status = result_text(row);
     let status_width = Line::from(status).width();
-    let trailing_width = if status_width + duration_width == 0 {
+    let trailing_width = if status_width + tool_count_width + duration_width == 0 {
         0
     } else {
         // One column separates the label from the status.
-        1 + status_width + STATUS_DURATION_GAP.len() + duration_width
+        1 + status_width
+            + STATUS_DURATION_GAP.len()
+            + tool_count_width
+            + STATUS_DURATION_GAP.len()
+            + duration_width
     };
     let label_width = inner_width
         .saturating_sub(MARKER_COLUMN_WIDTH + trailing_width)
@@ -159,6 +170,18 @@ fn row_line(
                 format!(" {status}")
             },
             result_style,
+        ),
+        Span::styled(
+            if trailing_width == 0 {
+                String::new()
+            } else {
+                format!(
+                    "{STATUS_DURATION_GAP}{:>tool_count_width$}",
+                    tool_count_text(row),
+                    tool_count_width = tool_count_width
+                )
+            },
+            base_style,
         ),
         Span::styled(
             if trailing_width == 0 {
@@ -229,6 +252,13 @@ pub(super) fn draw_agents_popup(frame: &mut Frame, state: &mut TuiState, input_a
         .map(|row| Line::from(duration_text(row)).width())
         .max()
         .unwrap_or(0);
+    let tool_count_width = state
+        .agents_popup
+        .rows
+        .iter()
+        .map(|row| Line::from(tool_count_text(row)).width())
+        .max()
+        .unwrap_or(0);
     let mut hitboxes = Vec::new();
     let mut lines = Vec::new();
     for (index, row) in state
@@ -242,6 +272,7 @@ pub(super) fn draw_agents_popup(frame: &mut Frame, state: &mut TuiState, input_a
         lines.push(row_line(
             row,
             content_width as usize,
+            tool_count_width,
             duration_width,
             index == selected_index,
         ));

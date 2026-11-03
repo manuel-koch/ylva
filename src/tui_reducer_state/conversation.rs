@@ -396,6 +396,10 @@ pub struct SubagentConversation {
     /// into this subagent, even after it finishes.
     pub context_usage: Option<ContextUsage>,
     pub needs_lazy_load: bool,
+    /// Tool-call count recovered from the persisted subagent session at
+    /// replay time, shown while the transcript has not been lazily loaded
+    /// yet. `None` when nothing was recorded (live runs, legacy sessions).
+    pub recovered_tool_call_count: Option<usize>,
 }
 
 /// Terminal result of a subagent run, derived from the `status` of
@@ -439,6 +443,7 @@ impl SubagentConversation {
             turn_buffer: TurnBuffer::default(),
             context_usage: None,
             needs_lazy_load: false,
+            recovered_tool_call_count: None,
         }
     }
 
@@ -453,6 +458,7 @@ impl SubagentConversation {
             turn_buffer: TurnBuffer::default(),
             context_usage: None,
             needs_lazy_load: true,
+            recovered_tool_call_count: None,
         }
     }
 }

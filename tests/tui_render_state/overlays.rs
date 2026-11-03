@@ -207,6 +207,60 @@ fn agents_popup_panel_sits_above_the_input_rather_than_centered() {
     }
 }
 
+#[test]
+fn agents_popup_root_row_counts_a_pending_root_tool_call_live() {
+    let mut state = ylva::AppState::new();
+    state.chat_entries.push(ChatEntry::ToolBubble {
+        id: uuid::Uuid::new_v4(),
+        name: "bash".to_string(),
+        state: Box::new(ylva::ToolCallState::Pending {
+            arguments: serde_json::json!({"command": "make test"}),
+            content_sections: vec![],
+            title_arguments: vec![],
+        }),
+        collapsed: true,
+    });
+    state.open_agents_popup();
+    let buffer = render_offline(&mut state, 100, 30);
+    let text = rendered_text(&buffer);
+    // The call counts the moment it is pending, before it ever finishes.
+    assert!(text.contains("1 tools"), "{text}");
+}
+
+#[test]
+fn agents_popup_replayed_run_shows_recovered_tool_count_without_lazy_load() {
+    let run_id = uuid::Uuid::new_v4();
+    let mut state = ylva::AppState::new();
+    let mut conversation = ylva::tui_reducer_state::SubagentConversation {
+        info: ylva::tui_reducer_state::SubagentRunInfo {
+            run_id,
+            bubble_id: uuid::Uuid::new_v4(),
+            agent_type: "research".to_string(),
+            task: "inspect the patch".to_string(),
+            label: "Inspect patch".to_string(),
+        },
+        started_at: None,
+        finished_at: None,
+        recorded_duration: None,
+        outcome: None,
+        messages: vec![],
+        turn_buffer: Default::default(),
+        context_usage: None,
+        needs_lazy_load: true,
+        recovered_tool_call_count: Some(4),
+    };
+    conversation.recovered_tool_call_count = Some(4);
+    state.subagent_conversations.insert(run_id, conversation);
+    state.open_agents_popup();
+    let buffer = render_offline(&mut state, 100, 30);
+    let text = rendered_text(&buffer);
+    assert!(text.contains("4 tools"), "{text}");
+    assert!(
+        state.subagent_needs_lazy_load(run_id),
+        "the transcript must not have been lazily loaded to show the count"
+    );
+}
+
 #[tokio::test]
 async fn typed_manual_compaction_preserves_persisted_transcript_and_replays_marker() {
     let directory = tempfile::tempdir().unwrap();

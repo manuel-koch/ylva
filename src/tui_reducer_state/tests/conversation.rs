@@ -243,6 +243,7 @@ fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_subagent_st
             sources: vec!["src/lib.rs".to_string()],
             origin: crate::subagent_manager::FinishResultOrigin::Agent,
             duration: Some(Duration::from_secs(1)),
+            tool_call_count: None,
         },
         SubagentRunRecord {
             run_id: orphaned_run_id,
@@ -258,6 +259,7 @@ fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_subagent_st
             sources: vec![],
             origin: crate::subagent_manager::FinishResultOrigin::default(),
             duration: None,
+            tool_call_count: None,
         },
     ];
 
@@ -319,6 +321,7 @@ fn replay_subagent_transcripts_load_once_on_drill_in() {
         sources: vec![],
         origin: crate::subagent_manager::FinishResultOrigin::Agent,
         duration: Some(Duration::from_secs(1)),
+        tool_call_count: None,
     }];
     let root_messages = vec![Message::Assistant {
         content: String::new(),

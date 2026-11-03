@@ -223,4 +223,8 @@ pub struct SubagentRunRecord {
     pub sources: Vec<String>,
     pub origin: FinishResultOrigin,
     pub duration: Option<std::time::Duration>,
+    /// Tool-call events of the run's own session transcript, recovered by
+    /// [`crate::store::Store::read_subagent_runs`]. `None` when the transcript
+    /// could not be read or nothing was recorded.
+    pub tool_call_count: Option<usize>,
 }

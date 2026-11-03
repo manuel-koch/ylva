@@ -30,6 +30,7 @@ fn row(label: &str, status: AgentRowStatus) -> AgentRow {
         awaiting_input: false,
         depth: 1,
         is_last_sibling: false,
+        tool_call_count: 0,
     }
 }
 
@@ -137,22 +138,81 @@ fn status_and_duration_are_flush_right_with_a_three_space_gap() {
     let mut waiting = row("Copy the file", AgentRowStatus::Running);
     waiting.awaiting_input = true;
     waiting.elapsed = Some(Duration::from_secs(150));
+    waiting.tool_call_count = 12;
     let mut running = row("Other topic", AgentRowStatus::Running);
     running.elapsed = Some(Duration::from_secs(190));
+    running.tool_call_count = 3;
     let mut finished = row("Super duper task", AgentRowStatus::Finished);
     finished.outcome = Some(SubagentOutcome::Success);
     finished.elapsed = Some(Duration::from_secs(15));
+    finished.tool_call_count = 5;
     let mut state = TuiState::new();
     state.agents_popup.rows = vec![waiting, running, finished];
     let text = draw(&mut state, 100, 12);
     let lines: Vec<&str> = text.lines().filter(|line| line.contains("s│")).collect();
     assert_eq!(lines.len(), 3);
     assert!(
-        lines[0].contains("waiting for user input   2m30s│"),
+        lines[0].contains("waiting for user input   12 tools   2m30s│"),
         "{text}"
     );
-    assert!(lines[1].contains("running   3m10s│"), "{text}");
-    assert!(lines[2].contains("success     15s│"), "{text}");
+    assert!(lines[1].contains("running    3 tools   3m10s│"), "{text}");
+    assert!(lines[2].contains("success    5 tools     15s│"), "{text}");
+}
+
+#[test]
+fn tool_counts_are_flush_right_and_root_and_queued_rows_show_their_count() {
+    let mut root = row("Root (main conversation)", AgentRowStatus::Root);
+    root.depth = 0;
+    root.is_last_sibling = true;
+    root.tool_call_count = 7;
+    let mut queued = row("Queued subagent", AgentRowStatus::Queued);
+    queued.tool_call_count = 0;
+    let mut state = TuiState::new();
+    state.agents_popup.rows = vec![root, queued];
+    let text = draw(&mut state, 100, 12);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("tools"))
+        .map(|line| line.trim_end())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].ends_with("7 tools   │"), "{lines:?}");
+    assert!(lines[1].ends_with("0 tools   │"), "{lines:?}");
+    assert!(lines[0].contains("Root (main conversation)"));
+    assert!(lines[1].contains("queued"));
+}
+
+#[test]
+fn a_wide_tool_count_column_stays_right_aligned_on_every_row() {
+    let mut wide = row("many calls", AgentRowStatus::Running);
+    wide.tool_call_count = 1_234_567;
+    let mut narrow = row("few calls", AgentRowStatus::Running);
+    narrow.tool_call_count = 2;
+    let mut state = TuiState::new();
+    state.agents_popup.rows = vec![wide, narrow];
+    let text = draw(&mut state, 100, 12);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("tools"))
+        .map(|line| line.trim_end())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    for line in lines {
+        assert!(line.trim_end().ends_with("tools   –│"), "{line:?}");
+    }
+    assert!(text.contains("1234567 tools"), "{text}");
+    assert!(text.contains("  2 tools"), "{text}");
+}
+
+#[test]
+fn a_narrow_terminal_elides_the_label_and_keeps_the_tool_count() {
+    let mut running = row(&"x".repeat(60), AgentRowStatus::Running);
+    running.tool_call_count = 42;
+    let mut state = TuiState::new();
+    state.agents_popup.rows = vec![running];
+    let text = draw(&mut state, 30, 12);
+    assert!(text.contains('…'), "{text}");
+    assert!(text.contains("42 tools"), "{text}");
 }
 
 #[test]

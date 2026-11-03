@@ -736,6 +736,7 @@ fn live_spawn_subagent_tool_bubble_matches_serialized_and_replayed_bubble() {
             sources,
             origin: ylva::subagent_manager::FinishResultOrigin::Agent,
             duration: Some(Duration::from_millis(91)),
+            tool_call_count: None,
         }],
     );
 }

@@ -15,7 +15,9 @@
 //! Read-only queries and reconstruction of session and subagent-run state.
 
 use super::archive;
-use super::{project_directory, SessionMeta, Store, StoreError, StoreEvent, SubagentRunRecord};
+use super::{
+    project_directory, session_path, SessionMeta, Store, StoreError, StoreEvent, SubagentRunRecord,
+};
 use crate::agent::{Message, UserMessageKind};
 use crate::home_relative_path::display_path;
 use crate::subagent_manager::FinishResultOrigin;
@@ -364,6 +366,7 @@ impl Store {
                         sources: Vec::new(),
                         origin: FinishResultOrigin::default(),
                         duration: None,
+                        tool_call_count: None,
                     });
                 }
                 StoreEvent::SubagentResult {
@@ -392,7 +395,60 @@ impl Store {
                 _ => {}
             }
         }
+        Self::recover_tool_call_counts(path, &mut runs);
         Ok(runs)
+    }
+
+    /// Count the tool-call messages of each run's own session transcript
+    /// (`session_path` keyed by `run_id`) so a resumed session can show the
+    /// counts without lazily loading every transcript. A missing or unreadable
+    /// transcript only leaves that run's count `None`.
+    fn recover_tool_call_counts(path: &Path, runs: &mut [SubagentRunRecord]) {
+        let Some(session_directory) = path.parent() else {
+            return;
+        };
+        let Some(chats_root) = session_directory.parent() else {
+            return;
+        };
+        let Some(project_key) = session_directory.file_name() else {
+            return;
+        };
+        for run in runs {
+            let subagent_path =
+                session_path(chats_root, &project_key.to_string_lossy(), run.run_id);
+            if !archive::transcript_exists(&subagent_path) {
+                continue;
+            }
+            match Self::read_messages(&subagent_path) {
+                Ok(messages) => {
+                    // Each persisted tool call appears twice — once as its
+                    // trigger (`Assistant` with `tool_calls`) and once as its
+                    // terminal `ToolResult`/`ToolError` — so only the triggers
+                    // count, matching the live transcript's one bubble per
+                    // call.
+                    run.tool_call_count = Some(
+                        messages
+                            .iter()
+                            .filter(|message| {
+                                matches!(message, Message::Assistant { tool_calls, .. } if !tool_calls.is_empty())
+                            })
+                            .map(|message| match message {
+                                Message::Assistant { tool_calls, .. } => tool_calls.len(),
+                                _ => 0,
+                            })
+                            .sum(),
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        path = %subagent_path.display(),
+                        run_id = %run.run_id,
+                        "could not replay subagent transcript"
+                    );
+                }
+            }
+        }
     }
 }
 

@@ -24,6 +24,94 @@ mod session_file;
 mod writer;
 
 #[tokio::test]
+async fn read_subagent_runs_recovers_tool_call_counts_from_run_transcripts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chats_root = temp.path().join("chats");
+    let store = Store::create(
+        &chats_root,
+        temp.path(),
+        Uuid::new_v4(),
+        "openrouter",
+        "gpt-4o",
+        None,
+    )
+    .expect("parent store created");
+    let run_id = Uuid::new_v4();
+    let call_id = Uuid::new_v4();
+
+    store.record_subagent_start(run_id, call_id, "research", "find it", "Find it");
+    store.record_subagent_result(
+        run_id,
+        call_id,
+        "success",
+        Some("found".to_string()),
+        vec![],
+        FinishResultOrigin::Agent,
+    );
+    store.flush().await;
+
+    let subagent_store = store
+        .write_subagent_transcript_for_run_store(run_id, None, &[])
+        .await
+        .expect("subagent session written");
+    subagent_store.record_message(&user_message("find it"));
+    subagent_store.record_message(&Message::Assistant {
+        content: "working".to_string(),
+        status: AssistantStatus::Complete,
+        tool_calls: vec![
+            ToolCallRequest {
+                id: Uuid::new_v4(),
+                name: "read".to_string(),
+                arguments: serde_json::json!({}),
+                persisted_title_arguments: vec![],
+            },
+            ToolCallRequest {
+                id: Uuid::new_v4(),
+                name: "grep".to_string(),
+                arguments: serde_json::json!({}),
+                persisted_title_arguments: vec![],
+            },
+        ],
+    });
+    subagent_store.record_message(&Message::User {
+        content: "note".to_string(),
+        kind: UserMessageKind::ImplicitToolNote,
+    });
+    subagent_store.record_message(&Message::ToolResult {
+        value: crate::agent::ToolResult {
+            id: Uuid::new_v4(),
+            name: "read".to_string(),
+            result: "contents".to_string(),
+            attachments: vec![],
+            result_section_id: None,
+            result_metadata: None,
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: std::time::Duration::ZERO,
+        },
+    });
+    subagent_store.record_message(&Message::ToolError {
+        id: Uuid::new_v4(),
+        name: "grep".to_string(),
+        error: "boom".to_string(),
+        duration: std::time::Duration::ZERO,
+        content_sections: vec![],
+    });
+    subagent_store.record_message(&assistant_message("plain reply, no tool call"));
+    subagent_store.flush().await;
+    drop(subagent_store);
+
+    let runs = Store::read_subagent_runs(store.path()).expect("subagent records readable");
+    let run = runs.iter().find(|run| run.run_id == run_id).unwrap();
+    // Two tool calls, each counted once from its trigger (the assistant
+    // message's two `tool_calls`) — the later result and error messages would
+    // double-count, so only the triggers count. User notes and plain replies
+    // never count.
+    assert_eq!(run.tool_call_count, Some(2));
+}
+
+#[tokio::test]
 async fn title_rewrite_retains_the_writer_lock_and_append_destination_for_every_handle() {
     let temporary_directory = tempfile::tempdir().expect("temporary directory");
     let chats_root = temporary_directory.path().join("chats");

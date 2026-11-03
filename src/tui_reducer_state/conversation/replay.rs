@@ -383,6 +383,7 @@ impl AppState {
                 .as_deref()
                 .map(SubagentOutcome::from_status);
             conversation.recorded_duration = subagent_run.duration;
+            conversation.recovered_tool_call_count = subagent_run.tool_call_count;
             self.subagent_conversations
                 .insert(subagent_run.run_id, conversation);
         }

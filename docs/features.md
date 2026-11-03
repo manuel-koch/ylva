@@ -1100,14 +1100,21 @@ for the full mechanics.
   conversation and the session's subagent runs, one level deep (`├─`/`└─`).
   Order: root, running (oldest first), queued, finished (newest first;
   replayed runs last). Each agent is one line: a marker for the viewed
-  conversation, the elided label, then the status and the elapsed time flush
-  right, three spaces apart.
+  conversation, the elided label, then the status, the tool-call count and the
+  elapsed time flush right, three spaces apart.
   - **Label:** the root row shows the session title once generated, else
     `Root (main conversation)`.
   - **Status:** `running`, `queued`, `success`, `error`, `cancelled`, or
     `waiting for user input` (highlighted, replaces `running` while a tool
     approval or clarify answer is pending). Replayed runs show their stored
     status.
+  - **Tool-call count:** how many tool bubbles the row's transcript has
+    triggered (e.g. `12 tools`), in any state — a call counts the moment it is
+    pending, not only once it has finished. The root row counts the root
+    transcript (its own `spawn_subagent` calls included), each subagent row its
+    own transcript; queued rows show `0 tools`. On a resumed session the
+    counts are recovered from the persisted transcripts without lazily loading
+    each one; rows without a recorded count show `0 tools`.
   - **Elapsed time:** live while running, frozen when finished, recovered from
     the stored run on replay, `–` when unknown.
   - **Actions:** `enter` or a double-click switches to the row's conversation

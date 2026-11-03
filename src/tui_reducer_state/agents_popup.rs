@@ -66,6 +66,9 @@ pub struct AgentRow {
     pub depth: usize,
     /// Last child of its parent, drawn with `└─` instead of `├─`.
     pub is_last_sibling: bool,
+    /// Tool bubbles this row's transcript has triggered, in any
+    /// [`ToolCallState`]; `0` for queued runs, which have no transcript yet.
+    pub tool_call_count: usize,
 }
 
 impl AgentRow {
@@ -118,6 +121,15 @@ fn queued_label(title_arguments: &[(String, serde_json::Value)]) -> String {
         .unwrap_or_else(|| "Queued subagent".to_string())
 }
 
+/// Tool bubbles of `entries` regardless of [`ToolCallState`] — a call counts
+/// as soon as it is triggered (`Pending`/`Running`), not only once finished.
+pub fn count_tool_calls(entries: &[ChatEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| matches!(entry, ChatEntry::ToolBubble { .. }))
+        .count()
+}
+
 impl AppState {
     /// Rows of the agents popup as a tree (the root with its subagents as
     /// children) in display order: root, running (oldest
@@ -158,6 +170,11 @@ impl AppState {
                 }
                 _ => conversation.recorded_duration,
             };
+            let tool_call_count = if conversation.needs_lazy_load {
+                conversation.recovered_tool_call_count.unwrap_or(0)
+            } else {
+                count_tool_calls(&conversation.messages)
+            };
             let row = AgentRow {
                 key: AgentRowKey::Run(*run_id),
                 label: conversation.info.label.clone(),
@@ -172,6 +189,7 @@ impl AppState {
                 awaiting_input: is_running && transcript_awaits_input(&conversation.messages),
                 depth: 1,
                 is_last_sibling: false,
+                tool_call_count,
             };
             let position = position_of(conversation.info.bubble_id);
             if is_running {
@@ -226,6 +244,7 @@ impl AppState {
                 awaiting_input: false,
                 depth: 1,
                 is_last_sibling: false,
+                tool_call_count: 0,
             })
         });
 
@@ -243,6 +262,7 @@ impl AppState {
             awaiting_input: transcript_awaits_input(&self.chat_entries),
             depth: 0,
             is_last_sibling: true,
+            tool_call_count: count_tool_calls(&self.chat_entries),
         };
 
         let mut rows: Vec<AgentRow> = std::iter::once(root)
@@ -488,5 +508,154 @@ mod tests {
         let now = Instant::now();
         assert!(!state.agents_popup_click(key, now));
         assert!(state.agents_popup_click(key, now + Duration::from_millis(50)));
+    }
+
+    /// One tool bubble per state variant, plus a user message that must not
+    /// count.
+    fn all_state_bubbles() -> Vec<ChatEntry> {
+        use crate::agent::tools::Section;
+        let bubble = |state: ToolCallState| ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: "read".to_string(),
+            state: Box::new(state),
+            collapsed: true,
+        };
+        let arguments = serde_json::json!({"path": "README.md"});
+        vec![
+            ChatEntry::UserMessage {
+                text: "prompt".to_string(),
+                state: crate::tui_reducer_state::UserMessageState::Sent,
+            },
+            bubble(ToolCallState::Pending {
+                arguments: arguments.clone(),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            bubble(ToolCallState::Running {
+                arguments: arguments.clone(),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            bubble(ToolCallState::Done {
+                arguments: arguments.clone(),
+                result_section: crate::tui_reducer_state::ResultSection::plain("ok"),
+                content_sections: vec![Section::Content(crate::agent::tools::ContentSection {
+                    label: None,
+                    content: "ok".to_string(),
+                    file_extension: None,
+                    line_number_offset: None,
+                })],
+                summary: vec![],
+                duration: Duration::ZERO,
+                title_arguments: vec![],
+            }),
+            bubble(ToolCallState::Error {
+                error: "boom".to_string(),
+                title_arguments: vec![],
+                duration: Duration::ZERO,
+                content_sections: vec![],
+            }),
+            bubble(ToolCallState::Killed),
+            bubble(ToolCallState::Denied {
+                arguments,
+                error: "denied".to_string(),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+        ]
+    }
+
+    #[test]
+    fn count_tool_calls_counts_every_bubble_state_and_ignores_other_entries() {
+        let entries = all_state_bubbles();
+        // Six tool bubbles; the user message does not count.
+        assert_eq!(count_tool_calls(&entries), 6);
+        assert_eq!(count_tool_calls(&[]), 0);
+    }
+
+    #[test]
+    fn root_row_counts_its_transcript_bubbles_live() {
+        let mut state = AppState::new();
+        state.chat_entries = all_state_bubbles();
+        let rows = state.agent_rows(Instant::now());
+        assert_eq!(rows[0].tool_call_count, 6);
+
+        // A pending call is counted the moment it appears.
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: "write".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::Value::Null,
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+        let rows = state.agent_rows(Instant::now());
+        assert_eq!(rows[0].tool_call_count, 7);
+    }
+
+    #[test]
+    fn subagent_rows_count_their_own_transcript_bubbles() {
+        let mut state = AppState::new();
+        let info = run_info("busy");
+        state.start_subagent_run(info.clone());
+        let bubble = ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: "read".to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::Value::Null,
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: true,
+        };
+        state
+            .subagent_conversations
+            .get_mut(&info.run_id)
+            .unwrap()
+            .messages
+            .push(bubble);
+
+        let rows = state.agent_rows(Instant::now());
+        assert_eq!(rows[0].tool_call_count, 0, "root has no tool bubbles");
+        assert_eq!(rows[1].tool_call_count, 1);
+    }
+
+    #[test]
+    fn replayed_rows_fall_back_to_the_recovered_count_without_lazy_load() {
+        let mut state = AppState::new();
+        let info = run_info("old");
+        let mut conversation = SubagentConversation::new_replay(info.clone());
+        conversation.recovered_tool_call_count = Some(4);
+        state
+            .subagent_conversations
+            .insert(info.run_id, conversation);
+
+        let rows = state.agent_rows(Instant::now());
+        assert_eq!(rows[1].tool_call_count, 4);
+        assert!(state.subagent_needs_lazy_load(info.run_id));
+
+        // Loading the real transcript makes its live count authoritative.
+        state
+            .subagent_conversations
+            .get_mut(&info.run_id)
+            .unwrap()
+            .needs_lazy_load = false;
+        let rows = state.agent_rows(Instant::now());
+        assert_eq!(rows[1].tool_call_count, 0);
+    }
+
+    #[test]
+    fn legacy_replayed_rows_without_a_recovered_count_show_zero() {
+        let mut state = AppState::new();
+        let info = run_info("legacy");
+        state
+            .subagent_conversations
+            .insert(info.run_id, SubagentConversation::new_replay(info.clone()));
+        let rows = state.agent_rows(Instant::now());
+        assert_eq!(rows[1].tool_call_count, 0);
     }
 }
