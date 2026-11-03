@@ -732,3 +732,39 @@ fn fresh_loop_reports_baseline_context_usage_before_any_prompt() {
         assert!(expected_tokens > 0, "tool schemas alone must be counted");
     });
 }
+
+#[test]
+fn preflight_sweep_reports_the_background_compaction_start() {
+    crate::test_support::run_locked(async {
+        let mut context = Context::new();
+        context.push_user("word ".repeat(10_000));
+        context.push_assistant("recorded answer ".repeat(100), AssistantStatus::Complete);
+        let (mut compaction, _outcome_rx) = compaction::CompactionRuntime::new(
+            Some(test_engine()),
+            compaction::COMPACTION_SUMMARY_PROMPT.to_string(),
+            Duration::from_secs(compaction::DEFAULT_COMPACTION_TIMEOUT_SECS),
+        );
+        let (sender, mut events) = mpsc::channel(4);
+        let (updates, _usage_updates) = mpsc::channel(4);
+        let _cancel = start_request(
+            &mut context,
+            Some(&mut compaction),
+            test_engine_with_context_length(16_000),
+            Vec::new(),
+            updates,
+            sender,
+            1,
+            None,
+            None,
+        );
+        let (_, event) = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("notice arrives")
+            .expect("event");
+        assert!(matches!(
+            event,
+            AgentEvent::PreflightNotice { text, .. }
+                if text == "Started background context compaction."
+        ));
+    });
+}

@@ -676,6 +676,101 @@ async fn a_runaway_summary_fails_instead_of_buffering_without_bound() {
 }
 
 #[tokio::test]
+async fn truncated_summary_fails_instead_of_replacing_history() {
+    struct TruncatedProvider;
+    impl crate::llm::Provider for TruncatedProvider {
+        fn name(&self) -> &str {
+            "truncated"
+        }
+        fn list_models(
+            &self,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            Box::pin(async move {
+                let (tx, rx) = mpsc::channel(4);
+                tx.send(StreamEvent::Text("partial".to_string()))
+                    .await
+                    .unwrap();
+                tx.send(StreamEvent::OutputTruncated("cut off".to_string()))
+                    .await
+                    .unwrap();
+                tx.send(StreamEvent::Done).await.unwrap();
+                Ok(rx)
+            })
+        }
+    }
+
+    let engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
+        Arc::new(TruncatedProvider),
+        crate::llm::EngineConfig {
+            provider_connection: "mock".to_string(),
+            max_output_tokens: None,
+            model: "summary-model".to_string(),
+            temperature: None,
+            context_length: None,
+            api_base_url: None,
+            api_key: None,
+            reasoning: None,
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
+        },
+    ));
+
+    let error = generate_summary(
+        engine,
+        build_summary_request(&[user("hello")], COMPACTION_SUMMARY_PROMPT),
+        None,
+        CancellationToken::new(),
+        crate::http::RequestDumpFailureHandler::default(),
+        None,
+    )
+    .await
+    .expect_err("a truncated summary must fail so the fallback runs");
+    assert!(error.to_string().contains("output token limit"), "{error}");
+}
+
+#[test]
+fn configured_low_output_limit_is_raised_to_the_available_window() {
+    let engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
+        Arc::new(crate::llm::OpenAiCompatibleProvider::new(
+            "test".to_string(),
+            "http://127.0.0.1:9/v1".to_string(),
+            "summary-model".to_string(),
+            None,
+        )),
+        crate::llm::EngineConfig {
+            provider_connection: "mock".to_string(),
+            max_output_tokens: Some(1024),
+            model: "summary-model".to_string(),
+            temperature: None,
+            context_length: Some(32_000),
+            api_base_url: None,
+            api_key: None,
+            reasoning: None,
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
+        },
+    ));
+    let request = build_summary_request(&[user("hello")], COMPACTION_SUMMARY_PROMPT);
+    let available = available_summary_output_tokens(&request, engine.as_ref());
+    assert_eq!(available, 32_000 - summary_request_tokens(&request));
+
+    let raised = engine_with_raised_output_limit(Arc::clone(&engine), available);
+
+    assert_eq!(raised.effective_max_output_tokens(), Some(available));
+    assert_eq!(engine.effective_max_output_tokens(), Some(1024));
+}
+
+#[tokio::test]
 async fn summary_timeout_records_failure_on_the_request_dump() {
     let handler = crate::http::RequestDumpFailureHandler::default();
     let recorded_failure = Arc::new(Mutex::new(None::<String>));

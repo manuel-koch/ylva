@@ -664,6 +664,32 @@ fn output_limit_cap_copies_without_touching_the_original() {
 }
 
 #[test]
+fn minimum_output_limit_raises_a_copy_without_touching_the_original() {
+    let engine = restricted_engine_with_provider(
+        &["test-*"],
+        "test-model",
+        Arc::new(OpenAiCompatibleProvider::new(
+            "test".to_string(),
+            "http://127.0.0.1:9/v1".to_string(),
+            "test-model".to_string(),
+            None,
+        )),
+    );
+
+    let unlimited = engine.with_minimum_output_limit(8192).expect("copy");
+    assert_eq!(unlimited.effective_max_output_tokens(), None);
+
+    engine.set_max_output_tokens_override(Some(512)).unwrap();
+    let raised = engine.with_minimum_output_limit(8192).expect("raised copy");
+    assert_eq!(raised.effective_max_output_tokens(), Some(8192));
+    assert_eq!(engine.effective_max_output_tokens(), Some(512));
+
+    engine.set_max_output_tokens_override(Some(16384)).unwrap();
+    let kept = engine.with_minimum_output_limit(8192).expect("copy");
+    assert_eq!(kept.effective_max_output_tokens(), Some(16384));
+}
+
+#[test]
 fn unrestricted_empty_engine_stays_chat_capable_for_existing_behavior() {
     let engine = EngineImpl::new(
         Arc::new(MockProvider::new(vec![], Duration::from_millis(0))),

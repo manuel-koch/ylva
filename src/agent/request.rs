@@ -121,6 +121,9 @@ pub(super) fn start_request(
             };
             notices.push(text.to_string());
         }
+        if result.summary_started {
+            notices.push("Started background context compaction.".to_string());
+        }
         if compaction.defer_request(context, engine.as_ref(), &tools) {
             notices.push(
                 "Waiting for the running context summary within its original deadline.".to_string(),

@@ -244,6 +244,30 @@ impl EngineImpl {
 impl EngineImpl {
     /// Resolve the configured limit against the catalog maximum, warning
     /// when the catalog forces it lower.
+    /// Independent copy of the current runtime selection whose output limit
+    /// is `adjust(current limit)`; `None` leaves the limit as it is.
+    fn copy_with_output_limit(
+        &self,
+        adjust: impl FnOnce(Option<usize>) -> Option<usize>,
+    ) -> anyhow::Result<Arc<dyn Engine>> {
+        let snapshot = self.snapshot();
+        let adjusted_limit = adjust(snapshot.max_output_tokens);
+        let runtime_config = Arc::new(RwLock::new(snapshot.clone()));
+        let provider = self.provider.with_runtime_config(runtime_config)?;
+        let copy = Self::new(provider, self.config.clone())
+            .with_model_policy(self.model_policy.clone())
+            .with_favorite_models(self.configured_favorite_models());
+        *copy
+            .runtime_config
+            .write()
+            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))? =
+            snapshot;
+        if adjusted_limit.is_some() {
+            copy.set_max_output_tokens_override(adjusted_limit)?;
+        }
+        Ok(Arc::new(copy))
+    }
+
     fn resolve_max_output_tokens(
         &self,
         model: &str,
@@ -405,24 +429,19 @@ impl Engine for EngineImpl {
         &self,
         maximum_output_tokens: usize,
     ) -> anyhow::Result<Arc<dyn Engine>> {
-        let snapshot = self.snapshot();
-        let capped_limit = snapshot
-            .max_output_tokens
-            .map_or(maximum_output_tokens, |limit| {
+        self.copy_with_output_limit(|limit| {
+            Some(limit.map_or(maximum_output_tokens, |limit| {
                 limit.min(maximum_output_tokens)
-            });
-        let runtime_config = Arc::new(RwLock::new(snapshot.clone()));
-        let provider = self.provider.with_runtime_config(runtime_config)?;
-        let copy = Self::new(provider, self.config.clone())
-            .with_model_policy(self.model_policy.clone())
-            .with_favorite_models(self.configured_favorite_models());
-        *copy
-            .runtime_config
-            .write()
-            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))? =
-            snapshot;
-        copy.set_max_output_tokens_override(Some(capped_limit))?;
-        Ok(Arc::new(copy))
+            }))
+        })
+    }
+
+    fn with_minimum_output_limit(
+        &self,
+        minimum_output_tokens: usize,
+    ) -> anyhow::Result<Arc<dyn Engine>> {
+        // Without a limit nothing is sent, so there is nothing to raise.
+        self.copy_with_output_limit(|limit| limit.map(|limit| limit.max(minimum_output_tokens)))
     }
 
     fn max_output_tokens_for_model(

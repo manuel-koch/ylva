@@ -393,6 +393,14 @@ impl Engine for EngineRouter {
             .with_output_limit_cap(maximum_output_tokens)
     }
 
+    fn with_minimum_output_limit(
+        &self,
+        minimum_output_tokens: usize,
+    ) -> anyhow::Result<Arc<dyn Engine>> {
+        self.active_engine()
+            .with_minimum_output_limit(minimum_output_tokens)
+    }
+
     fn active_engine_name(&self) -> Option<String> {
         Some(self.active_engine_entry().0)
     }

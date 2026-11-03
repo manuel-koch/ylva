@@ -148,6 +148,18 @@ pub trait Engine: Send + Sync {
         anyhow::bail!("engine does not support creating a capped copy")
     }
 
+    /// Create an independent copy of this engine's current runtime selection
+    /// whose output limit is at least `minimum_output_tokens` (clamped to the
+    /// catalog maximum when known), leaving this engine's own limit untouched.
+    /// A higher limit already in effect is kept; no limit stays no limit.
+    fn with_minimum_output_limit(
+        &self,
+        minimum_output_tokens: usize,
+    ) -> anyhow::Result<Arc<dyn Engine>> {
+        let _ = minimum_output_tokens;
+        anyhow::bail!("engine does not support creating a raised copy")
+    }
+
     /// Resolve a selected model's window without retaining another model's metadata.
     fn context_length_for_model(
         &self,

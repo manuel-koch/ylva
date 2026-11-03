@@ -195,6 +195,14 @@ See [configuration](./configuration.md),
   Session-title requests run on `Engine::with_output_limit_cap`, an independent copy
   of the engine's current selection capped at `TITLE_MAX_OUTPUT_TOKENS` (2048),
   so the shared engine's limit is untouched.
+- Compaction output limit: `generate_summary` (`src/agent/compaction.rs`) raises a
+  configured limit to the largest usable value — the window left after the summary
+  request (reasoning tokens count, so the summary text size is no bound), clamped to
+  the catalog maximum — through `Engine::with_minimum_output_limit`, a per-request copy that leaves
+  the conversation's limit and session overrides untouched, and logs a warning. No
+  limit stays no limit. A summary that ends in `OutputTruncated` fails
+  (`SummaryFailed`, reason shown) like any failed compaction, so a partial summary
+  never replaces history.
 
 ## Tool-result wire protocol
 

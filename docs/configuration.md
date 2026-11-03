@@ -753,7 +753,12 @@ Choosing a value (rules of thumb, to be confirmed by real usage):
   - reasoning `low`/`medium` 16K–32K
   - reasoning `high` or heavy file writing 32K–64K
   - compaction engines: leave unlimited, or allow roughly 25–50% of the summarized
-    prefix (e.g. 32K–64K for a 128K conversation); a truncated summary loses context
+    prefix (e.g. 32K–64K for a 128K conversation); a truncated summary loses context.
+    Ylva raises a lower limit per summary request to the largest usable value (the
+    window left after the request, within the catalog maximum) and
+    logs a warning; this also applies when compaction follows the conversation engine.
+    A summary still cut off by the limit is never used: the compaction fails with an
+    error
   - utility engine (session titles): no setting needed; each title request is capped at
     2048 tokens, or at your lower limit, since titles are one short line
 - Never above the model's catalog maximum; on gateways that reserve credit

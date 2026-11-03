@@ -505,7 +505,54 @@ pub enum CompactionOutcome {
 /// buffered without bound.
 pub(crate) const COMPACTION_SUMMARY_MAX_BYTES: usize = 256 * 1024;
 
+/// The largest output limit a summary of `request` can use: the window left
+/// after the request, because input and output must fit together. Reasoning
+/// tokens count against the limit, so it is not bounded by the summary text
+/// size. The catalog maximum is applied by the engine.
+fn available_summary_output_tokens(request: &[Message], engine: &dyn Engine) -> usize {
+    engine
+        .effective_context_length()
+        .saturating_sub(summary_request_tokens(request))
+}
+
+/// Return an engine whose output limit is raised to `available_output_tokens`
+/// when a configured limit is lower, so a summary is never cut off by a limit
+/// sized for chat. The limit is only a ceiling, so raising it costs nothing
+/// unless the summary needs the tokens. If raising is unsupported the engine
+/// is used as is.
+fn engine_with_raised_output_limit(
+    engine: Arc<dyn Engine>,
+    available_output_tokens: usize,
+) -> Arc<dyn Engine> {
+    let Some(configured_limit) = engine.effective_max_output_tokens() else {
+        return engine;
+    };
+    if configured_limit >= available_output_tokens {
+        return engine;
+    }
+    match engine.with_minimum_output_limit(available_output_tokens) {
+        Ok(raised) => {
+            tracing::warn!(
+                configured_max_output_tokens = configured_limit,
+                raised_max_output_tokens = ?raised.effective_max_output_tokens(),
+                "raised the output limit for a compaction summary request"
+            );
+            raised
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                configured_max_output_tokens = configured_limit,
+                "could not raise the output limit for a compaction summary request"
+            );
+            engine
+        }
+    }
+}
+
 /// Drive one tool-free summary request to completion and return its text.
+/// A summary cut off by the output limit is an error, so a partial summary
+/// never replaces history.
 async fn generate_summary(
     engine: Arc<dyn Engine>,
     request: Vec<Message>,
@@ -521,17 +568,50 @@ async fn generate_summary(
             let _ = sender.send(super::UiUpdate::Notice { text, run_id }).await;
         }
     }
+    let available_output_tokens = available_summary_output_tokens(&request, engine.as_ref());
+    let engine = engine_with_raised_output_limit(engine, available_output_tokens);
+    match stream_summary(
+        engine.as_ref(),
+        &request,
+        session_id,
+        &cancellation_token,
+        &request_dump_failure_handler,
+    )
+    .await?
+    {
+        SummaryStream::Complete(summary) => Ok(summary),
+        SummaryStream::Truncated => anyhow::bail!(
+            "compaction summary was cut off by the output token limit ({:?} tokens); \
+             use a compaction engine whose model allows a larger output",
+            engine.effective_max_output_tokens()
+        ),
+    }
+}
+
+enum SummaryStream {
+    Complete(String),
+    Truncated,
+}
+
+async fn stream_summary(
+    engine: &dyn Engine,
+    request: &[Message],
+    session_id: Option<uuid::Uuid>,
+    cancellation_token: &CancellationToken,
+    request_dump_failure_handler: &crate::http::RequestDumpFailureHandler,
+) -> anyhow::Result<SummaryStream> {
     let mut stream = engine
         .chat_with_session_id_and_diagnostics(
-            request,
+            request.to_vec(),
             Vec::new(),
-            cancellation_token,
+            cancellation_token.clone(),
             session_id,
             Box::new(|_, _| Box::pin(async {})),
-            Some(request_dump_failure_handler),
+            Some(request_dump_failure_handler.clone()),
         )
         .await?;
     let mut summary = BoundedBuffer::new(COMPACTION_SUMMARY_MAX_BYTES);
+    let mut truncated = false;
     loop {
         match stream.recv().await {
             Some(StreamEvent::Text(text)) => {
@@ -545,11 +625,13 @@ async fn generate_summary(
                 anyhow::bail!("compaction summary stream was cancelled");
             }
             Some(StreamEvent::Error(error)) => return Err(error),
-            Some(
-                StreamEvent::Thinking(_) | StreamEvent::Delta(_) | StreamEvent::OutputTruncated(_),
-            ) => {}
+            Some(StreamEvent::OutputTruncated(_)) => truncated = true,
+            Some(StreamEvent::Thinking(_) | StreamEvent::Delta(_)) => {}
             None => break,
         }
+    }
+    if truncated {
+        return Ok(SummaryStream::Truncated);
     }
     let summary = String::from_utf8_lossy(summary.as_slice())
         .trim()
@@ -558,7 +640,7 @@ async fn generate_summary(
         !summary.is_empty(),
         "compact engine returned an empty summary"
     );
-    Ok(summary)
+    Ok(SummaryStream::Complete(summary))
 }
 
 #[expect(clippy::too_many_arguments)]
