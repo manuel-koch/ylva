@@ -446,7 +446,7 @@ Perform a documentation review over the following files:
 - docs/features.md
 
 Save your findings as a markdown formatted report to
-`tmp/docs-review.md`.
+`tmp/partial-docs-review.md`.
 
 ---
 
@@ -464,6 +464,6 @@ Only review, don't touch any file!
 - `CHANGELOG.md`
 
 Save your findings as a markdown formatted report to
-`tmp/docs-review.md`.
+`tmp/full-docs-review.md`.
 
 ---

@@ -1472,8 +1472,8 @@ rules = [
     { command = ["head"],         verdict = "auto_approved" },
     { command = ["head", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-c"] },
     
-    { command = ["ls"],           verdict = "auto_approved", only_arguments = ["-l", "-a", "-h", "-d", "-t", "-R"] },
-    { command = ["ls", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-a", "-h", "-d", "-t", "-R"] },
+    { command = ["ls"],           verdict = "auto_approved", only_arguments = ["-l", "-a", "-A", "-h", "-d", "-t", "-R", "-F", "-1", "-S", "-r", "-p", "-i", "-s", "-L", "-H", "-C", "-m", "-n", "-G", "--color", "--classify", "--almost-all"] },
+    { command = ["ls", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-a", "-A", "-h", "-d", "-t", "-R", "-F", "-1", "-S", "-r", "-p", "-i", "-s", "-L", "-H", "-C", "-m", "-n", "-G", "--color", "--classify", "--almost-all"] },
     
     { command = ["rg", "**"],     verdict = "auto_approved", only_arguments = ["-n", "-i", "-e", "-F", "-g", "-C", "-A", "-B", "--files"] },
     

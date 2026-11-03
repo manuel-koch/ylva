@@ -1,5 +1,9 @@
 [tools.bash]
 rules = [
+    # allow use of globs and brace-expansion
+    { rule = "unquoted_glob",            verdict = "auto_approved" },
+    { rule = "unquoted_brace_expansion", verdict = "auto_approved" },
+
     # Broad rules for read-only tools
     { command = ["true"],         verdict = "auto_approved" },
     { command = ["false"],        verdict = "auto_approved" },
@@ -10,7 +14,6 @@ rules = [
     { command = ["test", "**"],   verdict = "auto_approved" },
     { command = ["uname"],        verdict = "auto_approved" },
     { command = ["uname", "**"],  verdict = "auto_approved" },
-    { command = ["rumdl", "check", "**"], verdict = "auto_approved" },
     { command = ["pwd"],          verdict = "auto_approved" },
     { command = ["pwd", "**"],    verdict = "auto_approved" },
 
@@ -22,7 +25,7 @@ rules = [
     # Each bash call is a fresh shell, so `cd dir; cmd` equals `cmd dir/...`.
     { command = ["cd", "**"],     verdict = "auto_approved", only_arguments = [] },
 
-    { command = ["cat", "**"],    verdict = "auto_approved", only_arguments = ["-n", "-b", "-s"] },
+    { command = ["cat", "**"],    verdict = "auto_approved", only_arguments = ["-n", "-b", "-s", "-v", "-e", "-t", "-E", "-T"] },
 
     { command = ["find", "**"],   verdict = "auto_approved", only_arguments = ["-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth", "-depth", "-a", "-o", "!", "-print"] },
 
@@ -60,7 +63,8 @@ rules = [
     { command = ["head"],         verdict = "auto_approved" },
     { command = ["head", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-c"] },
 
-    { command = ["ls", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-a", "-h", "-d", "-t", "-R"] },
+    { command = ["ls"],           verdict = "auto_approved", only_arguments = ["-l", "-a", "-A", "-h", "-d", "-t", "-R", "-F", "-1", "-S", "-r", "-p", "-i", "-s", "-L", "-H", "-C", "-m", "-n", "-G", "--color", "--classify", "--almost-all"] },
+    { command = ["ls", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-a", "-A", "-h", "-d", "-t", "-R", "-F", "-1", "-S", "-r", "-p", "-i", "-s", "-L", "-H", "-C", "-m", "-n", "-G", "--color", "--classify", "--almost-all"] },
 
     { command = ["rg", "**"],     verdict = "auto_approved", only_arguments = ["-n", "-i", "-e", "-F", "-g", "-C", "-A", "-B", "--files"] },
 
@@ -73,9 +77,23 @@ rules = [
 
     { command = ["wc", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-w", "-c", "-m"] },
 
+    # commands that may have side-effects, but we deem them harmless
+    { command = ["md5sum", "**"],          verdict = "auto_approved" },
+    { command = ["sha1sum", "**"],         verdict = "auto_approved" },
+    { command = ["sha256sum", "**"],       verdict = "auto_approved" },
+    { command = ["sha384sum", "**"],       verdict = "auto_approved" },
+    { command = ["rumdl", "check", "**"],  verdict = "auto_approved" },
+    { command = ["rumdl", "fmt", "**"],    verdict = "auto_approved" },
+    { command = ["cargo", "fmt"],          verdict = "auto_approved" },
+    { command = ["cargo", "fmt", "**"],    verdict = "auto_approved" },
+    { command = ["cargo", "test"],         verdict = "auto_approved" },
+    { command = ["cargo", "test", "**"],   verdict = "auto_approved" },
+    { command = ["cargo", "check"],        verdict = "auto_approved" },
+    { command = ["cargo", "check", "**"],  verdict = "auto_approved" },
+    { command = ["cargo", "clippy"],       verdict = "auto_approved" },
+    { command = ["cargo", "clippy", "**"], verdict = "auto_approved" },
+
     # need to use the default rules to avoid unwanted auto-approvals
-    { rule = "unquoted_glob",              verdict = "user_approval_required" },
-    { rule = "unquoted_brace_expansion",   verdict = "user_approval_required" },
     { rule = "variable_assignment_prefix", verdict = "user_approval_required" },
     { rule = "backgrounded",               verdict = "auto_denied" },
 ]
