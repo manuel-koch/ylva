@@ -524,13 +524,18 @@ fn migrated_sample_uses_argument_filters_and_explicit_structural_protection() {
     for command in [
         "cat *.rs",
         "cat {a,b}",
-        "FOO=bar cat file",
         "grep -r needle *.rs",
         "rg --files -g *.rs",
         "find . -name *.rs -print",
         "git check-ignore -v *.rs",
-        "VALUE=other git check-ignore -v file",
     ] {
+        assert_eq!(
+            context.check_command(command),
+            Some(ApprovalCheck::AutoApproved),
+            "{command}"
+        );
+    }
+    for command in ["FOO=bar cat file", "VALUE=other git check-ignore -v file"] {
         assert_eq!(
             context.check_command(command),
             Some(ApprovalCheck::UserApprovalRequired),
