@@ -28,6 +28,7 @@ fn oversized_subagent_result_preserves_canonical_output_and_bounds_parent_projec
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "root-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: Some(20_000),
                 api_base_url: None,
@@ -47,6 +48,7 @@ fn oversized_subagent_result_preserves_canonical_output_and_bounds_parent_projec
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "summary-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: Some(16_000),
                 api_base_url: None,
@@ -181,6 +183,7 @@ fn subagent_role_run_returns_immediately_after_finish_tool_is_called() {
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,
@@ -300,6 +303,7 @@ fn root_role_does_not_receive_the_subagent_iteration_budget_heads_up() {
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,
@@ -364,6 +368,7 @@ fn subagent_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,

@@ -283,6 +283,21 @@ pub(super) fn build_entry(
                     .add_modifier(Modifier::DIM),
             ));
         }
+        ChatEntry::TruncationTrailer { text } => {
+            for (index, wrapped) in textwrap::wrap(text, wrap_width.saturating_sub(6).max(1))
+                .into_iter()
+                .enumerate()
+            {
+                layout.rows.push(Line::styled(
+                    if index == 0 {
+                        format!("  ⚠️  {wrapped}")
+                    } else {
+                        format!("      {wrapped}")
+                    },
+                    Style::default().fg(error_color()),
+                ));
+            }
+        }
         ChatEntry::Notice { text } => {
             for (index, line) in text.lines().enumerate() {
                 let wrapped = textwrap::wrap(line, wrap_width.saturating_sub(6).max(1));

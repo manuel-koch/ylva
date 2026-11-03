@@ -473,6 +473,7 @@ async fn a_completed_turn_above_the_soft_threshold_compacts_the_model_view() {
     let active_config = EngineConfig {
         provider_connection: "mock".to_string(),
         model: "test-model".to_string(),
+        max_output_tokens: None,
         temperature: None,
         context_length: Some(context_length),
         api_base_url: None,
@@ -685,6 +686,7 @@ async fn a_failed_background_summary_falls_back_to_dropping_at_the_next_boundary
     let active_config = EngineConfig {
         provider_connection: "mock".to_string(),
         model: "test-model".to_string(),
+        max_output_tokens: None,
         temperature: None,
         context_length: Some(context_length),
         api_base_url: None,
@@ -776,6 +778,7 @@ async fn a_turn_above_the_hard_threshold_drops_without_starting_a_summary() {
     let active_config = EngineConfig {
         provider_connection: "mock".to_string(),
         model: "test-model".to_string(),
+        max_output_tokens: None,
         temperature: None,
         context_length: Some(context_length),
         api_base_url: None,

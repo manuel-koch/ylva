@@ -144,6 +144,15 @@ impl RunState {
                     self.mode = AgentMode::Idle;
                 }
             }
+            AgentEvent::OutputTruncated(text) => {
+                let _ = self
+                    .ui_tx
+                    .send(UiUpdate::OutputTruncated {
+                        text,
+                        run_id: self.own_run_id,
+                    })
+                    .await;
+            }
             AgentEvent::PreflightNotice {
                 text,
                 acknowledgement,

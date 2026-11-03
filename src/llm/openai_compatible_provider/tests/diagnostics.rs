@@ -594,6 +594,107 @@ async fn totals_after_request_with_cost(with_parser: bool) -> Option<String> {
     ledger.totals_text()
 }
 
+async fn captured_chat_request_body(max_output_tokens: Option<usize>) -> serde_json::Value {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local test server");
+    let address = listener.local_addr().expect("local test server address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let body = loop {
+            let bytes_read = stream.read(&mut buffer).await.expect("read request");
+            request.extend_from_slice(&buffer[..bytes_read]);
+            let Some(header_end) = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|position| position + 4)
+            else {
+                continue;
+            };
+            let header_text = String::from_utf8_lossy(&request[..header_end]).to_string();
+            let content_length = header_text
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().expect("content length"))
+                })
+                .expect("content length header");
+            if request.len() >= header_end + content_length {
+                break serde_json::from_slice::<serde_json::Value>(
+                    &request[header_end..header_end + content_length],
+                )
+                .expect("JSON request body");
+            }
+        };
+        let response_body = "data: [DONE]\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        body
+    });
+    let provider = OpenAiCompatibleProvider::new(
+        "limit-test".to_string(),
+        format!("http://{address}"),
+        "limit-model".to_string(),
+        None,
+    );
+    provider
+        .runtime_config
+        .write()
+        .expect("Engine runtime config lock")
+        .max_output_tokens = max_output_tokens;
+    let mut events = provider
+        .chat(Vec::new(), Vec::new(), CancellationToken::new())
+        .await
+        .expect("provider stream");
+    while events.recv().await.is_some() {}
+    server.await.expect("server task")
+}
+
+#[test]
+fn chat_request_carries_max_tokens_only_when_a_limit_is_set() {
+    crate::test_support::run_locked(async {
+        let limited = captured_chat_request_body(Some(1234)).await;
+        assert_eq!(limited["max_tokens"], 1234);
+        let unlimited = captured_chat_request_body(None).await;
+        assert!(unlimited.get("max_tokens").is_none());
+    });
+}
+
+#[test]
+fn truncation_notice_detects_chat_and_responses_limit_stops() {
+    let chat = r#"{"choices":[{"finish_reason":"length"}]}"#;
+    let notice = output_limit_truncation_notice(chat, Some(2048)).expect("chat notice");
+    assert!(notice.contains("2048") && notice.contains("max_output_tokens"));
+    assert!(output_limit_truncation_notice(chat, None).is_some());
+    let responses = r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}"#;
+    assert!(output_limit_truncation_notice(responses, Some(10)).is_some());
+    let stopped = r#"{"choices":[{"finish_reason":"stop"}]}"#;
+    assert!(output_limit_truncation_notice(stopped, Some(10)).is_none());
+    assert!(output_limit_truncation_notice("not json", Some(10)).is_none());
+}
+
+#[test]
+fn output_limit_hint_is_added_only_for_credit_or_gateway_errors_without_a_limit() {
+    let credit = || anyhow::anyhow!("chat request failed with HTTP 402: need more credits");
+    let hinted = format!("{:#}", with_output_limit_hint(credit(), None));
+    assert!(hinted.contains("need more credits") && hinted.contains("max_output_tokens"));
+    let gateway = anyhow::anyhow!("chat request failed with HTTP 500: boom");
+    assert!(format!("{:#}", with_output_limit_hint(gateway, None)).contains("max_output_tokens"));
+    assert!(!format!("{:#}", with_output_limit_hint(credit(), Some(100))).contains("hint"));
+    let client_error = anyhow::anyhow!("chat request failed with HTTP 400: bad");
+    assert!(!format!("{:#}", with_output_limit_hint(client_error, None)).contains("hint"));
+}
+
 #[test]
 fn reported_cost_is_recorded_only_with_a_usage_cost_parser() {
     crate::test_support::run_locked(async {

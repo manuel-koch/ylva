@@ -396,11 +396,13 @@ fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
                 initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     context_length_override: None,
+                    max_output_tokens_override: None,
                     provider_connection: "stub".to_string(),
                     model: crate::llm::ModelInfo {
                         reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                         id: format!("model-{index}"),
                         context_length: None,
+                        max_output_tokens: None,
                         reasoning_efforts: None,
                         reasoning_default: None,
                         input_modalities: None,
@@ -487,8 +489,10 @@ fn slash_overlay_model_drag_copies_the_filtered_model_label() {
         catalog_context_length: None,
         selection: ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: provider_connection.to_string(),
             model: crate::llm::ModelInfo {
+                max_output_tokens: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: model_id.to_string(),
                 context_length: None,
@@ -1359,8 +1363,10 @@ fn model_choice(model_id: &str) -> ModelChoice {
         catalog_context_length: None,
         selection: ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "stub".to_string(),
             model: crate::llm::ModelInfo {
+                max_output_tokens: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: model_id.to_string(),
                 context_length: None,

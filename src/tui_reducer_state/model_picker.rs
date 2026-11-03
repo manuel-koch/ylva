@@ -486,6 +486,8 @@ pub enum ParameterField {
     ContextLength,
     /// Reasoning effort, cycled through advertised choices or labelled unverified overrides.
     ReasoningEffort,
+    /// Output-token limit requested from the provider; `None` sends no limit.
+    MaxOutputTokens,
 }
 
 /// Draft of the follow-up parameter popup. Edits stay here until the popup is
@@ -506,6 +508,52 @@ pub struct ModelParameterEdit {
     pub context_length_edited: bool,
     /// Draft reasoning effort. `None` selects the provider default.
     pub reasoning_effort: Option<String>,
+    /// Draft output-token limit. `None` means no limit is sent.
+    pub max_output_tokens: Option<usize>,
+    /// Catalog maximum the draft output limit may not exceed, when known.
+    pub max_output_tokens_maximum: Option<usize>,
+    /// Whether the output limit was changed in this popup.
+    pub max_output_tokens_edited: bool,
+}
+
+/// Smallest output-limit step; every ladder value is this unit doubled.
+const MAX_OUTPUT_TOKENS_LADDER_UNIT: usize = 1024;
+/// Number of doublings on the output-limit ladder (1K up to 256K).
+const MAX_OUTPUT_TOKENS_LADDER_DOUBLINGS: u32 = 8;
+
+/// Move the output-token limit along a 1K…256K doubling ladder capped at the
+/// catalog `maximum` (which becomes the last step when known). Moving up from
+/// `None` selects the lowest step; moving down from the lowest step returns
+/// to `None`.
+pub(crate) fn adjust_max_output_tokens(
+    current: Option<usize>,
+    delta: isize,
+    maximum: Option<usize>,
+) -> Option<usize> {
+    let mut steps: Vec<usize> = (0..=MAX_OUTPUT_TOKENS_LADDER_DOUBLINGS)
+        .map(|doublings| MAX_OUTPUT_TOKENS_LADDER_UNIT << doublings)
+        .filter(|step| maximum.is_none_or(|maximum| *step < maximum))
+        .collect();
+    if let Some(maximum) = maximum {
+        steps.push(maximum);
+    }
+    let floor = current.unwrap_or(0);
+    if delta >= 0 {
+        match steps.iter().copied().find(|step| *step > floor) {
+            Some(step) => Some(step),
+            None => current,
+        }
+    } else {
+        steps.iter().copied().rev().find(|step| *step < floor)
+    }
+}
+
+/// Whether the output limit can still move smaller and greater.
+fn max_output_tokens_directions(current: Option<usize>, maximum: Option<usize>) -> (bool, bool) {
+    (
+        current.is_some(),
+        adjust_max_output_tokens(current, 1, maximum) != current,
+    )
 }
 
 /// Smallest context-window step and the unit every step is a multiple of.
@@ -780,6 +828,20 @@ pub(crate) fn model_parameter_rows(edit: &ModelParameterEdit, choice: &ModelChoi
                 }
                 None => "Context length:  unknown".to_string(),
             },
+            ParameterField::MaxOutputTokens => {
+                let directions = max_output_tokens_directions(
+                    edit.max_output_tokens,
+                    edit.max_output_tokens_maximum,
+                );
+                let value = match edit.max_output_tokens {
+                    Some(limit) => format_token_estimate(limit),
+                    None => "unlimited".to_string(),
+                };
+                format!(
+                    "Max output tokens:  {}",
+                    format_parameter_value(&value, directions)
+                )
+            }
             ParameterField::ReasoningEffort => {
                 let reasoning_efforts = choice.reasoning_choices();
                 let directions = reasoning_effort_directions(
@@ -1041,9 +1103,17 @@ impl AppState {
         if !choice.reasoning_choices().is_empty() || choice.selection.reasoning_effort.is_some() {
             fields.push(ParameterField::ReasoningEffort);
         }
+        fields.push(ParameterField::MaxOutputTokens);
         *parameters = Some(ModelParameterEdit {
             choice_index,
             fields,
+            max_output_tokens: choice
+                .selection_target
+                .as_ref()
+                .and_then(|target| target.max_output_tokens)
+                .or(choice.selection.max_output_tokens_override),
+            max_output_tokens_maximum: choice.selection.model.max_output_tokens,
+            max_output_tokens_edited: false,
             cursor: 0,
             context_length: choice
                 .selection_target
@@ -1099,6 +1169,14 @@ impl AppState {
                 ));
                 edit.context_length_edited = true;
             }
+            ParameterField::MaxOutputTokens => {
+                edit.max_output_tokens = adjust_max_output_tokens(
+                    edit.max_output_tokens,
+                    delta,
+                    edit.max_output_tokens_maximum,
+                );
+                edit.max_output_tokens_edited = true;
+            }
             ParameterField::ReasoningEffort => {
                 let Some((reasoning_efforts, reasoning_default)) = reasoning_cycle else {
                     return;
@@ -1139,6 +1217,12 @@ impl AppState {
                 (choice.selection_target.as_mut(), edit.context_length)
             {
                 target.context_length = context_length;
+            }
+        }
+        if edit.max_output_tokens_edited {
+            choice.selection.max_output_tokens_override = edit.max_output_tokens;
+            if let Some(target) = choice.selection_target.as_mut() {
+                target.max_output_tokens = edit.max_output_tokens;
             }
         }
         choice.refresh_label();

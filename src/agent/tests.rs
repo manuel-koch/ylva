@@ -58,6 +58,7 @@ pub(in crate::agent) fn test_engine() -> Arc<dyn Engine> {
         EngineConfig {
             provider_connection: "mock".to_string(),
             model: "test-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: None,
             api_base_url: None,
@@ -77,6 +78,7 @@ fn test_engine_with_context_length(context_length: usize) -> Arc<dyn Engine> {
         EngineConfig {
             provider_connection: "mock".to_string(),
             model: "test-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: Some(context_length),
             api_base_url: None,
@@ -580,6 +582,7 @@ fn root_reprompts_after_subagent_finish_arrives_mid_stream() {
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,

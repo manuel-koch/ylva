@@ -35,10 +35,12 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
             initial_reasoning_effort: None,
             selection: ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: provider_connection.to_string(),
                 model: crate::llm::ModelInfo {
                     id: model_id.to_string(),
                     context_length: None,
+                    max_output_tokens: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,
@@ -254,10 +256,12 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_headers() {
         catalog_context_length: None,
         selection: ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: provider_connection.to_string(),
             model: crate::llm::ModelInfo {
                 id: label.to_string(),
                 context_length: None,
+                max_output_tokens: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: None,
                 reasoning_default: None,
@@ -310,10 +314,12 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_headers() {
 fn model_choice_label_explains_reasoning_effort_availability() {
     let model_option = |reasoning_efforts| ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
             context_length: None,
+            max_output_tokens: None,
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts,
             reasoning_default: None,
@@ -345,10 +351,12 @@ fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
         },
         selection: ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "stub".to_string(),
             model: crate::llm::ModelInfo {
                 id: "model".to_string(),
                 context_length: None,
+                max_output_tokens: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
                 reasoning_default: None,
@@ -393,10 +401,12 @@ fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
 fn model_choice_label_shows_the_provider_advertised_default_effort() {
     let option = |reasoning_efforts, reasoning_effort| ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
             context_length: None,
+            max_output_tokens: None,
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts,
             reasoning_default: Some("medium".to_string()),
@@ -457,10 +467,12 @@ fn two_row_fixture_choices() -> Vec<ModelChoice> {
         catalog_context_length: None,
         selection: ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: provider_connection.to_string(),
             model: crate::llm::ModelInfo {
                 id: "model".to_string(),
                 context_length: None,
+                max_output_tokens: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: None,
                 reasoning_default: None,
@@ -625,9 +637,11 @@ fn two_row_layout_text_is_identity_then_details_per_entry() {
 fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
     let option = ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: "openrouter".to_string(),
         model: crate::llm::ModelInfo {
             id: "openai/gpt-oss-120b".to_string(),
+            max_output_tokens: None,
             context_length: Some(131_072),
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: Some(vec!["low".to_string()]),
@@ -647,9 +661,11 @@ fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
 fn model_choice_label_formats_context_length_as_compact_decimal_tokens() {
     let model_option = |context_length| ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
+            max_output_tokens: None,
             context_length: Some(context_length),
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
@@ -680,9 +696,11 @@ fn model_choice_label_formats_context_length_as_compact_decimal_tokens() {
 fn model_choice_label_marks_advertised_non_text_input_modalities() {
     let model_option = |input_modalities| ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
+            max_output_tokens: None,
             context_length: None,
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
@@ -734,6 +752,27 @@ fn context_length_step_is_an_eighth_rounded_to_the_token_step_with_a_floor() {
     assert_eq!(context_length_step(1024 * KB), 128 * KB);
     assert_eq!(context_length_step(64 * KB), 32 * KB);
     assert_eq!(context_length_step(0), 32 * KB);
+}
+
+#[test]
+fn adjust_max_output_tokens_climbs_from_unlimited_and_returns_to_it() {
+    use crate::tui_reducer_state::model_picker::adjust_max_output_tokens;
+    assert_eq!(adjust_max_output_tokens(None, 1, None), Some(1024));
+    assert_eq!(adjust_max_output_tokens(Some(1024), 1, None), Some(2048));
+    assert_eq!(adjust_max_output_tokens(Some(1024), -1, None), None);
+    assert_eq!(adjust_max_output_tokens(None, -1, None), None);
+    assert_eq!(
+        adjust_max_output_tokens(Some(256 * 1024), 1, None),
+        Some(256 * 1024)
+    );
+    assert_eq!(
+        adjust_max_output_tokens(Some(8192), 1, Some(10_000)),
+        Some(10_000)
+    );
+    assert_eq!(
+        adjust_max_output_tokens(Some(10_000), 1, Some(10_000)),
+        Some(10_000)
+    );
 }
 
 #[test]
@@ -830,9 +869,11 @@ fn parameter_fixture(
     context_length: Option<usize>,
 ) -> AppState {
     let selection = ProviderModelOption {
+        max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
+            max_output_tokens: None,
             context_length,
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts,
@@ -854,6 +895,7 @@ fn parameter_fixture(
                 provider_connection: "stub".to_string(),
                 model: "model".to_string(),
                 context_length: 256 * KB,
+                max_output_tokens: None,
             }),
             selection,
             is_active: false,
@@ -873,9 +915,11 @@ fn engine_parameter_fixture(
     catalog_context_length: Option<usize>,
 ) -> AppState {
     let selection = ProviderModelOption {
+        max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "model".to_string(),
+            max_output_tokens: None,
             context_length: Some(configured_context_length),
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
@@ -899,6 +943,7 @@ fn engine_parameter_fixture(
                 provider_connection: "stub".to_string(),
                 model: "model".to_string(),
                 context_length: configured_context_length,
+                max_output_tokens: None,
             }),
             selection,
             is_active: false,
@@ -1017,7 +1062,8 @@ fn parameter_popup_shows_reasoning_only_for_models_with_selectable_efforts() {
         edit.fields,
         vec![
             ParameterField::ContextLength,
-            ParameterField::ReasoningEffort
+            ParameterField::ReasoningEffort,
+            ParameterField::MaxOutputTokens
         ]
     );
     assert_eq!(
@@ -1038,7 +1084,13 @@ fn parameter_popup_shows_reasoning_only_for_models_with_selectable_efforts() {
     else {
         panic!("popup must open");
     };
-    assert_eq!(edit.fields, vec![ParameterField::ContextLength]);
+    assert_eq!(
+        edit.fields,
+        vec![
+            ParameterField::ContextLength,
+            ParameterField::MaxOutputTokens
+        ]
+    );
     assert_eq!(
         edit.context_length, None,
         "no preview and no catalog window is unknown"
@@ -1092,6 +1144,7 @@ fn parameter_rows_show_label_and_value_for_each_field() {
         vec![
             "Context length:  ◂ 262.1K ▸".to_string(),
             "Reasoning effort:    default (medium) ▸".to_string(),
+            "Max output tokens:    unlimited ▸".to_string(),
         ]
     );
 }
@@ -1172,7 +1225,10 @@ fn context_length_row_shows_no_arrows_while_the_window_is_unknown() {
     state.open_model_parameters();
     assert_eq!(
         popup_rows(&state),
-        vec!["Context length:  unknown".to_string()]
+        vec![
+            "Context length:  unknown".to_string(),
+            "Max output tokens:    unlimited ▸".to_string()
+        ]
     );
 }
 
@@ -1208,9 +1264,11 @@ fn reasoning_row_marks_each_direction_that_can_still_move() {
 fn plain_choice(provider_connection: &str, model_id: &str) -> ModelChoice {
     let selection = ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: provider_connection.to_string(),
         model: crate::llm::ModelInfo {
             id: model_id.to_string(),
+            max_output_tokens: None,
             context_length: None,
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
@@ -1310,6 +1368,9 @@ fn regrouping_keeps_the_parameter_popup_bound_to_its_model() {
         context_length: None,
         context_length_maximum: None,
         context_length_edited: false,
+        max_output_tokens: None,
+        max_output_tokens_maximum: None,
+        max_output_tokens_edited: false,
         reasoning_effort: None,
     });
 
@@ -1358,9 +1419,11 @@ fn favorites_follow_configured_rank_within_sorted_connections_and_filters_apply(
 fn model_choice_label_preserves_explicit_effort_without_selectable_capability() {
     for reasoning_efforts in [None, Some(Vec::new())] {
         let option = ProviderModelOption {
+            max_output_tokens_override: None,
             provider_connection: "arbitrary-connection".to_string(),
             model: crate::llm::ModelInfo {
                 id: "model".to_string(),
+                max_output_tokens: None,
                 context_length: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts,
@@ -1480,7 +1543,7 @@ fn rejected_evidence_does_not_offer_gateway_overrides_but_explicit_effort_can_re
             &choices[0].selection.model,
         );
         state.open_model_parameters();
-        assert_eq!(popup_rows(&state).len(), 1);
+        assert_eq!(popup_rows(&state).len(), 2);
         state.leave_model_parameters();
         let SlashOverlay::ModelPicker { choices, .. } = &mut state.slash_overlay else {
             panic!("picker");

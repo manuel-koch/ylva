@@ -190,6 +190,20 @@ impl EngineImpl {
         runtime.context_length = context_override.unwrap_or_else(|| {
             self.context_length_for_model(&option.model.id, option.model.context_length)
         });
+        let max_output_override = if change.is_some() {
+            option
+                .max_output_tokens_override
+                .or(runtime.max_output_tokens_override)
+        } else {
+            option.max_output_tokens_override
+        }
+        .map(|requested| {
+            super::config::clamp_to_catalog_maximum(requested, option.model.max_output_tokens)
+        });
+        runtime.max_output_tokens_override = max_output_override;
+        runtime.max_output_tokens = max_output_override.or_else(|| {
+            self.resolve_max_output_tokens(&option.model.id, option.model.max_output_tokens)
+        });
         // Reset warning when the actual effective selection changes, including default.
         let selection = runtime
             .reasoning_effort
@@ -228,6 +242,30 @@ impl EngineImpl {
 }
 
 impl EngineImpl {
+    /// Resolve the configured limit against the catalog maximum, warning
+    /// when the catalog forces it lower.
+    fn resolve_max_output_tokens(
+        &self,
+        model: &str,
+        catalog_max_output_tokens: Option<usize>,
+    ) -> Option<usize> {
+        let resolved = self
+            .config
+            .max_output_tokens_for_model(model, catalog_max_output_tokens);
+        if let (Some(resolved), Some(configured)) = (resolved, self.config.max_output_tokens) {
+            if resolved < configured {
+                tracing::warn!(
+                    provider_connection = %self.config.provider_connection,
+                    model,
+                    configured_max_output_tokens = configured,
+                    max_output_tokens = resolved,
+                    "configured max_output_tokens exceeds the model's advertised output maximum; clamped"
+                );
+            }
+        }
+        resolved
+    }
+
     fn configured_favorite_models(&self) -> Vec<String> {
         self.favorite_models
             .read()
@@ -296,6 +334,9 @@ impl Engine for EngineImpl {
         if let Some(context_length) = option.context_length_override {
             self.set_context_length_override(Some(context_length))?;
         }
+        if let Some(max_output_tokens) = option.max_output_tokens_override {
+            self.set_max_output_tokens_override(Some(max_output_tokens))?;
+        }
         Ok(())
     }
 
@@ -358,6 +399,39 @@ impl Engine for EngineImpl {
                 .with_model_policy(self.model_policy.clone())
                 .with_favorite_models(self.configured_favorite_models()),
         ))
+    }
+
+    fn with_output_limit_cap(
+        &self,
+        maximum_output_tokens: usize,
+    ) -> anyhow::Result<Arc<dyn Engine>> {
+        let snapshot = self.snapshot();
+        let capped_limit = snapshot
+            .max_output_tokens
+            .map_or(maximum_output_tokens, |limit| {
+                limit.min(maximum_output_tokens)
+            });
+        let runtime_config = Arc::new(RwLock::new(snapshot.clone()));
+        let provider = self.provider.with_runtime_config(runtime_config)?;
+        let copy = Self::new(provider, self.config.clone())
+            .with_model_policy(self.model_policy.clone())
+            .with_favorite_models(self.configured_favorite_models());
+        *copy
+            .runtime_config
+            .write()
+            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))? =
+            snapshot;
+        copy.set_max_output_tokens_override(Some(capped_limit))?;
+        Ok(Arc::new(copy))
+    }
+
+    fn max_output_tokens_for_model(
+        &self,
+        model: &str,
+        catalog_max_output_tokens: Option<usize>,
+    ) -> Option<usize> {
+        self.config
+            .max_output_tokens_for_model(model, catalog_max_output_tokens)
     }
 
     fn context_length_for_model(
@@ -464,6 +538,7 @@ impl Engine for EngineImpl {
         }
         config.model = runtime_config.model;
         config.temperature = runtime_config.temperature;
+        config.max_output_tokens = runtime_config.max_output_tokens;
         config
     }
 
@@ -500,6 +575,11 @@ impl Engine for EngineImpl {
                 model,
                 info.as_ref().and_then(|info| info.context_length),
             );
+            runtime.max_output_tokens_override = None;
+            runtime.max_output_tokens = self.resolve_max_output_tokens(
+                model,
+                info.as_ref().and_then(|info| info.max_output_tokens),
+            );
             runtime.input_modalities = info.and_then(|info| info.input_modalities);
             *self
                 .warned_selection
@@ -524,6 +604,8 @@ impl Engine for EngineImpl {
             .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))?;
         if model_changed {
             runtime_config.context_length = self.context_length_for_model(model, None);
+            runtime_config.max_output_tokens_override = None;
+            runtime_config.max_output_tokens = self.resolve_max_output_tokens(model, None);
             runtime_config.input_modalities = None;
             self.catalog_hydrated.store(false, Ordering::Release);
         }
@@ -578,6 +660,47 @@ impl Engine for EngineImpl {
             runtime_config.context_length = context_length;
         }
         Ok(())
+    }
+
+    fn set_max_output_tokens_override(
+        &self,
+        max_output_tokens: Option<usize>,
+    ) -> anyhow::Result<()> {
+        let mut runtime_config = self
+            .runtime_config
+            .write()
+            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))?;
+        let catalog_maximum = runtime_config
+            .model_info
+            .as_ref()
+            .filter(|info| info.id == runtime_config.model)
+            .and_then(|info| info.max_output_tokens);
+        let max_output_tokens = max_output_tokens
+            .map(|requested| super::config::clamp_to_catalog_maximum(requested, catalog_maximum));
+        runtime_config.max_output_tokens_override = max_output_tokens;
+        if max_output_tokens.is_some() {
+            runtime_config.max_output_tokens = max_output_tokens;
+        }
+        Ok(())
+    }
+
+    fn effective_max_output_tokens(&self) -> Option<usize> {
+        self.runtime_config
+            .read()
+            .expect("the engine runtime configuration lock is poisoned")
+            .max_output_tokens
+    }
+
+    fn adopt_catalog_max_output_tokens(&self, catalog_max_output_tokens: Option<usize>) {
+        let mut runtime_config = self
+            .runtime_config
+            .write()
+            .expect("the engine runtime configuration lock is poisoned");
+        if runtime_config.max_output_tokens_override.is_some() {
+            return;
+        }
+        runtime_config.max_output_tokens =
+            self.resolve_max_output_tokens(&runtime_config.model, catalog_max_output_tokens);
     }
 
     fn adopt_catalog_context_length(&self, catalog_context_length: Option<usize>) {
@@ -652,6 +775,10 @@ impl Engine for EngineImpl {
                 if runtime.context_length_override.is_none() {
                     runtime.context_length =
                         self.context_length_for_model(&captured.model, model.context_length);
+                }
+                if runtime.max_output_tokens_override.is_none() {
+                    runtime.max_output_tokens =
+                        self.resolve_max_output_tokens(&captured.model, model.max_output_tokens);
                 }
                 if let Some(modalities) = model.input_modalities.as_ref() {
                     runtime.input_modalities = Some(modalities.clone());

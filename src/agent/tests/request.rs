@@ -332,6 +332,98 @@ fn request_estimate_updates_footer_with_the_sent_request_window() {
     });
 }
 
+struct StreamNoticeEngine {
+    inner: EngineImpl,
+}
+
+impl Engine for StreamNoticeEngine {
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async {
+            let (sender, receiver) = mpsc::channel(8);
+            sender
+                .send(StreamEvent::OutputTruncated("cut off".to_string()))
+                .await
+                .expect("send notice");
+            sender
+                .send(StreamEvent::Text("answer".to_string()))
+                .await
+                .expect("send text");
+            sender.send(StreamEvent::Done).await.expect("send done");
+            Ok(receiver)
+        })
+    }
+
+    fn config(&self) -> EngineConfig {
+        self.inner.config()
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        self.inner.list_models()
+    }
+
+    fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        self.inner.switch_model(model)
+    }
+}
+
+#[test]
+fn stream_notice_is_published_after_the_response_it_explains() {
+    crate::test_support::run_locked(async {
+        let engine: Arc<dyn Engine> = Arc::new(StreamNoticeEngine {
+            inner: EngineImpl::new(
+                Arc::new(MockProvider::new(Vec::new(), Duration::from_millis(0))),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "test-model".to_string(),
+                    max_output_tokens: None,
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
+                },
+            ),
+        });
+        let (mut agent, mut ui_rx) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+        let handle = agent.run();
+        agent
+            .send_command(AgentCommand::Prompt("hello".to_string()))
+            .await;
+
+        let mut updates = Vec::new();
+        while !updates
+            .iter()
+            .any(|update| matches!(update, UiUpdate::OutputTruncated { .. }))
+        {
+            let update = tokio::time::timeout(Duration::from_millis(500), ui_rx.recv())
+                .await
+                .expect("the notice arrives")
+                .expect("the UI channel stays open");
+            updates.push(update);
+        }
+        let position_of = |wanted: fn(&UiUpdate) -> bool| updates.iter().position(wanted);
+        let done = position_of(|update| matches!(update, UiUpdate::StreamDone))
+            .expect("stream done precedes the notice");
+        let notice = position_of(|update| matches!(update, UiUpdate::OutputTruncated { .. }))
+            .expect("notice published");
+        assert!(done < notice, "notice must follow StreamDone: {updates:?}");
+
+        drop(agent);
+        handle
+            .await
+            .expect("agent task should not panic")
+            .expect("agent should stop cleanly after the channel closes");
+    });
+}
+
 #[test]
 fn engine_notices_are_forwarded_before_the_stream_starts() {
     crate::test_support::run_locked(async {
@@ -344,6 +436,7 @@ fn engine_notices_are_forwarded_before_the_stream_starts() {
                     EngineConfig {
                         provider_connection: "mock".to_string(),
                         model: "test-model".to_string(),
+                        max_output_tokens: None,
                         temperature: None,
                         context_length: None,
                         api_base_url: None,

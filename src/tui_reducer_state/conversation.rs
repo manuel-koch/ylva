@@ -225,6 +225,12 @@ pub enum ChatEntry {
     Notice {
         text: String,
     },
+    /// Red trailer closing the response or thinking bubble directly above it
+    /// when the provider cut that output off at the output-token limit, so
+    /// missing text is obvious even when the cut lands mid-sentence.
+    TruncationTrailer {
+        text: String,
+    },
     /// Non-message divider marking where compaction cut the transcript: the
     /// `summarized_messages` messages before it are represented in the model
     /// view by the compaction summary, while the full transcript stays
@@ -695,6 +701,13 @@ impl AppState {
     pub fn push_notice_to(&mut self, run_id: Option<Uuid>, text: String) {
         self.target_messages_mut(run_id)
             .push(ChatEntry::Notice { text });
+    }
+
+    /// Push the red trailer that closes a response cut off by the output
+    /// limit, routed like [`Self::push_notice_to`].
+    pub fn push_truncation_trailer_to(&mut self, run_id: Option<Uuid>, text: String) {
+        self.target_messages_mut(run_id)
+            .push(ChatEntry::TruncationTrailer { text });
     }
 
     pub fn push_user_bubble(&mut self, text: String, state: UserMessageState) {

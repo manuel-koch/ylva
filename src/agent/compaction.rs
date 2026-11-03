@@ -545,7 +545,9 @@ async fn generate_summary(
                 anyhow::bail!("compaction summary stream was cancelled");
             }
             Some(StreamEvent::Error(error)) => return Err(error),
-            Some(StreamEvent::Thinking(_) | StreamEvent::Delta(_)) => {}
+            Some(
+                StreamEvent::Thinking(_) | StreamEvent::Delta(_) | StreamEvent::OutputTruncated(_),
+            ) => {}
             None => break,
         }
     }

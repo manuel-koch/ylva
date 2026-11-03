@@ -28,6 +28,7 @@ fn user_visible_tool_failures_are_written_to_the_log() {
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,

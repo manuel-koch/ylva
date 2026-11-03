@@ -228,6 +228,7 @@ fn estimated_usage_ratio_uses_the_active_engines_effective_context_length() {
     let configured = EngineConfig {
         provider_connection: "ollama".to_string(),
         model: "test-model".to_string(),
+        max_output_tokens: None,
         temperature: None,
         context_length: Some(64),
         api_base_url: None,

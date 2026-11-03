@@ -303,6 +303,7 @@ async fn ollama_chat_request_carries_the_runtime_reasoning_effort() {
         EngineConfig {
             provider_connection: "ollama".to_string(),
             model: "qwen3:8b".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: None,
             api_base_url: Some(server.base_url()),
@@ -378,6 +379,7 @@ async fn openrouter_request_projects_selected_image_capability_once() {
         EngineConfig {
             provider_connection: "openrouter".to_string(),
             model: "provider/vision".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: None,
             api_base_url: Some(server.base_url()),
@@ -393,6 +395,7 @@ async fn openrouter_request_projects_selected_image_capability_once() {
     engine
         .switch_model_option(&ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "openrouter".to_string(),
             model: models[0].clone(),
             reasoning_effort: None,
@@ -449,6 +452,7 @@ async fn ollama_vision_request_uses_compatibility_image_shape_and_pdf_fallback()
         EngineConfig {
             provider_connection: "ollama".to_string(),
             model: "vision-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: None,
             api_base_url: Some(server.base_url()),
@@ -464,6 +468,7 @@ async fn ollama_vision_request_uses_compatibility_image_shape_and_pdf_fallback()
     engine
         .switch_model_option(&ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "ollama".to_string(),
             model: models[0].clone(),
             reasoning_effort: None,
@@ -590,6 +595,7 @@ async fn generic_openai_compatible_catalog_can_opt_into_image_projection() {
         EngineConfig {
             provider_connection: "generic".to_string(),
             model: "generic/vision".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: None,
             api_base_url: Some(server.base_url()),
@@ -605,6 +611,7 @@ async fn generic_openai_compatible_catalog_can_opt_into_image_projection() {
     engine
         .switch_model_option(&ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "generic".to_string(),
             model: models[0].clone(),
             reasoning_effort: None,
@@ -656,6 +663,7 @@ async fn named_ollama_connection_uses_native_model_discovery() {
     let engine_config = EngineConfig {
         provider_connection: "ollama-local".to_string(),
         model: "gemma4:latest".to_string(),
+        max_output_tokens: None,
         temperature: None,
         context_length: None,
         api_base_url: None,
@@ -772,6 +780,7 @@ async fn switching_model_during_stream_keeps_in_flight_request_on_original_model
         EngineConfig {
             provider_connection: "test".to_string(),
             model: "initial-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: None,
             api_base_url: Some(server.base_url()),
@@ -1636,6 +1645,7 @@ async fn edenai_profile_and_typed_selections_serialize_effort_and_preserve_reque
         .find(|model| model.id == "upstream/reasoning")
         .expect("reasoning model");
     let mut selection = ProviderModelOption {
+        max_output_tokens_override: None,
         provider_connection: "gateway-work".to_string(),
         model: model.clone(),
         reasoning_effort: Some("medium".to_string()),
@@ -1838,6 +1848,7 @@ async fn edenai_configured_copies_share_connection_without_leaking_live_selectio
     let models = engine.list_models().await.expect("catalog");
     engine
         .switch_model_option(&ProviderModelOption {
+            max_output_tokens_override: None,
             provider_connection: "gateway-work".to_string(),
             model: models
                 .iter()
@@ -1906,6 +1917,7 @@ async fn edenai_in_flight_request_keeps_the_model_and_effort_snapshot_after_sele
         .expect("request serialization deadline");
     engine
         .switch_model_option(&ProviderModelOption {
+            max_output_tokens_override: None,
             provider_connection: "gateway-work".to_string(),
             model: models
                 .iter()
@@ -1999,6 +2011,7 @@ async fn edenai_rejected_typed_or_direct_model_switch_leaves_runtime_and_next_bo
         .expect("original model");
     engine
         .switch_model_option(&ProviderModelOption {
+            max_output_tokens_override: None,
             provider_connection: "gateway-work".to_string(),
             model: original.clone(),
             reasoning_effort: Some("medium".to_string()),
@@ -2015,6 +2028,7 @@ async fn edenai_rejected_typed_or_direct_model_switch_leaves_runtime_and_next_bo
         .expect("unsupported target");
     engine
         .switch_model_option(&ProviderModelOption {
+            max_output_tokens_override: None,
             provider_connection: "gateway-work".to_string(),
             model: unsupported.clone(),
             reasoning_effort: Some("high".to_string()),

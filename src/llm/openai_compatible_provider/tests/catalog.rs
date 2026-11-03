@@ -44,6 +44,7 @@ fn default_catalog_reads_generic_model_metadata() {
                 reasoning_efforts: Some(vec!["low".to_string()]),
                 reasoning_default: Some("low".to_string()),
                 input_modalities: Some(vec![crate::llm::InputModality::Image]),
+                max_output_tokens: None,
             },
             crate::llm::ModelInfo {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
@@ -52,6 +53,7 @@ fn default_catalog_reads_generic_model_metadata() {
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
+                max_output_tokens: None,
             },
         ]
     );

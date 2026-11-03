@@ -231,11 +231,21 @@ async fn generate_title_within(
         .map_err(|_| anyhow::anyhow!("title request timed out after {}s", timeout.as_secs_f32()))?
 }
 
+/// Output ceiling for a title request. Titles are one short line, but
+/// reasoning models also spend output tokens on thinking.
+const TITLE_MAX_OUTPUT_TOKENS: usize = 2048;
+
 async fn generate_title(
     engine: Arc<dyn Engine>,
     prompt: String,
     session_id: Option<uuid::Uuid>,
 ) -> anyhow::Result<String> {
+    let engine = engine
+        .with_output_limit_cap(TITLE_MAX_OUTPUT_TOKENS)
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "session title request runs without an output cap");
+            engine
+        });
     let cancellation_token = CancellationToken::new();
     let _cancellation_guard = cancellation_token.clone().drop_guard();
     let mut stream = match engine
@@ -284,6 +294,12 @@ async fn generate_title(
                     "session title utility response failed"
                 );
                 return Err(error);
+            }
+            Some(StreamEvent::OutputTruncated(_)) => {
+                tracing::warn!(
+                    stage = "response_truncated",
+                    "session title response hit the output limit"
+                );
             }
             Some(StreamEvent::Thinking(_) | StreamEvent::Delta(_)) => {}
             None => break "channel_closed",
@@ -400,6 +416,7 @@ mod tests {
                 model: "title".to_string(),
                 temperature: None,
                 context_length: None,
+                max_output_tokens: None,
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
@@ -598,6 +615,7 @@ mod tests {
                 model: "title-model".to_string(),
                 temperature: None,
                 context_length: None,
+                max_output_tokens: None,
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,

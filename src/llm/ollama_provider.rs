@@ -251,6 +251,7 @@ fn parse_tags(body: &serde_json::Value) -> Vec<ModelInfo> {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: id.to_string(),
                 context_length,
+                max_output_tokens: None,
                 reasoning_efforts: parse_reasoning_efforts(entry),
                 reasoning_default: None,
                 input_modalities: None,
@@ -397,6 +398,7 @@ mod tests {
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
+                max_output_tokens: None,
             }]
         );
     }
@@ -600,6 +602,8 @@ mod tests {
             reasoning_effort: Some("medium".to_string()),
             input_modalities: None,
             context_length_override: None,
+            max_output_tokens: None,
+            max_output_tokens_override: None,
         };
 
         OllamaProvider::customize_request_body(&mut request_body, &runtime_config, None);

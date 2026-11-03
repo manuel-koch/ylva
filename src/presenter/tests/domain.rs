@@ -818,6 +818,33 @@ fn domain_streaming_interleaved_thinking_and_response_flush_into_separate_bubble
 }
 
 #[test]
+fn domain_error_commits_streamed_text_before_the_error_line() {
+    let mut state = AppState::new();
+    state.mode = TuiMode::Streaming;
+    for event in [
+        DomainEvent::StreamChunk("half a resp".to_string()),
+        DomainEvent::Error {
+            message: "stream failed".to_string(),
+            run_id: None,
+        },
+    ] {
+        update(&mut state, TuiEvent::Domain(event), &empty_textarea());
+    }
+
+    assert!(
+        matches!(
+            &state.chat_entries[..],
+            [
+                ChatEntry::AssistantMessage { text, .. },
+                ChatEntry::ErrorLine { .. }
+            ] if text == "half a resp"
+        ),
+        "{:?}",
+        state.chat_entries
+    );
+}
+
+#[test]
 fn subagent_token_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order() {
     // Mirrors `domain_streaming_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order`
     // for a subagent conversation: `SubagentToken`'s `is_thinking` flag must

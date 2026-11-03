@@ -263,6 +263,10 @@ pub struct ModelInfo {
     pub reasoning_evidence: ReasoningEvidence,
     pub id: String,
     pub context_length: Option<usize>,
+    /// Largest output-token count the provider advertises for one response;
+    /// `None` when the catalog does not say. Used to clamp a requested limit,
+    /// never sent on its own.
+    pub max_output_tokens: Option<usize>,
     /// Reasoning support advertised by the provider.
     ///
     /// - `None` means that reasoning support is not advertised.

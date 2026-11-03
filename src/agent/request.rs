@@ -301,6 +301,7 @@ pub(super) fn start_request(
             let mut partial = String::new();
             let mut accumulators: std::collections::BTreeMap<usize, ToolCallAccumulator> =
                 std::collections::BTreeMap::new();
+            let mut stream_notices: Vec<String> = Vec::new();
             while let Some(event) = stream.recv().await {
                 match event {
                     StreamEvent::Text(text) => {
@@ -311,6 +312,10 @@ pub(super) fn start_request(
                         // Never appended to `partial` — thinking content must
                         // not affect the assistant text or tool-call logic.
                         let _ = ui_tx.send(UiUpdate::AppendThinking(text)).await;
+                    }
+                    StreamEvent::OutputTruncated(text) => {
+                        // Held back until the stream's terminal event is queued.
+                        stream_notices.push(text);
                     }
                     StreamEvent::Delta(delta) => {
                         if !accumulators.contains_key(&delta.tool_call_index)
@@ -399,6 +404,11 @@ pub(super) fn start_request(
                         break;
                     }
                 }
+            }
+            for text in stream_notices {
+                let _ = agent_tx
+                    .send((generation, AgentEvent::OutputTruncated(text)))
+                    .await;
             }
             if inner_cancel.is_cancelled() {
                 tracing::debug!("session request cancelled");

@@ -937,6 +937,7 @@ fn implicit_engine_config(
         model: default_model.unwrap_or_default().to_string(),
         temperature: None,
         context_length: None,
+        max_output_tokens: None,
         api_base_url: None,
         api_key: None,
         reasoning: None,

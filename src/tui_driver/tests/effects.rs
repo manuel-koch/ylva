@@ -818,10 +818,12 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
             initial_reasoning_effort: None,
             selection: crate::llm::ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: "stub".to_string(),
                 model: crate::llm::ModelInfo {
                     id: "deepseek-v3".to_string(),
                     context_length: None,
+                    max_output_tokens: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,

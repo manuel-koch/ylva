@@ -44,6 +44,10 @@ impl ModelCatalog for CopilotModelCatalog {
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: entry.get("id")?.as_str()?.to_string(),
                     context_length: parse_context_length(entry),
+                    max_output_tokens: entry
+                        .pointer("/capabilities/limits/max_output_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|tokens| tokens as usize),
                     reasoning_efforts: parse_reasoning_efforts(entry),
                     reasoning_default: None,
                     input_modalities: parse_input_modalities(entry),

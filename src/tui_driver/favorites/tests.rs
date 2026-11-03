@@ -33,6 +33,7 @@ fn empty_engine() -> Arc<dyn crate::llm::engine::Engine> {
             model: "model".to_string(),
             temperature: None,
             context_length: None,
+            max_output_tokens: None,
             api_base_url: None,
             api_key: None,
             reasoning: None,

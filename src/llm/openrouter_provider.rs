@@ -63,6 +63,10 @@ impl ModelCatalog for OpenRouterModelCatalog {
                         .get("context_length")
                         .and_then(serde_json::Value::as_u64)
                         .map(|length| length as usize),
+                    max_output_tokens: entry
+                        .pointer("/top_provider/max_completion_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|tokens| tokens as usize),
                     reasoning_efforts,
                     reasoning_default,
                     input_modalities: entry
@@ -250,6 +254,7 @@ mod tests {
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
+                max_output_tokens: None,
             }]
         );
     }
@@ -432,6 +437,8 @@ mod tests {
             context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
             reasoning_effort: Some("high".to_string()),
             input_modalities: None,
+            max_output_tokens: None,
+            max_output_tokens_override: None,
         };
 
         OpenRouterProvider::customize_request_body(&mut request_body, &runtime_config, None);

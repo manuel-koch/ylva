@@ -125,6 +125,7 @@ pub(crate) fn responses_request_body(
     tools: &[serde_json::Value],
     temperature: Option<f32>,
     reasoning_effort: Option<&str>,
+    max_output_tokens: Option<usize>,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": model,
@@ -134,6 +135,9 @@ pub(crate) fn responses_request_body(
     });
     if let Some(temperature) = temperature {
         body["temperature"] = serde_json::json!(temperature);
+    }
+    if let Some(max_output_tokens) = max_output_tokens {
+        body["max_output_tokens"] = serde_json::json!(max_output_tokens);
     }
     if let Some(effort) = reasoning_effort {
         body["reasoning"] = serde_json::json!({"effort": effort, "summary": "auto"});

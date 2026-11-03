@@ -187,9 +187,10 @@ pub(super) fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent
         // ToolError, ToolAutoDenied and Notice are handled directly by the
         // Driver via AppState; no corresponding DomainEvent exists in the
         // Presenter's surface.
-        UiUpdate::ToolError { .. } | UiUpdate::ToolAutoDenied { .. } | UiUpdate::Notice { .. } => {
-            None
-        }
+        UiUpdate::ToolError { .. }
+        | UiUpdate::ToolAutoDenied { .. }
+        | UiUpdate::Notice { .. }
+        | UiUpdate::OutputTruncated { .. } => None,
     }
 }
 
@@ -300,6 +301,11 @@ pub(super) async fn process_one_update(
     }
     if let UiUpdate::Notice { text, run_id } = update {
         state.push_notice_to(*run_id, text.clone());
+        return ActionOutcome::Continue;
+    }
+    if let UiUpdate::OutputTruncated { text, run_id } = update {
+        state.flush_target_partial_text(*run_id);
+        state.push_truncation_trailer_to(*run_id, text.clone());
         return ActionOutcome::Continue;
     }
     pending_run_ids.record_update(update);

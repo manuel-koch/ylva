@@ -245,6 +245,9 @@ pub enum AgentEvent {
     StreamError(String),
     ContextWindowRejected(String),
     ContextWindowChanged,
+    /// The response stopped at the output-token limit. Travels behind the
+    /// stream's terminal event so it renders after the response it explains.
+    OutputTruncated(String),
     PreflightNotice {
         text: String,
         acknowledgement: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -309,6 +312,14 @@ pub enum UiUpdate {
     /// effort the pre-chat catalog validation dropped), surfaced as a
     /// transcript notice via `AppState` rather than as an error line.
     Notice {
+        text: String,
+        /// See `UiUpdate::Error::run_id`.
+        run_id: Option<Uuid>,
+    },
+    /// The latest response was cut off by the output-token limit. Sent after
+    /// the response's own updates; the TUI renders it as a red trailer below
+    /// the bubble.
+    OutputTruncated {
         text: String,
         /// See `UiUpdate::Error::run_id`.
         run_id: Option<Uuid>,
@@ -521,6 +532,9 @@ pub enum StreamEvent {
     /// / reasoning enabled to produce it) and is provider-agnostic.
     Thinking(String),
     Delta(DeltaChunk),
+    /// A provider-side condition ended the response early: it was cut off by
+    /// the output-token limit. Never part of the assistant text.
+    OutputTruncated(String),
     Done,
     Cancelled,
     Error(anyhow::Error),

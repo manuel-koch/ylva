@@ -69,6 +69,14 @@ pub struct EngineConfig {
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_context_length")]
     pub context_length: Option<usize>,
+    /// Output-token limit requested per chat call, with the same value
+    /// syntax as `context_length` (zero is rejected). `None` sends no limit,
+    /// so the provider applies the model's own ceiling. The limit applies
+    /// only to the configured model; see
+    /// [`EngineConfig::max_output_tokens_for_model`].
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_max_output_tokens")]
+    pub max_output_tokens: Option<usize>,
     #[serde(default)]
     pub api_base_url: Option<String>,
     #[serde(default)]
@@ -127,6 +135,24 @@ impl EngineConfig {
             .unwrap_or(DEFAULT_CONTEXT_LENGTH)
     }
 
+    /// Output-token limit for `model`: the configured value only for the
+    /// configured model, clamped to the catalog's advertised maximum. Models
+    /// without a configured limit stay unlimited (`None`); the catalog
+    /// maximum is never sent on its own.
+    pub fn max_output_tokens_for_model(
+        &self,
+        model: &str,
+        catalog_max_output_tokens: Option<usize>,
+    ) -> Option<usize> {
+        let configured = (model == self.model)
+            .then_some(self.max_output_tokens)
+            .flatten()?;
+        Some(clamp_to_catalog_maximum(
+            configured,
+            catalog_max_output_tokens,
+        ))
+    }
+
     /// Resolve the context-length budget to use for this engine.
     ///
     /// An explicit TOML `context_length` always wins. Otherwise, falls back
@@ -139,6 +165,11 @@ impl EngineConfig {
             .or(catalog_context_length)
             .unwrap_or(DEFAULT_CONTEXT_LENGTH)
     }
+}
+
+/// Never request more output tokens than the catalog says the model can emit.
+pub fn clamp_to_catalog_maximum(requested: usize, catalog_maximum: Option<usize>) -> usize {
+    catalog_maximum.map_or(requested, |maximum| requested.min(maximum))
 }
 
 fn deserialize_optional_f32_or_string<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
@@ -187,6 +218,19 @@ where
         ContextLengthValue::Text(text) => parse_context_length(&text)
             .map(Some)
             .map_err(serde::de::Error::custom),
+    }
+}
+
+/// Same syntax as `context_length`, but a limit of zero tokens is invalid.
+fn deserialize_max_output_tokens<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match deserialize_context_length(deserializer)? {
+        Some(0) => Err(serde::de::Error::custom(
+            "invalid max_output_tokens: the limit must be greater than zero",
+        )),
+        value => Ok(value),
     }
 }
 
@@ -254,6 +298,8 @@ pub struct EngineRuntimeConfig {
     pub model: String,
     pub temperature: Option<f32>,
     pub context_length: usize,
+    /// Output-token limit sent with chat requests; `None` sends no limit.
+    pub max_output_tokens: Option<usize>,
     pub reasoning_effort: Option<String>,
     /// Provider-advertised input modalities for the active model. `None`
     /// remains conservative: no media projection is enabled.
@@ -261,6 +307,9 @@ pub struct EngineRuntimeConfig {
     /// Session-only context window chosen in the model picker. While set,
     /// catalog adoption leaves `context_length` alone.
     pub context_length_override: Option<usize>,
+    /// Session-only output limit chosen in the model picker. While set,
+    /// catalog adoption leaves `max_output_tokens` alone.
+    pub max_output_tokens_override: Option<usize>,
 }
 
 impl From<&EngineConfig> for EngineRuntimeConfig {
@@ -273,9 +322,11 @@ impl From<&EngineConfig> for EngineRuntimeConfig {
             // this only resolves the TOML value against the built-in
             // default; see `EngineConfig::effective_context_length`.
             context_length: config.effective_context_length(None),
+            max_output_tokens: config.max_output_tokens_for_model(&config.model, None),
             reasoning_effort: config.reasoning.clone(),
             input_modalities: None,
             context_length_override: None,
+            max_output_tokens_override: None,
         }
     }
 }

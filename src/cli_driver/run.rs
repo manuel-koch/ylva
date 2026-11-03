@@ -73,6 +73,7 @@ pub async fn run_cli(
         model: String::new(),
         temperature: None,
         context_length: None,
+        max_output_tokens: None,
         api_base_url: None,
         api_key: None,
         reasoning: None,
@@ -608,6 +609,21 @@ pub(super) async fn run_cli_to_with_title(
             // for its TUI-only purpose). The eventual `ToolDone` still
             // prints the real outcome once the subagent actually finishes.
             Some(UiUpdate::ToolProgress { .. }) => {}
+            Some(UiUpdate::OutputTruncated { text, run_id }) => {
+                // Follows the response it explains, so it prints after it.
+                let label = match run_id {
+                    None => "output truncated".to_string(),
+                    Some(run_id) => format!("[subagent {run_id}] output truncated"),
+                };
+                write_cli_styled_line(
+                    out,
+                    &format!("---[ {label} ]---"),
+                    error_color(),
+                    false,
+                    output_options,
+                )?;
+                writeln!(out, "{text}")?;
+            }
             Some(UiUpdate::Notice { text, run_id }) => {
                 // A notice (for example a dropped profile reasoning effort)
                 // is a real configuration fact, not a transcript-only

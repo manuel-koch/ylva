@@ -340,8 +340,10 @@ fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::Mod
             initial_reasoning_effort: None,
             selection: ylva::ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: "stub".to_string(),
                 model: ylva::ModelInfo {
+                    max_output_tokens: None,
                     reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                     id: format!("model-{index}"),
                     context_length: None,
@@ -495,6 +497,7 @@ impl Engine for DelayedCatalogEngine {
             Ok(vec![ModelInfo {
                 reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                 id: "delayed-model".to_string(),
+                max_output_tokens: None,
                 context_length: None,
                 reasoning_efforts: None,
                 reasoning_default: None,

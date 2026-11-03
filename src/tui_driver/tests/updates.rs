@@ -494,3 +494,30 @@ async fn engine_notices_render_as_transcript_notices() {
         "the notice must carry the engine's wording: {text}"
     );
 }
+
+#[tokio::test]
+async fn output_truncated_update_pushes_a_trailer_entry() {
+    let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+    let textarea_context = textarea_ctx_from(&textarea);
+
+    let outcome = process_one_update(
+        &mut state,
+        &mut textarea,
+        &cmd_tx,
+        &textarea_context,
+        &UiUpdate::OutputTruncated {
+            text: "cut off at the output limit".to_string(),
+            run_id: None,
+        },
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut PendingRunIds::default(),
+    )
+    .await;
+
+    assert_eq!(outcome, ActionOutcome::Continue);
+    assert!(matches!(
+        state.chat_entries.last(),
+        Some(ChatEntry::TruncationTrailer { text }) if text.contains("output limit")
+    ));
+}

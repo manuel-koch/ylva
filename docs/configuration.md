@@ -728,12 +728,37 @@ rebuilding the provider.
 | `model` | string | Model identifier passed to the provider. May be omitted, in which case the profile's `default_model` fills it in. |
 | `temperature` | number (optional) | Sampling temperature. Omit to use the model's own default. |
 | `context_length` | number or string (optional) | Maximum token context window for this engine's configured model. Omitted means the profile doesn't limit it explicitly. Accepts a plain integer or a decimal string with a case-insensitive `K`/`M` suffix (e.g. `"128K"` = 128,000 tokens, `"1.2M"` = 1,200,000 tokens). Bare integer strings are also accepted. Fractional suffixed values must resolve to whole tokens without rounding; overflow and byte-unit suffixes (`kb`, `mb`, `KiB`, etc.) are rejected. Configuration and display both use decimal token units. For the configured model, this value takes precedence over the provider catalog. Switching to another model uses that model's catalog window, then the built-in default of `128 000`, without retaining the configured override or the previous model's window. Selecting the configured model again reapplies its override. Compaction budgeting uses the resolved window. |
+| `max_output_tokens` | number or string (optional) | Output-token limit requested from the provider for this engine's configured model; same syntax as `context_length`, `0` is rejected. Omitted means no limit field is sent. It is clamped to the catalog's maximum output when known (with a warning) and never applies to other models: switching models drops it, selecting the configured model again reapplies it, like `context_length`. See [Output limit](#output-limit-max_output_tokens). |
 | `api_base_url` | string (optional) | Optional engine-level override for the connection's base URL. |
 | `api_key` | string (optional) | Optional engine-level override for the connection's API key. |
 | `reasoning` | string (optional) | Initial explicit reasoning effort. Omitted uses the provider default. See [reasoning validation](#reasoning-validation). |
 | `compact_target_ratio` | number (optional) | Best-effort model-view target as a fraction of the effective window (default `0.5`). Task continuity takes priority when the separate safe request ceiling already fits. Must be `> 0` and `≤ 1`, and strictly below `soft_compaction_threshold`. |
 | `soft_compaction_threshold` | number (optional) | Fraction of the effective window at or above which a completed turn or tool outcome schedules a useful completed-prefix summary (default `0.7`). Soft pressure alone does not cancel running tools. Must be `> 0` and `≤ 1`, and strictly below `hard_compaction_threshold`. |
 | `hard_compaction_threshold` | number (optional) | Fraction above which a continuation waits for an existing summary within its remaining original deadline, then recovers lossily if necessary (default `0.9`). Every request also fits the separate local safe ceiling. Must be `> 0` and `≤ 1`. |
+
+### Output limit (`max_output_tokens`)
+
+The limit is sent as `max_tokens` (chat completions, Ollama), `max_completion_tokens`
+(Copilot) or `max_output_tokens` (Responses API), and only when set. `/models` →
+parameter popup offers a session override (`unlimited` up to the catalog maximum).
+When a response stops at the limit, Ylva shows a notice. A failed request (HTTP 402,
+429 or 5xx) sent without a limit gets an advisory hint naming `max_output_tokens`.
+
+Choosing a value (rules of thumb, to be confirmed by real usage):
+
+- The limit covers everything the model emits: reasoning tokens, the answer and
+  tool-call arguments (e.g. whole file contents).
+- Starting values:
+  - non-reasoning models 8K–16K
+  - reasoning `low`/`medium` 16K–32K
+  - reasoning `high` or heavy file writing 32K–64K
+  - compaction engines: leave unlimited, or allow roughly 25–50% of the summarized
+    prefix (e.g. 32K–64K for a 128K conversation); a truncated summary loses context
+  - utility engine (session titles): no setting needed; each title request is capped at
+    2048 tokens, or at your lower limit, since titles are one short line
+- Never above the model's catalog maximum; on gateways that reserve credit
+  (EdenAI), stay within what the balance covers (the 402 message names that figure).
+- Too low a value truncates answers; a red trailer below the cut-off response says so.
 
 For example, select a local compaction engine and allow more time for its requests:
 

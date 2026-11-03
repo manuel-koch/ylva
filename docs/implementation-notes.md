@@ -181,6 +181,20 @@ See [configuration](./configuration.md),
 - Provider clients use a connect timeout and an *idle* read timeout, neither
   configurable: the idle limit applies to headers and between chunks, so
   stalled servers fail while long, steadily streaming responses survive.
+- Output limit: `EngineConfig::max_output_tokens_for_model` resolves the
+  configured value (configured model only, clamped to `ModelInfo::max_output_tokens`);
+  `EngineRuntimeConfig` holds `max_output_tokens` plus the picker's
+  `max_output_tokens_override`. The chat request sets `max_tokens` before the
+  provider's `request_body_customizer` (Copilot renames it); the Responses body
+  takes it as a parameter. Stream `finish_reason == "length"` or `response.incomplete`
+  becomes a one-shot `StreamEvent::OutputTruncated`, which the agent loop sends
+  after the stream's terminal event so the UI renders it as a red
+  `ChatEntry::TruncationTrailer` directly below the cut-off bubble.
+  `send_with_retry` logs each failed attempt's body, and the chat request
+  runs inside a `chat_request` span carrying `dump_id`.
+  Session-title requests run on `Engine::with_output_limit_cap`, an independent copy
+  of the engine's current selection capped at `TITLE_MAX_OUTPUT_TOKENS` (2048),
+  so the shared engine's limit is untouched.
 
 ## Tool-result wire protocol
 

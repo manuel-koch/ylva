@@ -323,6 +323,7 @@ fn assemble_model_choices(
                 context_length: engine_config
                     .context_length
                     .or_else(|| catalog_model.and_then(|model| model.context_length)),
+                max_output_tokens: catalog_model.and_then(|model| model.max_output_tokens),
                 reasoning_evidence: catalog_model
                     .map(|model| model.reasoning_evidence)
                     .unwrap_or_default(),
@@ -333,6 +334,7 @@ fn assemble_model_choices(
             let favorite_rank = favorite_rank_of(&engine_config.provider_connection, &model.id);
             let selection = crate::llm::ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: engine_config.provider_connection,
                 model,
                 reasoning_effort: initial_reasoning_effort.clone(),

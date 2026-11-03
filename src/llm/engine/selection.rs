@@ -99,6 +99,10 @@ pub struct ProviderModelOption {
     /// tokens. `None` keeps the catalog or profile window. The override is
     /// session-only and never written to the profile.
     pub context_length_override: Option<usize>,
+    /// Output-token limit edited in the model picker's parameter popup.
+    /// `None` keeps the profile or unlimited behavior. Session-only like
+    /// [`Self::context_length_override`].
+    pub max_output_tokens_override: Option<usize>,
 }
 
 /// How a named-engine shortcut should treat the engine's current reasoning
@@ -148,6 +152,9 @@ pub struct ModelSelectionTarget {
     pub model: String,
     /// Effective context window after applying the selection, in tokens.
     pub context_length: usize,
+    /// Effective output-token limit after applying the selection; `None`
+    /// means no limit is sent.
+    pub max_output_tokens: Option<usize>,
 }
 
 /// Engine runtime settings displayed for one named engine.

@@ -144,11 +144,13 @@ fn implicit_summarizer_follows_root_named_engine_activation() {
             engine_name: named_engine.name,
             option: crate::llm::ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: named_engine.config.provider_connection,
                 model: crate::llm::ModelInfo {
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: named_engine.config.model,
                     context_length: None,
+                    max_output_tokens: None,
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,
@@ -189,11 +191,13 @@ fn implicit_summarizer_follows_root_named_engine_activation() {
     engine
         .switch_model_option(&crate::llm::ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: crate::llm::ModelInfo {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "fast-catalog-model".to_string(),
                 context_length: Some(24_000),
+                max_output_tokens: None,
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
@@ -242,11 +246,13 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
             engine_name: named_engine.name,
             option: crate::llm::ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: named_engine.config.provider_connection,
                 model: crate::llm::ModelInfo {
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: named_engine.config.model,
                     context_length: None,
+                    max_output_tokens: None,
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,
@@ -283,11 +289,13 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
             engine_name: main_engine.name,
             option: crate::llm::ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: main_engine.config.provider_connection,
                 model: crate::llm::ModelInfo {
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: main_engine.config.model,
                     context_length: None,
+                    max_output_tokens: None,
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,
@@ -300,11 +308,13 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
     engine
         .switch_model_option(&crate::llm::ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: crate::llm::ModelInfo {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "main-catalog-model".to_string(),
                 context_length: Some(32_000),
+                max_output_tokens: None,
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
@@ -645,6 +655,7 @@ fn from_profile_resolves_multiple_connections_using_one_provider_kind() {
                 EngineConfig {
                     provider_connection: "ollama-local".to_string(),
                     model: "local-model".to_string(),
+                    max_output_tokens: None,
                     temperature: None,
                     context_length: None,
                     api_base_url: None,
@@ -661,6 +672,7 @@ fn from_profile_resolves_multiple_connections_using_one_provider_kind() {
                 EngineConfig {
                     provider_connection: "ollama-cloud".to_string(),
                     model: "cloud-model".to_string(),
+                    max_output_tokens: None,
                     temperature: None,
                     context_length: None,
                     api_base_url: None,
@@ -722,6 +734,7 @@ fn from_profile_requires_an_api_base_url_for_an_http_provider() {
             EngineConfig {
                 provider_connection: "ollama".to_string(),
                 model: "some-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,
@@ -896,6 +909,7 @@ fn from_profile_enforces_connection_allowed_models_on_every_engine() {
     let engine_with_model = |model: &str| EngineConfig {
         provider_connection: "guarded".to_string(),
         model: model.to_string(),
+        max_output_tokens: None,
         temperature: None,
         context_length: None,
         api_base_url: None,

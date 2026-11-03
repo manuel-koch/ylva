@@ -190,6 +190,7 @@ fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection()
     .expect("router construction");
     let option = |connection: &str, model: &str| ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: connection.to_string(),
         model: ModelInfo {
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
@@ -198,6 +199,7 @@ fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection()
             reasoning_efforts: None,
             reasoning_default: None,
             input_modalities: None,
+            max_output_tokens: None,
         },
         reasoning_effort: None,
     };
@@ -293,6 +295,7 @@ fn named_engine_selection_rejects_invalid_targets_without_switching() {
     let option = |provider_connection: &str, reasoning_efforts: Option<Vec<&str>>, id: &str| {
         ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: provider_connection.to_string(),
             model: ModelInfo {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
@@ -302,6 +305,7 @@ fn named_engine_selection_rejects_invalid_targets_without_switching() {
                     .map(|efforts| efforts.into_iter().map(str::to_string).collect()),
                 reasoning_default: None,
                 input_modalities: None,
+                max_output_tokens: None,
             },
             reasoning_effort: None,
         }
@@ -539,6 +543,7 @@ fn policy_engine(connection: &str, model: &str, patterns: &[&str]) -> Arc<dyn En
 fn option_on(connection: &str, model: &str) -> ProviderModelOption {
     ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: connection.to_string(),
         model: model_info_with_reasoning_efforts(model, None),
         reasoning_effort: None,
@@ -680,6 +685,7 @@ fn edenai_router_raw_and_named_preview_match_transactional_confirmation() {
         model: model_info_with_modalities("test-model", Some(vec![])),
         reasoning_effort: None,
         context_length_override: Some(333),
+        max_output_tokens_override: None,
     };
     let named = ModelSelection::NamedEngine {
         engine_name: "gateway-engine".into(),

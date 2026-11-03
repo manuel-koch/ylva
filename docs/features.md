@@ -401,6 +401,11 @@ title is restored when the TUI exits.
 
 Currently the following AI model providers are supported:
 
+An optional per-engine `max_output_tokens` limits the tokens a model may emit;
+see [configuration](./configuration.md#output-limit-max_output_tokens). When the provider
+reports a response cut off at that limit, a red trailer appears below the truncated
+response or thinking bubble.
+
 - Ollama (OpenAI-compatible chat plus native model discovery endpoints)
 - OpenRouter ( via OpenAI compatible endpoints; requests carry app
   attribution headers identifying Ylva, see

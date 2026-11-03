@@ -74,6 +74,7 @@ fn unknown_tool_does_not_leave_bash_approval_idle() {
             EngineConfig {
                 provider_connection: "tool-result-tracking".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,
@@ -178,6 +179,7 @@ fn large_read_result_is_capped_to_remaining_context_before_follow_up_request() {
             EngineConfig {
                 provider_connection: "tool-result-tracking".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: Some(10_000),
                 api_base_url: None,
@@ -753,6 +755,7 @@ fn only_the_first_six_calls_of_a_response_are_executed() {
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,

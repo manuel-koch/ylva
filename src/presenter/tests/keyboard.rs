@@ -26,11 +26,13 @@ fn picker_choice(connection: &str, model: &str, favorite_rank: Option<usize>) ->
         initial_reasoning_effort: Some("medium".to_string()),
         selection: ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: connection.to_string(),
             model: ModelInfo {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: model.to_string(),
                 context_length: Some(65_536),
+                max_output_tokens: None,
                 reasoning_efforts: Some(vec!["low".to_string(), "medium".to_string()]),
                 reasoning_default: Some("medium".to_string()),
                 input_modalities: None,
@@ -388,11 +390,13 @@ fn model_picker_pages_selection_with_page_keys() {
                 initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     context_length_override: None,
+                    max_output_tokens_override: None,
                     provider_connection: "stub".to_string(),
                     model: crate::llm::ModelInfo {
                         reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                         id: format!("model-{index}"),
                         context_length: None,
+                        max_output_tokens: None,
                         reasoning_efforts: None,
                         reasoning_default: None,
                         input_modalities: None,

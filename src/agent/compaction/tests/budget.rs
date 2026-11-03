@@ -19,6 +19,7 @@ fn the_budget_combines_the_window_with_the_engines_compaction_knobs() {
     let config = crate::llm::EngineConfig {
         provider_connection: "mock".to_string(),
         model: "test-model".to_string(),
+        max_output_tokens: None,
         temperature: None,
         context_length: None,
         api_base_url: None,
@@ -51,6 +52,7 @@ fn summary_timeout_comes_from_the_engine_generating_the_summary() {
         crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
             model: "compact-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: None,
             api_base_url: None,

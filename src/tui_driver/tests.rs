@@ -201,6 +201,7 @@ async fn tui_triggers_title_generation_when_stream_done_is_drained() {
     let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
         provider,
         EngineConfig {
+            max_output_tokens: None,
             provider_connection: "mock".to_string(),
             model: "conversation".to_string(),
             temperature: None,
@@ -308,6 +309,7 @@ async fn title_follows_the_active_engine_unless_a_utility_engine_is_configured()
                 model: model.to_string(),
                 temperature: None,
                 context_length: None,
+                max_output_tokens: None,
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
@@ -421,6 +423,7 @@ async fn tui_loads_prior_session_user_messages_into_input_history() {
     let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
         provider,
         EngineConfig {
+            max_output_tokens: None,
             provider_connection: "mock".to_string(),
             model: "conversation".to_string(),
             temperature: None,
@@ -492,6 +495,7 @@ async fn startup_notice_is_shown_once_in_the_conversation() {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+            max_output_tokens: None,
             compact_target_ratio: 0.5,
             soft_compaction_threshold: 0.7,
             hard_compaction_threshold: 0.9,
@@ -567,6 +571,7 @@ impl StubEngine {
                 .map(|id| crate::llm::ModelInfo {
                     id: (*id).to_string(),
                     context_length: None,
+                    max_output_tokens: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,
@@ -579,6 +584,7 @@ impl StubEngine {
                 model: active_model.to_string(),
                 temperature: None,
                 context_length: None,
+                max_output_tokens: None,
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
@@ -616,6 +622,7 @@ impl StubEngine {
                 .iter()
                 .map(|id| crate::llm::ModelInfo {
                     id: (*id).to_string(),
+                    max_output_tokens: None,
                     context_length: if *id == engine_model {
                         catalog_context_length
                     } else {
@@ -642,6 +649,7 @@ impl StubEngine {
                 model: active_model.to_string(),
                 temperature: None,
                 context_length: None,
+                max_output_tokens: None,
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
@@ -657,6 +665,7 @@ impl StubEngine {
                     model: engine_model.to_string(),
                     temperature: None,
                     context_length: engine_context_length,
+                    max_output_tokens: None,
                     api_base_url: None,
                     api_key: None,
                     reasoning: engine_reasoning.map(str::to_string),

@@ -89,6 +89,7 @@ impl ModelCatalog for EdenAiModelCatalog {
                         .get("context_length")
                         .and_then(serde_json::Value::as_u64)
                         .map(|length| length as usize),
+                    max_output_tokens: None,
                     reasoning_efforts,
                     reasoning_default,
                     input_modalities: entry
@@ -240,9 +241,9 @@ pub(crate) fn resolve_reasoning_effort(
 }
 
 fn contextualize_error(runtime: &EngineRuntimeConfig, error: anyhow::Error) -> anyhow::Error {
-    let details = format!("{error:#}");
+    // The cause stays in the chain only; the `{:#}` rendering appends it once.
     error.context(format!(
-        "EdenAI model '{}' reasoning effort '{}': {details}",
+        "EdenAI model '{}' reasoning effort '{}'",
         runtime.model,
         runtime.reasoning_effort.as_deref().unwrap_or("default")
     ))
@@ -571,6 +572,8 @@ mod tests {
             context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
             reasoning_effort: None,
             input_modalities: None,
+            max_output_tokens: None,
+            max_output_tokens_override: None,
         };
         let session_id = uuid::Uuid::new_v4();
         let mut with_session = serde_json::json!({});
@@ -939,6 +942,11 @@ mod policy_tests {
             rendered.contains("model")
                 && rendered.contains("medium")
                 && rendered.contains("HTTP 422")
+        );
+        assert_eq!(
+            rendered.matches("HTTP 422").count(),
+            1,
+            "the cause must be rendered once: {rendered}"
         );
         assert_eq!(
             error.root_cause().to_string(),

@@ -172,6 +172,7 @@ impl SwitchableTestEngine {
                 model: model.to_string(),
                 temperature: None,
                 context_length: None,
+                max_output_tokens: None,
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
@@ -304,6 +305,7 @@ impl Engine for SwitchableTestEngine {
         Box::pin(async move {
             Ok(vec![ModelInfo {
                 id: model,
+                max_output_tokens: None,
                 context_length: None,
                 reasoning_efforts: None,
                 reasoning_default: None,
@@ -492,6 +494,7 @@ async fn catalog_context_length_rebudgets_the_first_request_before_dispatch() {
             Box::pin(async {
                 Ok(vec![ModelInfo {
                     id: common::test_engine_config().model,
+                    max_output_tokens: None,
                     context_length: Some(4_096),
                     reasoning_efforts: None,
                     reasoning_default: None,
@@ -604,8 +607,10 @@ async fn subagent_spawn_after_root_model_switch_uses_the_root_active_engine() {
             engine_name: "alternate".to_string(),
             option: ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: "alternate-provider".to_string(),
                 model: ModelInfo {
+                    max_output_tokens: None,
                     id: "alternate-model".to_string(),
                     context_length: None,
                     reasoning_efforts: None,
@@ -728,8 +733,10 @@ async fn running_subagent_uses_a_shared_engine_switch_on_its_next_request() {
     root.engine()
         .switch_model_option(&ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "alternate-provider".to_string(),
             model: ModelInfo {
+                max_output_tokens: None,
                 id: "alternate-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
@@ -841,8 +848,10 @@ async fn subagent_with_explicit_engine_override_keeps_its_named_engine() {
     root.engine()
         .switch_model_option(&ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "alternate-provider".to_string(),
             model: ModelInfo {
+                max_output_tokens: None,
                 id: "alternate-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,

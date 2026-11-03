@@ -65,6 +65,7 @@ impl Provider for SelectableMockProvider {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: id.to_string(),
                 context_length: Some(32_000),
+                max_output_tokens: None,
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
@@ -82,6 +83,7 @@ fn test_engine_config() -> EngineConfig {
     EngineConfig {
         provider_connection: "mock".to_string(),
         model: "test-model".to_string(),
+        max_output_tokens: None,
         temperature: None,
         context_length: None,
         api_base_url: None,
@@ -126,6 +128,7 @@ fn two_engine_profile() -> ProfileConfig {
     let engine_config = |model: &str| EngineConfig {
         provider_connection: "mock".to_string(),
         model: model.to_string(),
+        max_output_tokens: None,
         temperature: None,
         context_length: None,
         api_base_url: None,

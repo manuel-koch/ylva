@@ -19,6 +19,21 @@ Keep these three things apart:
   OpenRouter worked well; small local Ollama models worked with lower-quality
   results.
 
+## Output limit support
+
+| Provider | Request field | Catalog maximum source |
+|---|---|---|
+| OpenRouter, EdenAI, generic chat completions | `max_tokens` | OpenRouter `top_provider.max_completion_tokens`; EdenAI advertises none |
+| Copilot chat completions | `max_completion_tokens` | `capabilities.limits.max_output_tokens` |
+| Copilot / OpenAI Responses API | `max_output_tokens` | as above |
+| Ollama (OpenAI endpoint) | `max_tokens` | none |
+
+- EdenAI reserves credit for the model's full output ceiling when no limit is sent
+  and answers HTTP 402 ("Set max_tokens to N or less") when the balance is too low;
+  setting `max_output_tokens` avoids that.
+- Rules of thumb for values: see
+  [Output limit](./configuration.md#output-limit-max_output_tokens).
+
 ## Usage and cost reporting
 
 Ylva totals only costs that the provider itself reports in a response (see

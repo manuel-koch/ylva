@@ -31,6 +31,7 @@ fn make_engine_config() -> EngineConfig {
         model: "test-model".to_string(),
         temperature: None,
         context_length: None,
+        max_output_tokens: None,
         api_base_url: None,
         api_key: None,
         reasoning: None,
@@ -56,6 +57,7 @@ impl CatalogEngine {
                 model: model.to_string(),
                 temperature: None,
                 context_length: None,
+                max_output_tokens: None,
                 api_base_url: Some(format!("https://{provider}.test/v1")),
                 api_key: None,
                 reasoning: None,
@@ -73,6 +75,7 @@ impl CatalogEngine {
                     reasoning_efforts: None,
                     reasoning_default: None,
                     input_modalities: None,
+                    max_output_tokens: None,
                 })
                 .collect(),
             model_list_error: None,
@@ -196,6 +199,7 @@ fn model_info_with_modalities(id: &str, input_modalities: Option<Vec<InputModali
         reasoning_efforts: None,
         reasoning_default: None,
         input_modalities,
+        max_output_tokens: None,
     }
 }
 
@@ -210,6 +214,7 @@ fn model_info_with_reasoning_efforts(
         reasoning_efforts,
         reasoning_default: None,
         input_modalities: None,
+        max_output_tokens: None,
     }
 }
 
@@ -259,9 +264,11 @@ fn a_models_switch_scopes_the_context_override_to_the_configured_model() {
         reasoning_efforts: None,
         reasoning_default: None,
         input_modalities: None,
+        max_output_tokens: None,
     };
     let mut selection = ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: "mock".to_string(),
         model: catalog_model,
         reasoning_effort: None,
@@ -343,6 +350,7 @@ fn engine_and_openai_compatible_provider_share_runtime_configuration() {
         model: "engine-model".to_string(),
         temperature: Some(0.2),
         context_length: Some(32_000),
+        max_output_tokens: None,
         api_base_url: Some("http://localhost:1234/v1".to_string()),
         api_key: None,
         reasoning: None,
@@ -377,6 +385,7 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
     engine
         .switch_model_option(&ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
@@ -385,6 +394,7 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: Some(vec![InputModality::Image]),
+                max_output_tokens: None,
             },
             reasoning_effort: None,
         })
@@ -394,6 +404,7 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
     engine
         .switch_model_option(&ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
@@ -402,6 +413,7 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: Some(vec![]),
+                max_output_tokens: None,
             },
             reasoning_effort: None,
         })
@@ -417,6 +429,7 @@ fn switch_model_option_rejects_a_reasoning_effort_the_model_does_not_advertise()
     let error = engine
         .switch_model_option(&ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: model_info_with_reasoning_efforts("test-model", Some(vec!["low".to_string()])),
             reasoning_effort: Some("max".to_string()),

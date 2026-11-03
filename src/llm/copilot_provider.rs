@@ -118,7 +118,8 @@ impl CopilotProvider {
 }
 
 impl CopilotProvider {
-    /// Copilot follows the OpenAI `reasoning_effort` field.
+    /// Copilot follows the OpenAI `reasoning_effort` field and expects the
+    /// output limit as `max_completion_tokens`.
     fn customize_request_body(
         request_body: &mut serde_json::Value,
         runtime_config: &EngineRuntimeConfig,
@@ -126,6 +127,12 @@ impl CopilotProvider {
     ) {
         if let Some(reasoning_effort) = runtime_config.reasoning_effort.as_deref() {
             request_body["reasoning_effort"] = serde_json::json!(reasoning_effort);
+        }
+        if let Some(max_output_tokens) = runtime_config.max_output_tokens {
+            if let Some(object) = request_body.as_object_mut() {
+                object.remove("max_tokens");
+            }
+            request_body["max_completion_tokens"] = serde_json::json!(max_output_tokens);
         }
     }
 }

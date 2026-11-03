@@ -22,6 +22,7 @@ fn stream_failure_emits_one_user_visible_error() {
             EngineConfig {
                 provider_connection: "failing".to_string(),
                 model: "invalid".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,
@@ -87,6 +88,7 @@ fn clear_context_drops_stale_stream_event_from_a_superseded_generation() {
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,
@@ -169,6 +171,7 @@ fn clear_context_records_the_root_agent_type_in_the_replacement_session() {
             EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: None,
                 api_base_url: None,

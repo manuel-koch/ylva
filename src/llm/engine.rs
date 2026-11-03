@@ -126,12 +126,26 @@ pub trait Engine: Send + Sync {
         if let Some(context_length) = option.context_length_override {
             self.set_context_length_override(Some(context_length))?;
         }
+        if let Some(max_output_tokens) = option.max_output_tokens_override {
+            self.set_max_output_tokens_override(Some(max_output_tokens))?;
+        }
         Ok(())
     }
 
     /// Create an independent runtime from the engine's original configuration.
     fn configured_copy(&self) -> anyhow::Result<Arc<dyn Engine>> {
         anyhow::bail!("engine does not support creating an independent configured runtime")
+    }
+
+    /// Create an independent copy of this engine's current runtime selection
+    /// whose output limit is at most `maximum_output_tokens`, leaving this
+    /// engine's own limit untouched. A lower limit already in effect is kept.
+    fn with_output_limit_cap(
+        &self,
+        maximum_output_tokens: usize,
+    ) -> anyhow::Result<Arc<dyn Engine>> {
+        let _ = maximum_output_tokens;
+        anyhow::bail!("engine does not support creating a capped copy")
     }
 
     /// Resolve a selected model's window without retaining another model's metadata.
@@ -142,6 +156,17 @@ pub trait Engine: Send + Sync {
     ) -> usize {
         self.config()
             .context_length_for_model(model, catalog_context_length)
+    }
+
+    /// Resolve a selected model's output-token limit (SSOT:
+    /// [`EngineConfig::max_output_tokens_for_model`]); `None` sends no limit.
+    fn max_output_tokens_for_model(
+        &self,
+        model: &str,
+        catalog_max_output_tokens: Option<usize>,
+    ) -> Option<usize> {
+        self.config()
+            .max_output_tokens_for_model(model, catalog_max_output_tokens)
     }
 
     fn chat<'a>(
@@ -282,6 +307,7 @@ pub trait Engine: Send + Sync {
                     .filter(|model| self.ensure_model_allowed(&model.id).is_ok())
                     .map(|model| ProviderModelOption {
                         context_length_override: None,
+                        max_output_tokens_override: None,
                         provider_connection: provider_connection.clone(),
                         model,
                         reasoning_effort: None,
@@ -353,6 +379,31 @@ pub trait Engine: Send + Sync {
         }
         Ok(())
     }
+
+    /// Set or clear the session-only output-token limit override. `None`
+    /// returns to the profile limit on the next catalog adoption.
+    ///
+    /// Engines that cannot change the limit reject a `Some` value.
+    fn set_max_output_tokens_override(
+        &self,
+        max_output_tokens: Option<usize>,
+    ) -> anyhow::Result<()> {
+        if max_output_tokens.is_some() {
+            anyhow::bail!("engine does not support an output token limit override");
+        }
+        Ok(())
+    }
+
+    /// The output-token limit sent with chat requests, or `None` when no
+    /// limit is sent.
+    fn effective_max_output_tokens(&self) -> Option<usize> {
+        let config = self.config();
+        config.max_output_tokens_for_model(&config.model, None)
+    }
+
+    /// Adopt the catalog's output maximum of a newly selected model so a
+    /// configured limit stays within it.
+    fn adopt_catalog_max_output_tokens(&self, _catalog_max_output_tokens: Option<usize>) {}
 
     /// Return the active model's provider-advertised input modalities.
     fn input_modalities(&self) -> Option<Vec<InputModality>> {
@@ -484,11 +535,25 @@ pub trait Engine: Send + Sync {
                 })
             }
         };
+        let max_output_tokens = match selection {
+            ModelSelection::NamedEngine { option, .. } => option
+                .max_output_tokens_override
+                .or_else(|| self.effective_max_output_tokens()),
+            ModelSelection::ProviderModel(option) => {
+                option.max_output_tokens_override.or_else(|| {
+                    self.max_output_tokens_for_model(
+                        &option.model.id,
+                        option.model.max_output_tokens,
+                    )
+                })
+            }
+        };
         Ok(ModelSelectionTarget {
             engine_name,
             provider_connection: selection.provider_connection().to_string(),
             model: selection.model_id().to_string(),
             context_length,
+            max_output_tokens,
         })
     }
 }
@@ -518,6 +583,8 @@ pub(super) fn apply_model_option(
     // a plain catalog selection (`None`) clears it and adopts the catalog.
     engine.set_context_length_override(option.context_length_override)?;
     engine.adopt_catalog_context_length(option.model.context_length);
+    engine.set_max_output_tokens_override(option.max_output_tokens_override)?;
+    engine.adopt_catalog_max_output_tokens(option.model.max_output_tokens);
     Ok(())
 }
 

@@ -57,6 +57,7 @@ const KNOWN_KEYS: &[&str] = &[
     "input_history_limit",
     "keybindings",
     "max_concurrent_subagents",
+    "max_output_tokens",
     "max_tool_iterations",
     "model",
     "only_arguments",

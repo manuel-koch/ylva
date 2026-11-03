@@ -303,6 +303,7 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             if run_id.is_none() {
                 state.mode = TuiMode::Idle;
             }
+            state.flush_target_partial_text(run_id);
             state
                 .target_messages_mut(run_id)
                 .push(ChatEntry::ErrorLine { message });
@@ -423,6 +424,7 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             if run_id.is_none() {
                 state.mode = TuiMode::Idle;
             }
+            state.flush_target_partial_text(run_id);
             state
                 .target_messages_mut(run_id)
                 .push(ChatEntry::ErrorLine { message });
@@ -672,6 +674,7 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             if run_id.is_none() {
                 state.mode = TuiMode::Idle;
             }
+            state.flush_target_partial_text(run_id);
             state
                 .target_messages_mut(run_id)
                 .push(ChatEntry::ErrorLine { message });
@@ -870,6 +873,7 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             if run_id.is_none() {
                 state.mode = TuiMode::Idle;
             }
+            state.flush_target_partial_text(run_id);
             state
                 .target_messages_mut(run_id)
                 .push(ChatEntry::ErrorLine { message });

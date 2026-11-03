@@ -297,6 +297,7 @@ fn summary_application_log_reports_estimated_model_view_reduction() {
         let config = crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
             model: "test-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: Some(context_length),
             api_base_url: None,
@@ -345,6 +346,7 @@ fn synchronous_drop_log_reports_estimated_model_view_reduction() {
         let config = crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
             model: "test-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: Some(2_000),
             api_base_url: None,
@@ -385,6 +387,7 @@ fn no_op_sweep_log_reports_estimate_window_and_decision() {
         let config = crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
             model: "test-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: Some(20_000),
             api_base_url: None,
@@ -445,6 +448,7 @@ fn repeated_compaction_advances_and_stops_without_new_messages() {
             crate::llm::EngineConfig {
                 provider_connection: "mock".to_string(),
                 model: "summary-model".to_string(),
+                max_output_tokens: None,
                 temperature: None,
                 context_length: Some(context.model_view_token_count() * 3 / 2),
                 api_base_url: None,
@@ -500,6 +504,7 @@ async fn generate_summary_collects_the_text_without_tools() {
         }),
         crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
+            max_output_tokens: None,
             model: "summary-model".to_string(),
             temperature: None,
             context_length: None,
@@ -578,6 +583,7 @@ async fn an_empty_summary_response_is_a_failure() {
         Arc::new(EmptyProvider),
         crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
+            max_output_tokens: None,
             model: "summary-model".to_string(),
             temperature: None,
             context_length: None,
@@ -643,6 +649,7 @@ async fn a_runaway_summary_fails_instead_of_buffering_without_bound() {
         Arc::new(RunawayProvider),
         crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
+            max_output_tokens: None,
             model: "summary-model".to_string(),
             temperature: None,
             context_length: None,
@@ -710,6 +717,7 @@ async fn summary_timeout_records_failure_on_the_request_dump() {
         Arc::new(PendingProvider),
         crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
+            max_output_tokens: None,
             model: "summary-model".to_string(),
             temperature: None,
             context_length: None,

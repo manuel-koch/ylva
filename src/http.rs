@@ -576,6 +576,7 @@ where
                 url,
                 operation,
                 status = status.as_u16(),
+                body = %detail,
                 "non-retryable status"
             );
             return Err(status_error(
@@ -613,6 +614,7 @@ where
                 operation,
                 status = status.as_u16(),
                 retry = retries,
+                body = %detail,
                 "retryable status but retries exhausted"
             );
             return Err(status_error(
@@ -629,6 +631,9 @@ where
         if let (true, Some(seconds)) = (honors_retry_after, retry_after) {
             cooldown.note_retry_after(Duration::from_secs(seconds.min(RETRY_MAX_SECONDS)));
         }
+        // The response dump only keeps the final attempt, so log what the
+        // provider said on every attempt that gets retried.
+        let detail = response_body_detail(response).await;
         tracing::warn!(
             url,
             operation,
@@ -636,6 +641,7 @@ where
             retry = retries,
             delay_ms = delay.as_millis() as u64,
             retry_after_seconds = retry_after,
+            body = %detail,
             "retryable status; retrying"
         );
         if sleep_cancel_aware(cancel, delay).await.is_none() {

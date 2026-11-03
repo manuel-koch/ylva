@@ -381,6 +381,18 @@ impl Engine for EngineRouter {
         self.active_engine().effective_context_length()
     }
 
+    fn effective_max_output_tokens(&self) -> Option<usize> {
+        self.active_engine().effective_max_output_tokens()
+    }
+
+    fn with_output_limit_cap(
+        &self,
+        maximum_output_tokens: usize,
+    ) -> anyhow::Result<Arc<dyn Engine>> {
+        self.active_engine()
+            .with_output_limit_cap(maximum_output_tokens)
+    }
+
     fn active_engine_name(&self) -> Option<String> {
         Some(self.active_engine_entry().0)
     }
@@ -474,6 +486,7 @@ impl Engine for EngineRouter {
                                 .is_none_or(|engine| engine.ensure_model_allowed(&model.id).is_ok())
                                 .then_some(ProviderModelOption {
                                     context_length_override: None,
+                                    max_output_tokens_override: None,
                                     provider_connection: provider_connection.clone(),
                                     model,
                                     reasoning_effort: None,
@@ -589,11 +602,25 @@ impl Engine for EngineRouter {
                 })
             }
         };
+        let max_output_tokens = match selection {
+            ModelSelection::NamedEngine { option, .. } => option
+                .max_output_tokens_override
+                .or_else(|| target_engine.effective_max_output_tokens()),
+            ModelSelection::ProviderModel(option) => {
+                option.max_output_tokens_override.or_else(|| {
+                    target_engine.max_output_tokens_for_model(
+                        &option.model.id,
+                        option.model.max_output_tokens,
+                    )
+                })
+            }
+        };
         Ok(ModelSelectionTarget {
             engine_name: Some(engine_name),
             provider_connection: config.provider_connection,
             model: selection.model_id().to_string(),
             context_length,
+            max_output_tokens,
         })
     }
 

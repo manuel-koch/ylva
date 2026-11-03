@@ -198,6 +198,7 @@ fn comment_stream_fixture_tolerates_comment_lines() {
                 Some(StreamEvent::Text(text)) => texts.push(text),
                 Some(StreamEvent::Done) => done = true,
                 Some(StreamEvent::Error(_)) => panic!("comment fixture must not error"),
+                Some(StreamEvent::OutputTruncated(_)) => {}
                 Some(StreamEvent::Cancelled) => {}
                 Some(StreamEvent::Delta(_)) => {}
                 Some(StreamEvent::Thinking(_)) => {}
@@ -220,6 +221,7 @@ fn reasoning_fixture_skips_reasoning_only_delta() {
                 Some(StreamEvent::Text(text)) => texts.push(text),
                 Some(StreamEvent::Done) => done = true,
                 Some(StreamEvent::Error(_)) => panic!("reasoning fixture must not error"),
+                Some(StreamEvent::OutputTruncated(_)) => {}
                 Some(StreamEvent::Cancelled) => {}
                 Some(StreamEvent::Delta(_)) => {}
                 Some(StreamEvent::Thinking(_)) => {}

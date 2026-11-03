@@ -23,6 +23,15 @@ fn decode_all(frames: &[serde_json::Value]) -> Vec<StreamEvent> {
 }
 
 #[test]
+fn request_body_sets_max_output_tokens_only_when_configured() {
+    let messages = serde_json::json!([]);
+    let limited = responses_request_body("m", &messages, &[], None, None, Some(4096));
+    assert_eq!(limited["max_output_tokens"], 4096);
+    let unlimited = responses_request_body("m", &messages, &[], None, None, None);
+    assert!(unlimited.get("max_output_tokens").is_none());
+}
+
+#[test]
 fn input_projects_conversation_and_tool_round_trip() {
     let chat_messages = serde_json::json!([
         {"role": "system", "content": "be brief"},
@@ -102,6 +111,7 @@ fn request_body_flattens_tools_and_carries_reasoning() {
         &tools,
         None,
         Some("high"),
+        None,
     );
 
     assert_eq!(body["model"], "gpt-6-luna");
@@ -123,7 +133,7 @@ fn request_body_flattens_tools_and_carries_reasoning() {
 
 #[test]
 fn request_body_omits_optional_fields_when_unset() {
-    let body = responses_request_body("m", &serde_json::json!([]), &[], None, None);
+    let body = responses_request_body("m", &serde_json::json!([]), &[], None, None, None);
 
     assert!(body.get("tools").is_none());
     assert!(body.get("reasoning").is_none());

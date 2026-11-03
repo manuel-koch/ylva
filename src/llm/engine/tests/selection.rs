@@ -42,6 +42,7 @@ fn direct_engine_previews_the_selected_effective_context_length() {
     let option = |context_length| {
         ModelSelection::ProviderModel(ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
@@ -50,6 +51,7 @@ fn direct_engine_previews_the_selected_effective_context_length() {
                 reasoning_efforts: None,
                 reasoning_default: None,
                 input_modalities: None,
+                max_output_tokens: None,
             },
             reasoning_effort: None,
         })
@@ -102,6 +104,7 @@ fn edenai_selection_and_preview_reject_invalid_without_mutation() {
         model: model_info_with_modalities("new-model", Some(vec![])),
         reasoning_effort: Some("med".into()),
         context_length_override: Some(77),
+        max_output_tokens_override: None,
     };
     let before = engine.runtime_snapshot().unwrap();
     assert!(engine
@@ -125,6 +128,7 @@ fn edenai_selection_accepts_unverified_and_can_clear_to_default() {
         model: model_info_with_modalities("new-model", Some(vec![])),
         reasoning_effort: Some("medium".into()),
         context_length_override: Some(77),
+        max_output_tokens_override: None,
     };
     engine.switch_model_option(&option).unwrap();
     assert_eq!(engine.reasoning_effort().as_deref(), Some("medium"));

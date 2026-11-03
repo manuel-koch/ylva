@@ -14,6 +14,46 @@
 
 use super::*;
 
+fn engine_config_with_max_output_tokens(value: &str) -> Result<EngineConfig, toml::de::Error> {
+    toml::from_str(&format!(
+        "provider_connection = \"mock\"\nmodel = \"local\"\n{value}"
+    ))
+}
+
+#[test]
+fn engine_config_max_output_tokens_parses_numbers_and_suffixes_and_rejects_zero() {
+    let omitted = engine_config_with_max_output_tokens("").expect("omitted parses");
+    assert_eq!(omitted.max_output_tokens, None);
+    let integer = engine_config_with_max_output_tokens("max_output_tokens = 8192").expect("int");
+    assert_eq!(integer.max_output_tokens, Some(8_192));
+    let suffixed = engine_config_with_max_output_tokens("max_output_tokens = \"8K\"").expect("K");
+    assert_eq!(suffixed.max_output_tokens, Some(8_000));
+    assert!(engine_config_with_max_output_tokens("max_output_tokens = 0").is_err());
+    assert!(engine_config_with_max_output_tokens("max_output_tokens = \"0K\"").is_err());
+}
+
+#[test]
+fn max_output_tokens_applies_only_to_the_configured_model_and_clamps_to_catalog() {
+    let config = engine_config_with_max_output_tokens("max_output_tokens = 64000").expect("parses");
+    assert_eq!(
+        config.max_output_tokens_for_model("local", None),
+        Some(64_000)
+    );
+    assert_eq!(
+        config.max_output_tokens_for_model("local", Some(16_000)),
+        Some(16_000)
+    );
+    assert_eq!(
+        config.max_output_tokens_for_model("other", Some(16_000)),
+        None
+    );
+    let unset = engine_config_with_max_output_tokens("").expect("parses");
+    assert_eq!(
+        unset.max_output_tokens_for_model("local", Some(16_000)),
+        None
+    );
+}
+
 #[test]
 fn engine_config_context_length_accepts_a_plain_integer() {
     let config: EngineConfig = toml::from_str(

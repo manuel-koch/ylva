@@ -82,6 +82,7 @@ fn configured_copies_keep_provider_runtimes_independent_and_restore_original_set
         engine
             .switch_model_option(&ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: "mock".to_string(),
                 model: ModelInfo {
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
@@ -90,6 +91,7 @@ fn configured_copies_keep_provider_runtimes_independent_and_restore_original_set
                     reasoning_efforts: Some(vec!["high".to_string()]),
                     reasoning_default: None,
                     input_modalities: Some(Vec::new()),
+                    max_output_tokens: None,
                 },
                 reasoning_effort: reasoning_effort.map(str::to_string),
             })
@@ -157,6 +159,7 @@ fn catalog_selection_without_optional_metadata_does_not_fetch_again() {
         engine
             .switch_model_option(&ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: "mock".to_string(),
                 model: model_info_with_modalities("catalog-selection", None),
                 reasoning_effort: None,
@@ -474,6 +477,7 @@ fn context_length_override_survives_catalog_adoption_until_a_plain_selection_cle
             model: larger_model.clone(),
             reasoning_effort: None,
             context_length_override,
+            max_output_tokens_override: None,
         };
 
         engine
@@ -525,6 +529,7 @@ fn restricted_engine_with_provider(
 fn option_for(model: &str, reasoning_effort: Option<&str>) -> ProviderModelOption {
     ProviderModelOption {
         context_length_override: Some(4_096),
+        max_output_tokens_override: None,
         provider_connection: "mock".to_string(),
         model: model_info_with_reasoning_efforts(model, Some(vec!["low".to_string()])),
         reasoning_effort: reasoning_effort.map(str::to_string),
@@ -634,6 +639,28 @@ fn configured_copies_keep_the_model_policy() {
 
     assert!(copy.switch_model("other").is_err());
     assert!(copy.ensure_model_allowed("test-x").is_ok());
+}
+
+#[test]
+fn output_limit_cap_copies_without_touching_the_original() {
+    let engine = restricted_engine_with_provider(
+        &["test-*"],
+        "test-model",
+        Arc::new(OpenAiCompatibleProvider::new(
+            "test".to_string(),
+            "http://127.0.0.1:9/v1".to_string(),
+            "test-model".to_string(),
+            None,
+        )),
+    );
+
+    let capped = engine.with_output_limit_cap(2048).expect("capped copy");
+    assert_eq!(capped.effective_max_output_tokens(), Some(2048));
+    assert_eq!(engine.effective_max_output_tokens(), None);
+
+    engine.set_max_output_tokens_override(Some(512)).unwrap();
+    let lower = engine.with_output_limit_cap(2048).expect("capped copy");
+    assert_eq!(lower.effective_max_output_tokens(), Some(512));
 }
 
 #[test]
@@ -816,6 +843,7 @@ async fn stale_hydration_cannot_overwrite_a_new_selection() {
             model: model_info_with_modalities("new-model", Some(vec![])),
             reasoning_effort: Some("low".into()),
             context_length_override: Some(999),
+            max_output_tokens_override: None,
         })
         .unwrap();
     let selected = engine.runtime_snapshot().unwrap();
@@ -1028,6 +1056,7 @@ async fn neutral_reasoning_contract_controls_validation_hydration_and_notices_wi
         model: model_info_with_modalities("test-model", None),
         reasoning_effort: Some("custom".into()),
         context_length_override: None,
+        max_output_tokens_override: None,
     };
     let options = engine
         .selection_reasoning_options(&ModelSelection::ProviderModel(option.clone()))
@@ -1067,6 +1096,7 @@ async fn independently_bound_runtime_retains_strict_profile_fallback_and_atomic_
             model: model_info_with_modalities("new-model", Some(vec![])),
             reasoning_effort: Some("unadvertised".into()),
             context_length_override: Some(999),
+            max_output_tokens_override: None,
         })
         .is_err());
     assert_eq!(engine.runtime_snapshot(), before);

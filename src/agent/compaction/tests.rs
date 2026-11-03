@@ -83,6 +83,7 @@ fn new_recording_runtime(reply: &str) -> RecordingRuntimeFixture {
         crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
             model: "compact-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length: Some(16_000),
             api_base_url: None,
@@ -115,6 +116,7 @@ fn capacity_test_engine(context_length: Option<usize>) -> Arc<dyn Engine> {
         crate::llm::EngineConfig {
             provider_connection: "mock".to_string(),
             model: "capacity-model".to_string(),
+            max_output_tokens: None,
             temperature: None,
             context_length,
             api_base_url: None,

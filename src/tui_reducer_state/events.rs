@@ -363,6 +363,8 @@ impl DomainEvent {
 /// I/O command emitted by the Presenter for the Driver to execute.
 /// The Presenter is pure; all actual I/O (channel sends, textarea mutations)
 /// happens in `execute_effects`.
+// `SwitchModel` carries the full selection, which stays inline like other effect payloads.
+#[expect(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// Send the current textarea contents as a prompt.

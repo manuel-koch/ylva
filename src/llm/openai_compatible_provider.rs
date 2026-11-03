@@ -359,6 +359,7 @@ impl ModelCatalog for DefaultModelCatalog {
                         .get("context_length")
                         .and_then(serde_json::Value::as_u64)
                         .map(|length| length as usize),
+                    max_output_tokens: None,
                     reasoning_efforts,
                     reasoning_default,
                     input_modalities: entry
@@ -452,6 +453,8 @@ impl OpenAiCompatibleProvider {
                 model,
                 temperature: None,
                 context_length: DEFAULT_CONTEXT_LENGTH,
+                max_output_tokens: None,
+                max_output_tokens_override: None,
                 reasoning_effort: None,
                 input_modalities: None,
             })),
@@ -768,6 +771,7 @@ impl Provider for OpenAiCompatibleProvider {
                     &tools,
                     runtime_config.temperature,
                     runtime_config.reasoning_effort.as_deref(),
+                    runtime_config.max_output_tokens,
                 )
             } else {
                 let mut request_body = serde_json::json!({
@@ -778,6 +782,11 @@ impl Provider for OpenAiCompatibleProvider {
                 });
                 if let Some(temperature) = runtime_config.temperature {
                     request_body["temperature"] = serde_json::json!(temperature);
+                }
+                // Customizers rename the field for endpoints that expect
+                // `max_completion_tokens`.
+                if let Some(max_output_tokens) = runtime_config.max_output_tokens {
+                    request_body["max_tokens"] = serde_json::json!(max_output_tokens);
                 }
                 request_body_customizer(&mut request_body, &runtime_config, session_id);
                 if !tools.is_empty() {
@@ -855,6 +864,7 @@ impl Provider for OpenAiCompatibleProvider {
                 model = %runtime_config.model,
                 temperature = ?runtime_config.temperature,
                 effective_context_length = runtime_config.context_length,
+                effective_max_output_tokens = ?runtime_config.max_output_tokens,
                 reasoning_effort = %crate::llm::format_reasoning_effort_for_log(
                     runtime_config.reasoning_effort.as_deref()
                 ),
@@ -875,13 +885,17 @@ impl Provider for OpenAiCompatibleProvider {
                 );
             }
             let request_started_at = std::time::Instant::now();
-            let (response, request_permit) = match crate::http::post_with_retry_and_limiter(
-                &client,
-                &completions_url,
-                &headers,
-                &request_body,
-                &cancel,
-                &request_limiter,
+            let (response, request_permit) = match tracing::Instrument::instrument(
+                crate::http::post_with_retry_and_limiter(
+                    &client,
+                    &completions_url,
+                    &headers,
+                    &request_body,
+                    &cancel,
+                    &request_limiter,
+                ),
+                // Correlates retry logs with the request/response dump files.
+                tracing::info_span!("chat_request", dump_id = %dump_id),
             )
             .await
             {
@@ -894,7 +908,11 @@ impl Provider for OpenAiCompatibleProvider {
                     let response_dump_path =
                         dump_context.response_path_for_content_type(None, "jsonl");
                     crate::http::dump_response_transport_error(&response_dump_path, &error);
-                    return Err(model_catalog.contextualize_error(&runtime_config, error));
+                    let error = model_catalog.contextualize_error(&runtime_config, error);
+                    return Err(with_output_limit_hint(
+                        error,
+                        runtime_config.max_output_tokens,
+                    ));
                 }
             };
             tracing::debug!(
@@ -931,6 +949,7 @@ impl Provider for OpenAiCompatibleProvider {
                 let mut reported_input_tokens = None;
                 let mut cost_recorded = false;
                 let mut first_token_received = false;
+                let mut truncation_notified = false;
                 let mut responses_decoder = use_responses
                     .then(crate::llm::openai_responses::ResponsesStreamDecoder::default);
                 let terminal_marker = if use_responses {
@@ -1002,6 +1021,24 @@ impl Provider for OpenAiCompatibleProvider {
                                         );
                                         cost_ledger.record(cost);
                                     }
+                                    // A cut-off response is announced once; the stream
+                                    // itself still ends normally.
+                                    if !truncation_notified {
+                                        if let Some(notice) = output_limit_truncation_notice(
+                                            &event.data,
+                                            runtime_config.max_output_tokens,
+                                        ) {
+                                            truncation_notified = true;
+                                            tracing::warn!(
+                                                dump_id = %stream_dump_id,
+                                                max_output_tokens = ?runtime_config.max_output_tokens,
+                                                "response truncated by the output token limit"
+                                            );
+                                            if tx.send(StreamEvent::OutputTruncated(notice)).await.is_err() {
+                                                break 'stream;
+                                            }
+                                        }
+                                    }
                                     let stream_events = match responses_decoder.as_mut() {
                                         Some(decoder) => decoder.decode(&event.data),
                                         None => stream_payload_parser(&event.data),
@@ -1066,6 +1103,65 @@ impl Provider for OpenAiCompatibleProvider {
             Ok(rx)
         })
     }
+}
+
+/// Append an advisory hint when a request that carried no output limit fails
+/// with a credit-related or gateway status (HTTP 402, 429 or 5xx). Some
+/// gateways reserve credit for the model's full output ceiling when no limit
+/// is sent. The provider's own message stays intact and Ylva never retries
+/// with different parameters.
+pub(crate) fn with_output_limit_hint(
+    error: anyhow::Error,
+    requested_limit: Option<usize>,
+) -> anyhow::Error {
+    if requested_limit.is_some() {
+        return error;
+    }
+    let message = format!("{error:#}");
+    let status = message
+        .split_once("failed with HTTP ")
+        .and_then(|(_, rest)| rest.get(..3))
+        .and_then(|digits| digits.parse::<u16>().ok());
+    match status {
+        Some(402 | 429 | 500..=599) => anyhow::anyhow!(
+            "{message} (hint: no output limit was sent; some providers reserve credit for the \
+             model's full output size. Set max_output_tokens in the engine configuration or in \
+             /models to request a smaller limit)"
+        ),
+        _ => error,
+    }
+}
+
+/// Notice text when an SSE payload reports that the model stopped at its
+/// output-token limit: chat completions `finish_reason: "length"`, or a
+/// Responses `response.incomplete` with reason `max_output_tokens`.
+/// Reasoning tokens count toward the limit, so the answer may be cut short
+/// even when little text was produced.
+pub(crate) fn output_limit_truncation_notice(
+    data: &str,
+    requested_limit: Option<usize>,
+) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    let by_chat_completions = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(serde_json::Value::as_str)
+        == Some("length");
+    let by_responses = value.get("type").and_then(serde_json::Value::as_str)
+        == Some("response.incomplete")
+        && value
+            .pointer("/response/incomplete_details/reason")
+            .and_then(serde_json::Value::as_str)
+            == Some("max_output_tokens");
+    if !(by_chat_completions || by_responses) {
+        return None;
+    }
+    Some(match requested_limit {
+        Some(limit) => format!(
+            "The response was cut off at the output limit of {limit} tokens (reasoning tokens \
+             count too). Raise max_output_tokens in the engine configuration or in /models."
+        ),
+        None => "The response was cut off at the model's own output limit.".to_string(),
+    })
 }
 
 /// Parse the OpenAI Chat Completions input-token usage fields used by

@@ -29,6 +29,7 @@ fn model_choice(context_length: usize) -> ModelChoice {
             model: ModelInfo {
                 id: "model".to_string(),
                 context_length: Some(context_length),
+                max_output_tokens: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: None,
                 reasoning_default: None,
@@ -36,6 +37,7 @@ fn model_choice(context_length: usize) -> ModelChoice {
             },
             reasoning_effort: None,
             context_length_override: None,
+            max_output_tokens_override: None,
         },
         reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         initial_reasoning_effort: None,
@@ -51,6 +53,7 @@ fn model_choice(context_length: usize) -> ModelChoice {
             provider_connection: "stub".to_string(),
             model: "model".to_string(),
             context_length,
+            max_output_tokens: None,
         }),
         selection_preview_error: None,
         favorite_rank: None,
@@ -78,6 +81,9 @@ fn context_length_draft(
         context_length: Some(context_length),
         context_length_maximum: Some(256 * KB),
         context_length_edited: edited,
+        max_output_tokens: None,
+        max_output_tokens_maximum: None,
+        max_output_tokens_edited: false,
         reasoning_effort: None,
     }
 }

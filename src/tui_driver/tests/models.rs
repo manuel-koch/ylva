@@ -27,8 +27,10 @@ fn picker_preview_and_confirmation_keep_explicit_compaction_fixed_and_implicit_c
 
         let make_option = |connection: &str, model: &str, context_length| ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: connection.to_string(),
             model: crate::llm::ModelInfo {
+                max_output_tokens: None,
                 id: model.to_string(),
                 context_length: Some(context_length),
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
@@ -69,6 +71,7 @@ fn picker_preview_and_confirmation_keep_explicit_compaction_fixed_and_implicit_c
                         model: model.to_string(),
                         temperature: None,
                         context_length: Some(98_304),
+                        max_output_tokens: None,
                         api_base_url: Some("http://127.0.0.1:9/v1".to_string()),
                         api_key: None,
                         reasoning: None,
@@ -272,12 +275,15 @@ fn compaction_switch_notices_explain_engine_selection_effects() {
         provider_connection: "mock".to_string(),
         model: "model-b".to_string(),
         context_length: 65_536,
+        max_output_tokens: None,
     };
     let option = crate::llm::ProviderModelOption {
+        max_output_tokens_override: None,
         provider_connection: "mock".to_string(),
         model: crate::llm::ModelInfo {
             id: "model-b".to_string(),
             context_length: None,
+            max_output_tokens: None,
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: None,
             reasoning_default: None,
@@ -332,6 +338,7 @@ fn compaction_switch_notices_explain_engine_selection_effects() {
         provider_connection: "mock".to_string(),
         model: "model-a".to_string(),
         context_length: 131_072,
+        max_output_tokens: None,
     };
     assert_eq!(
         compaction_switch_notice(&display, &shared_target, &named).as_deref(),
@@ -372,10 +379,12 @@ async fn interrupted_model_list_discovery_resumes_after_the_pause() {
     let partial = ModelListResult::PartialFailure {
         models: vec![crate::llm::ProviderModelOption {
             context_length_override: None,
+            max_output_tokens_override: None,
             provider_connection: "healthy".to_string(),
             model: crate::llm::ModelInfo {
                 id: "available".to_string(),
                 context_length: None,
+                max_output_tokens: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 reasoning_efforts: None,
                 reasoning_default: None,
@@ -902,10 +911,12 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
     let (mut state, textarea, _cmd_tx, _cmd_rx) = setup();
     let selection = crate::llm::ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "thinking".to_string(),
             context_length: None,
+            max_output_tokens: None,
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
             reasoning_default: None,
@@ -999,10 +1010,12 @@ async fn model_picker_parameter_popup_esc_returns_to_the_list_and_discards_the_d
     let (mut state, textarea, _cmd_tx, _cmd_rx) = setup();
     let selection = crate::llm::ProviderModelOption {
         context_length_override: None,
+        max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
             id: "thinking".to_string(),
             context_length: None,
+            max_output_tokens: None,
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             reasoning_efforts: Some(vec!["low".to_string()]),
             reasoning_default: None,
@@ -1357,10 +1370,12 @@ fn picker_orders_engines_then_favorites_in_configured_order_then_the_rest() {
             .iter()
             .map(|id| crate::llm::ProviderModelOption {
                 context_length_override: None,
+                max_output_tokens_override: None,
                 provider_connection: "stub".to_string(),
                 model: crate::llm::ModelInfo {
                     id: id.to_string(),
                     context_length: None,
+                    max_output_tokens: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     reasoning_efforts: None,
                     reasoning_default: None,
@@ -1468,6 +1483,7 @@ fn gateway_picker_engine(effort: Option<&str>) -> Arc<dyn Engine> {
         model: model.to_string(),
         temperature: None,
         context_length: Some(32_000),
+        max_output_tokens: None,
         api_base_url: Some("http://127.0.0.1:9".to_string()),
         api_key: None,
         reasoning: effort.map(str::to_string),
@@ -1595,12 +1611,14 @@ fn gateway_catalog_evidence_reaches_named_and_raw_picker_rows() {
             id: "upstream/model".to_string(),
             context_length: Some(128_000),
             reasoning_evidence: crate::llm::ReasoningEvidence::Supported,
+            max_output_tokens: None,
             reasoning_efforts: Some(Vec::new()),
             reasoning_default: None,
             input_modalities: Some(vec![crate::llm::InputModality::Image]),
         },
         reasoning_effort: None,
         context_length_override: None,
+        max_output_tokens_override: None,
     };
     apply_model_list_result(
         &mut state,
@@ -1692,11 +1710,13 @@ fn gateway_shortcut_outage_retains_active_runtime_capability_evidence() {
             context_length: Some(128_000),
             reasoning_evidence: crate::llm::ReasoningEvidence::Supported,
             reasoning_efforts: Some(vec!["medium".to_string(), "high".to_string()]),
+            max_output_tokens: None,
             reasoning_default: Some("medium".to_string()),
             input_modalities: Some(vec![crate::llm::InputModality::Image]),
         },
         reasoning_effort: Some("medium".to_string()),
         context_length_override: None,
+        max_output_tokens_override: None,
     };
     engine
         .select_model(&ModelSelection::ProviderModel(option))
@@ -1737,6 +1757,7 @@ fn gateway_outage_retains_inactive_named_engine_evidence() {
     let evidence = crate::llm::ModelInfo {
         id: configuration.model.clone(),
         context_length: Some(128_000),
+        max_output_tokens: None,
         reasoning_evidence: crate::llm::ReasoningEvidence::Supported,
         reasoning_efforts: Some(vec!["medium".to_string(), "high".to_string()]),
         reasoning_default: None,
@@ -1748,6 +1769,7 @@ fn gateway_outage_retains_inactive_named_engine_evidence() {
             model: evidence.clone(),
             reasoning_effort: Some("medium".to_string()),
             context_length_override: None,
+            max_output_tokens_override: None,
         })
         .expect("advertised selection");
     let engine: Arc<dyn Engine> = Arc::new(
