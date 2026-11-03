@@ -1408,26 +1408,89 @@ replaces the floor:
 ```toml
 [tools.bash]
 rules = [
-  { command = ["true"], verdict = "auto_approved" },
-  { command = ["false"], verdict = "auto_approved" },
-  { command = ["cat", "**"], only_arguments = ["-n", "-b", "-s"], verdict = "auto_approved" },
-  { command = ["ls", "**"], only_arguments = ["-l", "-a", "-h", "-d", "-t", "-R"], verdict = "auto_approved" },
-  { command = ["head", "**"], only_arguments = ["-n", "-c"], verdict = "auto_approved" },
-  { command = ["tail", "**"], only_arguments = ["-n", "-c"], verdict = "auto_approved" },
-  { command = ["wc", "**"], only_arguments = ["-l", "-w", "-c", "-m"], verdict = "auto_approved" },
-  { command = ["grep", "**"], only_arguments = ["-n", "-i", "-e", "-F", "-E", "-r", "-v", "-A", "-B", "-l", "-c", "-o", "-H", "-m", "--include", "--exclude", "--exclude-dir"], verdict = "auto_approved" },
-  { command = ["rg", "**"], only_arguments = ["-n", "-i", "-e", "-F", "-g", "-C", "-A", "-B", "--files"], verdict = "auto_approved" },
-  { command = ["sort", "**"], only_arguments = ["-n", "-r", "-u", "-k"], verdict = "auto_approved" },
-  { command = ["find", "**"], only_arguments = ["-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth", "-depth", "-a", "-o", "!", "-print"], verdict = "auto_approved" },
-  { command = ["git", "**"], only_arguments = ["check-ignore", "--no-pager", "--verbose"], verdict = "auto_approved" },
-  { command = ["git", "**"], only_arguments = ["status", "--no-pager", "--short", "--branch"], verdict = "auto_approved" },
-  { command = ["git", "**"], only_arguments = ["diff", "--no-pager", "--stat", "--check", "--cached", "--numstat", "--name-only", "--unified"], verdict = "auto_approved" },
-  { command = ["git", "**"], only_arguments = ["log", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"], verdict = "auto_approved" },
-  { command = ["git", "**"], only_arguments = ["show", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"], verdict = "auto_approved" },
-  { rule = "unquoted_glob", verdict = "user_approval_required" },
-  { rule = "unquoted_brace_expansion", verdict = "user_approval_required" },
-  { rule = "variable_assignment_prefix", verdict = "user_approval_required" },
-  { rule = "backgrounded", verdict = "auto_denied" },
+    # Broad rules for read-only tools
+    { command = ["true"],         verdict = "auto_approved" },
+    { command = ["false"],        verdict = "auto_approved" },
+    { command = ["nl", "**"],     verdict = "auto_approved" },
+    { command = ["cut", "**"],    verdict = "auto_approved" },
+    { command = ["tr", "**"],     verdict = "auto_approved" },
+    { command = ["echo", "**"],   verdict = "auto_approved" },
+    { command = ["test", "**"],   verdict = "auto_approved" },
+    { command = ["uname"],        verdict = "auto_approved" },
+    { command = ["uname", "**"],  verdict = "auto_approved" },
+    { command = ["pwd"],          verdict = "auto_approved" },
+    { command = ["pwd", "**"],    verdict = "auto_approved" },
+    
+    # printf has a grammar without options, so `only_arguments = []` matches only plain
+    # forms; `printf -v var` (assigns shell state) is incomplete and never matches.
+    { command = ["printf", "**"], verdict = "auto_approved", only_arguments = [] },
+    
+    # cd has a grammar: one literal operand only; bare `cd` and `cd -` use the environment.
+    # Each bash call is a fresh shell, so `cd dir; cmd` equals `cmd dir/...`.
+    { command = ["cd", "**"],     verdict = "auto_approved", only_arguments = [] },
+    
+    { command = ["cat", "**"],    verdict = "auto_approved", only_arguments = ["-n", "-b", "-s", "-v", "-e", "-t", "-E", "-T"] },
+    
+    { command = ["find", "**"],   verdict = "auto_approved", only_arguments = ["-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth", "-depth", "-a", "-o", "!", "-print"] },
+    
+    # One subcommand identity per filter also permits global --no-pager.
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["check-ignore", "--no-pager", "--verbose"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["diff", "--no-pager", "--stat", "--check", "--no-index", "--cached", "--numstat", "--name-only", "--unified"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["status", "--no-pager", "--short", "--branch", "--untracked-files"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["branch", "--no-pager", "--show-current"] },
+    # Git log -N (ASCII digits only) shares the -n/--max-count identity.
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["log", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["show", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },
+    
+    # The rules below only pick which options are allowed. Git option tables omit
+    # options that read files or run programs (grep -O, ls-files -x/-X, blame
+    # --contents/-S), so those are unknown and never match any rule.
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["ls-files", "--no-pager", "--cached", "--others", "--exclude-standard", "--full-name"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["blame", "--no-pager", "-L", "-w", "-e", "--porcelain"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["rev-parse", "--no-pager", "--show-toplevel", "--git-dir", "--abbrev-ref", "--short", "--verify", "--is-inside-work-tree"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["grep", "--no-pager", "-n", "-i", "-e", "-F", "-E", "-l", "-c", "-A", "-B", "-C", "--no-index", "--untracked", "--cached"] },
+    # The grammar requires a nested `list` or `show`; bare `git stash` (a push) and
+    # other nested commands are never matched, whatever this list contains.
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["stash", "list", "show", "--no-pager", "--oneline", "--stat"] },
+    
+    # sed rules must set `allowed_scripts`: regexes, each script command (split at `;` and
+    # newlines) must fully match one of them. Independent of this list, the sed grammar never
+    # recognizes writing, executing, file-reading or nesting commands (w e r s y a i c {}),
+    # -i or -f, so no rule matches them, even with `allowed_scripts = ['.*']`.
+    # `allowed_scripts` can only narrow what the grammar recognizes, never widen it.
+    { command = ["sed", "**"],    verdict = "auto_approved", only_arguments = ["-n", "-e", "-E", "-s"], allowed_scripts = ['\d+(,\d+)?p', '\$p', '/[^/]+/p'] },
+    
+    # grep options may follow the pattern (GNU and BSD/macOS grep permute).
+    { command = ["grep", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-i", "-e", "-F", "-E", "-r", "-v", "-A", "-B", "-l", "-c", "-o", "-H", "-m", "--include", "--exclude", "--exclude-dir"] },
+    
+    # First-argument head -N (ASCII digits only) is covered by -n below.
+    { command = ["head"],         verdict = "auto_approved" },
+    { command = ["head", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-c"] },
+    
+    { command = ["ls"],           verdict = "auto_approved", only_arguments = ["-l", "-a", "-h", "-d", "-t", "-R"] },
+    { command = ["ls", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-a", "-h", "-d", "-t", "-R"] },
+    
+    { command = ["rg", "**"],     verdict = "auto_approved", only_arguments = ["-n", "-i", "-e", "-F", "-g", "-C", "-A", "-B", "--files"] },
+    
+    { command = ["sort"],         verdict = "auto_approved" },
+    { command = ["sort", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-r", "-u", "-k"] },
+    
+    # First-argument tail -N (ASCII digits only) is covered by -n below.
+    { command = ["tail"],         verdict = "auto_approved" },
+    { command = ["tail", "**"],   verdict = "auto_approved", only_arguments = ["-n", "-c"] },
+    
+    { command = ["wc", "**"],     verdict = "auto_approved", only_arguments = ["-l", "-w", "-c", "-m"] },
+    
+    # commands that may have side-effects, but we deem them harmless
+    { command = ["md5sum", "**"],    verdict = "auto_approved" },
+    { command = ["sha1sum", "**"],   verdict = "auto_approved" },
+    { command = ["sha256sum", "**"], verdict = "auto_approved" },
+    { command = ["sha384sum", "**"], verdict = "auto_approved" },
+
+    { rule = "unquoted_glob", verdict = "user_approval_required" },
+    { rule = "unquoted_brace_expansion", verdict = "user_approval_required" },
+    { rule = "variable_assignment_prefix", verdict = "user_approval_required" },
+    { rule = "backgrounded", verdict = "auto_denied" },
 ]
 ```
 
