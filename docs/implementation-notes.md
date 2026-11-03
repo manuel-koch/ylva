@@ -767,6 +767,10 @@ terminal teardown and title restoration keep a fixed order.
   actions are queued after such an event, the event loop skips the next frame
   (`skip_frame`), so a burst over a long draft, e.g. drag-selecting text,
   costs one frame instead of one per event. Presses and releases always draw.
+- Prompt-button hover and focus are mutually exclusive (last input device
+  wins): the event loop clears `mouse_pos` when a key action moves
+  `prompt_button_focus`, and clears `prompt_button_focus` on a `Moved` mouse
+  event that changes the pointer position.
 - Measured (release build, 100x40 terminal): a frame with a ~1 MB / 28,000
   line draft in the textarea takes ~27 ms, below the 50 ms budget, so the
   per-frame `lines().join("\n")` and measurement clones are left as is.

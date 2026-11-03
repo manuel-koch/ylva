@@ -336,8 +336,15 @@ where
                 let Some(mut action) = action else { break };
 
                 // Track mouse position for hover highlight in the footer.
+                // The last input device wins: pointer motion drops keyboard
+                // button focus so only one button looks active.
                 if let AppAction::MouseInput(mouse) = &action {
+                    let moved_pointer = matches!(mouse.kind, MouseEventKind::Moved)
+                        && mouse_pos != Some((mouse.column, mouse.row));
                     mouse_pos = Some((mouse.column, mouse.row));
+                    if moved_pointer {
+                        state.prompt_button_focus = None;
+                    }
                 }
 
                 // Input-area scroll wheel is not handled by the Presenter
@@ -421,7 +428,12 @@ where
                 }
                 let Some(event) = app_action_to_tui_event(action) else { continue };
                 let was_loading_models = matches!(state.slash_overlay, SlashOverlay::LoadingModels);
+                let focus_before = state.prompt_button_focus;
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
+                // Keyboard focus change replaces the pointer hover highlight.
+                if state.prompt_button_focus.is_some() && state.prompt_button_focus != focus_before {
+                    mouse_pos = None;
+                }
                 // Slash-command effects are the only ones needing the engine,
                 // and only key input can produce them.
                 let (slash_effects, effects) = split_slash_effects(effects);

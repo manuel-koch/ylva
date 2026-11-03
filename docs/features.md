@@ -1074,7 +1074,9 @@ for the full mechanics.
   bare `enter` or `esc`
   never resolves an approval: `tab`/`shift-tab` focus a button (idle
   buttons are outlined in their colour; only the focused or hovered one is
-  drawn filled, so a freshly shown prompt has no apparent selection) and
+  drawn filled, so a freshly shown prompt has no apparent selection; the
+  last input device wins: `tab` clears the mouse hover highlight and moving
+  the mouse drops keyboard focus) and
   `enter` activates only the focused one. Approve
   leaves the input text alone (it is dimmed while Approve is focused, as a
   hint it is not used); Deny sends the input text as the reason and clears
