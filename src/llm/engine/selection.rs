@@ -40,6 +40,10 @@ pub struct EngineDisplayInfo {
     pub compaction_engine: Option<CompactionEngineDisplayInfo>,
     /// Whether this conversation shares an Engine runtime with its parent agent.
     pub inherits_parent_runtime: bool,
+    /// Whether the live model, reasoning effort or overrides differ from the
+    /// named engine's configured baseline, so the engine name no longer
+    /// describes what runs.
+    pub config_modified: bool,
 }
 
 /// Display-only selection and context window of the engine used for summaries.
@@ -52,6 +56,9 @@ pub struct CompactionEngineDisplayInfo {
     pub context_length: usize,
     pub follows_conversation: bool,
     pub shares_conversation: bool,
+    /// Copied from the conversation display when the summarizer follows or
+    /// shares the conversation engine.
+    pub config_modified: bool,
 }
 
 impl EngineDisplayInfo {
@@ -65,6 +72,7 @@ impl EngineDisplayInfo {
             reasoning_effort: engine.reasoning_effort(),
             compaction_engine: None,
             inherits_parent_runtime: false,
+            config_modified: engine.active_engine_config_modified(),
         }
     }
 }
@@ -78,6 +86,7 @@ impl From<&EngineConfig> for EngineDisplayInfo {
             reasoning_effort: None,
             compaction_engine: None,
             inherits_parent_runtime: false,
+            config_modified: false,
         }
     }
 }
@@ -165,6 +174,10 @@ pub struct NamedEngineInfo {
     pub name: String,
     pub config: EngineConfig,
     pub reasoning_effort: Option<String>,
+    /// The engine's configured profile baseline, when its runtime reports one.
+    pub configured: Option<EngineConfig>,
+    /// The engine's live runtime settings, including session-only overrides.
+    pub runtime: Option<super::EngineRuntimeConfig>,
 }
 
 pub(super) fn validate_named_engine_option(
@@ -179,8 +192,13 @@ pub(super) fn validate_named_engine_option(
         config.provider_connection,
         option.provider_connection
     );
+    // A named selection may also restore the configured model after a raw
+    // pick moved the engine to another model of the same connection.
+    let configured_model = engine
+        .configured_runtime_config()
+        .map(|configured| configured.model);
     anyhow::ensure!(
-        config.model == option.model.id,
+        config.model == option.model.id || configured_model.as_deref() == Some(&option.model.id),
         "engine uses model '{}', not '{}'",
         config.model,
         option.model.id

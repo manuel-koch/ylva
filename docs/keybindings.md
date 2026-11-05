@@ -106,14 +106,16 @@ conversation. The original draft returns after all approvals are resolved.
 | `Mouse wheel` | `/models` picker open | Move the highlighted provider-connection/model up / down |
 | `left-click` on an entry | `/models` picker open | Highlight the provider-connection/model; does not switch until `enter` |
 | double-click on an entry | `/models` picker open | Same as `enter`: open the parameter popup |
+| `left-click` on a row / on its `◂` or `▸` / on `Reset` or `✓ Apply` | `/models` parameter popup | Highlight the row / step that parameter smaller or greater / activate the button like `enter` |
 | `left-drag` | Slash-command overlay open | Select visible popup text; release copies it to the clipboard. A drag stays within its region: the list rows or the footer text (e.g. the compaction preview) |
 | any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices by engine name, provider connection, or model ID; no re-query |
 | `ctrl-x f` | `/models` picker list or parameter popup | Save the highlighted provider-connection/model as a favorite, or remove it if already marked; does not switch models or edit parameter drafts. |
 | `enter` | `/models` picker open | Open the parameter popup for the highlighted model; nothing switches yet |
 | `esc` | `/models` picker open | Cancel without switching and clear the input |
-| `↑` / `↓` | `/models` parameter popup open | Move between the parameter rows (context length, reasoning effort) |
+| `↑` / `↓` | `/models` parameter popup open | Move between the parameter rows (context length, reasoning effort, output limit) |
 | `←` / `→` | `/models` parameter popup open | Adjust the highlighted parameter: context length by one eighth of the window (minimum token-step floor, capped at the catalog window; see [model parameters](features.md#slash-commands)); reasoning effort through advertised values or separately labelled EdenAI unverified gateway overrides and the provider default, stopping at the ends. `◂`/`▸` beside a value mark the directions that can still move |
-| `enter` | `/models` parameter popup open | Confirm the model and the edited parameters, activate the highlighted selection, and clear the input |
+| `enter` | `/models` parameter popup open | On `Reset`: reload the draft from the engine's configured baseline and stay in the popup. On `✓ Apply`: confirm the model and the edited parameters, activate the highlighted selection, and clear the input. On a value row: nothing |
+| `tab` / `shift-tab` | `/models` parameter popup open | Cycle focus: value rows → `Reset` (named-engine rows only; skipped while the draft equals the configured baseline) → `✓ Apply` |
 | `esc` | `/models` parameter popup open | Return to the model list and discard the parameter edits |
 | typing / backspace | `/models` parameter popup open | Ignored; the filter stays as it was |
 | `↑` / `↓`, page keys, mouse wheel | `/session` picker ready | Move the highlighted session |

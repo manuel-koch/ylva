@@ -121,6 +121,12 @@ extending grammars or suggesting persistent rules.
   prompt-injectable, unreliable and adds latency. Consider it only as a veto or
   explanation aid, never as authority to auto-approve.
 
+## Improved grammar
+
+Maybe improve/add grammar for the following commands
+
+- rumdl
+
 ## Grammar coverage and adversarial validation
 
 Extend the grammar roster only when repeated approvals demonstrate a useful

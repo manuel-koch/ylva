@@ -151,7 +151,7 @@ impl EngineImpl {
         self.ensure_model_allowed(&option.model.id)?;
         if change.is_some() {
             anyhow::ensure!(
-                runtime.model == option.model.id,
+                runtime.model == option.model.id || self.config.model == option.model.id,
                 "engine uses model '{}', not '{}'",
                 runtime.model,
                 option.model.id
@@ -175,13 +175,7 @@ impl EngineImpl {
                 effort.as_deref(),
             )?;
         }
-        let context_override = if change.is_some() {
-            option
-                .context_length_override
-                .or(runtime.context_length_override)
-        } else {
-            option.context_length_override
-        };
+        let context_override = option.context_length_override;
         runtime.model = option.model.id.clone();
         runtime.reasoning_effort = effort;
         runtime.model_info = Some(option.model.clone());
@@ -190,14 +184,7 @@ impl EngineImpl {
         runtime.context_length = context_override.unwrap_or_else(|| {
             self.context_length_for_model(&option.model.id, option.model.context_length)
         });
-        let max_output_override = if change.is_some() {
-            option
-                .max_output_tokens_override
-                .or(runtime.max_output_tokens_override)
-        } else {
-            option.max_output_tokens_override
-        }
-        .map(|requested| {
+        let max_output_override = option.max_output_tokens_override.map(|requested| {
             super::config::clamp_to_catalog_maximum(requested, option.model.max_output_tokens)
         });
         runtime.max_output_tokens_override = max_output_override;
@@ -302,6 +289,12 @@ impl Engine for EngineImpl {
     fn runtime_snapshot(&self) -> Option<EngineRuntimeConfig> {
         Some(self.snapshot())
     }
+
+    // The immutable profile config, not `config()`, which carries live values.
+    fn configured_engine_config(&self) -> Option<EngineConfig> {
+        Some(self.config.clone())
+    }
+
     fn reasoning_effort_policy(&self) -> std::sync::Arc<dyn crate::llm::ReasoningEffortPolicy> {
         self.provider.reasoning_effort_policy()
     }
@@ -351,17 +344,7 @@ impl Engine for EngineImpl {
         if self.owns_provider_runtime {
             return self.apply_runtime_option(option, Some(change));
         }
-        super::validate_named_engine_option(self, option, change)?;
-        if let super::ReasoningEffortChange::Set(effort) = change {
-            self.set_reasoning_effort(effort.as_deref())?;
-        }
-        if let Some(context_length) = option.context_length_override {
-            self.set_context_length_override(Some(context_length))?;
-        }
-        if let Some(max_output_tokens) = option.max_output_tokens_override {
-            self.set_max_output_tokens_override(Some(max_output_tokens))?;
-        }
-        Ok(())
+        super::apply_named_option(self, option, change)
     }
 
     fn favorite_models(&self) -> Vec<(String, Vec<String>)> {

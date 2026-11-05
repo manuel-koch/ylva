@@ -810,6 +810,8 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
     state.slash_overlay = SlashOverlay::ModelPicker {
         parameters: None,
         choices: vec![ModelChoice {
+            configured: None,
+            configuration_warnings: Vec::new(),
             label: crate::tui_reducer_state::ChoiceLabel {
                 identity: "stub/deepseek-v3".to_string(),
                 details: Vec::new(),

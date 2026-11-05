@@ -25,15 +25,16 @@ use crate::saturating_cast::saturating_u16;
 use crate::theme::{
     active_model_color, approve_background_color, approve_hover_background_color,
     chat_scrollbar_color, clarify_banner_fg_color, clarify_banner_scroll_indicator_color,
-    clarify_banner_selection_fg_color, compaction_mismatch_color, deny_background_color,
-    deny_hover_background_color, list_border_color, list_selection_background_color,
-    list_selection_foreground_color, list_text_color, muted_text_color, overlay_selection_color,
-    toast_bg_color, toast_fg_color,
+    clarify_banner_selection_fg_color, deny_background_color, deny_hover_background_color,
+    list_border_color, list_selection_background_color, list_selection_foreground_color,
+    list_text_color, muted_text_color, overlay_selection_color, toast_bg_color, toast_fg_color,
+    warning_color,
 };
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, model_picker_row_is_details,
     model_picker_row_layout, slash_overlay_text_rows, visible_model_choices, BannerDragSelection,
-    PickerRow, PickerRowLayout, PromptButton, SlashOverlay, SlashOverlayLayout,
+    ParameterField, ParameterGlyphHit, PickerRow, PickerRowLayout, PromptButton, SlashOverlay,
+    SlashOverlayLayout, GREATER_VALUE_GLYPH, SMALLER_VALUE_GLYPH,
 };
 
 use super::chat::{apply_selection_highlight_to_line, render_chat_scrollbar};
@@ -48,8 +49,8 @@ const SESSION_ACTION_BUTTON_GAP: &str = "  ";
 /// Indent of a `/models` details row, aligning it under the identity text
 /// (past the two-column selection marker).
 const MODEL_PICKER_DETAIL_INDENT: &str = "    ";
-/// Indent of a `/models` group header, aligning it with the selection marker.
-const MODEL_PICKER_HEADER_INDENT: &str = "  ";
+/// Indent of a `/models` group header, one column left of the selection marker.
+const MODEL_PICKER_HEADER_INDENT: &str = " ";
 /// Panel columns a single-line `/models` label cannot use: both border
 /// columns, the scrollbar column and the two-column selection marker.
 const MODEL_PICKER_CHROME_WIDTH: usize = 5;
@@ -64,6 +65,7 @@ pub(super) fn draw_slash_overlay(
     drag: Option<BannerDragSelection>,
     engine_display: &crate::llm::engine::EngineDisplayInfo,
     overlay_layout: &mut SlashOverlayLayout,
+    mouse_pos: Option<(u16, u16)>,
 ) {
     let previous_first_visible = overlay_layout.first_visible_row;
     *overlay_layout = SlashOverlayLayout::default();
@@ -121,10 +123,19 @@ pub(super) fn draw_slash_overlay(
             }
             None => {
                 let visible_indices = matching_model_indices(choices, filter);
-                if visible_indices.is_empty() {
-                    ("Engines & Provider Models".to_string(), None)
+                let title = if visible_indices.len() == choices.len() {
+                    format!("Engines & Provider Models  ({})", choices.len())
                 } else {
-                    ("Engines & Provider Models".to_string(), Some(*selected))
+                    format!(
+                        "Engines & Provider Models  ({}/{})",
+                        visible_indices.len(),
+                        choices.len()
+                    )
+                };
+                if visible_indices.is_empty() {
+                    (title, None)
+                } else {
+                    (title, Some(*selected))
                 }
             }
         },
@@ -146,13 +157,29 @@ pub(super) fn draw_slash_overlay(
         return;
     }
 
+    // Reset and Apply share one row: the Apply entry gets no row of its own
+    // and is drawn beside Reset, which owns the row.
+    let apply_button_index_sharing_row = match overlay {
+        SlashOverlay::ModelPicker {
+            parameters: Some(edit),
+            ..
+        } => edit
+            .fields
+            .iter()
+            .position(|field| *field == ParameterField::ResetToConfigured)
+            .map(|reset_index| reset_index + 1),
+        _ => None,
+    };
     // Map each rendered row to the entry it shows, or to the group header
     // that precedes a group of model-picker entries.
     let rows: Vec<PickerRow> = match overlay {
         SlashOverlay::ModelPicker {
             parameters: Some(_),
             ..
-        } => (0..entries.len()).map(PickerRow::Entry).collect(),
+        } => (0..entries.len())
+            .filter(|entry_index| Some(*entry_index) != apply_button_index_sharing_row)
+            .map(PickerRow::Entry)
+            .collect(),
         SlashOverlay::ModelPicker {
             choices, filter, ..
         } if !matching_model_indices(choices, filter).is_empty() => {
@@ -232,12 +259,23 @@ pub(super) fn draw_slash_overlay(
     // repositioning the popup unnecessarily.
     // A selected entry may span two rows; keep its whole span in view.
     let selected_span = selected.and_then(|selected| {
+        let selected = if Some(selected) == apply_button_index_sharing_row {
+            selected - 1
+        } else {
+            selected
+        };
         let first_row = rows
             .iter()
             .position(|row| *row == PickerRow::Entry(selected))?;
         let last_row = rows
             .iter()
             .rposition(|row| *row == PickerRow::Entry(selected))?;
+        // A group's first entry keeps its header in view.
+        let first_row = if first_row > 0 && matches!(rows[first_row - 1], PickerRow::Header(_)) {
+            first_row - 1
+        } else {
+            first_row
+        };
         Some((first_row, last_row))
     });
     let max_first_visible = rows.len().saturating_sub(content_height as usize);
@@ -253,6 +291,16 @@ pub(super) fn draw_slash_overlay(
         }
     }
     let content_width = panel_area.width.saturating_sub(3) as usize;
+    let list_origin = (panel_area.x + 1, panel_area.y + 1);
+    let is_button_hovered = |row_index: usize, first_column: u16, width: usize| {
+        mouse_pos.is_some_and(|(column, row)| {
+            row == list_origin.1 + (row_index - first_visible) as u16
+                && column >= first_column
+                && (column as usize) < first_column as usize + width
+        })
+    };
+    let mut parameter_glyphs: Vec<ParameterGlyphHit> = Vec::new();
+    let mut parameter_buttons: Vec<(Rect, usize)> = Vec::new();
     let mut lines: Vec<Line<'static>> = rows
         .iter()
         .enumerate()
@@ -266,12 +314,13 @@ pub(super) fn draw_slash_overlay(
                         &entries[row_index],
                         content_width.saturating_sub(MODEL_PICKER_HEADER_INDENT.chars().count()),
                     );
-                    return Line::styled(
-                        format!("{MODEL_PICKER_HEADER_INDENT}{header_text}"),
-                        Style::default()
-                            .fg(muted_text_color())
-                            .add_modifier(Modifier::BOLD),
-                    );
+                    let header_style = Style::default()
+                        .fg(muted_text_color())
+                        .add_modifier(Modifier::BOLD);
+                    return Line::from(vec![
+                        Span::styled(MODEL_PICKER_HEADER_INDENT, header_style),
+                        Span::styled(header_text, header_style.add_modifier(Modifier::UNDERLINED)),
+                    ]);
                 }
                 PickerRow::Entry(entry_index) => *entry_index,
             };
@@ -296,11 +345,22 @@ pub(super) fn draw_slash_overlay(
                 && visible_model_choices_in_overlay
                     .get(entry_index)
                     .is_some_and(|choice| choice.is_active);
+            let is_misconfigured_row = list_is_shown
+                && visible_model_choices_in_overlay
+                    .get(entry_index)
+                    .is_some_and(|choice| !choice.configuration_warnings.is_empty());
             let style = if is_selected {
                 Style::default()
                     .fg(list_selection_foreground_color())
                     .bg(list_selection_background_color())
                     .add_modifier(Modifier::BOLD)
+            } else if is_misconfigured_row {
+                let style = Style::default().fg(warning_color());
+                if is_active_model_row {
+                    style.add_modifier(Modifier::BOLD)
+                } else {
+                    style
+                }
             } else if is_active_model_row {
                 Style::default()
                     .fg(active_model_color())
@@ -315,14 +375,186 @@ pub(super) fn draw_slash_overlay(
                 return Line::styled(format!("{MODEL_PICKER_DETAIL_INDENT}{text}"), style);
             }
             let marker = if is_selected { "▸ " } else { "  " };
+            let button_style = |is_enabled: bool, is_focused: bool| {
+                if !is_enabled {
+                    Style::default().fg(muted_text_color())
+                } else if is_focused {
+                    // Filled like the focused Approve button.
+                    Style::default()
+                        .fg(crate::theme::button_text_color())
+                        .bg(approve_hover_background_color())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    // Outlined only, so focus is obvious in every theme.
+                    Style::default()
+                        .fg(approve_background_color())
+                        .add_modifier(Modifier::BOLD)
+                }
+            };
+            if let SlashOverlay::ModelPicker {
+                choices,
+                parameters: Some(edit),
+                ..
+            } = overlay
+            {
+                match edit.fields.get(entry_index) {
+                    Some(ParameterField::ResetToConfigured) => {
+                        let reset_enabled = choices
+                            .get(edit.choice_index)
+                            .is_some_and(|choice| edit.reset_enabled(choice));
+                        let reset_label = format!(" [ {entry} ] ");
+                        let apply_label = format!(" [ {} ] ", entries[entry_index + 1]);
+                        let reset_column = list_origin.0 + marker.chars().count() as u16;
+                        let apply_column = reset_column + reset_label.chars().count() as u16 + 1;
+                        let reset_hovered = reset_enabled
+                            && is_button_hovered(
+                                row_index,
+                                reset_column,
+                                reset_label.chars().count(),
+                            );
+                        let apply_hovered =
+                            is_button_hovered(row_index, apply_column, apply_label.chars().count());
+                        // Pointer hover overrules keyboard focus so one button
+                        // looks active at a time.
+                        let button_row = list_origin.1 + (row_index - first_visible) as u16;
+                        if reset_enabled {
+                            parameter_buttons.push((
+                                Rect::new(
+                                    reset_column,
+                                    button_row,
+                                    reset_label.chars().count() as u16,
+                                    1,
+                                ),
+                                entry_index,
+                            ));
+                        }
+                        parameter_buttons.push((
+                            Rect::new(
+                                apply_column,
+                                button_row,
+                                apply_label.chars().count() as u16,
+                                1,
+                            ),
+                            entry_index + 1,
+                        ));
+                        let any_hovered = reset_hovered || apply_hovered;
+                        let apply_focused = selected == Some(entry_index + 1) && !any_hovered;
+                        return Line::from(vec![
+                            Span::styled(marker, Style::default().fg(list_text_color())),
+                            Span::styled(
+                                reset_label,
+                                button_style(
+                                    reset_enabled,
+                                    (is_selected && !any_hovered) || reset_hovered,
+                                ),
+                            ),
+                            Span::raw(" "),
+                            Span::styled(
+                                apply_label,
+                                button_style(true, apply_focused || apply_hovered),
+                            ),
+                        ]);
+                    }
+                    Some(ParameterField::Apply) => {
+                        let apply_label = format!(" [ {entry} ] ");
+                        let apply_hovered = is_button_hovered(
+                            row_index,
+                            list_origin.0 + marker.chars().count() as u16,
+                            apply_label.chars().count(),
+                        );
+                        parameter_buttons.push((
+                            Rect::new(
+                                list_origin.0 + marker.chars().count() as u16,
+                                list_origin.1 + (row_index - first_visible) as u16,
+                                apply_label.chars().count() as u16,
+                                1,
+                            ),
+                            entry_index,
+                        ));
+                        return Line::from(vec![
+                            Span::styled(marker, Style::default().fg(list_text_color())),
+                            Span::styled(
+                                apply_label,
+                                button_style(true, is_selected || apply_hovered),
+                            ),
+                        ]);
+                    }
+                    _ => {}
+                }
+            }
             let text = if is_model_identity_row {
                 elide_balanced_tokens(entry, content_width.saturating_sub(marker.chars().count()))
             } else {
                 entry.clone()
             };
+            if matches!(
+                overlay,
+                SlashOverlay::ModelPicker {
+                    parameters: Some(_),
+                    ..
+                }
+            ) {
+                let screen_row = list_origin.1 + (row_index - first_visible) as u16;
+                let glyph_columns: Vec<(usize, isize)> =
+                    [(SMALLER_VALUE_GLYPH, -1), (GREATER_VALUE_GLYPH, 1)]
+                        .into_iter()
+                        .filter_map(|(glyph, delta)| {
+                            let position = text
+                                .chars()
+                                .position(|character| character.to_string() == glyph)?;
+                            Some((position, delta))
+                        })
+                        .collect();
+                if !glyph_columns.is_empty() {
+                    // The hit area spans the glyph and one cell on each side,
+                    // so the pointer does not cover the whole highlight.
+                    let padded_text = format!("{text} ");
+                    let first_column = list_origin.0 + marker.chars().count() as u16;
+                    let hovered_glyph = glyph_columns.iter().find(|(position, _)| {
+                        let area = Rect::new(
+                            first_column + position.saturating_sub(1) as u16,
+                            screen_row,
+                            3,
+                            1,
+                        );
+                        mouse_pos.is_some_and(|(column, row)| {
+                            area.contains(ratatui::layout::Position::new(column, row))
+                        })
+                    });
+                    let hover_style = Style::default()
+                        .fg(crate::theme::button_text_color())
+                        .bg(approve_hover_background_color())
+                        .add_modifier(Modifier::BOLD);
+                    let mut spans = vec![Span::styled(marker, style)];
+                    for (position, character) in padded_text.chars().enumerate() {
+                        let is_highlighted = hovered_glyph.is_some_and(|(glyph_position, _)| {
+                            position.abs_diff(*glyph_position) <= 1
+                        });
+                        spans.push(Span::styled(
+                            character.to_string(),
+                            if is_highlighted { hover_style } else { style },
+                        ));
+                    }
+                    for (position, delta) in &glyph_columns {
+                        parameter_glyphs.push(ParameterGlyphHit {
+                            area: Rect::new(
+                                first_column + position.saturating_sub(1) as u16,
+                                screen_row,
+                                3,
+                                1,
+                            ),
+                            row: entry_index,
+                            delta: *delta,
+                        });
+                    }
+                    return Line::from(spans);
+                }
+            }
             Line::styled(format!("{marker}{text}"), style)
         })
         .collect();
+    overlay_layout.parameter_glyphs = parameter_glyphs;
+    overlay_layout.parameter_buttons = parameter_buttons;
 
     frame.render_widget(Clear, panel_area);
     let block = Block::default()
@@ -552,7 +784,7 @@ fn model_picker_detail_lines(
                     )
                 };
             let color = if mismatch {
-                compaction_mismatch_color()
+                warning_color()
             } else {
                 muted_text_color()
             };

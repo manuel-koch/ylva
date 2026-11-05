@@ -388,6 +388,8 @@ fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
         parameters: None,
         choices: (0..3)
             .map(|index| ModelChoice {
+                configured: None,
+                configuration_warnings: Vec::new(),
                 reasoning_options: crate::llm::ReasoningEffortOptions::default(),
                 label: crate::tui_reducer_state::ChoiceLabel {
                     identity: format!("stub/model-{index}"),
@@ -478,8 +480,104 @@ fn mouse_click_on_model_picker_entry_selects_without_switching() {
 }
 
 #[test]
+fn mouse_click_in_model_parameter_popup_selects_rows_and_steps_values_by_glyph() {
+    use crate::tui_reducer_state::{ParameterField, ParameterGlyphHit};
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: vec![model_choice("model-0")],
+        filter: String::new(),
+        selected: 0,
+    };
+    state.open_model_parameters();
+    let output_row = state
+        .model_parameters_mut()
+        .and_then(|edit| {
+            edit.fields
+                .iter()
+                .position(|field| *field == ParameterField::MaxOutputTokens)
+        })
+        .expect("max output tokens row");
+    state.layout.input_area.rect = ratatui::layout::Rect::new(0, 10, 40, 2);
+    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 5, 37, 4);
+    state.layout.slash_overlay.parameter_glyphs = vec![ParameterGlyphHit {
+        area: ratatui::layout::Rect::new(30, 5 + output_row as u16, 1, 1),
+        row: output_row,
+        delta: 1,
+    }];
+    let click = |column: u16, row: u16| crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    update(
+        &mut state,
+        TuiEvent::Mouse(click(5, 5 + output_row as u16)),
+        &empty_textarea(),
+    );
+    assert_eq!(state.model_parameters_mut().unwrap().cursor, output_row);
+    assert_eq!(
+        state.model_parameters_mut().unwrap().max_output_tokens,
+        None
+    );
+
+    update(
+        &mut state,
+        TuiEvent::Mouse(click(30, 5 + output_row as u16)),
+        &empty_textarea(),
+    );
+    assert_eq!(
+        state.model_parameters_mut().unwrap().max_output_tokens,
+        Some(1024)
+    );
+}
+
+#[test]
+fn mouse_click_on_model_parameter_apply_button_confirms_the_switch() {
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: vec![model_choice("model-0")],
+        filter: String::new(),
+        selected: 0,
+    };
+    state.open_model_parameters();
+    let apply_row = state.model_parameters_mut().unwrap().fields.len() - 1;
+    state.layout.input_area.rect = ratatui::layout::Rect::new(0, 10, 40, 2);
+    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 5, 37, 4);
+    state.layout.slash_overlay.parameter_buttons = vec![(
+        ratatui::layout::Rect::new(3, 5 + apply_row as u16, 10, 1),
+        apply_row,
+    )];
+    let mouse = crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: 5,
+        row: 5 + apply_row as u16,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    let effects = update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+    assert!(!effects.is_empty(), "Apply must switch to the model");
+    assert!(
+        !matches!(
+            state.slash_overlay,
+            SlashOverlay::ModelPicker {
+                parameters: Some(_),
+                ..
+            }
+        ),
+        "the parameter popup must close"
+    );
+}
+
+#[test]
 fn slash_overlay_model_drag_copies_the_filtered_model_label() {
     let model_choice = |label: &str, provider_connection: &str, model_id: &str| ModelChoice {
+        configured: None,
+        configuration_warnings: Vec::new(),
         reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         label: crate::tui_reducer_state::ChoiceLabel {
             identity: label.to_string(),
@@ -1354,6 +1452,8 @@ fn agents_popup_mouse_click_selects_double_click_activates_outside_closes() {
 
 fn model_choice(model_id: &str) -> ModelChoice {
     ModelChoice {
+        configured: None,
+        configuration_warnings: Vec::new(),
         reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         label: crate::tui_reducer_state::ChoiceLabel {
             identity: format!("stub/{model_id}"),

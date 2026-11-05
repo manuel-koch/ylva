@@ -458,7 +458,7 @@ async fn configured_capacity_warning(
          {summary_context_length} tokens, with approximately {overhead_tokens} tokens \
          needed for the compaction prompt and request overhead. A summary prefix may \
          not fit. Select a larger compaction engine, lower the conversation engine's \
-         soft_compaction_threshold, or override this agent type's compaction.engine. \
+         'soft_compaction_threshold', or override this agent type's `compaction.engine`. \
          Selecting a different conversation engine does not enlarge the compaction engine.",
         conversation_config.provider_connection,
         conversation_config.model,

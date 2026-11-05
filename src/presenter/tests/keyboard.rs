@@ -18,6 +18,8 @@ use crate::tui_reducer_state::{ChoiceLabel, ModelChoice, PromptButton};
 
 fn picker_choice(connection: &str, model: &str, favorite_rank: Option<usize>) -> ModelChoice {
     let mut choice = ModelChoice {
+        configured: None,
+        configuration_warnings: Vec::new(),
         reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         label: ChoiceLabel {
             identity: format!("{connection}/{model}"),
@@ -382,6 +384,8 @@ fn model_picker_pages_selection_with_page_keys() {
         parameters: None,
         choices: (0..10)
             .map(|index| ModelChoice {
+                configured: None,
+                configuration_warnings: Vec::new(),
                 reasoning_options: crate::llm::ReasoningEffortOptions::default(),
                 label: crate::tui_reducer_state::ChoiceLabel {
                     identity: format!("stub/model-{index}"),

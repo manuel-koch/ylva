@@ -331,6 +331,8 @@ impl Backend for InspectableTestBackend {
 fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::ModelChoice> {
     (0..choice_count)
         .map(|index| ylva::tui_reducer_state::ModelChoice {
+            configured: None,
+            configuration_warnings: Vec::new(),
             reasoning_options: ylva::llm::ReasoningEffortOptions::default(),
             catalog_context_length: None,
             label: ylva::tui_reducer_state::ChoiceLabel {

@@ -331,5 +331,20 @@ impl From<&EngineConfig> for EngineRuntimeConfig {
     }
 }
 
+impl EngineRuntimeConfig {
+    /// Whether the live settings no longer describe the configured engine.
+    ///
+    /// Compares exactly the settings a profile name can encode: model,
+    /// reasoning effort and the two session-only overrides. Effective
+    /// `context_length` / `max_output_tokens` are excluded because catalog
+    /// hydration adjusts them without any user action.
+    pub fn differs_from_configured(&self, configured: &EngineRuntimeConfig) -> bool {
+        self.model != configured.model
+            || self.reasoning_effort != configured.reasoning_effort
+            || self.context_length_override != configured.context_length_override
+            || self.max_output_tokens_override != configured.max_output_tokens_override
+    }
+}
+
 /// Shared handle for the mutable settings used by an engine and its provider.
 pub type EngineRuntimeConfigHandle = Arc<RwLock<EngineRuntimeConfig>>;

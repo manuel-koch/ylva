@@ -29,7 +29,7 @@ use crate::conversation_render_cache::{
 use crate::highlight::active_theme;
 use crate::theme::{
     chat_scrollbar_color, chat_selection_bg, error_color, muted_text_color, notice_color,
-    subagent_view_separator_color, thinking_border_color,
+    subagent_view_separator_color, thinking_border_color, warning_color,
 };
 use crate::tui_reducer_state::{BubbleExpansionTarget, ChatEntry, ToolCallState, UserMessageState};
 use crate::tui_render_state::TuiState;
@@ -298,7 +298,12 @@ pub(super) fn build_entry(
                 ));
             }
         }
-        ChatEntry::Notice { text } => {
+        ChatEntry::Notice { text } | ChatEntry::WarningNotice { text } => {
+            let (marker, color) = if matches!(entry, ChatEntry::WarningNotice { .. }) {
+                ("⚠️", warning_color())
+            } else {
+                ("ⓘ", notice_color())
+            };
             for (index, line) in text.lines().enumerate() {
                 let wrapped = textwrap::wrap(line, wrap_width.saturating_sub(6).max(1));
                 if wrapped.is_empty() {
@@ -307,11 +312,11 @@ pub(super) fn build_entry(
                 for (wrap_index, wrapped) in wrapped.into_iter().enumerate() {
                     layout.rows.push(Line::styled(
                         if index == 0 && wrap_index == 0 {
-                            format!("  ⓘ  {wrapped}")
+                            format!("  {marker}  {wrapped}")
                         } else {
                             format!("     {wrapped}")
                         },
-                        Style::default().fg(notice_color()),
+                        Style::default().fg(color),
                     ));
                 }
             }

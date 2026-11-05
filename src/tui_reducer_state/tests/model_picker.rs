@@ -27,6 +27,8 @@ use crate::tui_reducer_state::model_picker::{
 fn matching_model_indices_requires_every_filter_word_in_any_order() {
     let choice =
         |provider_connection: &str, model_id: &str, engine_name: Option<&str>| ModelChoice {
+            configured: None,
+            configuration_warnings: Vec::new(),
             label: ChoiceLabel {
                 identity: format!("{provider_connection}/{model_id}"),
                 details: Vec::new(),
@@ -247,6 +249,8 @@ fn refresh_slash_overlay_keeps_the_selection_while_the_choices_are_unchanged() {
 #[test]
 fn slash_overlay_text_rows_preserves_filtered_model_labels_and_headers() {
     let choice = |label: &str, provider_connection: &str, engine_name: Option<&str>| ModelChoice {
+        configured: None,
+        configuration_warnings: Vec::new(),
         label: ChoiceLabel {
             identity: label.to_string(),
             details: Vec::new(),
@@ -345,6 +349,8 @@ fn model_choice_label_explains_reasoning_effort_availability() {
 #[test]
 fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
     let choice = ModelChoice {
+        configured: None,
+        configuration_warnings: Vec::new(),
         label: ChoiceLabel {
             identity: "reasoning → stub/model".to_string(),
             details: Vec::new(),
@@ -458,6 +464,8 @@ fn two_row_fixture_choices() -> Vec<ModelChoice> {
                   details: &[&str],
                   provider_connection: &str,
                   engine_name: Option<&str>| ModelChoice {
+        configured: None,
+        configuration_warnings: Vec::new(),
         label: ChoiceLabel {
             identity: identity.to_string(),
             details: details.iter().map(|detail| detail.to_string()).collect(),
@@ -886,6 +894,8 @@ fn parameter_fixture(
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
         choices: vec![ModelChoice {
+            configured: None,
+            configuration_warnings: Vec::new(),
             label: model_choice_parts(&selection),
             reasoning_options: crate::llm::ReasoningEffortOptions::default(),
             initial_reasoning_effort: None,
@@ -932,6 +942,8 @@ fn engine_parameter_fixture(
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
         choices: vec![ModelChoice {
+            configured: None,
+            configuration_warnings: Vec::new(),
             label: crate::tui_reducer_state::model_picker::engine_choice_parts(
                 "engine", &selection,
             ),
@@ -1063,7 +1075,8 @@ fn parameter_popup_shows_reasoning_only_for_models_with_selectable_efforts() {
         vec![
             ParameterField::ContextLength,
             ParameterField::ReasoningEffort,
-            ParameterField::MaxOutputTokens
+            ParameterField::MaxOutputTokens,
+            ParameterField::Apply
         ]
     );
     assert_eq!(
@@ -1088,7 +1101,8 @@ fn parameter_popup_shows_reasoning_only_for_models_with_selectable_efforts() {
         edit.fields,
         vec![
             ParameterField::ContextLength,
-            ParameterField::MaxOutputTokens
+            ParameterField::MaxOutputTokens,
+            ParameterField::Apply
         ]
     );
     assert_eq!(
@@ -1145,6 +1159,7 @@ fn parameter_rows_show_label_and_value_for_each_field() {
             "Context length:  ◂ 262.1K ▸".to_string(),
             "Reasoning effort:    default (medium) ▸".to_string(),
             "Max output tokens:    unlimited ▸".to_string(),
+            "✓ Apply".to_string(),
         ]
     );
 }
@@ -1227,7 +1242,8 @@ fn context_length_row_shows_no_arrows_while_the_window_is_unknown() {
         popup_rows(&state),
         vec![
             "Context length:  unknown".to_string(),
-            "Max output tokens:    unlimited ▸".to_string()
+            "Max output tokens:    unlimited ▸".to_string(),
+            "✓ Apply".to_string()
         ]
     );
 }
@@ -1278,6 +1294,8 @@ fn plain_choice(provider_connection: &str, model_id: &str) -> ModelChoice {
         reasoning_effort: None,
     };
     ModelChoice {
+        configured: None,
+        configuration_warnings: Vec::new(),
         label: model_choice_parts(&selection),
         reasoning_options: crate::llm::ReasoningEffortOptions::default(),
         initial_reasoning_effort: None,
@@ -1362,6 +1380,7 @@ fn regrouping_keeps_the_parameter_popup_bound_to_its_model() {
     };
     let index = matching_model_indices(choices, "")[*selected];
     *parameters = Some(crate::tui_reducer_state::ModelParameterEdit {
+        restored_baseline: false,
         choice_index: index,
         fields: Vec::new(),
         cursor: 0,
@@ -1543,7 +1562,7 @@ fn rejected_evidence_does_not_offer_gateway_overrides_but_explicit_effort_can_re
             &choices[0].selection.model,
         );
         state.open_model_parameters();
-        assert_eq!(popup_rows(&state).len(), 2);
+        assert_eq!(popup_rows(&state).len(), 3);
         state.leave_model_parameters();
         let SlashOverlay::ModelPicker { choices, .. } = &mut state.slash_overlay else {
             panic!("picker");
@@ -1563,4 +1582,130 @@ fn rejected_evidence_does_not_offer_gateway_overrides_but_explicit_effort_can_re
             }
         ));
     }
+}
+
+/// A named engine row whose live settings were tweaked away from its
+/// configured baseline (a 32K window, no override).
+fn modified_engine_fixture() -> AppState {
+    let mut state = engine_parameter_fixture(32 * KB, Some(512 * KB));
+    let SlashOverlay::ModelPicker { choices, .. } = &mut state.slash_overlay else {
+        unreachable!();
+    };
+    let live = &mut choices[0];
+    live.selection.context_length_override = Some(64 * KB);
+    live.selection_target
+        .as_mut()
+        .expect("target")
+        .context_length = 64 * KB;
+    let mut baseline = engine_parameter_fixture(32 * KB, Some(512 * KB));
+    let SlashOverlay::ModelPicker {
+        choices: baseline_choices,
+        ..
+    } = &mut baseline.slash_overlay
+    else {
+        unreachable!();
+    };
+    live.configured = Some(ConfiguredBaseline {
+        choice: Box::new(baseline_choices.remove(0)),
+        modified: true,
+    });
+    live.refresh_label();
+    state
+}
+
+#[test]
+fn reset_row_exists_only_for_named_engine_rows() {
+    let mut raw = parameter_fixture(None, Some(512 * KB));
+    raw.open_model_parameters();
+    assert!(!popup_rows(&raw).iter().any(|row| row.contains("Reset")));
+
+    let mut named = modified_engine_fixture();
+    named.open_model_parameters();
+    assert_eq!(
+        popup_rows(&named)[2..],
+        ["Reset".to_string(), "✓ Apply".to_string()]
+    );
+}
+
+#[test]
+fn reset_row_reloads_the_draft_keeps_the_popup_open_and_applies_on_confirm() {
+    let mut state = modified_engine_fixture();
+    state.open_model_parameters();
+    assert_eq!(popup_window(&state).0, Some(64 * KB));
+
+    state.move_model_parameter_cursor(10);
+    assert_eq!(
+        state.model_parameters_mut().expect("popup").cursor,
+        1,
+        "up/down never reach the reset button"
+    );
+    assert!(
+        !state.activate_model_parameter_row(),
+        "enter on a value row applies nothing"
+    );
+    state.cycle_model_parameter_focus(false);
+    assert!(
+        !state.activate_model_parameter_row(),
+        "the reset row must not confirm the popup"
+    );
+    assert_eq!(popup_window(&state).0, Some(32 * KB));
+    state.cycle_model_parameter_focus(false);
+    assert_eq!(
+        state.model_parameters_mut().expect("popup").cursor,
+        3,
+        "a disabled reset button takes no focus; tab lands on apply"
+    );
+    assert!(state.activate_model_parameter_row(), "apply confirms");
+    let choice = state.selected_model().expect("selected");
+    assert_eq!(choice.selection.context_length_override, None);
+    assert!(
+        !choice.configured.as_ref().expect("baseline").modified,
+        "the confirmed reset clears the modified marker"
+    );
+}
+
+#[test]
+fn leaving_the_popup_after_a_reset_discards_it() {
+    let mut state = modified_engine_fixture();
+    state.open_model_parameters();
+    state.cycle_model_parameter_focus(false);
+    state.activate_model_parameter_row();
+    state.leave_model_parameters();
+
+    let choice = state.selected_model().expect("selected");
+    assert_eq!(choice.selection.context_length_override, Some(64 * KB));
+}
+
+#[test]
+fn editing_a_value_back_to_the_baseline_stores_no_override() {
+    let mut state = modified_engine_fixture();
+    state.open_model_parameters();
+    state.adjust_model_parameter(-1);
+    assert_eq!(popup_window(&state).0, Some(32 * KB));
+    state.confirm_model_parameters();
+
+    let choice = state.selected_model().expect("selected");
+    assert_eq!(choice.selection.context_length_override, None);
+}
+
+#[test]
+fn tab_cycles_value_rows_reset_and_apply_and_up_returns_to_the_values() {
+    let mut state = modified_engine_fixture();
+    state.open_model_parameters();
+    let cursor = |state: &mut AppState| state.model_parameters_mut().expect("popup").cursor;
+
+    state.cycle_model_parameter_focus(false);
+    assert_eq!(cursor(&mut state), 2, "reset while enabled");
+    state.cycle_model_parameter_focus(false);
+    assert_eq!(cursor(&mut state), 3, "apply");
+    state.move_model_parameter_cursor(-1);
+    assert_eq!(cursor(&mut state), 1, "up returns to the last value row");
+    state.cycle_model_parameter_focus(true);
+    assert_eq!(
+        cursor(&mut state),
+        3,
+        "shift-tab from the values reaches apply"
+    );
+    state.cycle_model_parameter_focus(false);
+    assert_eq!(cursor(&mut state), 0, "tab wraps to the values");
 }

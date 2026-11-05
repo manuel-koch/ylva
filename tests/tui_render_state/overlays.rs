@@ -544,8 +544,15 @@ async fn switching_models_rechecks_compaction_capacity_before_any_prompt() {
         })
         .await
         .expect("the large model appears in the picker");
-        // First Enter opens the parameter popup; the second confirms the switch.
+        // Enter opens the parameter popup; Tab focuses Apply and Enter confirms.
         type_and_enter(&action_tx, "").await;
+        action_tx
+            .send(AppAction::KeyInput(KeyEvent::new(
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT,
+            )))
+            .await
+            .expect("action channel open");
         type_and_enter(&action_tx, "").await;
         let rendered = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -1023,6 +1030,8 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         slash_overlay: SlashOverlay::ModelPicker {
             parameters: None,
             choices: vec![ModelChoice {
+                configured: None,
+                configuration_warnings: Vec::new(),
                 catalog_context_length: None,
                 label: ylva::tui_reducer_state::ChoiceLabel {
                     identity: "stub/thinking".to_string(),
@@ -1089,8 +1098,8 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         "rendered footer: {rendered:?}"
     );
     assert!(
-        rendered.contains("Engines & Provider Models"),
-        "model picker must use the provider models title: {rendered:?}"
+        rendered.contains("Engines & Provider Models  (1)"),
+        "model picker must use the provider models title with the row count: {rendered:?}"
     );
     assert!(
         !rendered.contains("adjust reasoning"),
@@ -1118,6 +1127,8 @@ fn model_picker_details_show_highlighted_compaction_effect() {
     let make_choice =
         |name: &str, provider_connection: &str, model_id: &str, context_length: usize| {
             ModelChoice {
+                configured: None,
+                configuration_warnings: Vec::new(),
                 catalog_context_length: Some(context_length),
                 label: ylva::tui_reducer_state::ChoiceLabel {
                     identity: format!("{name} → {provider_connection}/{model_id}"),
@@ -1158,11 +1169,13 @@ fn model_picker_details_show_highlighted_compaction_effect() {
         };
     let mut state = TuiState {
         engine_display: EngineDisplayInfo {
+            config_modified: false,
             engine_name: "engine-a".to_string(),
             provider_connection: "mock".to_string(),
             model: "model-a".to_string(),
             reasoning_effort: None,
             compaction_engine: Some(CompactionEngineDisplayInfo {
+                config_modified: false,
                 engine_name: "engine-a".to_string(),
                 provider_connection: "mock".to_string(),
                 model: "model-a".to_string(),
@@ -1770,6 +1783,8 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
         slash_overlay: SlashOverlay::ModelPicker {
             parameters: None,
             choices: vec![ModelChoice {
+                configured: None,
+                configuration_warnings: Vec::new(),
                 catalog_context_length: None,
                 label: ylva::tui_reducer_state::ChoiceLabel {
                     identity: "stub/thinking".to_string(),
@@ -2044,6 +2059,8 @@ fn long_model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state
     use ylva::tui_reducer_state::ModelChoice;
     (0..choice_count)
         .map(|index| ModelChoice {
+            configured: None,
+            configuration_warnings: Vec::new(),
             catalog_context_length: Some(131_072),
             label: if index == 0 {
                 ylva::tui_reducer_state::ChoiceLabel {
@@ -2490,11 +2507,113 @@ fn model_parameter_popup_renders_one_row_per_parameter_with_its_footer_hints() {
 }
 
 #[test]
+fn model_picker_keeps_the_group_header_visible_when_scrolling_back_to_the_first_entry() {
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    let choices = long_model_picker_choices(40);
+    let last = choices.len() - 1;
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices,
+        filter: String::new(),
+        selected: last,
+        parameters: None,
+    };
+    let (rows, _terminal) = draw_app_state_rows(&mut state, 120, 30);
+    let has_header = |rows: &[String]| rows.iter().any(|row| row.contains("│ Models "));
+    assert!(!has_header(&rows), "header scrolled away: {rows:#?}");
+
+    if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
+        *selected = 0;
+    }
+    let (rows, _terminal) = draw_app_state_rows(&mut state, 120, 30);
+    assert!(has_header(&rows), "header must be shown: {rows:#?}");
+}
+
+#[test]
+fn model_parameter_popup_records_clickable_direction_glyphs() {
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    let mut choices = long_model_picker_choices(1);
+    choices[0].selection.model.reasoning_efforts = Some(vec!["low".to_string()]);
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices,
+        filter: String::new(),
+        selected: 0,
+        parameters: None,
+    };
+    state.open_model_parameters();
+    let (rows, _terminal) = draw_app_state_rows(&mut state, 120, 30);
+    let hit = state
+        .layout
+        .slash_overlay
+        .parameter_glyphs
+        .iter()
+        .find(|hit| hit.delta == -1 && hit.row == 0)
+        .expect("smaller-value glyph of the first row");
+    let line: Vec<char> = rows[hit.area.y as usize].chars().collect();
+    assert_eq!(line[hit.area.x as usize + 1], '◂', "{line:?}");
+}
+
+#[test]
+fn model_parameter_popup_fills_the_apply_button_under_the_pointer() {
+    use ratatui::backend::TestBackend;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    let mut choices = long_model_picker_choices(1);
+    choices[0].selection.model.reasoning_efforts = Some(vec!["low".to_string()]);
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices,
+        filter: String::new(),
+        selected: 0,
+        parameters: None,
+    };
+    state.open_model_parameters();
+    let (rows, _terminal) = draw_app_state_rows(&mut state, 120, 30);
+    let (apply_row, apply_line) = rows
+        .iter()
+        .enumerate()
+        .find(|(_, row)| row.contains("✓ Apply"))
+        .expect("apply button row");
+    let apply_column = apply_line
+        .find("✓ Apply")
+        .map(|byte_index| apply_line[..byte_index].chars().count() as u16)
+        .unwrap();
+    let mut background_at = |pointer: Option<(u16, u16)>| {
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+        let mut textarea = TextArea::default();
+        terminal
+            .draw(|frame| {
+                ylva::render::render(
+                    frame,
+                    &mut state,
+                    &mut textarea,
+                    None,
+                    pointer,
+                    &ylva::ToolRegistry::new(),
+                );
+            })
+            .expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .cell((apply_column, apply_row as u16))
+            .unwrap()
+            .bg
+    };
+    let idle = background_at(None);
+    let hovered = background_at(Some((apply_column, apply_row as u16)));
+    assert_ne!(idle, hovered, "hovering Apply must fill the button");
+}
+
+#[test]
 fn gateway_reasoning_parameter_row_renders_unverified_and_default_reset() {
     use ylva::tui_reducer_state::{ChoiceLabel, ModelChoice, SlashOverlay};
     let mut state = ylva::AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
         choices: vec![ModelChoice {
+            configured: None,
+            configuration_warnings: Vec::new(),
             selection: ylva::llm::ProviderModelOption {
                 max_output_tokens_override: None,
                 provider_connection: "arbitrary".to_string(),
@@ -2534,7 +2653,6 @@ fn gateway_reasoning_parameter_row_renders_unverified_and_default_reset() {
     state.open_model_parameters();
     let text = rendered_text(&render_offline(&mut state, 120, 40));
     assert!(text.contains("medium (unverified)"), "{text}");
-    assert!(text.contains("enter"), "{text}");
     assert!(text.contains("esc"), "{text}");
     state.move_model_parameter_cursor(1);
     state.adjust_model_parameter(-3);

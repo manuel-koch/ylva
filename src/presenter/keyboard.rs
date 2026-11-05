@@ -697,8 +697,9 @@ fn handle_model_picker_key(
             KeyCode::Down => state.move_slash_selection(1),
             KeyCode::Left => state.adjust_model_parameter(-1),
             KeyCode::Right => state.adjust_model_parameter(1),
-            KeyCode::Enter => {
-                state.confirm_model_parameters();
+            KeyCode::Tab => state.cycle_model_parameter_focus(false),
+            KeyCode::BackTab => state.cycle_model_parameter_focus(true),
+            KeyCode::Enter if state.activate_model_parameter_row() => {
                 return Some(switch_to_highlighted_model(state));
             }
             _ => {}
@@ -726,7 +727,7 @@ fn handle_model_picker_key(
 
 /// Close the picker and switch to the highlighted choice, applying any
 /// parameters confirmed in the popup.
-fn switch_to_highlighted_model(state: &mut AppState) -> Vec<Effect> {
+pub(super) fn switch_to_highlighted_model(state: &mut AppState) -> Vec<Effect> {
     let picked = state
         .selected_model()
         .map(|choice| choice.to_model_selection());

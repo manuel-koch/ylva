@@ -444,6 +444,20 @@ impl AgentLoop {
         self.engine.clone()
     }
 
+    /// The explicitly configured compaction engine with its name, when it is
+    /// independent of the conversation engine.
+    pub fn explicit_compaction_engine(&self) -> Option<(String, Arc<dyn Engine>)> {
+        let engine = self.compaction_engine.as_ref()?;
+        if self.compaction_follows_conversation_engine || Arc::ptr_eq(&self.engine, engine) {
+            return None;
+        }
+        let name = self
+            .compaction_engine_name
+            .clone()
+            .or_else(|| engine.active_engine_name())?;
+        Some((name, Arc::clone(engine)))
+    }
+
     #[cfg(test)]
     pub(crate) fn compaction_engine_config(&self) -> Option<crate::llm::EngineConfig> {
         self.compaction_engine
@@ -485,6 +499,7 @@ impl AgentLoop {
                 context_length: compaction_engine.effective_context_length(),
                 follows_conversation: self.compaction_follows_conversation_engine,
                 shares_conversation,
+                config_modified: shares_conversation && display.config_modified,
             });
         }
         display

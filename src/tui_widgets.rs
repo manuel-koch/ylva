@@ -642,6 +642,7 @@ fn draw_internal(
         state.slash_overlay_drag,
         &state.engine_display,
         &mut state.slash_overlay_layout,
+        mouse_pos,
     );
 
     // Store the input rect for mouse click/drag handling in the event loop.

@@ -60,15 +60,53 @@ pub struct ModelChoice {
     /// they all show the favorite marker; only provider/model catalog rows are
     /// grouped under the favorites header and ordered by this rank.
     pub favorite_rank: Option<usize>,
+    /// The configured baseline of a named-engine row; `None` for catalog rows.
+    pub configured: Option<ConfiguredBaseline>,
+    /// Engine settings the provider catalog does not advertise, shown as
+    /// detail segments and highlighted; empty for catalog rows and sound engines.
+    pub configuration_warnings: Vec<String>,
 }
+
+/// A named-engine row's configured settings, which the parameter popup's
+/// "Reset to configured" row restores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredBaseline {
+    /// The row as the engine's configured settings describe it: configured
+    /// model and effort, no session-only overrides. Its
+    /// `initial_reasoning_effort` is the live row's, so converting it to a
+    /// selection applies the baseline effort whenever it differs.
+    pub choice: Box<ModelChoice>,
+    /// Whether the live settings of this (active) row differ from the baseline.
+    pub modified: bool,
+}
+
+/// Suffix of the active row while its live settings differ from the baseline.
+const MODIFIED_SUFFIX: &str = " (modified)";
 
 /// Marker prefixed to the identity of a favorite row.
 const FAVORITE_MARKER: &str = "⚑ ";
+/// Same width as [`FAVORITE_MARKER`], keeping model names aligned.
+const FAVORITE_MARKER_PADDING: &str = "  ";
 
 impl ModelChoice {
     /// Whether this row's connection/model pair is a favorite.
     pub fn is_favorite(&self) -> bool {
         self.favorite_rank.is_some()
+    }
+
+    /// Context window and output limit the popup draft starts from: the
+    /// resolved selection target when known, else the row's own settings.
+    fn draft_limits(&self) -> (Option<usize>, Option<usize>) {
+        (
+            self.selection_target
+                .as_ref()
+                .map(|target| target.context_length)
+                .or(self.selection.model.context_length),
+            self.selection_target
+                .as_ref()
+                .and_then(|target| target.max_output_tokens)
+                .or(self.selection.max_output_tokens_override),
+        )
     }
 
     /// Whether this row names the given provider connection and model ID.
@@ -182,8 +220,20 @@ impl ModelChoice {
                 .details
                 .push(format!("reasoning capability: {capability}"));
         }
+        self.label
+            .details
+            .extend(self.configuration_warnings.iter().cloned());
         if self.is_favorite() {
             self.label.identity.insert_str(0, FAVORITE_MARKER);
+        } else {
+            self.label.identity.insert_str(0, FAVORITE_MARKER_PADDING);
+        }
+        if self
+            .configured
+            .as_ref()
+            .is_some_and(|baseline| baseline.modified)
+        {
+            self.label.identity.push_str(MODIFIED_SUFFIX);
         }
     }
 }
@@ -488,6 +538,20 @@ pub enum ParameterField {
     ReasoningEffort,
     /// Output-token limit requested from the provider; `None` sends no limit.
     MaxOutputTokens,
+    /// Action row, shown for named-engine rows only: reload the draft from
+    /// the engine's configured settings. Nothing is applied until confirmed.
+    ResetToConfigured,
+    /// Action row, always last: confirm the draft and switch to the model.
+    Apply,
+}
+
+impl ParameterField {
+    fn is_button(self) -> bool {
+        matches!(
+            self,
+            ParameterField::ResetToConfigured | ParameterField::Apply
+        )
+    }
 }
 
 /// Draft of the follow-up parameter popup. Edits stay here until the popup is
@@ -514,6 +578,49 @@ pub struct ModelParameterEdit {
     pub max_output_tokens_maximum: Option<usize>,
     /// Whether the output limit was changed in this popup.
     pub max_output_tokens_edited: bool,
+    /// Whether "Reset to configured" reloaded the draft: confirming then
+    /// applies the engine's configured model, effort and cleared overrides,
+    /// plus any edit made after the reset.
+    pub restored_baseline: bool,
+}
+
+impl ModelParameterEdit {
+    /// Whether the reset button can be used: the draft differs from the
+    /// configured baseline.
+    pub(crate) fn reset_enabled(&self, choice: &ModelChoice) -> bool {
+        self.reset_row().is_some() && !self.matches_baseline(choice)
+    }
+
+    fn reset_row(&self) -> Option<usize> {
+        self.fields
+            .iter()
+            .position(|field| *field == ParameterField::ResetToConfigured)
+    }
+    /// The row whose reasoning options and limits the draft currently shows:
+    /// the configured baseline once the draft was reloaded from it.
+    fn source_choice<'a>(&self, choice: &'a ModelChoice) -> &'a ModelChoice {
+        match (&choice.configured, self.restored_baseline) {
+            (Some(baseline), true) => &baseline.choice,
+            _ => choice,
+        }
+    }
+
+    /// Whether the draft and the applied settings already equal the engine's
+    /// configured baseline, leaving nothing to reset.
+    fn matches_baseline(&self, choice: &ModelChoice) -> bool {
+        let Some(baseline) = choice.configured.as_ref().map(|baseline| &*baseline.choice) else {
+            return true;
+        };
+        let (context_length, max_output_tokens) = baseline.draft_limits();
+        let live_matches_baseline = self.restored_baseline
+            || (choice.selection.model.id == baseline.selection.model.id
+                && choice.selection.context_length_override.is_none()
+                && choice.selection.max_output_tokens_override.is_none());
+        live_matches_baseline
+            && self.context_length == context_length
+            && self.max_output_tokens == max_output_tokens
+            && self.reasoning_effort == baseline.selection.reasoning_effort
+    }
 }
 
 /// Smallest output-limit step; every ladder value is this unit doubled.
@@ -560,9 +667,9 @@ fn max_output_tokens_directions(current: Option<usize>, maximum: Option<usize>) 
 pub(crate) const CONTEXT_LENGTH_STEP_UNIT: usize = 32 * 1024;
 
 /// Shown before a parameter value when a smaller value can be selected.
-const SMALLER_VALUE_GLYPH: &str = "◂";
+pub(crate) const SMALLER_VALUE_GLYPH: &str = "◂";
 /// Shown after a parameter value when a greater value can be selected.
-const GREATER_VALUE_GLYPH: &str = "▸";
+pub(crate) const GREATER_VALUE_GLYPH: &str = "▸";
 
 /// Step size for the context window: one eighth of it, rounded down to a
 /// multiple of [`CONTEXT_LENGTH_STEP_UNIT`] and never below that unit.
@@ -843,18 +950,21 @@ pub(crate) fn model_parameter_rows(edit: &ModelParameterEdit, choice: &ModelChoi
                 )
             }
             ParameterField::ReasoningEffort => {
-                let reasoning_efforts = choice.reasoning_choices();
+                let source = edit.source_choice(choice);
+                let reasoning_efforts = source.reasoning_choices();
                 let directions = reasoning_effort_directions(
                     &reasoning_efforts,
-                    choice.reasoning_cycle_default(),
+                    source.reasoning_cycle_default(),
                     edit.reasoning_effort.as_deref(),
                 );
-                let value = choice.reasoning_value_label(edit.reasoning_effort.as_deref());
+                let value = source.reasoning_value_label(edit.reasoning_effort.as_deref());
                 format!(
                     "Reasoning effort:  {}",
                     format_parameter_value(&value, directions)
                 )
             }
+            ParameterField::ResetToConfigured => "Reset".to_string(),
+            ParameterField::Apply => "✓ Apply".to_string(),
         })
         .collect()
 }
@@ -1104,35 +1214,82 @@ impl AppState {
             fields.push(ParameterField::ReasoningEffort);
         }
         fields.push(ParameterField::MaxOutputTokens);
+        if choice.configured.is_some() {
+            fields.push(ParameterField::ResetToConfigured);
+        }
+        fields.push(ParameterField::Apply);
+        let (context_length, max_output_tokens) = choice.draft_limits();
         *parameters = Some(ModelParameterEdit {
             choice_index,
             fields,
-            max_output_tokens: choice
-                .selection_target
-                .as_ref()
-                .and_then(|target| target.max_output_tokens)
-                .or(choice.selection.max_output_tokens_override),
+            max_output_tokens,
             max_output_tokens_maximum: choice.selection.model.max_output_tokens,
             max_output_tokens_edited: false,
             cursor: 0,
-            context_length: choice
-                .selection_target
-                .as_ref()
-                .map(|target| target.context_length)
-                .or(choice.selection.model.context_length),
+            context_length,
             context_length_maximum: choice.catalog_context_length,
             context_length_edited: false,
             reasoning_effort: choice.selection.reasoning_effort.clone(),
+            restored_baseline: false,
         });
     }
 
-    /// Move the highlighted parameter row by `delta`, clamped to the rows shown.
+    /// Move the highlighted parameter row by `delta` between the value rows.
+    /// The buttons are reached by tab; up from a button returns to the last
+    /// value row.
     pub fn move_model_parameter_cursor(&mut self, delta: isize) {
         let Some(edit) = self.model_parameters_mut() else {
             return;
         };
-        let last_row = edit.fields.len().saturating_sub(1) as isize;
-        edit.cursor = (edit.cursor as isize + delta).clamp(0, last_row) as usize;
+        let value_rows = edit
+            .fields
+            .iter()
+            .filter(|field| !field.is_button())
+            .count();
+        if value_rows == 0 {
+            return;
+        }
+        let last_row = value_rows - 1;
+        if edit.cursor > last_row {
+            if delta < 0 {
+                edit.cursor = last_row;
+            }
+            return;
+        }
+        edit.cursor = (edit.cursor as isize + delta).clamp(0, last_row as isize) as usize;
+    }
+
+    /// Tab / shift-tab: cycle the focus through the value rows (one stop),
+    /// the reset button (only while enabled) and the apply button.
+    pub fn cycle_model_parameter_focus(&mut self, backwards: bool) {
+        let SlashOverlay::ModelPicker {
+            choices,
+            parameters: Some(edit),
+            ..
+        } = &mut self.slash_overlay
+        else {
+            return;
+        };
+        let reset_enabled = choices
+            .get(edit.choice_index)
+            .is_some_and(|choice| edit.reset_enabled(choice));
+        let mut stops = vec![0];
+        if let (true, Some(reset_row)) = (reset_enabled, edit.reset_row()) {
+            stops.push(reset_row);
+        }
+        if let Some(apply_row) = edit.fields.iter().position(|f| *f == ParameterField::Apply) {
+            stops.push(apply_row);
+        }
+        let current = stops
+            .iter()
+            .rposition(|stop| *stop <= edit.cursor)
+            .unwrap_or(0);
+        let next = if backwards {
+            (current + stops.len() - 1) % stops.len()
+        } else {
+            (current + 1) % stops.len()
+        };
+        edit.cursor = stops[next];
     }
 
     /// Adjust the highlighted parameter: step the context window or cycle the
@@ -1146,12 +1303,20 @@ impl AppState {
             None => return,
         };
         let reasoning_cycle = match &self.slash_overlay {
-            SlashOverlay::ModelPicker { choices, .. } => choices.get(choice_index).map(|choice| {
-                (
-                    choice.reasoning_choices(),
-                    choice.reasoning_cycle_default().map(str::to_string),
-                )
-            }),
+            SlashOverlay::ModelPicker {
+                choices,
+                parameters,
+                ..
+            } => choices
+                .get(choice_index)
+                .zip(parameters.as_ref())
+                .map(|(choice, edit)| {
+                    let source = edit.source_choice(choice);
+                    (
+                        source.reasoning_choices(),
+                        source.reasoning_cycle_default().map(str::to_string),
+                    )
+                }),
             _ => None,
         };
         let Some(edit) = self.model_parameters_mut() else {
@@ -1188,6 +1353,61 @@ impl AppState {
                     delta,
                 );
             }
+            ParameterField::ResetToConfigured | ParameterField::Apply => {}
+        }
+    }
+
+    /// Reload the popup draft from the highlighted named-engine row's
+    /// configured baseline. Nothing is applied until the popup is confirmed.
+    /// Does nothing when the draft already equals the baseline.
+    fn reset_model_parameters_to_configured(&mut self) {
+        let SlashOverlay::ModelPicker {
+            choices,
+            parameters: Some(edit),
+            ..
+        } = &mut self.slash_overlay
+        else {
+            return;
+        };
+        let Some(choice) = choices.get(edit.choice_index) else {
+            return;
+        };
+        let Some(baseline) = choice.configured.as_ref().map(|baseline| &*baseline.choice) else {
+            return;
+        };
+        if edit.matches_baseline(choice) {
+            return;
+        }
+        let (context_length, max_output_tokens) = baseline.draft_limits();
+        edit.context_length = context_length;
+        edit.context_length_maximum = baseline.catalog_context_length;
+        edit.context_length_edited = false;
+        edit.max_output_tokens = max_output_tokens;
+        edit.max_output_tokens_maximum = baseline.selection.model.max_output_tokens;
+        edit.max_output_tokens_edited = false;
+        edit.reasoning_effort = baseline.selection.reasoning_effort.clone();
+        edit.restored_baseline = true;
+        // The reset button disappears once the draft equals the baseline.
+        edit.cursor = 0;
+    }
+
+    /// Activate the highlighted popup row with `enter`. The reset button
+    /// reloads the draft and keeps the popup open; the apply button confirms
+    /// the draft and returns `true`; value rows do nothing.
+    pub fn activate_model_parameter_row(&mut self) -> bool {
+        let field = self
+            .model_parameters_mut()
+            .and_then(|edit| edit.fields.get(edit.cursor).copied());
+        match field {
+            Some(ParameterField::ResetToConfigured) => {
+                self.reset_model_parameters_to_configured();
+                false
+            }
+            Some(ParameterField::Apply) => {
+                self.confirm_model_parameters();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1208,11 +1428,34 @@ impl AppState {
         let Some(choice) = choices.get_mut(edit.choice_index) else {
             return;
         };
+        if edit.restored_baseline {
+            if let Some(baseline) = choice.configured.as_mut() {
+                let configured = (*baseline.choice).clone();
+                baseline.modified = false;
+                choice.selection = configured.selection;
+                choice.reasoning_options = configured.reasoning_options;
+                choice.catalog_context_length = configured.catalog_context_length;
+                choice.selection_target = configured.selection_target;
+            }
+        }
+        // A value edited back to the baseline is no override: the engine
+        // name stays accurate for it.
+        let baseline_limits = choice
+            .configured
+            .as_ref()
+            .filter(|baseline| baseline.choice.selection.model.id == choice.selection.model.id)
+            .map(|baseline| baseline.choice.draft_limits());
         if edit.fields.contains(&ParameterField::ReasoningEffort) {
             choice.selection.reasoning_effort = edit.reasoning_effort;
         }
         if edit.context_length_edited {
-            choice.selection.context_length_override = edit.context_length;
+            let at_baseline = baseline_limits
+                .is_some_and(|(context_length, _)| context_length == edit.context_length);
+            choice.selection.context_length_override = if at_baseline {
+                None
+            } else {
+                edit.context_length
+            };
             if let (Some(target), Some(context_length)) =
                 (choice.selection_target.as_mut(), edit.context_length)
             {
@@ -1220,7 +1463,13 @@ impl AppState {
             }
         }
         if edit.max_output_tokens_edited {
-            choice.selection.max_output_tokens_override = edit.max_output_tokens;
+            let at_baseline = baseline_limits
+                .is_some_and(|(_, max_output_tokens)| max_output_tokens == edit.max_output_tokens);
+            choice.selection.max_output_tokens_override = if at_baseline {
+                None
+            } else {
+                edit.max_output_tokens
+            };
             if let Some(target) = choice.selection_target.as_mut() {
                 target.max_output_tokens = edit.max_output_tokens;
             }
@@ -1235,7 +1484,7 @@ impl AppState {
         }
     }
 
-    fn model_parameters_mut(&mut self) -> Option<&mut ModelParameterEdit> {
+    pub(crate) fn model_parameters_mut(&mut self) -> Option<&mut ModelParameterEdit> {
         match &mut self.slash_overlay {
             SlashOverlay::ModelPicker { parameters, .. } => parameters.as_mut(),
             _ => None,

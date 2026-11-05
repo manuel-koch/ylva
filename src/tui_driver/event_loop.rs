@@ -34,7 +34,8 @@ use super::input::{app_action_to_tui_event, configure_textarea, scroll_input_at_
 use super::leader::LeaderChord;
 use super::models::{
     abort_pending_model_list, apply_model_list_result, resume_interrupted_model_list,
-    start_model_list, wait_for_model_list, PendingModelList,
+    start_model_list, start_startup_engine_check, wait_for_model_list,
+    wait_for_startup_engine_check, PendingModelList,
 };
 use super::runtime::TuiRuntime;
 use super::sessions::{picker_mut, selection_error, SessionResult, SessionTasks};
@@ -144,6 +145,55 @@ where
     let mut pending_run_ids = PendingRunIds::default();
     let mut leader_chord = LeaderChord::default();
     let mut pending_model_list: Option<PendingModelList> = None;
+    let mut startup_engine_check = {
+        let mut extra_targets = Vec::new();
+        if let Some(driver) = &title_driver {
+            if let Some(name) = driver.profile.utility_engine.as_deref() {
+                if let Some(utility_engine) = driver.factory.engine(name) {
+                    extra_targets.push((
+                        name.to_string(),
+                        format!("Utility engine '{name}'"),
+                        utility_engine,
+                    ));
+                }
+            }
+            let mut agent_types: Vec<_> = driver.profile.agents.keys().collect();
+            agent_types.sort();
+            for agent_type in agent_types {
+                let agent_config = &driver.profile.agents[agent_type];
+                if let Some(name) = agent_config.engine.as_deref() {
+                    if let Some(agent_engine) = driver.factory.engine(name) {
+                        extra_targets.push((
+                            name.to_string(),
+                            format!("Agent '{agent_type}' engine '{name}'"),
+                            agent_engine,
+                        ));
+                    }
+                }
+                let compaction_name = agent_config
+                    .compaction
+                    .as_ref()
+                    .and_then(|compaction| compaction.engine.as_deref());
+                if let Some(name) = compaction_name {
+                    if let Some(compaction_engine) = driver.factory.engine(name) {
+                        extra_targets.push((
+                            name.to_string(),
+                            format!("Agent '{agent_type}' compaction engine '{name}'"),
+                            compaction_engine,
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some((name, compaction_engine)) = agent.explicit_compaction_engine() {
+            extra_targets.push((
+                name.clone(),
+                format!("Compaction engine '{name}'"),
+                compaction_engine,
+            ));
+        }
+        start_startup_engine_check(&engine, extra_targets)
+    };
     let mut session_tasks = SessionTasks::new();
     let mut title_updates_open = true;
     let mut active_title_session_id = replay_store.as_ref().map(|store| store.session_id());
@@ -321,6 +371,12 @@ where
                 apply_favorite_completion(&mut state, &engine, &favorite_completion);
             }
 
+            startup_warnings = wait_for_startup_engine_check(&mut startup_engine_check) => {
+                for text in startup_warnings {
+                    state.push_warning_notice(text);
+                }
+            }
+
             model_list_result = wait_for_model_list(&mut pending_model_list) => {
                 let Some((filter, result)) = model_list_result else {
                     continue;
@@ -429,9 +485,17 @@ where
                 let Some(event) = app_action_to_tui_event(action) else { continue };
                 let was_loading_models = matches!(state.slash_overlay, SlashOverlay::LoadingModels);
                 let focus_before = state.prompt_button_focus;
+                let parameter_cursor_before = state.model_parameters_mut().map(|edit| edit.cursor);
+                let is_key_event = matches!(event, TuiEvent::Input(_));
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
                 // Keyboard focus change replaces the pointer hover highlight.
                 if state.prompt_button_focus.is_some() && state.prompt_button_focus != focus_before {
+                    mouse_pos = None;
+                }
+                if is_key_event
+                    && parameter_cursor_before.is_some()
+                    && state.model_parameters_mut().map(|edit| edit.cursor) != parameter_cursor_before
+                {
                     mouse_pos = None;
                 }
                 // Slash-command effects are the only ones needing the engine,

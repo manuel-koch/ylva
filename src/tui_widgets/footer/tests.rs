@@ -268,3 +268,30 @@ fn approval_prompt_offers_go_to_agent_button_only_for_other_conversations() {
         }
     }
 }
+
+fn display_with_config_modified(config_modified: bool) -> TuiState {
+    TuiState {
+        engine_display: crate::llm::engine::EngineDisplayInfo {
+            engine_name: "copilot-haiku".to_string(),
+            provider_connection: "copilot".to_string(),
+            model: "haiku".to_string(),
+            config_modified,
+            ..crate::llm::engine::EngineDisplayInfo::default()
+        },
+        ..TuiState::new()
+    }
+}
+
+#[test]
+fn footer_shows_the_engine_name_while_the_configuration_is_unmodified() {
+    let state = display_with_config_modified(false);
+
+    assert_eq!(engine_label_text(&state, 40), "copilot-haiku → haiku");
+}
+
+#[test]
+fn footer_shows_the_connection_instead_of_the_engine_name_once_modified() {
+    let state = display_with_config_modified(true);
+
+    assert_eq!(engine_label_text(&state, 40), "copilot → haiku");
+}

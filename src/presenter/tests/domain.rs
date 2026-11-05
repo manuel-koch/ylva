@@ -593,6 +593,7 @@ fn subagent_engine_configuration_is_retained_for_its_conversation_view() {
         TuiEvent::Domain(DomainEvent::SubagentEngineConfigured {
             run_id,
             engine: crate::llm::engine::EngineDisplayInfo {
+                config_modified: false,
                 engine_name: "ollama/local2".to_string(),
                 provider_connection: "ollama".to_string(),
                 model: "subagent-model".to_string(),
@@ -607,6 +608,7 @@ fn subagent_engine_configuration_is_retained_for_its_conversation_view() {
     assert_eq!(
         state.subagent_engine_displays.get(&run_id),
         Some(&crate::llm::engine::EngineDisplayInfo {
+            config_modified: false,
             engine_name: "ollama/local2".to_string(),
             provider_connection: "ollama".to_string(),
             model: "subagent-model".to_string(),

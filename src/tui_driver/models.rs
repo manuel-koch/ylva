@@ -16,7 +16,7 @@ use crate::agent::AgentCommand;
 use crate::llm::engine::{Engine, ModelSelection};
 use crate::tui_reducer_state::{
     engine_choice_parts, extract_models_filter, matching_model_indices, model_choice_parts,
-    AppState, ModelChoice, SlashOverlay,
+    AppState, ConfiguredBaseline, ModelChoice, SlashOverlay,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -301,63 +301,48 @@ fn assemble_model_choices(
                 .is_ok()
         })
         .map(|named_engine| {
-            let engine_name = named_engine.name;
-            let engine_config = named_engine.config;
-            let initial_reasoning_effort = named_engine.reasoning_effort;
-            let is_active = active_engine_name.as_deref() == Some(&engine_name);
-            let catalog_model = catalog_by_identity
-                .get(&(
-                    engine_config.provider_connection.clone(),
-                    engine_config.model.clone(),
-                ))
-                .or(named_engine.model_info.as_ref())
-                .or_else(|| {
+            let is_active = active_engine_name.as_deref() == Some(&named_engine.name);
+            let live_runtime = named_engine.runtime.as_ref();
+            let mut choice = build_named_choice(NamedChoiceSettings {
+                engine_name: &named_engine.name,
+                engine_config: named_engine.config.clone(),
+                reasoning_effort: named_engine.reasoning_effort.clone(),
+                initial_reasoning_effort: named_engine.reasoning_effort.clone(),
+                context_length_override: live_runtime
+                    .and_then(|runtime| runtime.context_length_override),
+                max_output_tokens_override: live_runtime
+                    .and_then(|runtime| runtime.max_output_tokens_override),
+                fallback_model_info: named_engine.model_info.as_ref().or_else(|| {
                     active_runtime
                         .as_ref()
-                        .filter(|runtime| is_active && runtime.model == engine_config.model)
+                        .filter(|runtime| is_active && runtime.model == named_engine.config.model)
                         .and_then(|runtime| runtime.model_info.as_ref())
-                        .filter(|model| model.id == engine_config.model)
-                });
-            let model = crate::llm::ModelInfo {
-                id: engine_config.model.clone(),
-                context_length: engine_config
-                    .context_length
-                    .or_else(|| catalog_model.and_then(|model| model.context_length)),
-                max_output_tokens: catalog_model.and_then(|model| model.max_output_tokens),
-                reasoning_evidence: catalog_model
-                    .map(|model| model.reasoning_evidence)
-                    .unwrap_or_default(),
-                reasoning_efforts: catalog_model.and_then(|model| model.reasoning_efforts.clone()),
-                reasoning_default: catalog_model.and_then(|model| model.reasoning_default.clone()),
-                input_modalities: catalog_model.and_then(|model| model.input_modalities.clone()),
-            };
-            let favorite_rank = favorite_rank_of(&engine_config.provider_connection, &model.id);
-            let selection = crate::llm::ProviderModelOption {
-                context_length_override: None,
-                max_output_tokens_override: None,
-                provider_connection: engine_config.provider_connection,
-                model,
-                reasoning_effort: initial_reasoning_effort.clone(),
-            };
-            let mut choice = ModelChoice {
-                label: engine_choice_parts(&engine_name, &selection),
-                initial_reasoning_effort,
-                reasoning_options: engine
-                    .selection_reasoning_options(&ModelSelection::NamedEngine {
-                        engine_name: engine_name.clone(),
-                        option: selection.clone(),
-                        reasoning_effort: crate::llm::ReasoningEffortChange::Unchanged,
-                    })
-                    .unwrap_or_default(),
-                selection,
+                }),
                 is_active,
-                engine_name: Some(engine_name),
-                catalog_context_length: catalog_model.and_then(|model| model.context_length),
-                selection_target: None,
-                selection_preview_error: None,
-                favorite_rank,
-            };
-            choice.refresh_label();
+                catalog_by_identity: &catalog_by_identity,
+                favorite_rank_of: &favorite_rank_of,
+                engine,
+            });
+            if let Some(profile) = named_engine.configured {
+                let baseline = build_named_choice(NamedChoiceSettings {
+                    engine_name: &named_engine.name,
+                    reasoning_effort: profile.reasoning.clone(),
+                    engine_config: profile,
+                    initial_reasoning_effort: named_engine.reasoning_effort.clone(),
+                    context_length_override: None,
+                    max_output_tokens_override: None,
+                    fallback_model_info: named_engine.model_info.as_ref(),
+                    is_active,
+                    catalog_by_identity: &catalog_by_identity,
+                    favorite_rank_of: &favorite_rank_of,
+                    engine,
+                });
+                choice.configured = Some(ConfiguredBaseline {
+                    choice: Box::new(baseline),
+                    modified: is_active && engine.active_engine_config_modified(),
+                });
+                choice.refresh_label();
+            }
             choice
         });
     let model_choices = models.into_iter().map(|mut option| {
@@ -380,6 +365,8 @@ fn assemble_model_choices(
             selection_target: None,
             selection_preview_error: None,
             favorite_rank,
+            configured: None,
+            configuration_warnings: Vec::new(),
         };
         choice.refresh_label();
         choice
@@ -390,8 +377,147 @@ fn assemble_model_choices(
             Ok(target) => choice.selection_target = Some(target),
             Err(error) => choice.selection_preview_error = Some(error.to_string()),
         }
+        if let Some(baseline) = choice.configured.as_mut() {
+            match engine.preview_model_selection(&baseline.choice.to_model_selection()) {
+                Ok(target) => baseline.choice.selection_target = Some(target),
+                Err(error) => baseline.choice.selection_preview_error = Some(error.to_string()),
+            }
+        }
     }
     choices
+}
+
+struct NamedChoiceSettings<'a> {
+    engine_name: &'a str,
+    engine_config: crate::llm::EngineConfig,
+    reasoning_effort: Option<String>,
+    /// Effort the engine currently runs; keeps the selection diff against it.
+    initial_reasoning_effort: Option<String>,
+    context_length_override: Option<usize>,
+    max_output_tokens_override: Option<usize>,
+    fallback_model_info: Option<&'a crate::llm::ModelInfo>,
+    is_active: bool,
+    catalog_by_identity: &'a HashMap<(String, String), crate::llm::ModelInfo>,
+    favorite_rank_of: &'a dyn Fn(&str, &str) -> Option<usize>,
+    engine: &'a Arc<dyn Engine>,
+}
+
+/// Build a named-engine picker row from one settings view: the live settings
+/// or the engine's configured baseline.
+fn build_named_choice(settings: NamedChoiceSettings<'_>) -> ModelChoice {
+    let NamedChoiceSettings {
+        engine_name,
+        engine_config,
+        reasoning_effort,
+        initial_reasoning_effort,
+        context_length_override,
+        max_output_tokens_override,
+        fallback_model_info,
+        is_active,
+        catalog_by_identity,
+        favorite_rank_of,
+        engine,
+    } = settings;
+    // Looked up so an engine shortcut can show the real context length and
+    // advertised reasoning efforts of the model it names, rather than
+    // reporting "unavailable" for a model the catalog does list.
+    let catalog_model = catalog_by_identity
+        .get(&(
+            engine_config.provider_connection.clone(),
+            engine_config.model.clone(),
+        ))
+        .or(fallback_model_info.filter(|model| model.id == engine_config.model));
+    let model = crate::llm::ModelInfo {
+        id: engine_config.model.clone(),
+        context_length: engine_config
+            .context_length
+            .or_else(|| catalog_model.and_then(|model| model.context_length)),
+        max_output_tokens: catalog_model.and_then(|model| model.max_output_tokens),
+        reasoning_evidence: catalog_model
+            .map(|model| model.reasoning_evidence)
+            .unwrap_or_default(),
+        reasoning_efforts: catalog_model.and_then(|model| model.reasoning_efforts.clone()),
+        reasoning_default: catalog_model.and_then(|model| model.reasoning_default.clone()),
+        input_modalities: catalog_model.and_then(|model| model.input_modalities.clone()),
+    };
+    let favorite_rank = favorite_rank_of(&engine_config.provider_connection, &model.id);
+    let selection = crate::llm::ProviderModelOption {
+        context_length_override,
+        max_output_tokens_override,
+        provider_connection: engine_config.provider_connection,
+        model,
+        reasoning_effort,
+    };
+    let configuration_warnings = engine_configuration_warnings(
+        catalog_model,
+        &selection,
+        engine_config.context_length,
+        engine_config.max_output_tokens,
+        engine,
+    );
+    let mut choice = ModelChoice {
+        label: engine_choice_parts(engine_name, &selection),
+        initial_reasoning_effort,
+        reasoning_options: engine
+            .selection_reasoning_options(&ModelSelection::NamedEngine {
+                engine_name: engine_name.to_string(),
+                option: selection.clone(),
+                reasoning_effort: crate::llm::ReasoningEffortChange::Unchanged,
+            })
+            .unwrap_or_default(),
+        selection,
+        is_active,
+        engine_name: Some(engine_name.to_string()),
+        catalog_context_length: catalog_model.and_then(|model| model.context_length),
+        selection_target: None,
+        selection_preview_error: None,
+        favorite_rank,
+        configured: None,
+        configuration_warnings,
+    };
+    choice.refresh_label();
+    choice
+}
+
+/// Engine settings the catalog does not advertise. A model missing from the
+/// catalog makes every setting unadvertised, so it is the only warning then.
+/// An effort the provider accepts as unverified is already labelled elsewhere.
+pub(super) fn engine_configuration_warnings(
+    catalog_model: Option<&crate::llm::ModelInfo>,
+    selection: &crate::llm::ProviderModelOption,
+    configured_context_length: Option<usize>,
+    configured_max_output_tokens: Option<usize>,
+    engine: &Arc<dyn Engine>,
+) -> Vec<String> {
+    let Some(catalog_model) = catalog_model else {
+        return vec!["model not in catalog".to_string()];
+    };
+    let exceeds_catalog = |configured: Option<usize>, advertised: Option<usize>| matches!((configured, advertised), (Some(configured), Some(advertised)) if configured > advertised);
+    let mut warnings = Vec::new();
+    if exceeds_catalog(
+        selection
+            .context_length_override
+            .or(configured_context_length),
+        catalog_model.context_length,
+    ) {
+        warnings.push("context not advertised".to_string());
+    }
+    if exceeds_catalog(
+        selection
+            .max_output_tokens_override
+            .or(configured_max_output_tokens),
+        catalog_model.max_output_tokens,
+    ) {
+        warnings.push("max output not advertised".to_string());
+    }
+    if selection.reasoning_effort.is_some()
+        && engine
+            .resolve_selection_reasoning(&ModelSelection::ProviderModel(selection.clone()))
+            .is_err()
+    {
+        warnings.push("reasoning not advertised".to_string());
+    }
+    warnings
 }
 
 fn refresh_engine_display_after_selection(
@@ -407,6 +533,7 @@ fn refresh_engine_display_after_selection(
     conversation_display.provider_connection = runtime_display.provider_connection;
     conversation_display.model = runtime_display.model;
     conversation_display.reasoning_effort = runtime_display.reasoning_effort;
+    conversation_display.config_modified = runtime_display.config_modified;
     let conversation_engine_name = conversation_display.engine_name.clone();
     let conversation_provider_connection = conversation_display.provider_connection.clone();
     let conversation_model = conversation_display.model.clone();
@@ -425,6 +552,7 @@ fn refresh_engine_display_after_selection(
             subagent_display.provider_connection = conversation_display.provider_connection.clone();
             subagent_display.model = conversation_display.model.clone();
             subagent_display.reasoning_effort = conversation_display.reasoning_effort.clone();
+            subagent_display.config_modified = conversation_display.config_modified;
         }
         let subagent_engine_name = subagent_display.engine_name.clone();
         let subagent_provider_connection = subagent_display.provider_connection.clone();
@@ -446,6 +574,7 @@ fn refresh_compaction_display(
     conversation_provider_connection: &str,
     conversation_model: &str,
 ) {
+    let config_modified = display.config_modified;
     let Some(compaction) = &mut display.compaction_engine else {
         return;
     };
@@ -464,6 +593,9 @@ fn refresh_compaction_display(
     }
     compaction.shares_conversation = compaction.follows_conversation
         || (compaction.shares_conversation && compaction.engine_name == conversation_engine_name);
+    if compaction.shares_conversation {
+        compaction.config_modified = config_modified;
+    }
 }
 
 pub(super) fn compaction_switch_notice(
@@ -476,9 +608,13 @@ pub(super) fn compaction_switch_notice(
         // Only a named-engine pick names an engine; a provider-model pick
         // names the model, since the backing engine is an implementation detail.
         return Some(match selection {
-            ModelSelection::NamedEngine { engine_name, .. } => {
+            ModelSelection::NamedEngine { engine_name, .. } if !compaction.config_modified => {
                 format!("Compaction now uses selected engine '{engine_name}'.")
             }
+            ModelSelection::NamedEngine { .. } => format!(
+                "Compaction now uses selected engine '{}/{}'.",
+                target.provider_connection, target.model
+            ),
             ModelSelection::ProviderModel(_) => format!(
                 "Compaction now uses selected model '{}/{}'.",
                 target.provider_connection, target.model
@@ -498,8 +634,14 @@ pub(super) fn compaction_switch_notice(
         let target_name = target
             .engine_name
             .as_deref()
-            .filter(|name| !name.is_empty())
-            .unwrap_or(&target.provider_connection);
+            .filter(|name| !name.is_empty() && !compaction.config_modified);
+        let target_name = match target_name {
+            Some(name) => name.to_string(),
+            None if compaction.config_modified => {
+                format!("{}/{}", target.provider_connection, target.model)
+            }
+            None => target.provider_connection.clone(),
+        };
         Some(format!(
             "Compaction uses '{target_name}', shared with the conversation."
         ))
@@ -511,6 +653,104 @@ pub(super) fn compaction_switch_notice(
         };
         Some(format!("Compaction remains on '{compaction_engine_name}'."))
     }
+}
+
+/// Warnings for the active engine's live settings. A failed or slow catalog
+/// lookup yields none, so an unreachable provider never produces a false warning.
+async fn active_engine_warnings(engine: &Arc<dyn Engine>) -> Vec<String> {
+    let Ok(Ok(models)) = tokio::time::timeout(MODEL_LIST_TIMEOUT, engine.list_models()).await
+    else {
+        return Vec::new();
+    };
+    let config = engine.config();
+    let catalog_model = models.iter().find(|model| model.id == config.model);
+    let option = crate::llm::ProviderModelOption {
+        provider_connection: config.provider_connection.clone(),
+        model: catalog_model.cloned().unwrap_or(crate::llm::ModelInfo {
+            id: config.model.clone(),
+            max_output_tokens: None,
+            context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        }),
+        reasoning_effort: engine.reasoning_effort(),
+        context_length_override: None,
+        max_output_tokens_override: None,
+    };
+    engine_configuration_warnings(
+        catalog_model,
+        &option,
+        config.context_length,
+        config.max_output_tokens,
+        engine,
+    )
+}
+
+fn engine_warning_notice(subject: &str, warnings: &[String]) -> String {
+    format!(
+        "{subject} has settings the provider catalog does not advertise: {}.",
+        warnings.join(", ")
+    )
+}
+
+/// Background catalog check of the engines in use at startup; resolves to one
+/// warning notice per engine with warnings.
+pub(super) type StartupEngineCheck = tokio::task::JoinHandle<Vec<String>>;
+
+/// Check the conversation engine plus the explicit utility and compaction
+/// engines. Each target pairs the engine name and notice subject with its
+/// engine; every role gets its own notice, but the catalog is queried once
+/// per engine name.
+pub(super) fn start_startup_engine_check(
+    engine: &Arc<dyn Engine>,
+    extra_targets: Vec<(String, String, Arc<dyn Engine>)>,
+) -> Option<StartupEngineCheck> {
+    let mut targets = Vec::new();
+    if let Some(engine_name) = engine.active_engine_name() {
+        targets.push((
+            engine_name.clone(),
+            format!("Engine '{engine_name}'"),
+            Arc::clone(engine),
+        ));
+    }
+    targets.extend(extra_targets);
+    if targets.is_empty() {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        let mut notices = Vec::new();
+        let mut warnings_by_engine: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (engine_name, subject, engine) in targets {
+            let warnings = match warnings_by_engine.get(&engine_name) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let fresh = active_engine_warnings(&engine).await;
+                    warnings_by_engine.insert(engine_name, fresh.clone());
+                    fresh
+                }
+            };
+            if !warnings.is_empty() {
+                notices.push(engine_warning_notice(&subject, &warnings));
+            }
+        }
+        notices
+    }))
+}
+
+/// Resolves once with the startup check's notices, then stays disabled so the
+/// main `select!` loop can continue handling other events.
+pub(super) async fn wait_for_startup_engine_check(
+    startup_engine_check: &mut Option<StartupEngineCheck>,
+) -> Vec<String> {
+    let Some(check) = startup_engine_check.as_mut() else {
+        return std::future::pending().await;
+    };
+    let result = check.await.unwrap_or_default();
+    *startup_engine_check = None;
+    result
 }
 
 pub(super) async fn switch_model(
@@ -557,8 +797,14 @@ pub(super) async fn switch_model(
             }
             match preview {
                 Ok(target) => {
+                    // The notice describes the selection just applied, so it
+                    // needs the post-selection modified state.
+                    let mut notice_display = state.engine_display.clone();
+                    if let Some(compaction) = notice_display.compaction_engine.as_mut() {
+                        compaction.config_modified = engine.active_engine_config_modified();
+                    }
                     if let Some(effect) =
-                        compaction_switch_notice(&state.engine_display, &target, selection)
+                        compaction_switch_notice(&notice_display, &target, selection)
                     {
                         confirmation_parts.push(effect);
                     }
@@ -574,6 +820,15 @@ pub(super) async fn switch_model(
             // some providers/chat templates and the switch is already
             // durably recorded below via `RecordModelChanged`.
             state.push_notice(confirmation_parts.join(" "));
+            if let ModelSelection::NamedEngine { engine_name, .. } = selection {
+                let warnings = active_engine_warnings(engine).await;
+                if !warnings.is_empty() {
+                    state.push_warning_notice(engine_warning_notice(
+                        &format!("Engine '{engine_name}'"),
+                        &warnings,
+                    ));
+                }
+            }
             // Read both values from the live engine because a
             // selection may have changed the active provider as well
             // as its model.

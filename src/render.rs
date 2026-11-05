@@ -350,8 +350,10 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
                     state.engine_display.provider_connection.clone();
                 subagent_display.model = state.engine_display.model.clone();
                 subagent_display.reasoning_effort = state.engine_display.reasoning_effort.clone();
+                subagent_display.config_modified = state.engine_display.config_modified;
                 if let Some(compaction) = &mut subagent_display.compaction_engine {
                     if compaction.follows_conversation {
+                        compaction.config_modified = subagent_display.config_modified;
                         compaction.engine_name = subagent_display.engine_name.clone();
                         compaction.provider_connection =
                             subagent_display.provider_connection.clone();
@@ -1017,6 +1019,7 @@ mod tests {
     fn project_for_draw_selects_the_identity_of_the_visible_conversation() {
         let mut state = AppState::new();
         state.engine_display = crate::llm::engine::EngineDisplayInfo {
+            config_modified: false,
             engine_name: "openrouter".to_string(),
             provider_connection: "openrouter".to_string(),
             model: "root-model".to_string(),
@@ -1045,6 +1048,7 @@ mod tests {
         state.subagent_engine_displays.insert(
             run_id,
             crate::llm::engine::EngineDisplayInfo {
+                config_modified: false,
                 engine_name: "ollama/local2".to_string(),
                 provider_connection: "ollama".to_string(),
                 model: "subagent-model".to_string(),
@@ -1069,11 +1073,13 @@ mod tests {
         let bubble_id = Uuid::new_v4();
         let mut state = AppState::new();
         state.engine_display = crate::llm::engine::EngineDisplayInfo {
+            config_modified: false,
             engine_name: "engine-b".to_string(),
             provider_connection: "mock".to_string(),
             model: "model-b".to_string(),
             reasoning_effort: Some("high".to_string()),
             compaction_engine: Some(crate::llm::engine::CompactionEngineDisplayInfo {
+                config_modified: false,
                 engine_name: "engine-b".to_string(),
                 provider_connection: "mock".to_string(),
                 model: "model-b".to_string(),
@@ -1094,11 +1100,13 @@ mod tests {
         state.subagent_engine_displays.insert(
             run_id,
             crate::llm::engine::EngineDisplayInfo {
+                config_modified: false,
                 engine_name: "engine-a".to_string(),
                 provider_connection: "mock".to_string(),
                 model: "model-a".to_string(),
                 reasoning_effort: None,
                 compaction_engine: Some(crate::llm::engine::CompactionEngineDisplayInfo {
+                    config_modified: false,
                     engine_name: "engine-a".to_string(),
                     provider_connection: "mock".to_string(),
                     model: "model-a".to_string(),

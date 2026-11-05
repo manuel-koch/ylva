@@ -432,7 +432,11 @@ restriction, unbound) model fails before anything is sent.
 Named provider connections are constructed independently, so multiple
 connections can use the same implementation (for example, local Ollama and
 Ollama-Cloud). The conversation footer shows the active named engine and model
-when a profile engine name is available; direct unnamed engines show only the
+while the live configuration equals the engine's configured baseline (model,
+reasoning effort, context-length override, output-limit override); once a
+`/models` pick or parameter edit deviates, it shows
+`provider_connection → model` instead, and the compaction switch notice names
+`provider_connection/model` likewise. Direct unnamed engines show only the
 model. `/models` queries each connection once, reuses a successful result
 for 30 minutes within the run (failures are retried on the next `/models`),
 and lists configured named
@@ -441,15 +445,33 @@ engine shortcuts before favorite models and the remaining raw
 case-sensitive provider-connection preference saved with ctrl-f from the
 highlighted row in either the list or parameter popup; it does not switch the
 model or alter parameter drafts. Favorites not currently returned by discovery
-remain configured but are hidden. Groups are introduced by non-selectable
-`Engines`, `Favorites` and `Models` headers; favorites keep their configured
-order within each connection. Partial catalog outages retain available
-choices and add a notice naming failed connections; total outages continue to
-show available named-engine shortcuts. Selecting a shortcut activates that
-exact engine's current Engine runtime settings,
+remain configured but are hidden. Groups are introduced by non-selectable,
+underlined `Engines`, `Favorites` and `Models` headers; favorites are marked
+with `⚑`, and model names stay aligned with or without it. Favorites keep their
+configured order within each connection.
+Partial catalog outages retain available choices and add a notice naming failed
+connections; total outages continue to show available named-engine shortcuts.
+Selecting a shortcut activates that exact engine's current Engine runtime settings,
 even when another engine uses the same connection and model. A raw catalog
 entry keeps provider-based routing: it changes the active engine for its
 connection, or the deterministic representative engine for another connection.
+Engine rows whose settings the connection's catalog does not advertise get extra
+detail segments and render in the theme's orange warning colour; they stay selectable. The picker title
+shows the number of rows, as `(visible/total)` while the filter hides some.
+`model not in catalog` replaces all other warnings when the catalog lacks the model;
+otherwise `context not advertised` and `max output not advertised` mean the configured
+value exceeds the catalog's limit, and `reasoning not advertised` means the configured
+effort is rejected by the provider's reasoning policy (efforts accepted as unverified
+keep their `(unverified)` label instead).
+Nothing is flagged for a limit the catalog does not state. The same warnings appear
+as an orange `⚠️` transcript notice (`Engine '<name>' has settings the provider
+catalog does not advertise: …`) after applying a named engine and once shortly after
+startup when a named engine is active; an unreachable catalog produces no warning.
+The startup check also covers an explicit `utility_engine`, an explicit compaction
+engine, and each agent type's explicit `engine` and `compaction.engine` (`Utility
+engine '<name>' …`, `Compaction engine '<name>' …`, `Agent '<type>' engine '<name>' …`,
+`Agent '<type>' compaction engine '<name>' …`); engines that follow the conversation
+engine are already covered; roles sharing one engine each get their own notice.
 The picker detail previews the provider-connection/model and effective context
 window compaction will use for the highlighted selection, without repeating
 the active conversation engine and model already shown in the TUI footer. It
@@ -489,10 +511,18 @@ EdenAI's unverified choices remain separately labelled. Each picker row shows th
 effort or default, independently of reasoning capability. `◂`/`▸` mark the directions that
 can still move. The footer shows the controls for the open overlay.
 
-`enter` applies the selected model and parameter edits. A named-engine shortcut activates
-that exact engine and keeps its current settings unless edited. Previewing or cancelling
-does not change settings. Effort edits are session-only, are not saved to the profile,
-and are not restored when resuming a session.
+The popup ends with an `[ ✓ Apply ]` button; `enter` on it applies the selected model and
+parameter edits, while `enter` on a value row does nothing. A named-engine shortcut applies
+exactly the settings shown in its row: model, effort and overrides; it restores the
+configured model if a raw pick moved the engine away. Named rows of an engine that
+deviates from its configuration are labelled `(modified)`. The popup of a named row has an
+additional `[ Reset ]` button before Apply: `enter` on it reloads the draft from the
+engine's configured baseline (without confirming); `esc` discards the edits. `tab` /
+`shift-tab` cycle value rows → Reset → Apply; `↑`/`↓` move only between the value rows
+(`↑` from a button returns to them). Reset is shown disabled and skipped while the draft
+already equals the configured baseline. Raw catalog rows have no Reset button.
+Previewing or cancelling does not change settings. Effort edits are session-only,
+are not saved to the profile, and are not restored when resuming a session.
 
 An explicit EdenAI profile effort or a deliberately selected unverified override is enough
 to opt in. No extra switch or confirmation dialog is required. Invalid choices fail without
@@ -1419,15 +1449,19 @@ the highlighted value. The context length moves by one eighth of the current win
 rounded down to the fixed token-step multiple, and never exceeds the catalog's window
 when one is reported. A `◂` before a value means it can move smaller and a `▸`
 after it means it can move greater; a missing arrow marks a bound (for example
-the minimum token-step floor or the advertised window). The step unit and floor
-remain 32,768 tokens; decimal display formatting does not change the values.
+the minimum token-step floor or the advertised window). With the mouse, a click selects a
+row, a click on `◂`/`▸` steps the value, and the buttons can be clicked; the item
+under the pointer is highlighted. The step unit and floor remain 32,768 tokens;
+decimal display formatting does not change the values.
 Reasoning effort moves through the
 advertised efforts in order, or separately labelled EdenAI gateway overrides, with
 a provider-default slot and without wrapping. When the advertised default is `medium`,
 that effort cannot be chosen on its own; its slot selects the provider default.
-Its edit is session-only and is not written to the profile. In the popup, `enter`
-confirms the model and parameters and switches; `esc` returns to the model list
-and discards the parameter edits. `esc` in the list cancels and clears the input.
+Its edit is session-only and is not written to the profile. When a named engine
+keeps a profile effort but the provider catalog does not list its model, the
+popup offers only the provider default. In the popup, `enter` on the focused `✓ Apply`
+button confirms the model and parameters and switches; `esc` returns to the model
+list and discards the parameter edits. `esc` in the list cancels and clears the input.
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |

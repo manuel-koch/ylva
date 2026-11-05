@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::super::models::ModelListResult;
+use super::super::models::{
+    engine_configuration_warnings, start_startup_engine_check, switch_model,
+    wait_for_startup_engine_check, ModelListResult,
+};
 use super::*;
 
 #[test]
@@ -299,11 +302,13 @@ fn compaction_switch_notices_explain_engine_selection_effects() {
     };
     let provider_model = ModelSelection::ProviderModel(option);
     let mut display = EngineDisplayInfo {
+        config_modified: false,
         engine_name: "engine-a".to_string(),
         provider_connection: "mock".to_string(),
         model: "model-a".to_string(),
         reasoning_effort: None,
         compaction_engine: Some(CompactionEngineDisplayInfo {
+            config_modified: false,
             engine_name: "engine-a".to_string(),
             provider_connection: "mock".to_string(),
             model: "model-a".to_string(),
@@ -513,8 +518,8 @@ async fn models_lists_the_candidates_and_preselects_the_active_model() {
             .map(|choice| choice.label.single_line())
             .collect::<Vec<_>>(),
         vec![
-            "stub/small  reasoning: unavailable",
-            "stub/large  reasoning: unavailable"
+            "  stub/small  reasoning: unavailable",
+            "  stub/large  reasoning: unavailable"
         ]
     );
     assert_eq!(*selected, 1);
@@ -605,8 +610,21 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_efforts() {
     );
     assert_eq!(
         shortcut.label.single_line(),
-        "openrouter → stub/thinking  context: 32.0K  reasoning: max",
+        "  openrouter → stub/thinking  context: 32.0K  reasoning: max",
         "the shortcut must show its configured reasoning effort instead of 'unavailable'"
+    );
+    let baseline = shortcut
+        .configured
+        .as_ref()
+        .expect("a named row carries its configured baseline");
+    assert!(!baseline.modified);
+    assert_eq!(baseline.choice.selection.context_length_override, None);
+    assert!(
+        choices
+            .iter()
+            .filter(|choice| choice.engine_name.is_none())
+            .all(|choice| choice.configured.is_none()),
+        "raw catalog rows have no configured baseline"
     );
 }
 
@@ -659,7 +677,7 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_default() {
     );
     assert_eq!(
         shortcut.label.single_line(),
-        "openrouter → stub/thinking  context: 32.0K  reasoning: default (medium)",
+        "  openrouter → stub/thinking  context: 32.0K  reasoning: default (medium)",
         "the shortcut's default slot must name the advertised default"
     );
 }
@@ -704,7 +722,7 @@ async fn models_lists_an_engine_shortcut_falling_back_to_the_catalogs_context_le
     assert_eq!(shortcut.catalog_context_length, Some(999_999));
     assert_eq!(
         shortcut.label.single_line(),
-        "openrouter → stub/thinking  context: 1000.0K  reasoning: max"
+        "  openrouter → stub/thinking  context: 1000.0K  reasoning: max"
     );
 }
 
@@ -927,6 +945,8 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
     state.slash_overlay = SlashOverlay::ModelPicker {
         parameters: None,
         choices: vec![ModelChoice {
+            configured: None,
+            configuration_warnings: Vec::new(),
             label: crate::tui_reducer_state::ChoiceLabel {
                 identity: "stub/thinking".to_string(),
                 details: vec!["reasoning: default".to_string()],
@@ -995,7 +1015,8 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
         "the draft must not reach the choice before confirmation"
     );
 
-    // Enter confirms the popup and switches with the adjusted effort.
+    // Tab focuses Apply; Enter then switches with the adjusted effort.
+    press(&mut state, KeyCode::Tab);
     let effects = press(&mut state, KeyCode::Enter);
     assert!(matches!(
         effects.last(),
@@ -1026,6 +1047,8 @@ async fn model_picker_parameter_popup_esc_returns_to_the_list_and_discards_the_d
     state.slash_overlay = SlashOverlay::ModelPicker {
         parameters: None,
         choices: vec![ModelChoice {
+            configured: None,
+            configuration_warnings: Vec::new(),
             label: crate::tui_reducer_state::ChoiceLabel {
                 identity: "stub/thinking".to_string(),
                 details: vec!["reasoning: default".to_string()],
@@ -1115,6 +1138,7 @@ async fn confirming_a_picked_model_switches_the_engine_and_records_the_change() 
         &ctx,
     );
     assert!(effects.is_empty(), "the first Enter only opens the popup");
+    state.cycle_model_parameter_focus(false);
     let effects = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -1225,6 +1249,7 @@ async fn selecting_a_named_engine_shortcut_activates_that_exact_engine() {
         &textarea_ctx_from(&textarea),
     );
     assert!(effects.is_empty(), "the first Enter only opens the popup");
+    state.cycle_model_parameter_focus(false);
     let effects = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -1541,6 +1566,7 @@ async fn gateway_shortcut_after_catalog_failure_applies_enter_without_acknowledg
     assert!(first_enter.is_empty());
     state.move_model_parameter_cursor(1);
     state.adjust_model_parameter(1);
+    state.cycle_model_parameter_focus(true);
     let confirm = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -1683,6 +1709,7 @@ async fn gateway_shortcut_escape_keeps_profile_effort_and_default_reset_applies(
     state.open_model_parameters();
     state.move_model_parameter_cursor(1);
     state.adjust_model_parameter(-3);
+    state.cycle_model_parameter_focus(true);
     let confirm = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -1796,4 +1823,221 @@ fn gateway_outage_retains_inactive_named_engine_evidence() {
     assert_eq!(choice.selection.model, displayed_evidence);
     assert_eq!(choice.catalog_context_length, Some(128_000));
     assert!(!choice.label.details_text().contains("unverified"));
+}
+
+/// Stub whose named-engine selection always succeeds and reports a fixed effort.
+struct EffortStubEngine(Arc<StubEngine>);
+
+impl Engine for EffortStubEngine {
+    fn chat<'a>(
+        &'a self,
+        messages: Vec<crate::agent::Message>,
+        tools: Vec<crate::llm::ToolSchema>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<crate::agent::StreamEvent>>>
+    {
+        self.0.chat(messages, tools, cancel)
+    }
+
+    fn config(&self) -> EngineConfig {
+        self.0.config()
+    }
+
+    fn list_models(
+        &self,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>> {
+        self.0.list_models()
+    }
+
+    fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        self.0.switch_model(model)
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        Some("medium".to_string())
+    }
+
+    fn select_model(&self, _selection: &ModelSelection) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn active_engine_name(&self) -> Option<String> {
+        Some("haiku-engine".to_string())
+    }
+}
+
+/// Switch to the named stub engine; returns the confirmation notice and the
+/// warning notice, if one followed it.
+async fn named_engine_switch_notices(catalog_models: &[&str]) -> (String, Option<String>) {
+    let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+    let stub = StubEngine::with_models(catalog_models, "haiku");
+    let engine: Arc<dyn Engine> = Arc::new(EffortStubEngine(stub));
+    let selection = ModelSelection::NamedEngine {
+        engine_name: "haiku-engine".to_string(),
+        option: crate::llm::ProviderModelOption {
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "haiku".to_string(),
+                max_output_tokens: None,
+                context_length: None,
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
+            },
+            reasoning_effort: Some("medium".to_string()),
+            context_length_override: None,
+            max_output_tokens_override: None,
+        },
+        reasoning_effort: crate::llm::ReasoningEffortChange::Unchanged,
+    };
+    switch_model(&mut state, &selection, &engine, &cmd_tx).await;
+    let mut entries = state.chat_entries.iter().rev();
+    match (entries.next(), entries.next()) {
+        (
+            Some(ChatEntry::WarningNotice { text: warning }),
+            Some(ChatEntry::Notice { text: notice }),
+        ) => (notice.clone(), Some(warning.clone())),
+        (Some(ChatEntry::Notice { text: notice }), _) => (notice.clone(), None),
+        other => panic!("unexpected notices: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn named_engine_switch_adds_an_orange_notice_for_a_model_missing_from_the_catalog() {
+    let (notice, warning) = named_engine_switch_notices(&["other"]).await;
+    assert!(notice.contains("Reasoning effort: medium."), "{notice}");
+    assert_eq!(
+        warning.as_deref(),
+        Some("Engine 'haiku-engine' has settings the provider catalog does not advertise: model not in catalog.")
+    );
+}
+
+#[tokio::test]
+async fn named_engine_switch_for_a_cataloged_model_never_reports_a_missing_model() {
+    let (_, warning) = named_engine_switch_notices(&["haiku"]).await;
+    assert!(
+        !warning.unwrap_or_default().contains("model not in catalog"),
+        "the model is listed"
+    );
+}
+
+#[tokio::test]
+async fn startup_check_warns_when_the_active_engine_model_is_not_in_the_catalog() {
+    let engine: Arc<dyn Engine> = Arc::new(EffortStubEngine(StubEngine::with_models(
+        &["other"],
+        "haiku",
+    )));
+    let mut check = start_startup_engine_check(&engine, Vec::new());
+    let notices = wait_for_startup_engine_check(&mut check).await;
+    assert_eq!(
+        notices,
+        vec!["Engine 'haiku-engine' has settings the provider catalog does not advertise: model not in catalog.".to_string()]
+    );
+    assert!(check.is_none(), "the check resolves only once");
+}
+
+#[tokio::test]
+async fn startup_check_is_skipped_without_a_named_engine() {
+    let engine: Arc<dyn Engine> = StubEngine::with_models(&["haiku"], "haiku");
+    assert!(start_startup_engine_check(&engine, Vec::new()).is_none());
+}
+
+#[tokio::test]
+async fn startup_check_warns_for_each_role_sharing_a_misconfigured_engine() {
+    let conversation: Arc<dyn Engine> = StubEngine::with_models(&["haiku"], "haiku");
+    let missing = || -> Arc<dyn Engine> {
+        Arc::new(EffortStubEngine(StubEngine::with_models(
+            &["other"],
+            "haiku",
+        )))
+    };
+    let extra_targets = vec![
+        (
+            "haiku-engine".to_string(),
+            "Utility engine 'haiku-engine'".to_string(),
+            missing(),
+        ),
+        (
+            "haiku-engine".to_string(),
+            "Compaction engine 'haiku-engine'".to_string(),
+            missing(),
+        ),
+    ];
+    let mut check = start_startup_engine_check(&conversation, extra_targets);
+    let notices = wait_for_startup_engine_check(&mut check).await;
+    assert_eq!(
+        notices,
+        vec![
+            "Utility engine 'haiku-engine' has settings the provider catalog does not advertise: model not in catalog.".to_string(),
+            "Compaction engine 'haiku-engine' has settings the provider catalog does not advertise: model not in catalog.".to_string(),
+        ]
+    );
+}
+
+fn warning_option(effort: Option<&str>) -> crate::llm::ProviderModelOption {
+    crate::llm::ProviderModelOption {
+        provider_connection: "stub".to_string(),
+        model: crate::llm::ModelInfo {
+            id: "m".to_string(),
+            max_output_tokens: Some(50),
+            context_length: Some(100),
+            reasoning_evidence: crate::llm::ReasoningEvidence::Supported,
+            reasoning_efforts: Some(vec!["low".to_string()]),
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: effort.map(str::to_string),
+        context_length_override: None,
+        max_output_tokens_override: None,
+    }
+}
+
+#[test]
+fn engine_warnings_flag_a_model_missing_from_the_catalog_only_once() {
+    let engine: Arc<dyn Engine> = StubEngine::with_models(&["m"], "m");
+    let option = warning_option(Some("high"));
+    assert_eq!(
+        engine_configuration_warnings(None, &option, Some(1_000), None, &engine),
+        vec!["model not in catalog".to_string()]
+    );
+}
+
+#[test]
+fn engine_warnings_flag_each_unadvertised_setting() {
+    let engine: Arc<dyn Engine> = StubEngine::with_models(&["m"], "m");
+    let option = warning_option(Some("high"));
+    assert_eq!(
+        engine_configuration_warnings(Some(&option.model), &option, Some(101), Some(51), &engine),
+        vec![
+            "context not advertised".to_string(),
+            "max output not advertised".to_string(),
+            "reasoning not advertised".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn engine_warnings_are_empty_for_advertised_or_unstated_settings() {
+    let engine: Arc<dyn Engine> = StubEngine::with_models(&["m"], "m");
+    let option = warning_option(Some("low"));
+    assert!(engine_configuration_warnings(
+        Some(&option.model),
+        &option,
+        Some(100),
+        Some(50),
+        &engine
+    )
+    .is_empty());
+    let mut unstated = warning_option(None);
+    unstated.model.context_length = None;
+    unstated.model.max_output_tokens = None;
+    assert!(engine_configuration_warnings(
+        Some(&unstated.model),
+        &unstated,
+        Some(9_999),
+        Some(9_999),
+        &engine
+    )
+    .is_empty());
 }

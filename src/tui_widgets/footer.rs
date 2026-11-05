@@ -27,7 +27,7 @@ use crate::theme::{
     muted_text_color, overlay_selection_color,
 };
 use crate::tui_reducer_state::{
-    ActiveSubagentCounts, ChatEntry, PromptButton, SlashOverlay, ToolCallState,
+    ActiveSubagentCounts, ChatEntry, ParameterField, PromptButton, SlashOverlay, ToolCallState,
 };
 use crate::tui_render_state::TuiState;
 
@@ -96,7 +96,21 @@ const MODEL_PARAMETER_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("ctrl-x f", "favorite"),
     FooterHint::key("↑/↓", "parameter"),
     FooterHint::key("←/→", "adjust"),
-    FooterHint::key("enter", "switch"),
+    FooterHint::key("tab", "buttons"),
+    FooterHint::key("esc", "back"),
+    FooterHint::key("F1", "help"),
+];
+const MODEL_PARAMETER_RESET_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("ctrl-x f", "favorite"),
+    FooterHint::key("tab", "buttons"),
+    FooterHint::key("enter", "reset"),
+    FooterHint::key("esc", "back"),
+    FooterHint::key("F1", "help"),
+];
+const MODEL_PARAMETER_APPLY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("ctrl-x f", "favorite"),
+    FooterHint::key("tab", "buttons"),
+    FooterHint::key("enter", "apply"),
     FooterHint::key("esc", "back"),
     FooterHint::key("F1", "help"),
 ];
@@ -187,9 +201,13 @@ fn base_footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'sta
         SlashOverlay::Suggestions { .. } => SUGGESTION_FOOTER_HINTS,
         SlashOverlay::LoadingModels => LOADING_MODELS_FOOTER_HINTS,
         SlashOverlay::ModelPicker {
-            parameters: Some(_),
+            parameters: Some(edit),
             ..
-        } => MODEL_PARAMETER_FOOTER_HINTS,
+        } => match edit.fields.get(edit.cursor) {
+            Some(ParameterField::ResetToConfigured) => MODEL_PARAMETER_RESET_FOOTER_HINTS,
+            Some(ParameterField::Apply) => MODEL_PARAMETER_APPLY_FOOTER_HINTS,
+            _ => MODEL_PARAMETER_FOOTER_HINTS,
+        },
         SlashOverlay::ModelPicker { .. } => MODEL_PICKER_FOOTER_HINTS,
         SlashOverlay::SessionPicker(picker) => {
             if picker.phase == crate::tui_reducer_state::SessionPickerPhase::Ready {
@@ -291,7 +309,12 @@ pub(super) fn split_footer_rows(area: Rect) -> FooterRows {
 /// otherwise the provider-only or model-only variant is shown, elided from its
 /// beginning if necessary.
 fn engine_label_text(state: &TuiState, max_chars: usize) -> String {
-    let provider = state.engine_display.engine_name.as_str();
+    let engine_display = &state.engine_display;
+    let provider = if engine_display.config_modified {
+        engine_display.provider_connection.as_str()
+    } else {
+        engine_display.engine_name.as_str()
+    };
     let model = state.engine_display.model.as_str();
     let reasoning_effort = state
         .engine_display

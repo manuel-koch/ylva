@@ -1130,3 +1130,105 @@ async fn independently_bound_runtime_retains_strict_profile_fallback_and_atomic_
     assert_eq!(engine.reasoning_effort(), None);
     assert_eq!(engine.take_pending_notices().len(), 1);
 }
+
+// ── configured baseline ───────────────────────────────────────────────────
+
+fn baseline_engine() -> EngineImpl {
+    let provider = Arc::new(NeutralPolicyProvider(CatalogProvider::new(vec![
+        model_info_with_reasoning_efforts(
+            "test-model",
+            Some(vec!["low".to_string(), "high".to_string()]),
+        ),
+        model_info_with_reasoning_efforts("other-model", None),
+    ])));
+    let mut config = make_engine_config();
+    config.context_length = Some(32_768);
+    EngineImpl::new(provider, config)
+}
+
+fn baseline_option(
+    model: &str,
+    reasoning_effort: Option<&str>,
+    context_length_override: Option<usize>,
+    max_output_tokens_override: Option<usize>,
+) -> ProviderModelOption {
+    ProviderModelOption {
+        provider_connection: "mock".to_string(),
+        model: model_info_with_reasoning_efforts(
+            model,
+            Some(vec!["low".to_string(), "high".to_string()]),
+        ),
+        reasoning_effort: reasoning_effort.map(str::to_string),
+        context_length_override,
+        max_output_tokens_override,
+    }
+}
+
+#[test]
+fn a_fresh_engine_matches_its_configured_baseline_including_a_profile_context_length() {
+    let engine = baseline_engine();
+
+    assert!(!engine.active_engine_config_modified());
+}
+
+#[test]
+fn each_compared_setting_flips_the_modified_flag_and_a_named_reset_clears_it() {
+    let engine = baseline_engine();
+    let reset = || {
+        engine
+            .apply_named_model_option(
+                &baseline_option("test-model", None, None, None),
+                &ReasoningEffortChange::Set(None),
+            )
+            .expect("named reset");
+        assert!(!engine.active_engine_config_modified());
+    };
+
+    engine.set_reasoning_effort(Some("custom")).expect("effort");
+    assert!(engine.active_engine_config_modified());
+    reset();
+
+    engine
+        .set_context_length_override(Some(4_096))
+        .expect("window");
+    assert!(engine.active_engine_config_modified());
+    reset();
+
+    engine
+        .set_max_output_tokens_override(Some(512))
+        .expect("output");
+    assert!(engine.active_engine_config_modified());
+    reset();
+}
+
+#[test]
+fn a_raw_model_pick_flips_the_modified_flag_and_a_named_reset_restores_the_model() {
+    let provider = Arc::new(CatalogProvider::new(vec![
+        model_info_with_reasoning_efforts("test-model", None),
+        model_info_with_reasoning_efforts("other-model", None),
+    ]));
+    let engine = EngineImpl::new(provider, make_engine_config());
+
+    engine
+        .switch_model_option(&baseline_option("other-model", None, None, None))
+        .expect("raw pick");
+    assert!(engine.active_engine_config_modified());
+
+    let mut restore = baseline_option("test-model", None, None, None);
+    restore.model.reasoning_efforts = None;
+    engine
+        .apply_named_model_option(&restore, &ReasoningEffortChange::Unchanged)
+        .expect("named reset");
+    assert!(!engine.active_engine_config_modified());
+    assert_eq!(engine.config().model, "test-model");
+}
+
+#[test]
+fn catalog_adoption_does_not_mark_the_engine_modified() {
+    let engine = baseline_engine();
+
+    engine.adopt_catalog_context_length(Some(262_144));
+    engine.adopt_catalog_max_output_tokens(Some(8_192));
+
+    assert!(!engine.active_engine_config_modified());
+}

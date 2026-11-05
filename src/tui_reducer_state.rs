@@ -60,15 +60,17 @@ pub use events::{ConfirmKey, DomainEvent, Effect, Focus, InputEvent, TuiMode};
 pub use input_history::HistoryDirection;
 pub use layout::{
     AgentsPopupLayout, AppLayout, ChatArea, ChatScrollbarLayout, HelpPopupLayout, InputArea,
-    InputAreaLayout, SlashOverlayLayout,
+    InputAreaLayout, ParameterGlyphHit, SlashOverlayLayout,
 };
 pub(crate) use model_picker::{
     engine_choice_parts, extract_models_filter, matching_model_indices, model_choice_parts,
     model_picker_row_entries, model_picker_row_is_details, model_picker_row_layout,
-    slash_overlay_text_rows, visible_model_choices, PickerRow,
+    slash_overlay_text_rows, visible_model_choices, PickerRow, GREATER_VALUE_GLYPH,
+    SMALLER_VALUE_GLYPH,
 };
 pub use model_picker::{
-    ChoiceLabel, ModelChoice, ModelParameterEdit, ParameterField, PickerRowLayout, SlashOverlay,
+    ChoiceLabel, ConfiguredBaseline, ModelChoice, ModelParameterEdit, ParameterField,
+    PickerRowLayout, SlashOverlay,
 };
 pub use panels::{ClarifyBannerState, HelpPopupState, QueuedClarify, TuiDisplayMetadata};
 pub use pasted_blobs::{PastedBlob, PastedBlobs, LARGE_PASTE_CHAR_THRESHOLD};

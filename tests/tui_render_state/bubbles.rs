@@ -553,6 +553,7 @@ fn footer_shows_the_active_named_engine_and_model() {
     let mut terminal = Terminal::new(backend).expect("terminal");
     let mut state = TuiState {
         engine_display: EngineDisplayInfo {
+            config_modified: false,
             engine_name: "ollama/local".to_string(),
             provider_connection: "ollama".to_string(),
             model: "llama3.2".to_string(),

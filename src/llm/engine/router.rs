@@ -173,6 +173,9 @@ impl Engine for EngineRouter {
     fn runtime_snapshot(&self) -> Option<super::EngineRuntimeConfig> {
         self.active_engine().runtime_snapshot()
     }
+    fn configured_engine_config(&self) -> Option<EngineConfig> {
+        self.active_engine().configured_engine_config()
+    }
     fn reasoning_effort_policy(&self) -> Arc<dyn crate::llm::ReasoningEffortPolicy> {
         self.active_engine().reasoning_effort_policy()
     }
@@ -544,13 +547,18 @@ impl Engine for EngineRouter {
         let mut engines: Vec<NamedEngineInfo> = self
             .engines
             .iter()
-            .map(|(name, engine)| NamedEngineInfo {
-                model_info: engine
-                    .runtime_snapshot()
-                    .and_then(|runtime| runtime.model_info),
-                name: name.clone(),
-                config: engine.config(),
-                reasoning_effort: engine.reasoning_effort(),
+            .map(|(name, engine)| {
+                let runtime = engine.runtime_snapshot();
+                NamedEngineInfo {
+                    model_info: runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.model_info.clone()),
+                    name: name.clone(),
+                    config: engine.config(),
+                    reasoning_effort: engine.reasoning_effort(),
+                    configured: engine.configured_engine_config(),
+                    runtime,
+                }
             })
             .collect();
         engines.sort_by(|left, right| left.name.cmp(&right.name));
@@ -600,9 +608,9 @@ impl Engine for EngineRouter {
         };
         let config = target_engine.config();
         let context_length = match selection {
-            ModelSelection::NamedEngine { option, .. } => option
-                .context_length_override
-                .unwrap_or_else(|| target_engine.effective_context_length()),
+            ModelSelection::NamedEngine { option, .. } => {
+                super::named_selection_limits(target_engine.as_ref(), option).0
+            }
             ModelSelection::ProviderModel(option) => {
                 option.context_length_override.unwrap_or_else(|| {
                     target_engine
@@ -611,9 +619,9 @@ impl Engine for EngineRouter {
             }
         };
         let max_output_tokens = match selection {
-            ModelSelection::NamedEngine { option, .. } => option
-                .max_output_tokens_override
-                .or_else(|| target_engine.effective_max_output_tokens()),
+            ModelSelection::NamedEngine { option, .. } => {
+                super::named_selection_limits(target_engine.as_ref(), option).1
+            }
             ModelSelection::ProviderModel(option) => {
                 option.max_output_tokens_override.or_else(|| {
                     target_engine.max_output_tokens_for_model(

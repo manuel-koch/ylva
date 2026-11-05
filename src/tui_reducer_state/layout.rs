@@ -130,6 +130,21 @@ pub struct SlashOverlayLayout {
     /// Plain text of each footer line, as displayed, one entry per row of
     /// `detail_area` starting at its top.
     pub detail_rows: Vec<String>,
+    /// Clickable `◂` / `▸` glyphs of the `/models` parameter popup.
+    pub parameter_glyphs: Vec<ParameterGlyphHit>,
+    /// Clickable Reset / Apply buttons of the `/models` parameter popup, each
+    /// with the index of its field.
+    pub parameter_buttons: Vec<(Rect, usize)>,
+}
+
+/// One clickable direction glyph of a parameter-popup row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParameterGlyphHit {
+    pub area: Rect,
+    /// Index of the parameter row (into the edit's fields).
+    pub row: usize,
+    /// `-1` for the smaller-value glyph, `1` for the greater-value glyph.
+    pub delta: isize,
 }
 
 impl SlashOverlayLayout {
@@ -143,6 +158,22 @@ impl SlashOverlayLayout {
             return FALLBACK_PAGE_ENTRY_COUNT;
         }
         (visible_rows / self.row_layout.rows_per_entry()).max(1) as isize
+    }
+
+    /// The field index of the parameter-popup button under a terminal cell.
+    pub fn parameter_button_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.parameter_buttons
+            .iter()
+            .find(|(area, _)| area.contains((col, row).into()))
+            .map(|(_, field)| *field)
+    }
+
+    /// The parameter row and direction of the glyph under a terminal cell.
+    pub fn parameter_glyph_at(&self, col: u16, row: u16) -> Option<(usize, isize)> {
+        self.parameter_glyphs
+            .iter()
+            .find(|hit| hit.area.contains((col, row).into()))
+            .map(|hit| (hit.row, hit.delta))
     }
 
     /// Return the absolute content row under a terminal cell, if it is inside

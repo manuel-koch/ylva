@@ -351,6 +351,41 @@ pub(super) fn route_mouse(
                     }
                     return vec![];
                 }
+                if matches!(
+                    state.slash_overlay,
+                    SlashOverlay::ModelPicker {
+                        parameters: Some(_),
+                        ..
+                    }
+                ) {
+                    if let Some((parameter_row, delta)) =
+                        state.layout.slash_overlay.parameter_glyph_at(column, row)
+                    {
+                        if let Some(edit) = state.model_parameters_mut() {
+                            edit.cursor = parameter_row;
+                        }
+                        state.adjust_model_parameter(delta);
+                        return vec![];
+                    }
+                    if let Some(field_index) =
+                        state.layout.slash_overlay.parameter_button_at(column, row)
+                    {
+                        if let Some(edit) = state.model_parameters_mut() {
+                            edit.cursor = field_index;
+                        }
+                        if state.activate_model_parameter_row() {
+                            return super::keyboard::switch_to_highlighted_model(state);
+                        }
+                        return vec![];
+                    }
+                    if let Some(parameter_row) = state.layout.slash_overlay.row_at(column, row) {
+                        if let Some(edit) = state.model_parameters_mut() {
+                            if parameter_row < edit.fields.len() {
+                                edit.cursor = parameter_row;
+                            }
+                        }
+                    }
+                }
                 if let Some(overlay_row) = state.layout.slash_overlay.row_at(column, row) {
                     state.slash_overlay_drag_start = Some((column, row));
                     state.slash_overlay_drag_end = Some((column, row));

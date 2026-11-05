@@ -65,11 +65,14 @@ themed_colors! {
     /// Tool bubble color.
     tool_bubble_border_color(Color::Magenta, Color::Magenta);
 
-    // Error and interruption palette.
+    // Error/warning and interruption palette.
     /// Error color.
     error_color(Color::Red, Color::Red);
     /// Interrupted/cancelled color.
     interrupted_color(Color::DarkGray, Color::DarkGray);
+    /// Warnings: a compaction engine that differs from the picker choice, and
+    /// engine settings the provider catalog does not advertise.
+    warning_color(Color::Rgb(255, 165, 0), Color::Rgb(190, 95, 0));
 
     // Markdown palette.
     /// Foreground color used for `inline code` spans.
@@ -100,8 +103,6 @@ themed_colors! {
     muted_text_color(Color::DarkGray, Color::DarkGray);
     logo_color(Color::Blue, Color::Blue);
     footer_status_color(Color::Yellow, LIGHT_AMBER);
-    /// Orange warning for a compaction engine that differs from the picker choice.
-    compaction_mismatch_color(Color::Rgb(255, 165, 0), Color::Rgb(190, 95, 0));
 
     // Diff palette.
     diff_added_color(Color::Green, Color::Green);

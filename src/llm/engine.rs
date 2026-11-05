@@ -46,6 +46,30 @@ pub trait Engine: Send + Sync {
         None
     }
 
+    /// The engine's configured baseline: the profile settings before any
+    /// `/models` change. Routers report the active engine's baseline.
+    fn configured_engine_config(&self) -> Option<EngineConfig> {
+        None
+    }
+
+    /// The configured baseline as runtime settings (derived from
+    /// [`Engine::configured_engine_config`]).
+    fn configured_runtime_config(&self) -> Option<EngineRuntimeConfig> {
+        self.configured_engine_config()
+            .map(|config| EngineRuntimeConfig::from(&config))
+    }
+
+    /// Whether the live settings of the engine serving requests differ from
+    /// its configured baseline (see
+    /// [`EngineRuntimeConfig::differs_from_configured`]). Independent of
+    /// [`Engine::active_engine_name`], which keeps its routing meaning.
+    fn active_engine_config_modified(&self) -> bool {
+        match (self.runtime_snapshot(), self.configured_runtime_config()) {
+            (Some(live), Some(configured)) => live.differs_from_configured(&configured),
+            _ => false,
+        }
+    }
+
     /// Provider implementation owns reasoning policy; routers delegate to the target.
     fn reasoning_effort_policy(&self) -> std::sync::Arc<dyn crate::llm::ReasoningEffortPolicy> {
         std::sync::Arc::new(crate::llm::AdvertisedReasoningEffortPolicy)
@@ -114,22 +138,14 @@ pub trait Engine: Send + Sync {
     }
 
     /// Apply a named shortcut's complete settings before the router publishes routing.
+    /// The selection is absolute: a `None` override clears the session-only
+    /// override, and the option's model is restored when the engine moved away.
     fn apply_named_model_option(
         &self,
         option: &ProviderModelOption,
         change: &ReasoningEffortChange,
     ) -> anyhow::Result<()> {
-        validate_named_engine_option(self, option, change)?;
-        if let ReasoningEffortChange::Set(effort) = change {
-            self.set_reasoning_effort(effort.as_deref())?;
-        }
-        if let Some(context_length) = option.context_length_override {
-            self.set_context_length_override(Some(context_length))?;
-        }
-        if let Some(max_output_tokens) = option.max_output_tokens_override {
-            self.set_max_output_tokens_override(Some(max_output_tokens))?;
-        }
-        Ok(())
+        apply_named_option(self, option, change)
     }
 
     /// Create an independent runtime from the engine's original configuration.
@@ -354,8 +370,10 @@ pub trait Engine: Send + Sync {
             .map(|(name, config)| NamedEngineInfo {
                 model_info: None,
                 reasoning_effort: config.reasoning.clone(),
+                configured: Some(config.clone()),
                 name,
                 config,
+                runtime: None,
             })
             .collect()
     }
@@ -538,9 +556,7 @@ pub trait Engine: Send + Sync {
             }
         };
         let context_length = match selection {
-            ModelSelection::NamedEngine { option, .. } => option
-                .context_length_override
-                .unwrap_or_else(|| self.effective_context_length()),
+            ModelSelection::NamedEngine { option, .. } => named_selection_limits(self, option).0,
             ModelSelection::ProviderModel(option) => {
                 option.context_length_override.unwrap_or_else(|| {
                     self.context_length_for_model(&option.model.id, option.model.context_length)
@@ -548,9 +564,7 @@ pub trait Engine: Send + Sync {
             }
         };
         let max_output_tokens = match selection {
-            ModelSelection::NamedEngine { option, .. } => option
-                .max_output_tokens_override
-                .or_else(|| self.effective_max_output_tokens()),
+            ModelSelection::NamedEngine { option, .. } => named_selection_limits(self, option).1,
             ModelSelection::ProviderModel(option) => {
                 option.max_output_tokens_override.or_else(|| {
                     self.max_output_tokens_for_model(
@@ -568,6 +582,85 @@ pub trait Engine: Send + Sync {
             max_output_tokens,
         })
     }
+}
+
+/// Effective context window and output limit a named selection results in.
+///
+/// A named selection is absolute: `None` overrides clear the engine's
+/// session-only overrides. The live effective values describe the result only
+/// while the engine already runs the option's model without an override;
+/// otherwise the values are derived like a fresh selection of that model.
+pub(super) fn named_selection_limits(
+    engine: &(impl Engine + ?Sized),
+    option: &ProviderModelOption,
+) -> (usize, Option<usize>) {
+    let runtime = engine.runtime_snapshot();
+    let live_model_matches = runtime
+        .as_ref()
+        .is_none_or(|runtime| runtime.model == option.model.id);
+    let live_context_applies = live_model_matches
+        && runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.context_length_override.is_none());
+    let live_max_output_applies = live_model_matches
+        && runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.max_output_tokens_override.is_none());
+    let context_length = option.context_length_override.unwrap_or_else(|| {
+        if live_context_applies {
+            engine.effective_context_length()
+        } else {
+            engine.context_length_for_model(&option.model.id, option.model.context_length)
+        }
+    });
+    let max_output_tokens = option.max_output_tokens_override.or_else(|| {
+        if live_max_output_applies {
+            engine.effective_max_output_tokens()
+        } else {
+            engine.max_output_tokens_for_model(&option.model.id, option.model.max_output_tokens)
+        }
+    });
+    (context_length, max_output_tokens)
+}
+
+/// Apply a named selection absolutely: restore the option's model when the
+/// engine moved away from it, set the effort when requested and make the
+/// session-only overrides equal the option's, clearing them for `None`.
+pub(super) fn apply_named_option(
+    engine: &(impl Engine + ?Sized),
+    option: &ProviderModelOption,
+    change: &ReasoningEffortChange,
+) -> anyhow::Result<()> {
+    validate_named_engine_option(engine, option, change)?;
+    let previous = engine.runtime_snapshot();
+    if engine.config().model != option.model.id {
+        let effort = match change {
+            ReasoningEffortChange::Unchanged => engine.reasoning_effort(),
+            ReasoningEffortChange::Set(effort) => effort.clone(),
+        };
+        engine.set_reasoning_effort(effort.as_deref())?;
+        engine.switch_model(&option.model.id)?;
+        engine.set_input_modalities(option.model.input_modalities.clone());
+    } else if let ReasoningEffortChange::Set(effort) = change {
+        engine.set_reasoning_effort(effort.as_deref())?;
+    }
+    let cleared_context = option.context_length_override.is_none()
+        && previous.as_ref().is_none_or(|previous| {
+            previous.context_length_override.is_some() || previous.model != option.model.id
+        });
+    let cleared_max_output = option.max_output_tokens_override.is_none()
+        && previous.as_ref().is_none_or(|previous| {
+            previous.max_output_tokens_override.is_some() || previous.model != option.model.id
+        });
+    engine.set_context_length_override(option.context_length_override)?;
+    if cleared_context {
+        engine.adopt_catalog_context_length(option.model.context_length);
+    }
+    engine.set_max_output_tokens_override(option.max_output_tokens_override)?;
+    if cleared_max_output {
+        engine.adopt_catalog_max_output_tokens(option.model.max_output_tokens);
+    }
+    Ok(())
 }
 
 pub(super) fn apply_model_option(

@@ -225,6 +225,11 @@ pub enum ChatEntry {
     Notice {
         text: String,
     },
+    /// Warning counterpart of [`Self::Notice`] for a TUI-side warning, such as
+    /// an engine configuration the provider catalog does not advertise.
+    WarningNotice {
+        text: String,
+    },
     /// Red trailer closing the response or thinking bubble directly above it
     /// when the provider cut that output off at the output-token limit, so
     /// missing text is obvious even when the cut lands mid-sentence.
@@ -701,6 +706,12 @@ impl AppState {
     pub fn push_notice_to(&mut self, run_id: Option<Uuid>, text: String) {
         self.target_messages_mut(run_id)
             .push(ChatEntry::Notice { text });
+    }
+
+    /// Push an orange warning notice into the root transcript.
+    pub fn push_warning_notice(&mut self, text: String) {
+        self.target_messages_mut(None)
+            .push(ChatEntry::WarningNotice { text });
     }
 
     /// Push the red trailer that closes a response cut off by the output

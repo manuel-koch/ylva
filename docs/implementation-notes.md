@@ -109,6 +109,34 @@ See [configuration](./configuration.md),
 
 ## Engine runtime and provider request configuration
 
+- Configured baseline: `Engine::configured_engine_config` returns the immutable profile
+  `EngineConfig` (`EngineImpl::config` field; routers delegate to the active engine);
+  `NamedEngineInfo` carries it with the live `runtime`. `active_engine_config_modified`
+  compares the live `runtime_snapshot` with it on four fields only: model, reasoning
+  effort, `context_length_override`, `max_output_tokens_override`. Effective
+  `context_length`/`max_output_tokens` are excluded because catalog adoption legitimately
+  changes them. A profile effort dropped by hydration counts as modified. The flag feeds
+  `EngineDisplayInfo::config_modified` (footer label, compaction notice) and is independent
+  of `active_engine_name()`, which keeps its routing meaning.
+- A `ModelSelection::NamedEngine` is absolute: the engine ends up with exactly the
+  option's model, effort and overrides (`None` clears a session override). Picker named
+  rows therefore carry the live overrides, and `ModelChoice::configured` holds a baseline
+  row used by the `Reset` popup row.
+- `ModelChoice::configuration_warnings` is computed once per named row (live and baseline)
+  by `engine_configuration_warnings` in `tui_driver/models.rs`: a model absent from the
+  catalog yields `model not in catalog`; otherwise limits above the catalog's and an effort
+  for which `Engine::resolve_selection_reasoning` errors yield one segment each.
+  `refresh_label` appends them to the row's details, and the overlay renderer colours any
+  row with warnings (the highlighted row keeps the selection style).
+- The same rules run against the live engine in `active_engine_warnings`
+  (`tui_driver/models.rs`), one `list_models()` call with the catalog timeout. `switch_model`
+  calls it after applying a named engine; `start_startup_engine_check` spawns it for the
+  engine active at startup plus the explicit utility engine (`TitleDriver` profile and
+  factory) and explicit compaction engine (`AgentLoop::explicit_compaction_engine`),
+  and every agent type's explicit `engine` / `compaction.engine`, with one catalog
+  query per engine name and one notice per role, and the event loop awaits it through
+  `wait_for_startup_engine_check`. Both push `ChatEntry::WarningNotice`, the orange sibling
+  of `Notice`.
 - `EngineImpl` and `OpenAiCompatibleProvider` share one
   `EngineRuntimeConfigHandle`. The provider snapshots it before building a
   request and releases the lock before network I/O: updates affect later

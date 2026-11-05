@@ -16,7 +16,7 @@ use super::*;
 
 use crate::llm::engine::{CompactionEngineDisplayInfo, EngineDisplayInfo};
 use crate::llm::{ModelInfo, ModelSelectionTarget, ProviderModelOption};
-use crate::theme::{compaction_mismatch_color, muted_text_color};
+use crate::theme::{muted_text_color, warning_color};
 use crate::tui_reducer_state::{ChoiceLabel, ModelChoice, ModelParameterEdit, ParameterField};
 use ratatui::style::Color;
 
@@ -24,6 +24,8 @@ const KB: usize = 1024;
 
 fn model_choice(context_length: usize) -> ModelChoice {
     ModelChoice {
+        configured: None,
+        configuration_warnings: Vec::new(),
         selection: ProviderModelOption {
             provider_connection: "stub".to_string(),
             model: ModelInfo {
@@ -75,6 +77,7 @@ fn context_length_draft(
     edited: bool,
 ) -> ModelParameterEdit {
     ModelParameterEdit {
+        restored_baseline: false,
         choice_index,
         fields: vec![ParameterField::ContextLength],
         cursor: 0,
@@ -90,6 +93,7 @@ fn context_length_draft(
 
 fn engine_display(compaction_engine: CompactionEngineDisplayInfo) -> EngineDisplayInfo {
     EngineDisplayInfo {
+        config_modified: false,
         engine_name: String::new(),
         provider_connection: "stub".to_string(),
         model: "model".to_string(),
@@ -101,6 +105,7 @@ fn engine_display(compaction_engine: CompactionEngineDisplayInfo) -> EngineDispl
 
 fn following_compaction_engine() -> CompactionEngineDisplayInfo {
     CompactionEngineDisplayInfo {
+        config_modified: false,
         engine_name: String::new(),
         provider_connection: "stub".to_string(),
         model: "model".to_string(),
@@ -155,6 +160,7 @@ fn footer_shows_stored_window_once_popup_is_left_without_confirming() {
 #[test]
 fn draft_window_matching_explicit_compaction_engine_clears_mismatch_highlight() {
     let explicit_compaction_engine = CompactionEngineDisplayInfo {
+        config_modified: false,
         engine_name: "summary".to_string(),
         provider_connection: "other".to_string(),
         model: "small".to_string(),
@@ -166,7 +172,7 @@ fn draft_window_matching_explicit_compaction_engine_clears_mismatch_highlight() 
 
     let mismatching = picker_overlay(None);
     let (_, mismatch_color) = detail_text_and_color(&mismatching, &display);
-    assert_eq!(mismatch_color, Some(compaction_mismatch_color()));
+    assert_eq!(mismatch_color, Some(warning_color()));
 
     let matching = picker_overlay(Some(context_length_draft(0, 128 * KB, true)));
     let (text, matching_color) = detail_text_and_color(&matching, &display);
