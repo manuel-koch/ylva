@@ -363,13 +363,12 @@ without losing anything the user can still read.
 Ylva totals the cost that the provider itself reports for completed model
 requests during one run.
 
-- **What counts.** Only provider-reported costs; there are no price tables and
-  no token-based estimates. Currently OpenRouter reports a cost (USD,
-  `usage.cost`), EdenAI one (USD, top-level `cost`) and Copilot one in AI credits (`AIC`,
-  `usage.copilot_usage.total_nano_aiu`); Ollama (local and Cloud) and plain OpenAI-compatible
-  providers report none and contribute nothing; see
-  [provider notes](./provider-notes.md#usage-and-cost-reporting). Root, subagent, session-title and compaction requests all
-  count, including requests that failed or were cancelled after the provider
+- **What counts.** Only provider-reported costs; there are no price tables and no token-based
+  estimates. Currently OpenRouter reports a cost (USD, `usage.cost`), EdenAI one (USD, top-level
+  `cost`) and Copilot one in AI credits (`AIC`, `usage.copilot_usage.total_nano_aiu`); Ollama (local
+  and Cloud) and plain OpenAI-compatible providers report none and contribute nothing; see
+  [provider notes](./provider-notes.md#usage-and-cost-reporting). Root, subagent, session-title and
+  compaction requests all count, including requests that failed or were cancelled after the provider
   reported a cost.
 - **Scope.** The total spans the whole process, is kept separately per
   currency, and is not reset by `/clear` or a session switch. It is never
@@ -429,64 +428,52 @@ selection is rejected before any model, reasoning, window, modality or active
 engine state changes, and a chat request with a disallowed (or, under a
 restriction, unbound) model fails before anything is sent.
 
-Named provider connections are constructed independently, so multiple
-connections can use the same implementation (for example, local Ollama and
-Ollama-Cloud). The conversation footer shows the active named engine and model
-while the live configuration equals the engine's configured baseline (model,
-reasoning effort, context-length override, output-limit override); once a
-`/models` pick or parameter edit deviates, it shows
-`provider_connection → model` instead, and the compaction switch notice names
-`provider_connection/model` likewise. Direct unnamed engines show only the
-model. `/models` queries each connection once, reuses a successful result
-for 30 minutes within the run (failures are retried on the next `/models`),
-and lists configured named
-engine shortcuts before favorite models and the remaining raw
-`provider_connection/model` catalog entries. Favorite membership is an exact,
-case-sensitive provider-connection preference saved with ctrl-f from the
-highlighted row in either the list or parameter popup; it does not switch the
-model or alter parameter drafts. Favorites not currently returned by discovery
-remain configured but are hidden. Groups are introduced by non-selectable,
-underlined `Engines`, `Favorites` and `Models` headers; favorites are marked
-with `⚑`, and model names stay aligned with or without it. Favorites keep their
-configured order within each connection.
-Partial catalog outages retain available choices and add a notice naming failed
-connections; total outages continue to show available named-engine shortcuts.
-Selecting a shortcut activates that exact engine's current Engine runtime settings,
-even when another engine uses the same connection and model. A raw catalog
-entry keeps provider-based routing: it changes the active engine for its
-connection, or the deterministic representative engine for another connection.
-Engine rows whose settings the connection's catalog does not advertise get extra
-detail segments and render in the theme's orange warning colour; they stay selectable. The picker title
-shows the number of rows, as `(visible/total)` while the filter hides some.
-`model not in catalog` replaces all other warnings when the catalog lacks the model;
-otherwise `context not advertised` and `max output not advertised` mean the configured
-value exceeds the catalog's limit, and `reasoning not advertised` means the configured
-effort is rejected by the provider's reasoning policy (efforts accepted as unverified
-keep their `(unverified)` label instead).
-Nothing is flagged for a limit the catalog does not state. The same warnings appear
-as an orange `⚠️` transcript notice (`Engine '<name>' has settings the provider
-catalog does not advertise: …`) after applying a named engine and once shortly after
-startup when a named engine is active; an unreachable catalog produces no warning.
-The startup check also covers an explicit `utility_engine`, an explicit compaction
-engine, and each agent type's explicit `engine` and `compaction.engine` (`Utility
-engine '<name>' …`, `Compaction engine '<name>' …`, `Agent '<type>' engine '<name>' …`,
-`Agent '<type>' compaction engine '<name>' …`); engines that follow the conversation
-engine are already covered; roles sharing one engine each get their own notice.
-The picker detail previews the provider-connection/model and effective context
-window compaction will use for the highlighted selection, without repeating
-the active conversation engine and model already shown in the TUI footer. It
-uses the form `Compaction uses <provider_connection>/<model>, context: <window>`.
-The detail turns orange when a fixed compaction engine would retain a
-different effective context window than the highlighted choice, including
-raw catalog models from the same provider connection. A different
-provider connection or model alone does not indicate a context-window mismatch.
-While the parameter popup is open, the detail uses the popup's edited context
-length, so it previews the window before `enter` confirms it; `esc` restores
-the stored window.
-Compaction that follows the conversation selection shows the resulting pair
-without a mismatch warning. Explicit compaction keeps its configured model and
-window across selections, even with the same engine name. Switch notices describe the resulting
-compaction-engine selection.
+Named provider connections are constructed independently, so multiple connections can use the same
+implementation (for example, local Ollama and Ollama-Cloud). The conversation footer shows the
+active named engine and model while the live configuration equals the engine's configured baseline
+(model, reasoning effort, context-length override, output-limit override); once a `/models` pick or
+parameter edit deviates, it shows `provider_connection → model` instead, and the compaction switch
+notice names `provider_connection/model` likewise. Direct unnamed engines show only the model.
+`/models` queries each connection once, reuses a successful result for 30 minutes within the run
+(failures are retried on the next `/models`), and lists configured named engine shortcuts before
+favorite models and the remaining raw `provider_connection/model` catalog entries. Favorite
+membership is an exact, case-sensitive provider-connection preference saved with ctrl-f from the
+highlighted row in either the list or parameter popup; it does not switch the model or alter
+parameter drafts. Favorites not currently returned by discovery remain configured but are hidden.
+Groups are introduced by non-selectable, underlined `Engines`, `Favorites` and `Models` headers;
+favorites are marked with `⚑`, and model names stay aligned with or without it. Favorites keep their
+configured order within each connection. Partial catalog outages retain available choices and add a
+notice naming failed connections; total outages continue to show available named-engine shortcuts.
+Selecting a shortcut activates that exact engine's current Engine runtime settings, even when
+another engine uses the same connection and model. A raw catalog entry keeps provider-based routing:
+it changes the active engine for its connection, or the deterministic representative engine for
+another connection. Engine rows whose settings the connection's catalog does not advertise get extra
+detail segments and render in the theme's orange warning colour; they stay selectable. The picker
+title shows the number of rows, as `(visible/total)` while the filter hides some.
+`model not in catalog` replaces all other warnings when the catalog lacks the model; otherwise
+`context not advertised` and `max output not advertised` mean the configured value exceeds the
+catalog's limit, and `reasoning not advertised` means the configured effort is rejected by the
+provider's reasoning policy (efforts accepted as unverified keep their `(unverified)` label
+instead). Nothing is flagged for a limit the catalog does not state. The same warnings appear as an
+orange `⚠️` transcript notice
+(`Engine '<name>' has settings the provider catalog does not advertise: …`) after applying a named
+engine and once shortly after startup when a named engine is active; an unreachable catalog produces
+no warning. The startup check also covers an explicit `utility_engine`, an explicit compaction
+engine, and each agent type's explicit `engine` and `compaction.engine`
+(`Utility engine '<name>' …`, `Compaction engine '<name>' …`, `Agent '<type>' engine '<name>' …`,
+`Agent '<type>' compaction engine '<name>' …`); engines that follow the conversation engine are
+already covered; roles sharing one engine each get their own notice. The picker detail previews the
+provider-connection/model and effective context window compaction will use for the highlighted
+selection, without repeating the active conversation engine and model already shown in the TUI
+footer. It uses the form `Compaction uses <provider_connection>/<model>, context: <window>`. The
+detail turns orange when a fixed compaction engine would retain a different effective context window
+than the highlighted choice, including raw catalog models from the same provider connection. A
+different provider connection or model alone does not indicate a context-window mismatch. While the
+parameter popup is open, the detail uses the popup's edited context length, so it previews the
+window before `enter` confirms it; `esc` restores the stored window. Compaction that follows the
+conversation selection shows the resulting pair without a mismatch warning. Explicit compaction
+keeps its configured model and window across selections, even with the same engine name. Switch
+notices describe the resulting compaction-engine selection.
 
 Model discovery shows whether reasoning is supported, unsupported, or unknown, and
 which effort choices are available. Some reasoning-capable models expose no adjustable

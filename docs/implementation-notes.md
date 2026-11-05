@@ -493,18 +493,16 @@ See [features](./features.md#cli-mode).
   process-wide ledger that providers use by default, so every engine (root,
   subagent, utility, compaction) shares one total without per-caller plumbing;
   providers accept an own ledger only for tests.
-- Reported costs are not part of the OpenAI Chat Completions protocol, so the
-  shared `OpenAiCompatibleProvider` transport only offers a `UsageCostParser`
-  hook (default: none) applied to every SSE payload, independent of
-  `parse_sse_payload` because usage-only frames have no choices.
-  `OpenRouterProvider` supplies the parser for its `usage.cost` field (USD) and
-  `CopilotProvider` for `usage.copilot_usage.total_nano_aiu` (AIC) and
-  `EdenAiProvider` for the top-level `cost` (USD, `usage.cost` accepted too);
-  Ollama and plain OpenAI-compatible providers report none. The first cost frame of a request is recorded
-  immediately, before the terminal stream event is sent, so the redraw that
-  follows completion already sees it, and so failed or cancelled streams keep
-  a cost already reported. Each record is logged at `debug` level (connection,
-  model, amount, currency).
+- Reported costs are not part of the OpenAI Chat Completions protocol, so the shared
+  `OpenAiCompatibleProvider` transport only offers a `UsageCostParser` hook (default: none) applied
+  to every SSE payload, independent of `parse_sse_payload` because usage-only frames have no
+  choices. `OpenRouterProvider` supplies the parser for its `usage.cost` field (USD) and
+  `CopilotProvider` for `usage.copilot_usage.total_nano_aiu` (AIC) and `EdenAiProvider` for the
+  top-level `cost` (USD, `usage.cost` accepted too); Ollama and plain OpenAI-compatible providers
+  report none. The first cost frame of a request is recorded immediately, before the terminal stream
+  event is sent, so the redraw that follows completion already sees it, and so failed or cancelled
+  streams keep a cost already reported. Each record is logged at `debug` level (connection, model,
+  amount, currency).
 - The TUI render state carries `cost_total_text`, read from the ledger on every
   redraw (no event of its own); the footer places it left of the context
   usage and drops it first when the row is narrow. In the narrow single-line
@@ -682,18 +680,15 @@ See [persistence](./persistence.md) for on-disk contracts.
   also drains queued subagent UI updates before handling a finish.
 - The TUI shows only the head of the FIFO approval queue; a subagent awaiting
   a later prompt stays blocked without pausing its siblings.
-- Prompt deferral (`tui_reducer_state/prompt.rs`): the presenter never reads the clock. The driver calls
-  `AppState::note_keystroke(Instant::now())` for input actions and a timer arm
-  sends `DomainEvent::TypingSettled` at `typing_settles_at()` (idle delay
-  `PROMPT_IDLE_DELAY`, capped by `PROMPT_DEFERRAL_CAP`). While
-  `is_typing()`, arriving approvals/clarifies only join the queue and
-  `resume_pending_tool_approval` is a no-op; `TypingSettled` releases the
-  head. `AppState::prompt_button_focus` holds the `PromptButton` focused by
-  `tab`; `enter` activates only that button. `PromptButton::GoToAgent` is
-  offered only when the prompt's owner is not the viewed conversation; the
-  owner is the conversation whose transcript holds the prompt's tool bubble.
-  `InputEvent::ParentView`
-  (`ctrl-x p`) navigates back from a subagent view and is otherwise
+- Prompt deferral (`tui_reducer_state/prompt.rs`): the presenter never reads the clock. The driver
+  calls `AppState::note_keystroke(Instant::now())` for input actions and a timer arm sends
+  `DomainEvent::TypingSettled` at `typing_settles_at()` (idle delay `PROMPT_IDLE_DELAY`, capped by
+  `PROMPT_DEFERRAL_CAP`). While `is_typing()`, arriving approvals/clarifies only join the queue and
+  `resume_pending_tool_approval` is a no-op; `TypingSettled` releases the head.
+  `AppState::prompt_button_focus` holds the `PromptButton` focused by `tab`; `enter` activates only
+  that button. `PromptButton::GoToAgent` is offered only when the prompt's owner is not the viewed
+  conversation; the owner is the conversation whose transcript holds the prompt's tool bubble.
+  `InputEvent::ParentView` (`ctrl-x p`) navigates back from a subagent view and is otherwise
   forwarded to the textarea as plain `ctrl-p` (cursor up).
 - **Double-click:** `DoubleClickTracker` is shared by the agents popup and
   the slash-overlay lists; the second click acts like `enter`.
@@ -791,14 +786,13 @@ terminal teardown and title restoration keep a fixed order.
   Per-character `input` re-wrapped the whole draft for every key
   (`push_history` → `screen_map_load`), making a paste O(n²) and freezing the
   single-threaded event loop (including ctrl-c) for large pastes.
-- Pastes above `LARGE_PASTE_CHAR_THRESHOLD` (1,000 chars, measured on the
-  dedented text) insert a one-line marker instead. `PastedBlobs`
-  (`tui_reducer_state/pasted_blobs.rs`, held in `AppState::pasted_blobs`)
-  stores marker → text; markers are numbered per draft. `Effect::SubmitPrompt`
-  expands markers still present verbatim before `dedent` and sends, then
-  clears the store; `ClearTextarea` clears it too. Approvals and clarifies
-  leave the draft and its blobs in place. History recall (`set_input_text`) never creates markers; history
-  entries are the expanded sent text.
+- Pastes above `LARGE_PASTE_CHAR_THRESHOLD` (1,000 chars, measured on the dedented text) insert a
+  one-line marker instead. `PastedBlobs` (`tui_reducer_state/pasted_blobs.rs`, held in
+  `AppState::pasted_blobs`) stores marker → text; markers are numbered per draft.
+  `Effect::SubmitPrompt` expands markers still present verbatim before `dedent` and sends, then
+  clears the store; `ClearTextarea` clears it too. Approvals and clarifies leave the draft and its
+  blobs in place. History recall (`set_input_text`) never creates markers; history entries are the
+  expanded sent text.
 - Continuous mouse motion (wheel scroll, drag, hover) is coalesced: when more
   actions are queued after such an event, the event loop skips the next frame
   (`skip_frame`), so a burst over a long draft, e.g. drag-selecting text,

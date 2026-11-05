@@ -5,3 +5,5 @@ line-length = 100
 [MD013]
 # Don't check line length inside code blocks
 code-blocks = false
+# Let `rumdl fmt` re-wrap long paragraphs to the line length
+reflow = true

@@ -26,10 +26,10 @@ Name criterias ( weak filter ):
   Lucia, Eden, Shalom, Ora, Dika, Doxa, Theia, Atropos, Philia, Gratia, Tirzah,
   Hosanna, Zephyra, Beata, Seraph, Redempta, Stella, Regina, Lachesis, Adah, Keziah,
   Zipporah, Miriam, Deborah, Ruth, Gloria, Pax, Amata, Ecclesia, Mnemosyne.
-- **Tech / element / physical-science / oxygen-adjacent** : Yttria, Vanadis, Helia, Osmia, Erbia, Titania,
-  Selenia, Galatea, Quanta, Lithia, Ceria, Thoria, Palladia, Ruthenia, Iridia, Zirconia, Galena, Ozona,
-  Aethra, Dynamis, Silica, Mangana, Halite, Calcite, Manganite, Gravita, Cometa, Nebula, Terra, Aqua,
-  Ignis, Aether, Oxygen, Oxy, Nova, Aurora, Electra, Plasma, Ion, Soda.
+- **Tech / element / physical-science / oxygen-adjacent** : Yttria, Vanadis, Helia, Osmia, Erbia,
+  Titania, Selenia, Galatea, Quanta, Lithia, Ceria, Thoria, Palladia, Ruthenia, Iridia, Zirconia,
+  Galena, Ozona, Aethra, Dynamis, Silica, Mangana, Halite, Calcite, Manganite, Gravita, Cometa,
+  Nebula, Terra, Aqua, Ignis, Aether, Oxygen, Oxy, Nova, Aurora, Electra, Plasma, Ion, Soda.
 
 ## Method + remaining checks
 
@@ -41,9 +41,9 @@ Candidate names are checked for existing usage / trademark risk using:
   - **npm** (unscoped + scoped + org + user): `https://registry.npmjs.org/<name>` (package),
     `https://registry.npmjs.org/@<scope>%2F<name>` (scoped package),
     `https://registry.npmjs.org/-/org/<name>` (org scope `@<name>` — 404 "does not exist" = free),
-    `https://registry.npmjs.org/-/user/<name>` (user handle).
-    Cross-check with `npm view <name>` / `npm view @<scope>/<name>`.
-    Note: `npmjs.com/org/<name>` and `/~<name>` are Cloudflare-gated and not reliable for scripted checks.
+    `https://registry.npmjs.org/-/user/<name>` (user handle). Cross-check with `npm view <name>` /
+    `npm view @<scope>/<name>`. Note: `npmjs.com/org/<name>` and `/~<name>` are Cloudflare-gated and
+    not reliable for scripted checks.
 - **crates.io / lib.rs / docs.rs** (Rust crate, user handle, and docs namespace —
   via `https://crates.io/api/v1/crates/<name>` with a descriptive `User-Agent`;
   HTTP 404 = available, 200 = taken)

@@ -103,9 +103,10 @@ Provider setup:
 ## Contribution
 
 - [Domain language](CONTEXT.md): canonical project terminology.
-- [Development workflow](docs/development-workflow.md): build, install, and test
-  targets, [git hooks and commit/branch conventions](docs/development-workflow.md#git-hooks-and-conventions)
-  (run `make install-git-hooks`); [implementation notes](docs/implementation-notes.md) explain internals.
+- [Development workflow](docs/development-workflow.md): build, install, and test targets,
+  [git hooks and commit/branch conventions](docs/development-workflow.md#git-hooks-and-conventions)
+  (run `make install-git-hooks`); [implementation notes](docs/implementation-notes.md) explain
+  internals.
 
 ## Ylva's features
 

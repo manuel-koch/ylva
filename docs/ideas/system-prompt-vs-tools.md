@@ -75,7 +75,8 @@ rules (search-first, batching independent reads).
 
 Implement option 3 as a low-risk incremental improvement:
 
-1. Update `read` and `search` descriptions (see [tools](../features.md#tools-to-be-used-by-models)) with the nudges above.
+1. Update `read` and `search` descriptions (see [tools](../features.md#tools-to-be-used-by-models))
+   with the nudges above.
 2. Append a short "Tool use" paragraph to the built-in `DEFAULT_SOUL`.
 3. Observe whether the iteration-heavy prompt in `docs/ideas/sample-prompts.md`
    (module-tree tracing) completes within the limit with a capable model.
