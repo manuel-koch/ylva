@@ -55,7 +55,7 @@ dotenvy = "0.15"
 tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
 clap = { version = "4", features = ["derive"] }
-scraper = "0.27.0"
+scraper = "0.29.0"
 tiktoken-rs = "0.12"
 htmd = "0.5"
 httpdate = "1"
