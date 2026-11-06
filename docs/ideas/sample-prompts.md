@@ -321,13 +321,15 @@ Check whether they can return structured data or just html.
 Check whether they have contrains like rate-limits, bot-detection,
 need authentification/api-key etc.
 
-Do a web research using `web_fetch` of GitOver project at `https://github.com/manuel-koch/gitover-rust-tui`.
+Do a web research using `web_fetch` of GitOver project at
+`https://github.com/manuel-koch/gitover-rust-tui`.
 
 Read `https://www.bundestag.de/` using `web_fetch` and report a summary of the page.
 
 Read `https://github.com/foo/bar` using `web_fetch` and report a summary of the page.
 
-Fetch image using `web_fetch` and describe its content: `https://i.ytimg.com/vi/0iNrGpwZwog/sddefault.jpg`.
+Fetch image using `web_fetch` and describe its content:
+`https://i.ytimg.com/vi/0iNrGpwZwog/sddefault.jpg`.
 
 Do a search on Github using `web_fetch` and this URL template for url-encoded terms:
 `https://api.github.com/search/issues?per_page=3&page=1&q=<terms>+language:rust`.

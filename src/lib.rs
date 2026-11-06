@@ -21,6 +21,7 @@ pub(crate) mod cli;
 pub mod cli_driver;
 pub mod config;
 pub mod connect_command;
+pub mod context_breakdown;
 pub(crate) mod conversation_render_cache;
 pub(crate) mod events;
 pub(crate) mod exit_code;
@@ -48,6 +49,7 @@ pub(crate) mod slash_command;
 pub mod startup;
 pub(crate) mod stop_signal;
 pub mod store;
+pub mod system_prompt_origins;
 pub(crate) mod theme;
 pub mod tui_driver;
 pub mod tui_reducer_state;
@@ -85,8 +87,8 @@ pub use agent::tools::{
 };
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus, Context,
-    ContextUsageSource, DeltaChunk, Message, PendingTool, Role, StreamEvent, SubagentRoleConfig,
-    ToolAttachment, ToolCallRequest, ToolResult, UiUpdate, UserMessageKind,
+    ContextUsageSource, DeltaChunk, Message, PendingTool, Role, StatusSnapshot, StreamEvent,
+    SubagentRoleConfig, ToolAttachment, ToolCallRequest, ToolResult, UiUpdate, UserMessageKind,
     DEFAULT_MAX_TOOL_USE_ITERATIONS, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_CALLS_PER_RESPONSE,
     TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
@@ -97,13 +99,14 @@ pub use cli::{Cli, CliColorMode, CliCommand, ConnectCommand, SkillCommand};
 pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
 pub use config::compaction_prompt::{load_compaction_prompt, DEFAULT_COMPACTION_PROMPT};
 pub use config::instructions::{
-    compose_root_system_prompt, load_trusted_instructions, InstructionFile,
-    INSTRUCTION_SAFETY_PREAMBLE, MAX_INSTRUCTION_FILE_BYTES, TRUSTED_INSTRUCTION_FILE_NAMES,
+    compose_root_system_prompt, compose_root_system_prompt_origins, load_trusted_instructions,
+    InstructionFile, INSTRUCTION_SAFETY_PREAMBLE, MAX_INSTRUCTION_FILE_BYTES,
+    TRUSTED_INSTRUCTION_FILE_NAMES,
 };
 pub use config::layered::{
     current_workspace_root, discover_workspace_root, ConfigLayer, ResolvedFile,
 };
-pub use config::soul::{load_soul, DEFAULT_SOUL};
+pub use config::soul::{load_soul, load_soul_with_layer, LoadedSoul, DEFAULT_SOUL};
 pub use config::{
     default_profiles_root, load_profile_environment, load_profile_environment_at_workspace_root,
     profile_config_path, profile_config_source_path, profile_env_path, AgentCompactionConfig,

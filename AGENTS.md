@@ -8,14 +8,18 @@ A Rust-based terminal UI that implements an agent-harness.
    - [README](./README.md) (project intro and quickstart)
    - [CONTEXT](./CONTEXT.md) (Ylva's ubiquitous language and domain terms)
    - [features](./docs/features.md) (implemented feature reference)
-   - [implementation-notes](./docs/implementation-notes.md) (internal mechanics
-     behind the features above; module/struct-level detail for contributors)
-   - [architecture-design-records](./docs/architecture-design-records/) (recorded architecture decisions)
+   - [implementation-notes](./docs/implementation-notes.md) (cross-module
+     interactions, constraints/workarounds and design rationale only; no module
+     inventories, constants or field lists, read the source)
+   - [architecture-design-records](./docs/architecture-design-records/) (recorded architecture
+     decisions)
    - [configuration](./docs/configuration.md) (how to configure Ylva profiles and engines)
    - [keybindings](./docs/keybindings.md) (keybindings implemented in the TUI)
-   - [provider-notes](./docs/provider-notes.md) (what each model provider reports or lacks, e.g. usage and costs)
+   - [provider-notes](./docs/provider-notes.md) (what each model provider reports or lacks, e.g.
+     usage and costs)
    - [plans](./docs/plans/) (planned implementations, one file per subject/feature)
-   - [known-test-issues](./docs/known-test-issues.md) (persistent quirks and required workarounds for testing)
+   - [known-test-issues](./docs/known-test-issues.md) (persistent quirks and required workarounds
+     for testing)
 2. **Testing:** While implementing code changes (consent given), write tests according to
    [development-workflow](./docs/development-workflow.md). Before writing tests involving
    `tracing`, cwd, or integration-test side-effects, read the relevant entries in
@@ -70,6 +74,11 @@ implementation without those doc updates is incomplete.
 If a doc doesn't exist yet, ask the user before creating a new doc file.
 Out-of-date docs are treated as bugs.
 
+Before editing `docs/implementation-notes.md`, re-read the guideline at the top
+of that file. Add a note only when the code alone does not explain it; put
+persisted field-level detail in [persistence](./docs/persistence.md) and keep
+notes to a few sentences.
+
 If you notice a stale doc while working on something else, report it; do not fix it unless
 asked (consent rule applies).
 
@@ -83,7 +92,8 @@ resolve plan-vs-ADR and source-vs-ADR inconsistencies and gaps.
 Check markdown documents using linter `rumdl` with its configuration `.rumdl.toml`.
 To automatically fix possible issues and format markdown files, run `rumdl fmt [PATH]+`.
 
-Maintain configured test coverage threshold as noted in [development-workflow](./docs/development-workflow.md).
+Maintain configured test coverage threshold as noted in
+[development-workflow](./docs/development-workflow.md).
 
 ## Coding Conventions
 
@@ -103,8 +113,9 @@ re-exported through `src/lib.rs` — `tests/*.rs` cannot `use` items from `src/m
 
 Keep `main.rs` thin (event loop, key handling).
 
-**Module layout.** Use Rust 2018+ file-per-module style: `foo.rs`, not `foo/mod.rs`.
-For the integration-test shared module see [Integration-test shared helpers (`tests/common`)](./docs/development-workflow.md#integration-test-shared-helpers-testscommon).
+**Module layout.** Use Rust 2018+ file-per-module style: `foo.rs`, not `foo/mod.rs`. For the
+integration-test shared module see
+[Integration-test shared helpers (`tests/common`)](./docs/development-workflow.md#integration-test-shared-helpers-testscommon).
 
 See [Logging](./docs/development-workflow.md#logging) for logging diagnostics in CLI and TUI.
 

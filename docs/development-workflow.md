@@ -94,19 +94,17 @@ updates are grouped into one PR each, major Cargo updates stay separate.
 
 Releases are automated by [release-plz](https://release-plz.dev/)
 ([ADR-0002](./architecture-design-records/0002-use-release-plz-for-release-automation.md)):
-[`release.yml`](../.github/workflows/release.yml) opens a release PR bumping
-`Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` from conventional commits;
-merging it tags `vX.Y.Z` and creates the GitHub release (no crates.io publishing;
-`git_only = true` makes release-plz compare against the latest git tag).
-[`release-notes.yml`](../.github/workflows/release-notes.yml) runs when a release is
-published (or manually via `workflow_dispatch` with a tag). It builds Ylva, runs it
-headless over the commits since the previous tag following
-[release-notes-workflow](./release-notes-workflow.md) with the restricted profile
-[`.github/workflows/release-notes.config.toml`](../.github/workflows/release-notes.config.toml) (`write`/`edit` only on
-`release-notes.md`, `bash` only for read-only `git log`/`show`/`diff`), and replaces the
-GitHub release body with the curated notes. `CHANGELOG.md` stays release-plz-generated
-and is not touched.
-Repository setup (maintainer, GitHub settings):
+[`release.yml`](../.github/workflows/release.yml) opens a release PR bumping `Cargo.toml`,
+`Cargo.lock` and `CHANGELOG.md` from conventional commits; merging it tags `vX.Y.Z` and creates the
+GitHub release (no crates.io publishing; `git_only = true` makes release-plz compare against the
+latest git tag). [`release-notes.yml`](../.github/workflows/release-notes.yml) runs when a release
+is published (or manually via `workflow_dispatch` with a tag). It builds Ylva, runs it headless over
+the commits since the previous tag following [release-notes-workflow](./release-notes-workflow.md)
+with the restricted profile
+[`.github/workflows/release-notes.config.toml`](../.github/workflows/release-notes.config.toml)
+(`write`/`edit` only on `release-notes.md`, `bash` only for read-only `git log`/`show`/`diff`), and
+replaces the GitHub release body with the curated notes. `CHANGELOG.md` stays release-plz-generated
+and is not touched. Repository setup (maintainer, GitHub settings):
 
 - repository secret `RELEASE_PLZ_TOKEN`: fine-grained PAT with contents and
   pull-requests write
@@ -265,7 +263,8 @@ them to a `tracing` macro.
 
 ### Tracing subscriber isolation in tests
 
-See [known-test-issues.md — Tracing subscriber isolation](known-test-issues.md#tracing-subscriber-isolation-in-tests)
+See
+[known-test-issues.md — Tracing subscriber isolation](known-test-issues.md#tracing-subscriber-isolation-in-tests)
 for the root cause, required lock acquisition rules, and `run_locked` usage.
 
 ### Process-global cwd mutation in tests
@@ -450,51 +449,41 @@ the real binary instead:
 
 ## Unit-test shared helpers (`src/test_support.rs`)
 
-Large owner-local suites use `#[cfg(test)] mod tests;` with
-`<owner>/tests.rs`; responsibility-specific descendants live under
-`<owner>/tests/`, sharing fixtures from that local parent (see
-`src/llm/engine/tests.rs`, `src/tui_reducer_state/tests.rs` and
-`src/presenter/tests.rs`). Presenter cross-input effect-order assertions remain
-at the facade, alongside shared local fixtures; its keyboard, mouse, domain and
-bubble suites live in `presenter/tests/`. Public live/serialized/replayed
-tool-bubble buffer comparisons live in `tests/tui_render_state/roundtrip.rs`,
-alongside the external rendering contracts. Driver frame/title/history orchestration and cross-owner
-clarify routing assertions remain in `tui_driver/tests.rs`, alongside shared
-fixtures; effects, input, models, terminal and update suites live in
-`tui_driver/tests/`. Widget rendering suites follow the bubble, chat, footer,
-help and tool-bubble owners under `tui_widgets/`; small pure selection,
-diff and path-label suites remain beside their implementations.
-`tests/tui_render_state.rs` retains its integration target. Large highlighting
-inputs are generated deterministically rather than read from implementation
-files. Internal cache invalidation, layout identity, build-count and
-selection-storage reuse assertions live in `src/render/cache_tests.rs`;
-integration suites retain visible rendering, selection and driver workflows.
-Its explicitly declared descendants under `tests/tui_render_state/` cover
-cache, bubbles, selection, overlays, subagent views and round trips; the target parent
-retains shared fixtures. `tests/tools_agent_loop.rs` follows the same pattern,
-with queue/approval, cancellation and subagent suites under
-`tests/tools_agent_loop/`. Descendants are not separate Cargo test targets.
-Use `#[path = "<target>/<suite>.rs"] mod <suite>;` in the target parent:
-integration-test roots resolve a plain `mod <suite>;` beside the root file,
-not under its same-named directory.
-Persistence event, session-file, writer, replay, archive-transition and maintenance suites live under
-`store/tests/`, with shared fixtures and cross-owner lifecycle assertions in
-`store/tests.rs`. Sandbox suites live beside their private rule, path, command
-and network owners under `sandbox/<owner>/tests.rs`, keeping private helpers
-private; they share the sandbox fixture from `sandbox/tests.rs`, which also
-holds cross-owner assertions.
-Small boundary suites can remain beside the
-extracted implementation (see `src/agent/tools/read/stream.rs` and
-`src/agent/tools/read/windows.rs`). Cross-owner assertions stay at the facade.
-Agent unit fixtures and cross-owner assertions live in `agent/tests.rs`,
-with request, compaction-update, queue, execution, subagent and runtime suites
-under `agent/tests/`. Message and protocol tests follow their owners; Context
-retains transcript tests with projection, recovery and token descendants.
-`agent/runtime/tests.rs` checks handler control-flow outcomes directly.
-Request-fragment accumulator cases live directly under `agent/request.rs`;
-command-dispatch logging remains at the agent runtime facade, not the protocol
-type owner. Agent-type selection is tested at `agent_factory`, while compiled
-binary tests verify startup dispatch and controlled stdin behavior.
+Large owner-local suites use `#[cfg(test)] mod tests;` with `<owner>/tests.rs`;
+responsibility-specific descendants live under `<owner>/tests/`, sharing fixtures from that local
+parent (see `src/llm/engine/tests.rs`, `src/tui_reducer_state/tests.rs` and
+`src/presenter/tests.rs`). Presenter cross-input effect-order assertions remain at the facade,
+alongside shared local fixtures; its keyboard, mouse, domain and bubble suites live in
+`presenter/tests/`. Public live/serialized/replayed tool-bubble buffer comparisons live in
+`tests/tui_render_state/roundtrip.rs`, alongside the external rendering contracts. Driver
+frame/title/history orchestration and cross-owner clarify routing assertions remain in
+`tui_driver/tests.rs`, alongside shared fixtures; effects, input, models, terminal and update suites
+live in `tui_driver/tests/`. Widget rendering suites follow the bubble, chat, footer, help and
+tool-bubble owners under `tui_widgets/`; small pure selection, diff and path-label suites remain
+beside their implementations. `tests/tui_render_state.rs` retains its integration target. Large
+highlighting inputs are generated deterministically rather than read from implementation files.
+Internal cache invalidation, layout identity, build-count and selection-storage reuse assertions
+live in `src/render/cache_tests.rs`; integration suites retain visible rendering, selection and
+driver workflows. Its explicitly declared descendants under `tests/tui_render_state/` cover cache,
+bubbles, selection, overlays, subagent views and round trips; the target parent retains shared
+fixtures. `tests/tools_agent_loop.rs` follows the same pattern, with queue/approval, cancellation
+and subagent suites under `tests/tools_agent_loop/`. Descendants are not separate Cargo test
+targets. Use `#[path = "<target>/<suite>.rs"] mod <suite>;` in the target parent: integration-test
+roots resolve a plain `mod <suite>;` beside the root file, not under its same-named directory.
+Persistence event, session-file, writer, replay, archive-transition and maintenance suites live
+under `store/tests/`, with shared fixtures and cross-owner lifecycle assertions in `store/tests.rs`.
+Sandbox suites live beside their private rule, path, command and network owners under
+`sandbox/<owner>/tests.rs`, keeping private helpers private; they share the sandbox fixture from
+`sandbox/tests.rs`, which also holds cross-owner assertions. Small boundary suites can remain beside
+the extracted implementation (see `src/agent/tools/read/stream.rs` and
+`src/agent/tools/read/windows.rs`). Cross-owner assertions stay at the facade. Agent unit fixtures
+and cross-owner assertions live in `agent/tests.rs`, with request, compaction-update, queue,
+execution, subagent and runtime suites under `agent/tests/`. Message and protocol tests follow their
+owners; Context retains transcript tests with projection, recovery and token descendants.
+`agent/runtime/tests.rs` checks handler control-flow outcomes directly. Request-fragment accumulator
+cases live directly under `agent/request.rs`; command-dispatch logging remains at the agent runtime
+facade, not the protocol type owner. Agent-type selection is tested at `agent_factory`, while
+compiled binary tests verify startup dispatch and controlled stdin behavior.
 
 Mixed configuration, lifecycle, protocol and rendering responsibilities use
 owner-local suites under `agent_factory/tests/`, `agent/compaction/tests/`,
@@ -520,5 +509,6 @@ SSOT applies here as well.
 
 ## `cfg(test)` does not reach library code from integration tests
 
-See [known-test-issues.md — cfg(test) does not reach library code](known-test-issues.md#cfgtest-does-not-reach-library-code-from-integration-tests)
+See
+[known-test-issues.md — cfg(test) does not reach library code](known-test-issues.md#cfgtest-does-not-reach-library-code-from-integration-tests)
 for the explanation and the required abstraction pattern.

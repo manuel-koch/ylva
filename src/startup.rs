@@ -222,9 +222,11 @@ pub fn run(
     apply_cli_profile_overrides(cli, &mut profile);
     let profile_path =
         selected_profile_path(explicit_profile_name, profile_workspace_root.as_deref())?;
-    let root_system_prompt =
-        crate::compose_root_system_prompt(workspace_root.as_deref(), current_directory.as_deref())
-            .map_err(|error| error.to_string())?;
+    let root_system_prompt = crate::compose_root_system_prompt_origins(
+        workspace_root.as_deref(),
+        current_directory.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
     crate::highlight::set_active_theme(profile.theme);
     tracing::info!(theme = ?profile.theme, "theme selected");
     let provider_env = load_provider_env(&profile_environment)?;
@@ -279,7 +281,7 @@ pub fn run(
             factory = factory.with_auto_approve(tool);
         }
         factory = factory
-            .with_system_prompt(root_system_prompt.clone())
+            .with_system_prompt_origins(root_system_prompt.clone())
             .with_skill_catalog(skills, use_tui);
         factory
     };
@@ -322,7 +324,11 @@ pub fn run(
         // different provider/model than the session's history last showed,
         // and that must be visible without re-deriving it from config.
         if let Some(config) = &initial_engine_config {
-            store.record_model_changed(&config.provider_connection, &config.model);
+            let parameters = factory_without_store
+                .engine(initial_engine_name)
+                .map(|engine| crate::store::ModelParameters::from_engine(engine.as_ref()))
+                .unwrap_or_default();
+            store.record_model_changed(&config.provider_connection, &config.model, &parameters);
         }
         // An explicit `--agent` that changed the type a *resumed* session was
         // already using becomes the latest stored selection, so later resumes

@@ -101,6 +101,7 @@ impl Store {
                 .map(str::to_string)
                 .or_else(|| source_meta.agent_type.clone()),
             cloned_from: Some(source_id),
+            allowed_tools: None,
         };
         let meta_line_len = write_meta_line(&mut file, &clone_path, &clone_meta)?;
 
@@ -180,6 +181,7 @@ impl Store {
                 meta_awaiting_title: title_state,
             },
             title_snapshot,
+            !messages.is_empty(),
         ))
     }
 }

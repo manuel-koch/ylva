@@ -193,8 +193,10 @@ pub(super) async fn execute_effects(
             Effect::ClearConversation
             | Effect::ListSessions
             | Effect::SelectSession { .. }
+            | Effect::DeleteSession { .. }
             | Effect::CancelSessionSelection
             | Effect::Compact
+            | Effect::ShowStatus { .. }
             | Effect::LoadSubagentTranscript { .. }
             | Effect::ListModels { .. }
             | Effect::SwitchModel(_)
@@ -220,6 +222,7 @@ pub(super) fn action_key(action: &crate::events::AppAction) -> crossterm::event:
         AppAction::LeaderAgents => KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
         AppAction::LeaderFavoriteModel => KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
         AppAction::LeaderParentView => KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        AppAction::LeaderStatus => KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
         // `Null` keys are unknown to the chord and leave it armed.
         AppAction::StopSignal
         | AppAction::MouseInput(_)
@@ -237,8 +240,10 @@ pub(super) fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Eff
             Effect::ClearConversation
                 | Effect::ListSessions
                 | Effect::SelectSession { .. }
+                | Effect::DeleteSession { .. }
                 | Effect::CancelSessionSelection
                 | Effect::Compact
+                | Effect::ShowStatus { .. }
                 | Effect::ListModels { .. }
                 | Effect::SwitchModel(_)
                 | Effect::SetFavoriteModel { .. }
@@ -264,6 +269,14 @@ pub(super) async fn execute_slash_effects(
                 if let Err(error) = cmd_tx.try_send(AgentCommand::Compact) {
                     tracing::warn!(%error, "could not deliver manual compaction command");
                     state.push_notice(format!("Could not request compaction: {error}"));
+                }
+            }
+            Effect::ShowStatus { run_id } => {
+                if let Err(error) =
+                    cmd_tx.try_send(route_command(run_id, AgentCommand::RequestStatus))
+                {
+                    tracing::warn!(%error, "could not deliver status request");
+                    state.push_notice(format!("Could not request status: {error}"));
                 }
             }
             Effect::ClearConversation => {

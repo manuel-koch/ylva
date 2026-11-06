@@ -214,7 +214,12 @@ async fn resuming_restores_the_latest_compaction_without_rewriting_the_session()
     });
     // Absolute transcript index: the two rebuilt system prompts occupy
     // `[..2]` in the live context and again after a resume.
-    store.record_compaction(4, 2, "first turn, summarized");
+    store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 4,
+        transcript_boundary: Some(2),
+        summary: "first turn, summarized".into(),
+        effect: None,
+    });
     store.flush().await;
     let path = store.path().to_path_buf();
     let before = std::fs::read(&path).expect("session file readable");
@@ -318,7 +323,12 @@ async fn resuming_a_snapshot_never_splits_a_tool_call_from_its_result() {
     });
     // Deliberately splits the round: the assistant tool call lands in the
     // summarized prefix while its result stays in the tail.
-    store.record_compaction(4, 2, "the tool round, summarized");
+    store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 4,
+        transcript_boundary: Some(2),
+        summary: "the tool round, summarized".into(),
+        effect: None,
+    });
     store.flush().await;
 
     let mut context = Context::new();

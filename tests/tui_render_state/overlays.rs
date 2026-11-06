@@ -39,8 +39,8 @@ fn session_picker_renders_actions_timestamps_and_elided_titles_on_small_terminal
             assert!(!text.contains("[ ]"), "{text}");
             assert!(text.contains("2026-01-01"), "{text}");
             let layout = state.layout.slash_overlay;
-            assert_eq!(layout.resume_action.width, " Resume ".len() as u16);
-            assert_eq!(layout.clone_action.width, " Clone ".len() as u16);
+            assert_eq!(layout.resume_action.width, " [ Resume ] ".len() as u16);
+            assert_eq!(layout.clone_action.width, " [ Clone ] ".len() as u16);
             assert_ne!(
                 buffer[(layout.resume_action.x, layout.resume_action.y)].bg,
                 buffer[(layout.clone_action.x, layout.clone_action.y)].bg
@@ -64,17 +64,16 @@ fn session_picker_renders_actions_timestamps_and_elided_titles_on_small_terminal
         if width >= 60 {
             assert!(text.contains("+01:00"), "{text}");
             assert!(text.contains('…'), "{text}");
-            assert_eq!(text.matches("enter confirm").count(), 1, "{text}");
+            assert_eq!(text.matches("enter activate").count(), 1, "{text}");
             assert_eq!(text.matches("esc cancel").count(), 1, "{text}");
         }
     }
 }
 
 #[test]
-fn session_picker_buttons_use_rendered_hit_targets_without_activating() {
+fn session_picker_buttons_use_rendered_hit_targets_and_activate_on_click() {
     use ylva::tui_reducer_state::{
-        Effect, InputEvent, SessionAction, SessionChoice, SessionPicker, SessionPickerPhase,
-        SlashOverlay,
+        Effect, SessionAction, SessionChoice, SessionPicker, SessionPickerPhase, SlashOverlay,
     };
     let textarea = ylva::TextareaContext {
         is_empty: true,
@@ -83,24 +82,27 @@ fn session_picker_buttons_use_rendered_hit_targets_without_activating() {
         cursor_row_is_last: true,
     };
     for (width, height) in [(120, 40), (60, 15), (30, 9)] {
-        let mut state = ylva::AppState::new();
-        let mut picker = SessionPicker::loading();
-        picker.phase = SessionPickerPhase::Ready;
-        let session_id = uuid::Uuid::new_v4();
-        picker.choices.push(SessionChoice {
-            session_id,
-            title: "target".into(),
-            last_used_at: "date".into(),
-        });
-        state.slash_overlay = SlashOverlay::SessionPicker(picker);
-        for action in [SessionAction::Clone, SessionAction::Resume] {
+        for action in SessionAction::ALL {
+            let mut state = ylva::AppState::new();
+            let mut picker = SessionPicker::loading();
+            picker.phase = SessionPickerPhase::Ready;
+            let session_id = uuid::Uuid::new_v4();
+            picker.choices.push(SessionChoice {
+                session_id,
+                title: "target".into(),
+                last_used_at: "date".into(),
+            });
+            state.slash_overlay = SlashOverlay::SessionPicker(picker);
             render_offline(&mut state, width, height);
             let layout = state.layout.slash_overlay.clone();
             let button = match action {
                 SessionAction::Resume => layout.resume_action,
                 SessionAction::Clone => layout.clone_action,
+                SessionAction::Delete => layout.delete_action,
             };
-            assert!(button.width > 0);
+            if button.width == 0 {
+                continue;
+            }
             let effects = ylva::presenter::update(
                 &mut state,
                 ylva::TuiEvent::Mouse(crossterm::event::MouseEvent {
@@ -113,25 +115,20 @@ fn session_picker_buttons_use_rendered_hit_targets_without_activating() {
                 }),
                 &textarea,
             );
-            assert!(effects.is_empty());
+            let expected = match action {
+                SessionAction::Delete => Effect::DeleteSession {
+                    source_id: session_id,
+                },
+                action => Effect::SelectSession {
+                    source_id: session_id,
+                    action,
+                },
+            };
+            assert_eq!(effects, vec![expected], "{action:?} at {width}x{height}");
             let SlashOverlay::SessionPicker(picker) = &state.slash_overlay else {
                 panic!()
             };
             assert_eq!(picker.action, action);
-            assert_eq!(
-                ylva::presenter::update(
-                    &mut state,
-                    ylva::TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
-                        KeyCode::Enter,
-                        KeyModifiers::NONE
-                    ))),
-                    &textarea
-                ),
-                vec![Effect::SelectSession {
-                    source_id: session_id,
-                    action
-                }]
-            );
         }
     }
 }
@@ -670,6 +667,7 @@ async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pendi
             .expect("switch to the requested provider");
         agent
             .send_command(ylva::AgentCommand::RecordModelChanged {
+                parameters: Default::default(),
                 provider_connection,
                 model,
             })

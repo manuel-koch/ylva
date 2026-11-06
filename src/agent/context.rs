@@ -23,6 +23,7 @@ use crate::store::Store;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use uuid::Uuid;
+mod breakdown;
 mod projection;
 mod recovery;
 
@@ -240,6 +241,14 @@ pub struct Context {
     compaction_trigger: &'static str,
     batch_admitted_calls: usize,
     batch_skipped_calls: usize,
+    /// Every compaction applied to this conversation, oldest first — restored
+    /// from the session file on resume. A subagent has no store, so this is
+    /// also what its transcript write persists.
+    compaction_history: Vec<crate::store::CompactionRecord>,
+    /// When each `compaction_history` record was applied; empty when unknown.
+    compaction_recorded_at: Vec<String>,
+    /// Creation time of this context, shown for the in-memory model entry.
+    started_at: String,
     /// Session store this context appends its committed messages to, when
     /// persistence is enabled. `None` for subagents and
     /// for runs started without a store.
@@ -317,6 +326,9 @@ impl Context {
             compaction_trigger: "request_boundary",
             batch_admitted_calls: 0,
             batch_skipped_calls: 0,
+            compaction_history: Vec::new(),
+            compaction_recorded_at: Vec::new(),
+            started_at: crate::store::now_timestamp(),
             messages: Vec::new(),
         };
         context.push_entry(Message::System {
@@ -356,6 +368,8 @@ impl Context {
     pub fn set_store(&mut self, store: Store) {
         match Store::read_session_state(store.path()) {
             Ok(state) => {
+                self.compaction_recorded_at = vec![String::new(); state.compactions.len()];
+                self.compaction_history = state.compactions;
                 self.hydrate(state.messages);
                 // Rebuild the model view from the latest snapshot plus the
                 // verbatim tail; the transcript above already carries every
@@ -638,6 +652,40 @@ impl Context {
     /// The latest applied compaction snapshot, if any.
     pub fn compaction(&self) -> Option<&crate::agent::compaction::CompactionSnapshot> {
         self.compaction.as_ref()
+    }
+
+    /// Every compaction applied to this conversation, oldest first.
+    pub(crate) fn compaction_recorded_at(&self) -> &[String] {
+        &self.compaction_recorded_at
+    }
+
+    pub(crate) fn started_at(&self) -> &str {
+        &self.started_at
+    }
+
+    pub fn compaction_history(&self) -> &[crate::store::CompactionRecord] {
+        &self.compaction_history
+    }
+
+    /// Remember an applied compaction and persist it when a store is attached.
+    pub(crate) fn record_compaction(
+        &mut self,
+        boundary: usize,
+        summary: &str,
+        effect: Option<crate::store::CompactionEffect>,
+    ) {
+        let record = crate::store::CompactionRecord {
+            boundary,
+            transcript_boundary: Some(boundary.saturating_sub(self.leading_system_len())),
+            summary: summary.to_string(),
+            effect,
+        };
+        if let Some(store) = &self.store {
+            store.record_compaction(&record);
+        }
+        self.compaction_history.push(record);
+        self.compaction_recorded_at
+            .push(crate::store::now_timestamp());
     }
 
     /// Install a prefix summary as the model view's compaction snapshot:

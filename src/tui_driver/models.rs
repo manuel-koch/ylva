@@ -836,6 +836,7 @@ pub(super) async fn switch_model(
                 .send(AgentCommand::RecordModelChanged {
                     provider_connection: config.provider_connection,
                     model: config.model,
+                    parameters: crate::store::ModelParameters::from_engine(engine.as_ref()),
                 })
                 .await;
         }

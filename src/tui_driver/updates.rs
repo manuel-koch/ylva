@@ -186,6 +186,7 @@ pub(super) fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent
         }),
         // ToolError, ToolAutoDenied and Notice are handled directly by the
         // Driver via AppState; no corresponding DomainEvent exists in the
+        UiUpdate::StatusSnapshot(snapshot) => Some(DomainEvent::StatusSnapshot(snapshot.clone())),
         // Presenter's surface.
         UiUpdate::ToolError { .. }
         | UiUpdate::ToolAutoDenied { .. }
@@ -353,6 +354,7 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
         .map(crate::tui_reducer_state::format_context_usage_readout);
     let has_subagents = !app.subagent_conversations.is_empty();
     let agents_popup = crate::render::agents_popup_render_state(&app);
+    let status_popup = crate::render::status_popup_render_state(&app);
     TuiState {
         compacting: false,
         display_metadata: app.display_metadata,
@@ -397,6 +399,7 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
             help_drag_active: app.help_popup.help_drag_active,
         },
         agents_popup,
+        status_popup,
         clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
             pending_clarify,
             clarify_scroll_offset: app.clarify_banner_state.clarify_scroll_offset,

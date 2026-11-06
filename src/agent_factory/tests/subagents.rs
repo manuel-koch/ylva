@@ -197,6 +197,9 @@ fn subagent_with_over_context_task_compacts_and_finishes() {
             .create(&profile, "quick", subagent_role)
             .expect("subagent factory builds");
         let transcript_target = SubagentTranscriptTarget {
+            agent_type: "default".to_string(),
+            engine_parameters: Default::default(),
+            allowed_tools: Vec::new(),
             parent_store: None,
             engine_config: Some(subagent_loop.engine().config()),
             utility_engine: None,
@@ -327,6 +330,9 @@ fn terminal_finish_is_received_only_after_the_subagent_finish_tool_done_is_forwa
             .create(&profile, "quick", subagent_role)
             .expect("subagent factory builds");
         let transcript_target = SubagentTranscriptTarget {
+            agent_type: "default".to_string(),
+            engine_parameters: Default::default(),
+            allowed_tools: Vec::new(),
             parent_store: None,
             engine_config: Some(subagent_loop.engine().config()),
             utility_engine: None,
@@ -617,6 +623,9 @@ fn tool_only_subagent_outcomes_receive_generated_session_titles() {
             ));
             write_subagent_transcript(
                 &SubagentTranscriptTarget {
+                    agent_type: "default".to_string(),
+                    engine_parameters: Default::default(),
+                    allowed_tools: Vec::new(),
                     parent_store: Some(parent_store.clone()),
                     engine_config: Some(test_engine_config()),
                     utility_engine: Some(utility_engine),
@@ -680,6 +689,9 @@ fn a_finished_subagent_transcript_is_written_to_its_own_session_file() {
 
         write_subagent_transcript(
             &SubagentTranscriptTarget {
+                agent_type: "default".to_string(),
+                engine_parameters: Default::default(),
+                allowed_tools: Vec::new(),
                 parent_store: Some(parent_store.clone()),
                 engine_config: Some(test_engine_config()),
                 utility_engine: Some(utility_engine),
@@ -731,6 +743,9 @@ fn a_finished_subagent_transcript_is_skipped_when_persistence_is_disabled() {
         subagent_context.push_assistant("unpersisted".to_string(), AssistantStatus::Complete);
         write_subagent_transcript(
             &SubagentTranscriptTarget {
+                agent_type: "default".to_string(),
+                engine_parameters: Default::default(),
+                allowed_tools: Vec::new(),
                 parent_store: None,
                 engine_config: Some(test_engine_config()),
                 utility_engine: None,
@@ -825,6 +840,9 @@ fn run_subagent_sends_unstructured_finish_result_when_finish_never_called() {
             finish_tx,
             forward_ui_tx,
             SubagentTranscriptTarget {
+                agent_type: "default".to_string(),
+                engine_parameters: Default::default(),
+                allowed_tools: Vec::new(),
                 parent_store: None,
                 engine_config: None,
                 utility_engine: None,
@@ -916,6 +934,9 @@ fn run_subagent_reports_stream_error_as_failure_instead_of_unstructured_result()
             finish_tx,
             forward_ui_tx,
             SubagentTranscriptTarget {
+                agent_type: "default".to_string(),
+                engine_parameters: Default::default(),
+                allowed_tools: Vec::new(),
                 parent_store: None,
                 engine_config: None,
                 utility_engine: None,

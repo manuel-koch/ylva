@@ -46,6 +46,7 @@ pub(super) fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent> {
         AppAction::Leader(_) => Some(TuiEvent::Input(InputEvent::ShowAgents)),
         AppAction::LeaderAgents => Some(TuiEvent::Input(InputEvent::ShowAgents)),
         AppAction::LeaderFavoriteModel => Some(TuiEvent::Input(InputEvent::ToggleFavoriteModel)),
+        AppAction::LeaderStatus => Some(TuiEvent::Input(InputEvent::ShowStatus)),
         AppAction::LeaderParentView => Some(TuiEvent::Input(InputEvent::ParentView)),
         AppAction::StopSignal => Some(TuiEvent::Input(InputEvent::StopSignal)),
         AppAction::KeyInput(event) if is_parent_view_key(&event) => {

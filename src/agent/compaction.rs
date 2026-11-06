@@ -1038,13 +1038,18 @@ impl CompactionRuntime {
             Some(tokens) if tokens >= estimated_tokens_before => {
                 ManualCompactionResult::NoReduction { request_id }
             }
-            Some(_) => {
+            Some(tokens_after) => {
                 let summary = snapshot.summary.clone();
                 if context.set_compaction(snapshot) {
                     context.set_compaction_diagnostics(request_id, "manual");
-                    if let Some(store) = context.store() {
-                        store.record_compaction(boundary, context.leading_system_len(), &summary);
-                    }
+                    context.record_compaction(
+                        boundary,
+                        &summary,
+                        Some(crate::store::CompactionEffect {
+                            estimated_tokens_before,
+                            estimated_tokens_after: tokens_after,
+                        }),
+                    );
                     result.summary_applied = true;
                     ManualCompactionResult::Applied { request_id }
                 } else {
@@ -1151,12 +1156,17 @@ impl CompactionRuntime {
                 );
                 // Persist the snapshot itself; the transcript it summarizes is
                 // already on disk and stays untouched (append-only).
-                if let Some(store) = context.store() {
-                    // The event carries both coordinates: the live boundary
-                    // the model view uses, and the same cut without the
-                    // rebuilt system prompts for replay-only readers.
-                    store.record_compaction(boundary, context.leading_system_len(), &summary);
-                }
+                // The event carries both coordinates: the live boundary the
+                // model view uses, and the same cut without the rebuilt
+                // system prompts for replay-only readers.
+                context.record_compaction(
+                    boundary,
+                    &summary,
+                    Some(crate::store::CompactionEffect {
+                        estimated_tokens_before: effectiveness.estimated_tokens_before,
+                        estimated_tokens_after: effectiveness.estimated_tokens_after,
+                    }),
+                );
                 tracing::info!(
                     trigger = "summary_applied",
                     request_id = ?context.compaction_request_id(),

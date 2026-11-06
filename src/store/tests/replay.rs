@@ -219,8 +219,9 @@ async fn past_explicit_user_messages_are_deduplicated_and_skip_current_and_subag
     let subagent = older
         .write_subagent_transcript_for_run_store(
             Uuid::new_v4(),
-            None,
+            &Default::default(),
             &[user_message("subagent task")],
+            &[],
         )
         .await
         .expect("subagent session");
@@ -401,7 +402,12 @@ async fn compaction_events_carry_the_transcript_relative_boundary_for_replay() {
     store.record_message(&user_message("first turn"));
     // The live boundary counts the two rebuilt system prompts; the
     // persisted transcript does not contain them.
-    store.record_compaction(5, 2, "summarized prefix");
+    store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 5,
+        transcript_boundary: Some(3),
+        summary: "summarized prefix".into(),
+        effect: None,
+    });
     store.flush().await;
 
     let events = read_events(store.path());
@@ -429,8 +435,18 @@ async fn compaction_events_carry_the_transcript_relative_boundary_for_replay() {
         Some(3),
         "replay-only readers get the cut without the system prompts"
     );
-    store.record_compaction(4, 0, "newer prefix after fewer rebuilt systems");
-    store.record_compaction(9, 6, "stale prefix with more rebuilt systems");
+    store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 4,
+        transcript_boundary: Some(4),
+        summary: "newer prefix after fewer rebuilt systems".into(),
+        effect: None,
+    });
+    store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 9,
+        transcript_boundary: Some(3),
+        summary: "stale prefix with more rebuilt systems".into(),
+        effect: None,
+    });
     store.flush().await;
     let state = Store::read_session_state(store.path()).expect("new state readable");
     assert_eq!(state.compaction_transcript_boundary, Some(4));
@@ -455,8 +471,18 @@ async fn compaction_events_round_trip_and_the_latest_snapshot_wins() {
     )
     .expect("store created");
     store.record_message(&user_message("first turn"));
-    store.record_compaction(3, 0, "first summary");
-    store.record_compaction(7, 0, "second summary");
+    store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 3,
+        transcript_boundary: Some(3),
+        summary: "first summary".into(),
+        effect: None,
+    });
+    store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 7,
+        transcript_boundary: Some(7),
+        summary: "second summary".into(),
+        effect: None,
+    });
     store.flush().await;
 
     let events = read_events(store.path());
@@ -540,7 +566,12 @@ async fn reading_a_session_state_never_touches_the_file() {
     )
     .expect("store created");
     store.record_message(&user_message("turn"));
-    store.record_compaction(1, 0, "summarized");
+    store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 1,
+        transcript_boundary: Some(1),
+        summary: "summarized".into(),
+        effect: None,
+    });
     store.flush().await;
     let path = store.path().to_path_buf();
     let session_id = store.session_id();

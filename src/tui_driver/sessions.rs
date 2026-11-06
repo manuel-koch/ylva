@@ -14,7 +14,7 @@
 
 //! Asynchronous, identity-scoped session discovery and replacement preparation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -29,8 +29,6 @@ use crate::tui_reducer_state::{
     AppState, SessionAction, SessionChoice, SessionPicker, SessionPickerPhase, SlashOverlay,
 };
 
-const SESSION_PICKER_LIMIT: usize = 32;
-
 pub(super) struct PreparedSession {
     pub agent: AgentLoop,
     pub updates: mpsc::Receiver<UiUpdate>,
@@ -44,6 +42,12 @@ pub(super) enum SessionResult {
         session_id: Uuid,
         picker_id: Uuid,
         result: anyhow::Result<(Vec<SessionChoice>, Vec<String>)>,
+    },
+    Deleted {
+        session_id: Uuid,
+        picker_id: Uuid,
+        deleted_id: Uuid,
+        result: anyhow::Result<()>,
     },
     Prepared {
         session_id: Uuid,
@@ -106,6 +110,43 @@ impl SessionTasks {
                 let _ = sender.send(SessionResult::Listed {
                     session_id,
                     picker_id,
+                    result,
+                });
+            }
+            .instrument(span),
+        ));
+    }
+
+    pub fn delete(&mut self, state: &mut AppState, source_id: Uuid, store: Option<Store>) {
+        let SlashOverlay::SessionPicker(picker) = &state.slash_overlay else {
+            return;
+        };
+        let picker_id = picker.identity;
+        let Some(store) = store else {
+            selection_error(
+                state,
+                picker_id,
+                "Session persistence is unavailable.".into(),
+            );
+            return;
+        };
+        let session_id = store.session_id();
+        let chats_root = store.chats_root().to_path_buf();
+        let project_key = store.project_key().to_owned();
+        let sender = self.sender.clone();
+        let span = store.span();
+        self.tasks.push(tokio::spawn(
+            async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    delete_session(&chats_root, &project_key, source_id)
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result);
+                let _ = sender.send(SessionResult::Deleted {
+                    session_id,
+                    picker_id,
+                    deleted_id: source_id,
                     result,
                 });
             }
@@ -248,8 +289,11 @@ pub(super) fn list_candidates(
     let (sessions, diagnostics) = Store::list_sessions_with_diagnostics(&chats_root, &project_key)?;
     let choices = sessions
         .into_iter()
-        .filter(|session| session.parent_session.is_none() && session.session_id != current_session)
-        .take(SESSION_PICKER_LIMIT)
+        .filter(|session| {
+            session.parent_session.is_none()
+                && session.session_id != current_session
+                && session.has_messages
+        })
         .map(|session| {
             let title = crate::app::single_line(&session.title).trim().to_string();
             let last_used_at = chrono::DateTime::parse_from_rfc3339(&session.last_used_at)?
@@ -268,6 +312,17 @@ pub(super) fn list_candidates(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok((choices, diagnostics))
+}
+
+/// Delete a root session and its subagent transcripts from disk.
+pub(super) fn delete_session(
+    chats_root: &Path,
+    project_key: &str,
+    source_id: Uuid,
+) -> anyhow::Result<()> {
+    let report = Store::delete_session_family(chats_root, project_key, source_id)?;
+    anyhow::ensure!(report.failures.is_empty(), "{}", report.failures.join("; "));
+    Ok(())
 }
 
 pub(super) fn prepare_target(
@@ -305,6 +360,7 @@ pub(super) fn prepare_target(
                 created_clone = Some(store.session_id());
                 store
             }
+            SessionAction::Delete => anyhow::bail!("Deleting is not a session activation."),
         };
         let meta = Store::read_session_meta(store.path())?
             .ok_or_else(|| anyhow::anyhow!("Opened session has no valid metadata."))?;

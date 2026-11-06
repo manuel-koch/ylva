@@ -157,6 +157,170 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Delete one session and the subagent transcripts nobody else references.
+    ///
+    /// Unlike [`Store::maintain_sessions`] this never parses unrelated
+    /// transcripts: only headers are read project-wide, and events are read
+    /// just for the target and its clone family (the only sessions that can
+    /// share subagent transcripts with it, because a clone copies its
+    /// source's subagent events).
+    pub fn delete_session_family(
+        chats_root: &Path,
+        project_key: &str,
+        session_id: Uuid,
+    ) -> Result<MaintenanceReport, StoreError> {
+        archive::require_unix()?;
+        let target_path = session_path(chats_root, project_key, session_id);
+        if !archive::transcript_exists(&target_path) {
+            return Err(StoreError::SessionNotFound {
+                session_id,
+                path: target_path,
+            });
+        }
+        let directory = project_directory(chats_root, project_key);
+        let _coordination = session_file::lock_project(&directory)?;
+        let headers = read_project_headers(&directory)?;
+        let mut children: BTreeMap<Uuid, BTreeSet<Uuid>> = BTreeMap::new();
+        let mut clone_neighbours: BTreeMap<Uuid, BTreeSet<Uuid>> = BTreeMap::new();
+        for (identity, meta) in &headers {
+            if let Some(parent) = meta.parent_session {
+                children.entry(parent).or_default().insert(*identity);
+            }
+            if let Some(source) = meta.cloned_from {
+                clone_neighbours
+                    .entry(*identity)
+                    .or_default()
+                    .insert(source);
+                clone_neighbours
+                    .entry(source)
+                    .or_default()
+                    .insert(*identity);
+            }
+        }
+        let family = closure(&BTreeSet::from([session_id]), &clone_neighbours);
+        let mut link_cache: BTreeMap<Uuid, BTreeSet<Uuid>> = BTreeMap::new();
+        let mut links_of = |identity: Uuid| -> Result<BTreeSet<Uuid>, StoreError> {
+            if let Some(links) = link_cache.get(&identity) {
+                return Ok(links.clone());
+            }
+            let mut links = children.get(&identity).cloned().unwrap_or_default();
+            let path = session_path(chats_root, project_key, identity);
+            for event in Store::read_events(&path)? {
+                if let StoreEvent::SubagentStart { id, .. }
+                | StoreEvent::SubagentResult { id, .. } = event
+                {
+                    // Only transcript identities are descendants.
+                    if headers
+                        .get(&id)
+                        .is_some_and(|meta| meta.parent_session.is_some())
+                    {
+                        links.insert(id);
+                    }
+                }
+            }
+            link_cache.insert(identity, links.clone());
+            Ok(links)
+        };
+        let mut retained = BTreeSet::new();
+        let mut pending: Vec<Uuid> = family
+            .iter()
+            .copied()
+            .filter(|identity| *identity != session_id && headers.contains_key(identity))
+            .collect();
+        retained.extend(pending.iter().copied());
+        while let Some(identity) = pending.pop() {
+            for linked in links_of(identity)? {
+                if retained.insert(linked) {
+                    pending.push(linked);
+                }
+            }
+        }
+        let mut reached = BTreeSet::from([session_id]);
+        let mut pending = vec![session_id];
+        while let Some(identity) = pending.pop() {
+            for linked in links_of(identity)? {
+                if reached.insert(linked) {
+                    pending.push(linked);
+                }
+            }
+        }
+        let mut report = MaintenanceReport::default();
+        let mut group = BTreeSet::new();
+        for identity in reached {
+            if retained.contains(&identity) {
+                report
+                    .notices
+                    .push(format!("retained shared descendant {identity}"));
+            } else if headers.contains_key(&identity) || identity == session_id {
+                group.insert(identity);
+            }
+        }
+        let result = process_group(
+            chats_root,
+            project_key,
+            &group,
+            &SessionSelection::Ids(vec![session_id]),
+            MaintenanceAction::Delete,
+            false,
+            &mut report,
+        );
+        if let Err(error) = result {
+            report.failures.push(error.to_string());
+        }
+        Ok(report)
+    }
+}
+
+/// Session headers of a project, read without parsing any transcript body.
+/// Files whose header is unreadable cannot be identified and are skipped.
+fn read_project_headers(
+    directory: &Path,
+) -> Result<BTreeMap<Uuid, super::SessionMeta>, StoreError> {
+    use std::io::BufRead;
+    let entries =
+        std::fs::read_dir(directory).map_err(|source| archive::io_error(directory, source))?;
+    let mut identities = BTreeSet::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if let Some(identity) = name
+            .strip_suffix(".jsonl")
+            .or_else(|| name.strip_suffix(".jsonl.gz"))
+            .or_else(|| name.strip_suffix(".meta.json"))
+            .and_then(|identity| Uuid::parse_str(identity).ok())
+        {
+            identities.insert(identity);
+        }
+    }
+    let mut headers = BTreeMap::new();
+    for identity in identities {
+        let path = directory.join(format!("{identity}.jsonl"));
+        let meta = if path.is_file() {
+            let mut first_line = String::new();
+            std::fs::File::open(&path)
+                .map(std::io::BufReader::new)
+                .and_then(|mut reader| reader.read_line(&mut first_line))
+                .ok()
+                .and_then(|_| serde_json::from_str::<StoreEvent>(first_line.trim_end()).ok())
+                .and_then(|event| match event {
+                    StoreEvent::Meta(meta) => Some(meta),
+                    _ => None,
+                })
+        } else {
+            std::fs::read(archive::metadata_path(&path))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<super::SessionMeta>(&bytes).ok())
+        };
+        if let Some(meta) = meta {
+            headers.insert(identity, meta);
+        }
+    }
+    Ok(headers)
+}
+
 fn closure(roots: &BTreeSet<Uuid>, links: &BTreeMap<Uuid, BTreeSet<Uuid>>) -> BTreeSet<Uuid> {
     let mut reached = roots.clone();
     let mut pending: Vec<_> = roots.iter().copied().collect();

@@ -160,6 +160,7 @@ async fn listing_groups_archived_and_nested_subagents_with_their_parents() {
             changed_at: format!("2026-01-{day:02}T00:00:00Z"),
             provider_connection: "mock".into(),
             model: "mock".into(),
+            parameters: Default::default(),
         };
         drop(store);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

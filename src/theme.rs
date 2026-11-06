@@ -98,6 +98,22 @@ themed_colors! {
     toast_fg_color(Color::White, Color::White);
     notice_color(Color::Cyan, LIGHT_TEAL);
 
+    // Status popup usage bar: one colour per segment, cycled in order, plus
+    // the unused remainder of the context window.
+    status_segment_blue_color(Color::Blue, Color::Blue);
+    status_segment_green_color(Color::Green, Color::Green);
+    status_segment_yellow_color(Color::Yellow, LIGHT_AMBER);
+    status_segment_magenta_color(Color::Magenta, Color::Magenta);
+    status_segment_cyan_color(Color::Cyan, LIGHT_TEAL);
+    status_segment_red_color(Color::Red, Color::Red);
+    status_segment_orange_color(Color::Rgb(255, 140, 0), Color::Rgb(200, 90, 0));
+    status_segment_lime_color(Color::Rgb(150, 220, 60), Color::Rgb(70, 130, 0));
+    status_segment_violet_color(Color::Rgb(150, 120, 255), Color::Rgb(100, 70, 200));
+    status_segment_pink_color(Color::Rgb(255, 105, 180), Color::Rgb(190, 40, 110));
+    status_segment_mint_color(Color::Rgb(64, 224, 170), Color::Rgb(0, 130, 95));
+    status_segment_brown_color(Color::Rgb(190, 140, 90), Color::Rgb(120, 80, 40));
+    status_free_segment_color(Color::DarkGray, Color::DarkGray);
+
     // General content and status palette.
     content_color(Color::White, Color::Black);
     muted_text_color(Color::DarkGray, Color::DarkGray);

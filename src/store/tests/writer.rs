@@ -438,8 +438,8 @@ async fn record_model_changed_persists_every_switch_independent_of_meta() {
     )
     .expect("store created");
 
-    store.record_model_changed("openrouter", "gpt-4o");
-    store.record_model_changed("openrouter", "gpt-4o-mini");
+    store.record_model_changed("openrouter", "gpt-4o", &Default::default());
+    store.record_model_changed("openrouter", "gpt-4o-mini", &Default::default());
     store.flush().await;
 
     let events = read_events(store.path());
@@ -592,6 +592,7 @@ async fn a_failed_reopen_after_title_rewrite_fails_the_writer_closed() {
         changed_at: "2026-01-01T00:00:00Z".into(),
         provider_connection: "mock".into(),
         model: "other".into(),
+        parameters: Default::default(),
     });
     assert_eq!(std::fs::read(&path).unwrap(), published);
     let error = writer.set_title("Another title").unwrap_err().to_string();

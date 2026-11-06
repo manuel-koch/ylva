@@ -27,7 +27,7 @@ struct RunState {
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<(u64, AgentEvent)>,
     parent_cancel: Option<CancellationToken>,
-    system_prompt: Option<String>,
+    system_prompt: Option<SystemPromptOrigins>,
     own_run_id: Option<Uuid>,
     subagent_manager: Option<crate::subagent_manager::SubagentManager>,
     max_tool_iterations: usize,
@@ -56,6 +56,7 @@ struct RunState {
     iteration_cap_exceeded: Option<String>,
     stream_error: Option<String>,
     session_switch_frozen: bool,
+    finished_status: Option<crate::agent::FinishedStatusRegistry>,
     execution_span: tracing::Span,
 }
 
@@ -67,6 +68,15 @@ enum LoopControl {
 }
 
 impl RunState {
+    /// Consume the state at loop exit, publishing a subagent's final status
+    /// snapshot first and returning its context.
+    fn into_final_context(self) -> Context {
+        if let (Some(registry), Some(run_id)) = (&self.finished_status, self.own_run_id) {
+            registry.insert(run_id, self.status_snapshot(None));
+        }
+        self.context
+    }
+
     fn session_switch_quiescent(&self) -> bool {
         !self.is_subagent
             && self.mode == AgentMode::Idle
@@ -177,6 +187,7 @@ impl AgentLoop {
         let startup_compaction_checks = std::mem::take(&mut self.startup_compaction_checks);
         let agent_type = self.agent_type.clone();
         let store = self.store.clone();
+        let finished_status = self.finished_status.take();
         let session_id = self.session_id;
         let current_store = Arc::clone(&self.current_store);
         // Retained past `Context::set_store` so `AgentCommand::ClearContext`
@@ -202,8 +213,8 @@ impl AgentLoop {
             .unwrap_or_else(|| parent_span.clone());
 
         tokio::spawn(async move {
-            let mut context = match system_prompt.as_deref() {
-                Some(system_prompt) => Context::with_system_prompt(system_prompt),
+            let mut context = match system_prompt.as_ref() {
+                Some(system_prompt) => Context::with_system_prompt(system_prompt.render()),
                 None => Context::new(),
             };
             // Pick the common local estimate before hydration, so counts
@@ -363,6 +374,7 @@ impl AgentLoop {
                 iteration_cap_exceeded,
                 stream_error,
                 session_switch_frozen: false,
+                finished_status,
                 execution_span: parent_span.clone(),
             };
 
@@ -397,7 +409,7 @@ impl AgentLoop {
                 Some((event_generation, event)) = agent_rx.recv() => {
                 match state.handle_agent_event(event_generation, event).instrument(session_span.clone()).await {
                 LoopControl::PollAgain => continue,
-                LoopControl::Finished => return Ok(state.context),
+                LoopControl::Finished => return Ok(state.into_final_context()),
                 LoopControl::CheckCompletion => {}
                 }
                 }
@@ -411,7 +423,7 @@ impl AgentLoop {
                 }
                 match state.handle_subagent_finish(finish_result).instrument(session_span.clone()).await {
                 LoopControl::PollAgain => continue,
-                LoopControl::Finished => return Ok(state.context),
+                LoopControl::Finished => return Ok(state.into_final_context()),
                 LoopControl::CheckCompletion => {}
                 }
                 }
@@ -430,7 +442,7 @@ impl AgentLoop {
                                             }
                                             state.pending_tools.clear();
                                             state.pending_steers.clear();
-                                            return Ok(state.context);
+                                            return Ok(state.into_final_context());
                                         }
                 outcome = compaction_rx.recv() => {
                                             // A background summary finished (or failed). The
@@ -486,7 +498,7 @@ impl AgentLoop {
                 cmd = cmd_rx.recv() => {
                 match state.handle_command(cmd).instrument(session_span.clone()).await {
                 LoopControl::PollAgain => continue,
-                LoopControl::Finished => return Ok(state.context),
+                LoopControl::Finished => return Ok(state.into_final_context()),
                 LoopControl::CheckCompletion => {}
                 }
                 }
@@ -536,7 +548,7 @@ impl AgentLoop {
                     if let Some(message) = state.iteration_cap_exceeded.take() {
                         return Err(anyhow::anyhow!(message));
                     }
-                    return Ok(state.context);
+                    return Ok(state.into_final_context());
                 }
             }
         })

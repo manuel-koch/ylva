@@ -133,6 +133,9 @@ pub struct AppState {
     // ── agents popup ────────────────────────────────────────────────────────
     pub agents_popup: AgentsPopupState,
 
+    // ── status popup ────────────────────────────────────────────────────────
+    pub status_popup: StatusPopupState,
+
     // ── clarify banner ───────────────────────────────────────────────────────
     pub clarify_banner_state: ClarifyBannerState,
 
@@ -343,6 +346,8 @@ impl AppState {
             help_popup: HelpPopupState::default(),
 
             agents_popup: AgentsPopupState::default(),
+
+            status_popup: StatusPopupState::default(),
 
             clarify_banner_state: ClarifyBannerState::default(),
 

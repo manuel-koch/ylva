@@ -363,13 +363,12 @@ without losing anything the user can still read.
 Ylva totals the cost that the provider itself reports for completed model
 requests during one run.
 
-- **What counts.** Only provider-reported costs; there are no price tables and
-  no token-based estimates. Currently OpenRouter reports a cost (USD,
-  `usage.cost`), EdenAI one (USD, top-level `cost`) and Copilot one in AI credits (`AIC`,
-  `usage.copilot_usage.total_nano_aiu`); Ollama (local and Cloud) and plain OpenAI-compatible
-  providers report none and contribute nothing; see
-  [provider notes](./provider-notes.md#usage-and-cost-reporting). Root, subagent, session-title and compaction requests all
-  count, including requests that failed or were cancelled after the provider
+- **What counts.** Only provider-reported costs; there are no price tables and no token-based
+  estimates. Currently OpenRouter reports a cost (USD, `usage.cost`), EdenAI one (USD, top-level
+  `cost`) and Copilot one in AI credits (`AIC`, `usage.copilot_usage.total_nano_aiu`); Ollama (local
+  and Cloud) and plain OpenAI-compatible providers report none and contribute nothing; see
+  [provider notes](./provider-notes.md#usage-and-cost-reporting). Root, subagent, session-title and
+  compaction requests all count, including requests that failed or were cancelled after the provider
   reported a cost.
 - **Scope.** The total spans the whole process, is kept separately per
   currency, and is not reset by `/clear` or a session switch. It is never
@@ -429,64 +428,52 @@ selection is rejected before any model, reasoning, window, modality or active
 engine state changes, and a chat request with a disallowed (or, under a
 restriction, unbound) model fails before anything is sent.
 
-Named provider connections are constructed independently, so multiple
-connections can use the same implementation (for example, local Ollama and
-Ollama-Cloud). The conversation footer shows the active named engine and model
-while the live configuration equals the engine's configured baseline (model,
-reasoning effort, context-length override, output-limit override); once a
-`/models` pick or parameter edit deviates, it shows
-`provider_connection → model` instead, and the compaction switch notice names
-`provider_connection/model` likewise. Direct unnamed engines show only the
-model. `/models` queries each connection once, reuses a successful result
-for 30 minutes within the run (failures are retried on the next `/models`),
-and lists configured named
-engine shortcuts before favorite models and the remaining raw
-`provider_connection/model` catalog entries. Favorite membership is an exact,
-case-sensitive provider-connection preference saved with ctrl-f from the
-highlighted row in either the list or parameter popup; it does not switch the
-model or alter parameter drafts. Favorites not currently returned by discovery
-remain configured but are hidden. Groups are introduced by non-selectable,
-underlined `Engines`, `Favorites` and `Models` headers; favorites are marked
-with `⚑`, and model names stay aligned with or without it. Favorites keep their
-configured order within each connection.
-Partial catalog outages retain available choices and add a notice naming failed
-connections; total outages continue to show available named-engine shortcuts.
-Selecting a shortcut activates that exact engine's current Engine runtime settings,
-even when another engine uses the same connection and model. A raw catalog
-entry keeps provider-based routing: it changes the active engine for its
-connection, or the deterministic representative engine for another connection.
-Engine rows whose settings the connection's catalog does not advertise get extra
-detail segments and render in the theme's orange warning colour; they stay selectable. The picker title
-shows the number of rows, as `(visible/total)` while the filter hides some.
-`model not in catalog` replaces all other warnings when the catalog lacks the model;
-otherwise `context not advertised` and `max output not advertised` mean the configured
-value exceeds the catalog's limit, and `reasoning not advertised` means the configured
-effort is rejected by the provider's reasoning policy (efforts accepted as unverified
-keep their `(unverified)` label instead).
-Nothing is flagged for a limit the catalog does not state. The same warnings appear
-as an orange `⚠️` transcript notice (`Engine '<name>' has settings the provider
-catalog does not advertise: …`) after applying a named engine and once shortly after
-startup when a named engine is active; an unreachable catalog produces no warning.
-The startup check also covers an explicit `utility_engine`, an explicit compaction
-engine, and each agent type's explicit `engine` and `compaction.engine` (`Utility
-engine '<name>' …`, `Compaction engine '<name>' …`, `Agent '<type>' engine '<name>' …`,
-`Agent '<type>' compaction engine '<name>' …`); engines that follow the conversation
-engine are already covered; roles sharing one engine each get their own notice.
-The picker detail previews the provider-connection/model and effective context
-window compaction will use for the highlighted selection, without repeating
-the active conversation engine and model already shown in the TUI footer. It
-uses the form `Compaction uses <provider_connection>/<model>, context: <window>`.
-The detail turns orange when a fixed compaction engine would retain a
-different effective context window than the highlighted choice, including
-raw catalog models from the same provider connection. A different
-provider connection or model alone does not indicate a context-window mismatch.
-While the parameter popup is open, the detail uses the popup's edited context
-length, so it previews the window before `enter` confirms it; `esc` restores
-the stored window.
-Compaction that follows the conversation selection shows the resulting pair
-without a mismatch warning. Explicit compaction keeps its configured model and
-window across selections, even with the same engine name. Switch notices describe the resulting
-compaction-engine selection.
+Named provider connections are constructed independently, so multiple connections can use the same
+implementation (for example, local Ollama and Ollama-Cloud). The conversation footer shows the
+active named engine and model while the live configuration equals the engine's configured baseline
+(model, reasoning effort, context-length override, output-limit override); once a `/models` pick or
+parameter edit deviates, it shows `provider_connection → model` instead, and the compaction switch
+notice names `provider_connection/model` likewise. Direct unnamed engines show only the model.
+`/models` queries each connection once, reuses a successful result for 30 minutes within the run
+(failures are retried on the next `/models`), and lists configured named engine shortcuts before
+favorite models and the remaining raw `provider_connection/model` catalog entries. Favorite
+membership is an exact, case-sensitive provider-connection preference saved with ctrl-f from the
+highlighted row in either the list or parameter popup; it does not switch the model or alter
+parameter drafts. Favorites not currently returned by discovery remain configured but are hidden.
+Groups are introduced by non-selectable, underlined `Engines`, `Favorites` and `Models` headers;
+favorites are marked with `⚑`, and model names stay aligned with or without it. Favorites keep their
+configured order within each connection. Partial catalog outages retain available choices and add a
+notice naming failed connections; total outages continue to show available named-engine shortcuts.
+Selecting a shortcut activates that exact engine's current Engine runtime settings, even when
+another engine uses the same connection and model. A raw catalog entry keeps provider-based routing:
+it changes the active engine for its connection, or the deterministic representative engine for
+another connection. Engine rows whose settings the connection's catalog does not advertise get extra
+detail segments and render in the theme's orange warning colour; they stay selectable. The picker
+title shows the number of rows, as `(visible/total)` while the filter hides some.
+`model not in catalog` replaces all other warnings when the catalog lacks the model; otherwise
+`context not advertised` and `max output not advertised` mean the configured value exceeds the
+catalog's limit, and `reasoning not advertised` means the configured effort is rejected by the
+provider's reasoning policy (efforts accepted as unverified keep their `(unverified)` label
+instead). Nothing is flagged for a limit the catalog does not state. The same warnings appear as an
+orange `⚠️` transcript notice
+(`Engine '<name>' has settings the provider catalog does not advertise: …`) after applying a named
+engine and once shortly after startup when a named engine is active; an unreachable catalog produces
+no warning. The startup check also covers an explicit `utility_engine`, an explicit compaction
+engine, and each agent type's explicit `engine` and `compaction.engine`
+(`Utility engine '<name>' …`, `Compaction engine '<name>' …`, `Agent '<type>' engine '<name>' …`,
+`Agent '<type>' compaction engine '<name>' …`); engines that follow the conversation engine are
+already covered; roles sharing one engine each get their own notice. The picker detail previews the
+provider-connection/model and effective context window compaction will use for the highlighted
+selection, without repeating the active conversation engine and model already shown in the TUI
+footer. It uses the form `Compaction uses <provider_connection>/<model>, context: <window>`. The
+detail turns orange when a fixed compaction engine would retain a different effective context window
+than the highlighted choice, including raw catalog models from the same provider connection. A
+different provider connection or model alone does not indicate a context-window mismatch. While the
+parameter popup is open, the detail uses the popup's edited context length, so it previews the
+window before `enter` confirms it; `esc` restores the stored window. Compaction that follows the
+conversation selection shows the resulting pair without a mismatch warning. Explicit compaction
+keeps its configured model and window across selections, even with the same engine name. Switch
+notices describe the resulting compaction-engine selection.
 
 Model discovery shows whether reasoning is supported, unsupported, or unknown, and
 which effort choices are available. Some reasoning-capable models expose no adjustable
@@ -1104,9 +1091,9 @@ for the full mechanics.
   bare `enter` or `esc`
   never resolves an approval: `tab`/`shift-tab` focus a button (idle
   buttons are outlined in their colour; only the focused or hovered one is
-  drawn filled, so a freshly shown prompt has no apparent selection; the
-  last input device wins: `tab` clears the mouse hover highlight and moving
-  the mouse drops keyboard focus) and
+  drawn filled, so a freshly shown prompt has no apparent selection; focus
+  always wins over hover: moving the mouse never drops keyboard focus, and
+  `tab` clears the mouse hover highlight) and
   `enter` activates only the focused one. Approve
   leaves the input text alone (it is dimmed while Approve is focused, as a
   hint it is not used); Deny sends the input text as the reason and clears
@@ -1467,33 +1454,41 @@ list and discards the parameter edits. `esc` in the list cancels and clears the 
 | --- | --- | --- |
 | `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights; a double-click acts like `enter`); page keys move by a page; `enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |
-| `/session` | Opens the recent-session picker in either conversation view. Select Resume or Clone, then confirm a root session. | Transient; activation and subsequent work use the selected persisted identity |
+| `/session` | Opens the recent-session picker in either conversation view. Focus Resume, Clone, or Delete, then activate it on a root session. | Transient; activation and subsequent work use the selected persisted identity |
 | `/agents` | Opens the Agents popup (same as `ctrl-x a`); available while busy and in either conversation view. | Transient |
+| `/status` | Opens a modal Status popup (also `ctrl-x s`, from any focus) for the viewed agent (root or drilled-in subagent): a "Current setup" section (agent type, engine, provider connection, model with configured parameters, and allowed tools, tools sorted by call count, then name, each used tool followed by its call count in parentheses; calls to tools that are not allowed are not listed), and estimated context usage as percentages of the effective context window (the title shows the used and free share of the window; two stacked bars, one relative to the window and one relative to the used context, plus a titled table by origin with `% window`, `% used` and `Tokens` columns (the `% window` column is dropped first on narrow terminals) and the free remainder). A History section lists model changes (with the parameters that changed) and compactions (estimated tokens before, after and reduction) in order as text lines with their UTC date and time, plus the average reduction. A finished subagent can be inspected too: within the live session its exact final status is kept; after a resume its status is rebuilt from the persisted transcript (without system prompt and tool schemas, which are not recorded; allowed tools come from the subagent transcript header, so transcripts written before that was recorded list none). Left-drag selects text; releasing copies it to the clipboard. Available while busy. Context groups: system prompt (soul layer, trusted instruction files by sentinel source, persona, skills), tool schemas, compaction summary, user messages, assistant messages, tool calls and results. Token figures are advisory estimates. The popup is the terminal width minus six columns wide and uses the full height of the conversation list and scrolls with a scrollbar, separated from the text by one column, when the content overflows. | Transient |
 | `/compact` | Requests a useful completed-prefix summary in the root conversation, regardless of automatic thresholds. | Transient outcomes; an applied summary is persisted |
 
 `/session` and `/compact` are TUI-only; they do not change headless CLI parsing
 or session maintenance commands. The session picker is available only within
 a running TUI, not at startup.
 
-`/session` lists recent **root sessions** in the active store's
+`/session` lists **root sessions** in the active store's
 launch-directory group, excluding the active session and subagent transcripts.
-It includes archives, clones, and empty sessions.
+It includes archives and clones; sessions without any message are hidden (and are discarded
+when the session that created them ends).
 Newest persisted activity comes first, with descending UUID as the tie-breaker.
 Rows show local date/time with a UTC offset before the sanitized title;
-empty titles display `Untitled`. The fixed limit adds no configuration key.
+empty titles display `Untitled`.
 Browsing is allowed while busy, but activation requires root work, queued
 steers, queued/running subagents, and running/pending compaction to be quiescent.
 
-The popup title is `Sessions`; styled Resume/Clone buttons highlight the selected
-action. Keybinding hints appear only in the TUI footer. The popup shows status
-or errors only when relevant, without repeating footer controls.
-Each open starts in **Resume**. `Left`/`Right` or clicking the action selects
-Resume/Clone; arrows, page keys, and wheel navigate; clicking a row only
-highlights it. `enter` or a double-click on a row confirms. Loading and `Resuming`/`Cloning` remain
-responsive to cancellation and quit; other mutations are blocked during
-preparation. `esc` dismisses and clears the draft without changing the
-conversation. Selection errors keep the picker, chosen action, and old view.
-Cancelled or superseded results never activate a target.
+The popup title is `Sessions`; the *Resume* and *Clone* buttons are green and the *Delete*
+button is red.
+The focused button is filled; hovering another button lightens it but never takes the focus away.
+Keybinding hints appear only in the TUI footer. The popup shows status or errors only when relevant,
+without repeating footer controls. Each open focuses **Resume**. `Tab`/`Shift-Tab` move button focus
+(keyboard focus overrides any mouse hover highlight); arrows, page keys, and wheel navigate rows.
+`enter` activates the focused button on the highlighted row, a click on a button activates it on the
+highlighted row, and a double-click on a row acts like `enter`; a single click on a row only
+highlights it. *Delete* removes the highlighted root session and its subagent transcripts from
+disk (no confirmation; it must be focused first, and focus returns to *Resume* afterwards) and drops
+it from the list; subagent transcripts still referenced by a clone of the session are kept. A
+refused or failed deletion keeps the row and shows the error. Loading,
+`Resuming`/`Cloning`, and `Deleting` remain responsive to cancellation and quit; other mutations are
+blocked during the operation. `esc` dismisses and clears the draft without changing the
+conversation. Selection errors keep the picker, focused button, and old view. Cancelled or
+superseded results never activate a target.
 
 Activation restores the stored root agent type (`default` for legacy sessions)
 and constructs fresh conversation engines from that type's **current profile**
@@ -1506,7 +1501,8 @@ A clone durably created before cancellation or activation failure is retained
 and reported as `Clone created but not activated: <id>`, including after
 terminal restoration on quit.
 
-`/compact` refuses explicitly from every subagent view. It immediately
+`/compact` is not offered in the slash suggestions of a subagent view; typing
+it there still refuses explicitly, with the notice shown in that subagent view. It immediately
 snapshots an eligible completed prefix, even while the root is busy, retaining
 the latest explicit task and every subsequent message verbatim. Queued steers
 are not yet part of that snapshot. An unchanged/one-task/empty context produces

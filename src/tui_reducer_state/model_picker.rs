@@ -14,13 +14,15 @@
 
 //! Model picker state and operations.
 
-use super::{AppState, BannerDragSelection, Focus};
+use super::{AppState, BannerDragSelection, ConversationView, Focus};
 use crate::llm::engine::{
     ModelSelection, ModelSelectionTarget, ProviderModelOption, ReasoningEffortChange,
 };
 use crate::llm::token_estimate::format_token_estimate;
 use crate::llm::InputModality;
-use crate::slash_command::{slash_command_suggestions, SlashCommandInfo, MODELS_COMMAND_NAME};
+use crate::slash_command::{
+    slash_command_suggestions, SlashCommand, SlashCommandInfo, MODELS_COMMAND_NAME,
+};
 
 // ─── slash-command overlay ───────────────────────────────────────────────────
 
@@ -1113,7 +1115,11 @@ impl AppState {
         ) {
             return;
         }
-        let suggestions = slash_command_suggestions(draft);
+        let mut suggestions = slash_command_suggestions(draft);
+        if matches!(self.active_view, ConversationView::Subagent { .. }) {
+            // Manual compaction only exists for the root conversation.
+            suggestions.retain(|info| info.command != SlashCommand::Compact);
+        }
         if suggestions.is_empty() {
             self.slash_overlay = SlashOverlay::Hidden;
             return;

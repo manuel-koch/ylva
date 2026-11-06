@@ -27,6 +27,7 @@ pub const MODELS_COMMAND_NAME: &str = "/models";
 pub const COMPACT_COMMAND_NAME: &str = "/compact";
 pub const SESSION_COMMAND_NAME: &str = "/session";
 pub const AGENTS_COMMAND_NAME: &str = "/agents";
+pub const STATUS_COMMAND_NAME: &str = "/status";
 
 /// A recognized slash command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +42,8 @@ pub enum SlashCommand {
     Compact,
     /// Open the agents popup listing the root and all subagent runs.
     Agents,
+    /// Open the status popup: engine, agent type and context usage by origin.
+    Status,
 }
 
 /// Static description of one entry in the slash-command allowlist.
@@ -105,6 +108,13 @@ pub const SLASH_COMMANDS: &[SlashCommandInfo] = &[
         aliases: &[],
         description: "List subagents and switch to one",
         command: SlashCommand::Agents,
+        accepts_argument: false,
+    },
+    SlashCommandInfo {
+        name: STATUS_COMMAND_NAME,
+        aliases: &[],
+        description: "Show engine, agent type and context usage",
+        command: SlashCommand::Status,
         accepts_argument: false,
     },
 ];
@@ -193,6 +203,7 @@ mod tests {
             ("/session", SlashCommand::Session),
             ("/compact", SlashCommand::Compact),
             ("/agents", SlashCommand::Agents),
+            ("/status", SlashCommand::Status),
         ] {
             assert_eq!(parse_slash_command(name), Some(command));
             assert_eq!(parse_slash_command(&format!("{name} \n")), Some(command));
@@ -258,7 +269,7 @@ mod tests {
         let suggestions = slash_command_suggestions("/");
         assert_eq!(
             suggestions.iter().map(|info| info.name).collect::<Vec<_>>(),
-            ["/clear", "/models", "/compact", "/session", "/agents", "/reset"]
+            ["/clear", "/models", "/compact", "/session", "/agents", "/status", "/reset"]
         );
         for suggestion in suggestions {
             assert_eq!(
@@ -266,6 +277,13 @@ mod tests {
                 Some(suggestion.command)
             );
         }
+    }
+
+    #[test]
+    fn a_status_prefix_suggests_only_status() {
+        let suggestions = slash_command_suggestions("/st");
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].command, SlashCommand::Status);
     }
 
     #[test]

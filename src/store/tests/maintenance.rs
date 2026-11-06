@@ -33,7 +33,7 @@ async fn before_is_revalidated_after_a_selected_session_is_used_again() {
     let summary = Store::list_sessions(&chats_root, &key).unwrap().remove(0);
     assert!(chrono::DateTime::parse_from_rfc3339(&summary.last_used_at).unwrap() < before);
     let resumed = Store::resume(&chats_root, directory.path(), identity).unwrap();
-    resumed.record_model_changed("mock", "mock");
+    resumed.record_model_changed("mock", "mock", &Default::default());
     resumed.flush().await;
     drop(resumed);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -182,8 +182,12 @@ async fn deletion_retains_clone_shared_subagents_and_never_cascades_clones() {
     root.record_subagent_start(run_id, Uuid::new_v4(), "default", "task", "label");
     root.write_subagent_transcript_for_run(
         run_id,
-        Some(("mock", "mock")),
+        &SubagentSessionHeader {
+            provider_connection_and_model: Some(("mock".to_string(), "mock".to_string())),
+            ..Default::default()
+        },
         &[user_message("subagent task")],
+        &[],
     )
     .await
     .unwrap();
@@ -235,6 +239,91 @@ async fn deletion_retains_clone_shared_subagents_and_never_cascades_clones() {
     assert!(report.failures.is_empty());
     assert!(!subagent_path.exists());
     assert!(!clone_path.exists());
+}
+
+#[tokio::test]
+async fn single_session_delete_keeps_clone_shared_subagents_and_ignores_unrelated_corruption() {
+    let (directory, chats_root, identity, path, _bytes) = super::archive::fixture().await;
+    let root = Store::resume(&chats_root, directory.path(), identity).unwrap();
+    let run_id = Uuid::new_v4();
+    root.record_subagent_start(run_id, Uuid::new_v4(), "default", "task", "label");
+    root.write_subagent_transcript_for_run(
+        run_id,
+        &SubagentSessionHeader {
+            provider_connection_and_model: Some(("mock".to_string(), "mock".to_string())),
+            ..Default::default()
+        },
+        &[user_message("subagent task")],
+        &[],
+    )
+    .await
+    .unwrap();
+    root.flush().await;
+    drop(root);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let clone = Store::clone_session(&chats_root, directory.path(), identity, None).unwrap();
+    let clone_id = clone.session_id();
+    let clone_path = clone.path().to_path_buf();
+    clone.flush().await;
+    drop(clone);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let key = project_key(directory.path());
+    let subagent_path = session_path(&chats_root, &key, run_id);
+    let corrupt_path = session_path(&chats_root, &key, Uuid::new_v4());
+    std::fs::write(&corrupt_path, "not json\n").unwrap();
+
+    let report = Store::delete_session_family(&chats_root, &key, identity).unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert!(report
+        .notices
+        .iter()
+        .any(|notice| notice.contains("retained shared")));
+    assert!(!path.exists());
+    assert!(clone_path.exists());
+    assert!(subagent_path.exists());
+
+    let report = Store::delete_session_family(&chats_root, &key, clone_id).unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert!(!clone_path.exists());
+    assert!(!subagent_path.exists());
+    assert!(corrupt_path.exists());
+}
+
+#[tokio::test]
+async fn discard_if_empty_removes_only_sessions_without_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let chats_root = directory.path();
+    let key = project_key(directory.path());
+    let create = || {
+        Store::create(
+            chats_root,
+            directory.path(),
+            Uuid::new_v4(),
+            "mock",
+            "mock",
+            None,
+        )
+        .unwrap()
+    };
+
+    let empty = create();
+    empty.record_model_changed("mock", "other", &Default::default());
+    assert!(empty.discard_if_empty());
+    assert!(!archive::transcript_exists(empty.path()));
+    assert!(!empty.path().with_extension("lock").exists());
+
+    let used = create();
+    used.record_message(&user_message("hello"));
+    assert!(!used.discard_if_empty());
+    used.flush().await;
+    assert!(used.path().exists());
+
+    let resumed = Store::resume(chats_root, directory.path(), used.session_id());
+    drop(used);
+    drop(resumed);
+    let (summaries, _) = Store::list_sessions_with_diagnostics(chats_root, &key).unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert!(summaries[0].has_messages);
 }
 
 #[tokio::test]
@@ -372,9 +461,14 @@ async fn concurrent_clone_and_deletion_never_leave_a_surviving_clone_without_its
         let root = Store::resume(&chats_root, directory.path(), identity).unwrap();
         let subagent_id = Uuid::new_v4();
         root.record_subagent_start(subagent_id, Uuid::new_v4(), "default", "task", "label");
-        root.write_subagent_transcript_for_run(subagent_id, None, &[user_message("subagent task")])
-            .await
-            .unwrap();
+        root.write_subagent_transcript_for_run(
+            subagent_id,
+            &Default::default(),
+            &[user_message("subagent task")],
+            &[],
+        )
+        .await
+        .unwrap();
         root.flush().await;
         drop(root);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

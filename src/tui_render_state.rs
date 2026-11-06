@@ -87,6 +87,23 @@ pub struct AgentsPopupRenderState {
     pub visible_rows: usize,
 }
 
+/// Status popup (`/status`) render state.
+#[derive(Default)]
+pub struct StatusPopupRenderState {
+    pub snapshot: Option<crate::agent::StatusSnapshot>,
+    /// Clamped by `draw_status_popup` each frame.
+    pub scroll_offset: usize,
+    /// Written each frame for click-outside hit-testing; zero-sized when hidden.
+    pub popup_rect: ratatui::layout::Rect,
+    /// Content rows that fit in the popup.
+    pub visible_rows: usize,
+    /// Text area written each frame for selection hit-testing.
+    pub content_area: ratatui::layout::Rect,
+    /// Plain text of every content line, written each frame.
+    pub rendered_lines: Vec<String>,
+    pub selection: Option<crate::tui_reducer_state::ChatSelection>,
+}
+
 /// Drill-in subagent-view header bubble render state.
 pub struct SubagentViewState {
     /// Set when the drill-in view (`AppState::active_view ==
@@ -309,6 +326,7 @@ pub struct TuiState {
     // ── help popup ──────────────────────────────────────────────────────────
     pub help_popup: HelpPopupState,
     pub agents_popup: AgentsPopupRenderState,
+    pub status_popup: StatusPopupRenderState,
 
     // ── clarify banner ───────────────────────────────────────────────────────
     pub clarify_banner_state: ClarifyBannerState,
@@ -373,6 +391,7 @@ impl TuiState {
                 help_drag_active: false,
             },
             agents_popup: AgentsPopupRenderState::default(),
+            status_popup: StatusPopupRenderState::default(),
             clarify_banner_state: ClarifyBannerState {
                 pending_clarify: None,
                 clarify_scroll_offset: 0,

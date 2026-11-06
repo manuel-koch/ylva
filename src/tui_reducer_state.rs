@@ -44,6 +44,7 @@ mod pasted_blobs;
 mod prompt;
 mod selection;
 mod session_picker;
+mod status_popup;
 
 pub use agents_popup::{
     AgentRow, AgentRowKey, AgentRowStatus, AgentsPopupState, AGENTS_POPUP_ROOT_LABEL,
@@ -60,7 +61,7 @@ pub use events::{ConfirmKey, DomainEvent, Effect, Focus, InputEvent, TuiMode};
 pub use input_history::HistoryDirection;
 pub use layout::{
     AgentsPopupLayout, AppLayout, ChatArea, ChatScrollbarLayout, HelpPopupLayout, InputArea,
-    InputAreaLayout, ParameterGlyphHit, SlashOverlayLayout,
+    InputAreaLayout, ParameterGlyphHit, SlashOverlayLayout, StatusPopupLayout,
 };
 pub(crate) use model_picker::{
     engine_choice_parts, extract_models_filter, matching_model_indices, model_choice_parts,
@@ -77,6 +78,7 @@ pub use pasted_blobs::{PastedBlob, PastedBlobs, LARGE_PASTE_CHAR_THRESHOLD};
 pub use prompt::{InputActivity, PromptButton, PROMPT_DEFERRAL_CAP, PROMPT_IDLE_DELAY};
 pub use selection::{BannerDragSelection, ChatSelection};
 pub use session_picker::{SessionAction, SessionChoice, SessionPicker, SessionPickerPhase};
+pub use status_popup::StatusPopupState;
 
 // ─── Shared TUI constants ────────────────────────────────────────────────────
 

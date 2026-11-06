@@ -32,6 +32,49 @@ impl RunState {
         }
     }
 
+    /// Read-only `/status` view of this agent.
+    pub(super) fn status_snapshot(
+        &self,
+        persisted_events: Option<Vec<crate::store::StoreEvent>>,
+    ) -> StatusSnapshot {
+        let display = crate::llm::EngineDisplayInfo::from_engine(self.engine.as_ref());
+        let config = self.engine.config();
+        let schemas = self.registry.schemas();
+        let breakdown = self.context.context_breakdown(
+            &schemas,
+            self.system_prompt.as_ref(),
+            self.engine.effective_context_length(),
+        );
+        let timeline = match persisted_events {
+            Some(events) => crate::agent::status_timeline::timeline_from_events(&events),
+            None => crate::agent::status_timeline::timeline_from_memory(
+                self.context.started_at(),
+                &display.provider_connection,
+                &display.model,
+                crate::store::ModelParameters::from_engine(self.engine.as_ref()),
+                self.context.compaction_history(),
+                self.context.compaction_recorded_at(),
+            ),
+        };
+        StatusSnapshot {
+            run_id: self.own_run_id,
+            engine_name: display.engine_name,
+            provider_connection: display.provider_connection,
+            model: display.model,
+            reasoning_effort: display.reasoning_effort,
+            temperature: config
+                .temperature
+                .map(|temperature| temperature.to_string()),
+            max_output_tokens: config.max_output_tokens,
+            agent_type: self.agent_type.clone(),
+            allowed_tools: schemas.into_iter().map(|schema| schema.name).collect(),
+            tool_call_counts: crate::agent::tool_call_counts(self.context.messages()),
+            breakdown,
+            timeline,
+            finished_subagent: false,
+        }
+    }
+
     pub(super) async fn handle_command(&mut self, cmd: Option<AgentCommand>) -> LoopControl {
         let Some(cmd) = cmd else {
             // AgentLoop dropped → cmd_tx closed → clean shutdown:
@@ -608,9 +651,9 @@ impl RunState {
                     }
                 }
                 self.mode = AgentMode::Idle;
-                let mut fresh_context = match self.system_prompt.as_deref() {
+                let mut fresh_context = match self.system_prompt.as_ref() {
                     Some(supplied_system_prompt) => {
-                        Context::with_system_prompt(supplied_system_prompt)
+                        Context::with_system_prompt(supplied_system_prompt.render())
                     }
                     None => Context::new(),
                 };
@@ -622,7 +665,10 @@ impl RunState {
                         None,
                         self.agent_type.as_deref(),
                     ) {
-                        Ok(new_store) => fresh_context.set_store(new_store),
+                        Ok(new_store) => {
+                            store.discard_if_empty();
+                            fresh_context.set_store(new_store)
+                        }
                         Err(error) => tracing::warn!(
                             %error,
                             "could not start a new session file; the cleared conversation is not persisted"
@@ -643,11 +689,12 @@ impl RunState {
             AgentCommand::RecordModelChanged {
                 provider_connection,
                 model,
+                parameters,
             } => {
                 // The common local baseline does not change
                 // across provider/model switches.
                 if let Some(store) = self.context.store() {
-                    store.record_model_changed(&provider_connection, &model);
+                    store.record_model_changed(&provider_connection, &model, &parameters);
                 }
                 self.model_change_capacity_check = Some(Box::pin(
                     self.compaction.capacity_warning(self.engine.clone()),
@@ -663,6 +710,20 @@ impl RunState {
                     ContextUsageSource::ModelView,
                 )
                 .await;
+            }
+            AgentCommand::RequestStatus => {
+                let persisted_events = match self.context.store() {
+                    Some(store) => {
+                        store.flush().await;
+                        crate::store::Store::read_events(store.path()).ok()
+                    }
+                    None => None,
+                };
+                let snapshot = self.status_snapshot(persisted_events);
+                let _ = self
+                    .ui_tx
+                    .send(UiUpdate::StatusSnapshot(Box::new(snapshot)))
+                    .await;
             }
             AgentCommand::ForSubagent { run_id, command } => {
                 // Only a root loop's `subagent_manager` can
@@ -686,6 +747,35 @@ impl RunState {
                             "AgentCommand::ForSubagent targets a run_id with no \
                              running subagent (already finished/cancelled); dropping"
                         );
+                        if matches!(*command, AgentCommand::RequestStatus) {
+                            let kept_snapshot = self
+                                .subagent_manager
+                                .as_ref()
+                                .and_then(|manager| manager.finished_status(run_id));
+                            if let Some(snapshot) = kept_snapshot {
+                                let _ = self
+                                    .ui_tx
+                                    .send(UiUpdate::StatusSnapshot(Box::new(snapshot)))
+                                    .await;
+                                return LoopControl::CheckCompletion;
+                            }
+                            let finished_state = self
+                                .context
+                                .store()
+                                .and_then(|store| store.read_subagent_session_state(run_id));
+                            let update = match finished_state {
+                                Some(state) => UiUpdate::StatusSnapshot(Box::new(
+                                    StatusSnapshot::from_finished_subagent(run_id, &state),
+                                )),
+                                None => UiUpdate::Notice {
+                                    text: "This subagent has finished and its transcript \
+                                           could not be read; no status available."
+                                        .to_string(),
+                                    run_id: Some(run_id),
+                                },
+                            };
+                            let _ = self.ui_tx.send(update).await;
+                        }
                     }
                 }
             }

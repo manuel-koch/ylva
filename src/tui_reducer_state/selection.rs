@@ -78,7 +78,7 @@ fn display_column_range(text: &str, start: usize, end: usize) -> String {
     selected
 }
 
-fn extract_selection_text(
+pub(super) fn extract_selection_text(
     selection: Option<&ChatSelection>,
     lines: &[String],
     prefix_widths: &[usize],

@@ -24,6 +24,7 @@ mod elapsed;
 mod footer;
 mod help;
 mod overlays;
+mod status_popup;
 mod tool_bubble;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -52,10 +53,11 @@ use chat::{
 };
 use footer::{
     agents_popup_footer_hints, draw_approval_prompt, draw_normal_footer, footer_keybinding_hints,
-    help_popup_footer_hints, APPROVAL_PROMPT_HEIGHT,
+    help_popup_footer_hints, status_popup_footer_hints, APPROVAL_PROMPT_HEIGHT,
 };
 use help::draw_help_popup;
 use overlays::{draw_clarify_banner, draw_clarify_buttons, draw_slash_overlay, draw_toast};
+use status_popup::draw_status_popup;
 use tool_bubble::{append_tool_bubble_lines, ToolBubbleArgs};
 
 pub(crate) struct ConversationSource<'a> {
@@ -695,7 +697,9 @@ fn draw_internal(
     let footer_source = conversation
         .as_ref()
         .map(|conversation| conversation.source);
-    let footer_hints = if state.agents_popup.show {
+    let footer_hints = if state.status_popup.snapshot.is_some() {
+        std::borrow::Cow::Borrowed(status_popup_footer_hints())
+    } else if state.agents_popup.show {
         std::borrow::Cow::Borrowed(agents_popup_footer_hints())
     } else if state.help_popup.show_help {
         std::borrow::Cow::Borrowed(help_popup_footer_hints(state))
@@ -731,6 +735,9 @@ fn draw_internal(
     }
     if state.agents_popup.show {
         draw_agents_popup(frame, state, input_area);
+    }
+    if state.status_popup.snapshot.is_some() {
+        draw_status_popup(frame, state);
     }
 
     // Dismiss any toast whose display window has elapsed, then render it.

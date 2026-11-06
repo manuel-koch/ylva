@@ -493,18 +493,16 @@ See [features](./features.md#cli-mode).
   process-wide ledger that providers use by default, so every engine (root,
   subagent, utility, compaction) shares one total without per-caller plumbing;
   providers accept an own ledger only for tests.
-- Reported costs are not part of the OpenAI Chat Completions protocol, so the
-  shared `OpenAiCompatibleProvider` transport only offers a `UsageCostParser`
-  hook (default: none) applied to every SSE payload, independent of
-  `parse_sse_payload` because usage-only frames have no choices.
-  `OpenRouterProvider` supplies the parser for its `usage.cost` field (USD) and
-  `CopilotProvider` for `usage.copilot_usage.total_nano_aiu` (AIC) and
-  `EdenAiProvider` for the top-level `cost` (USD, `usage.cost` accepted too);
-  Ollama and plain OpenAI-compatible providers report none. The first cost frame of a request is recorded
-  immediately, before the terminal stream event is sent, so the redraw that
-  follows completion already sees it, and so failed or cancelled streams keep
-  a cost already reported. Each record is logged at `debug` level (connection,
-  model, amount, currency).
+- Reported costs are not part of the OpenAI Chat Completions protocol, so the shared
+  `OpenAiCompatibleProvider` transport only offers a `UsageCostParser` hook (default: none) applied
+  to every SSE payload, independent of `parse_sse_payload` because usage-only frames have no
+  choices. `OpenRouterProvider` supplies the parser for its `usage.cost` field (USD) and
+  `CopilotProvider` for `usage.copilot_usage.total_nano_aiu` (AIC) and `EdenAiProvider` for the
+  top-level `cost` (USD, `usage.cost` accepted too); Ollama and plain OpenAI-compatible providers
+  report none. The first cost frame of a request is recorded immediately, before the terminal stream
+  event is sent, so the redraw that follows completion already sees it, and so failed or cancelled
+  streams keep a cost already reported. Each record is logged at `debug` level (connection, model,
+  amount, currency).
 - The TUI render state carries `cost_total_text`, read from the ledger on every
   redraw (no event of its own); the footer places it left of the context
   usage and drops it first when the row is narrow. In the narrow single-line
@@ -682,18 +680,15 @@ See [persistence](./persistence.md) for on-disk contracts.
   also drains queued subagent UI updates before handling a finish.
 - The TUI shows only the head of the FIFO approval queue; a subagent awaiting
   a later prompt stays blocked without pausing its siblings.
-- Prompt deferral (`tui_reducer_state/prompt.rs`): the presenter never reads the clock. The driver calls
-  `AppState::note_keystroke(Instant::now())` for input actions and a timer arm
-  sends `DomainEvent::TypingSettled` at `typing_settles_at()` (idle delay
-  `PROMPT_IDLE_DELAY`, capped by `PROMPT_DEFERRAL_CAP`). While
-  `is_typing()`, arriving approvals/clarifies only join the queue and
-  `resume_pending_tool_approval` is a no-op; `TypingSettled` releases the
-  head. `AppState::prompt_button_focus` holds the `PromptButton` focused by
-  `tab`; `enter` activates only that button. `PromptButton::GoToAgent` is
-  offered only when the prompt's owner is not the viewed conversation; the
-  owner is the conversation whose transcript holds the prompt's tool bubble.
-  `InputEvent::ParentView`
-  (`ctrl-x p`) navigates back from a subagent view and is otherwise
+- Prompt deferral (`tui_reducer_state/prompt.rs`): the presenter never reads the clock. The driver
+  calls `AppState::note_keystroke(Instant::now())` for input actions and a timer arm sends
+  `DomainEvent::TypingSettled` at `typing_settles_at()` (idle delay `PROMPT_IDLE_DELAY`, capped by
+  `PROMPT_DEFERRAL_CAP`). While `is_typing()`, arriving approvals/clarifies only join the queue and
+  `resume_pending_tool_approval` is a no-op; `TypingSettled` releases the head.
+  `AppState::prompt_button_focus` holds the `PromptButton` focused by `tab`; `enter` activates only
+  that button. `PromptButton::GoToAgent` is offered only when the prompt's owner is not the viewed
+  conversation; the owner is the conversation whose transcript holds the prompt's tool bubble.
+  `InputEvent::ParentView` (`ctrl-x p`) navigates back from a subagent view and is otherwise
   forwarded to the textarea as plain `ctrl-p` (cursor up).
 - **Double-click:** `DoubleClickTracker` is shared by the agents popup and
   the slash-overlay lists; the second click acts like `enter`.
@@ -791,22 +786,31 @@ terminal teardown and title restoration keep a fixed order.
   Per-character `input` re-wrapped the whole draft for every key
   (`push_history` → `screen_map_load`), making a paste O(n²) and freezing the
   single-threaded event loop (including ctrl-c) for large pastes.
-- Pastes above `LARGE_PASTE_CHAR_THRESHOLD` (1,000 chars, measured on the
-  dedented text) insert a one-line marker instead. `PastedBlobs`
-  (`tui_reducer_state/pasted_blobs.rs`, held in `AppState::pasted_blobs`)
-  stores marker → text; markers are numbered per draft. `Effect::SubmitPrompt`
-  expands markers still present verbatim before `dedent` and sends, then
-  clears the store; `ClearTextarea` clears it too. Approvals and clarifies
-  leave the draft and its blobs in place. History recall (`set_input_text`) never creates markers; history
-  entries are the expanded sent text.
+- Pastes above `LARGE_PASTE_CHAR_THRESHOLD` (1,000 chars, measured on the dedented text) insert a
+  one-line marker instead. `PastedBlobs` (`tui_reducer_state/pasted_blobs.rs`, held in
+  `AppState::pasted_blobs`) stores marker → text; markers are numbered per draft.
+  `Effect::SubmitPrompt` expands markers still present verbatim before `dedent` and sends, then
+  clears the store; `ClearTextarea` clears it too. Approvals and clarifies leave the draft and its
+  blobs in place. History recall (`set_input_text`) never creates markers; history entries are the
+  expanded sent text.
 - Continuous mouse motion (wheel scroll, drag, hover) is coalesced: when more
   actions are queued after such an event, the event loop skips the next frame
   (`skip_frame`), so a burst over a long draft, e.g. drag-selecting text,
   costs one frame instead of one per event. Presses and releases always draw.
-- Prompt-button hover and focus are mutually exclusive (last input device
-  wins): the event loop clears `mouse_pos` when a key action moves
-  `prompt_button_focus`, and clears `prompt_button_focus` on a `Moved` mouse
-  event that changes the pointer position.
+- Button hover never overrides focus, in every dialog that has buttons
+  (approval/clarify prompts, `/session`, `/models` parameter popup): the shared
+  `button_style` draws a focused button filled even when hovered, and the
+  event loop clears `mouse_pos` when a key action moves the focus
+  (`prompt_button_focus`, the session picker's action, or the parameter
+  cursor). Pointer motion leaves focus untouched.
+- The picker's *Delete* calls `Store::delete_session_family` (`store/maintenance.rs`),
+  not the bulk `maintain_sessions` path. It reads only file headers
+  project-wide (raw first line, or the `.meta.json` sidecar for archives) and
+  parses events solely for the target, its clone family (connected via
+  `cloned_from`) and their subagents, since only clones copy a source's
+  subagent events. Descendants reachable from the rest of the family are
+  retained; the rest are deleted via `process_group`. Unreadable unrelated
+  files neither block nor slow the deletion.
 - Measured (release build, 100x40 terminal): a frame with a ~1 MB / 28,000
   line draft in the textarea takes ~27 ms, below the 50 ms budget, so the
   per-frame `lines().join("\n")` and measurement clones are left as is.
@@ -860,13 +864,19 @@ Given that, the policy is:
   do, so any keybinding that turns out to be undeliverable in some terminal
   is an inconvenience, never a lockout.
 
-Current leader chords: `ctrl-x a` (agents popup, same as `/agents`),
-`ctrl-x f` (toggle `/models` favorite), `ctrl-x p` (back to the parent
-conversation from a subagent drill-in view). Completed chords re-enter the
-presenter as dedicated `InputEvent`s (`ShowAgents`, `ToggleFavoriteModel`,
-`ParentView`), not as synthesized raw keys, so bare `ctrl-a`/`ctrl-f`/`ctrl-p`
-keep their readline meanings in every draft. `ctrl-c` (the universal
-interrupt/quit convention) is the one intentional bare-`ctrl` exception.
+Current leader chords:
+
+- `ctrl-x a`: agents popup, same as `/agents`
+- `ctrl-x p`: back to the parent conversation from a subagent drill-in view
+- `ctrl-x f`: toggle `/models` favorite
+- `ctrl-x s`: status popup, same as `/status`
+
+Leader chords is intercepted before focus routing so it works from any focus.
+Completed chords re-enter the presenter as dedicated `InputEvent`s (`ShowAgents`,
+`ToggleFavoriteModel`, `ParentView`, `ShowStatus`), not as synthesized raw keys, so bare
+`ctrl-a`/`ctrl-f`/`ctrl-p` keep their readline meanings in every draft.
+`ctrl-c` (the universal interrupt/quit convention) is the one intentional
+bare-`ctrl` exception.
 
 ### Conversation layout cache
 
@@ -944,6 +954,62 @@ cancellable background task so input and agent updates continue. The parked
 slash overlay (`Effect::ParkSlashOverlay`/`RestoreSlashOverlay`) keeps fetched
 model choices across an approval/clarify; the draft is never parked. See
 [features](./features.md#slash-commands).
+
+## Status popup
+
+`/status` is a driver round trip because only the agent loop owns `Context`.
+The presenter emits `Effect::ShowStatus{run_id}` (viewed subagent id or none);
+the driver sends `AgentCommand::RequestStatus` (wrapped in `ForSubagent` for a
+subagent). The loop answers with `UiUpdate::StatusSnapshot`, mapped to
+`DomainEvent::StatusSnapshot`, which opens `Focus::StatusPopup` (modal) via
+`AppState::open_status_popup`. When a subagent loop exits, `RunState::into_final_context`
+publishes its exact final snapshot into the `FinishedStatusRegistry` shared with the root's
+`SubagentManager` (`finished_status`), and the root loop answers a later request for that run
+from it. For a finished subagent without a kept snapshot (e.g. after a resume) the
+root loop rebuilds the snapshot from the persisted subagent transcript
+(`StatusSnapshot::from_finished_subagent`, `agent/finished_status.rs`, via
+`Store::read_subagent_session_state`): model, parameters and context length from
+the latest `model_changed`, agent type and allowed tools from the header, a `Context`
+hydrated from the messages plus the latest compaction snapshot. The allowed tools
+are persisted in the subagent header because the popup lists only them, which keeps
+calls to unknown tools out; transcripts written before that list empty. System
+prompt and tool schemas are not persisted, so those segments are dropped and the
+popup adds a note (`finished_subagent`). An unreadable transcript yields a notice in
+the subagent's own view.
+
+`StatusSnapshot::tool_call_counts` counts every assistant tool call by name over the whole
+transcript (`tool_call_counts`, `agent/finished_status.rs`); the popup appends `(n)` to used tools
+to allowed tools only; calls to tools that are not allowed (unknown tools) are not listed.
+
+`StatusSnapshot::timeline` (`agent/status_timeline.rs`) merges `model_changed` and `compaction`
+events in file order; identical consecutive model entries (every process start records one) are
+dropped. A loop with a session store flushes it and reads the events, so the history covers startup
+and resume; a loop without one (a running subagent) falls back to the active model plus
+`Context::compaction_history`, without timestamps. The popup renders it as a "History" list of one
+text line per event, prefixed with the UTC date and time (`YYYY-MM-DD HH:MMZ`, blank when unknown)
+so multi-day sessions stay readable (long lines wrap with a hanging indent under the event text
+instead of being truncated): model lines show the model and only the parameters that changed,
+compaction lines show `before → after tokens (change)` or `effect not recorded`, followed by the
+average reduction.
+
+The snapshot is built in `RunState::status_snapshot`. Its `ContextBreakdown`
+(`context_breakdown.rs`) comes from `Context::context_breakdown`
+(`agent/context/breakdown.rs`), which splits message 0 by the
+`SystemPromptOrigins` (`system_prompt_origins.rs`). The prompt string is
+rendered from those origins, so they stay the single source of truth; sources
+are sentinel labels, never absolute paths. Percentages use
+`max(effective context length, used)` as the denominator. The widget
+(`tui_widgets/status_popup.rs`) writes its rect, visible rows and clamped
+scroll offset back through `sync_from_draw`. The popup is always the terminal
+width minus six columns wide (three-column margin on each side) and spans the
+full height of the conversation list (`conversation.chat_area`; 80% of the frame as a
+fallback before the first chat draw). When the content overflows it keeps a
+one-column gap between the text and the scrollbar. Text selection mirrors the
+help popup: `StatusPopupState` keeps the plain text of every line as drawn
+(`rendered_lines`) plus `selection`/`drag_active`; the widget writes
+`layout.status_popup.content_area` each frame, left-drag inside it selects (in
+absolute line coordinates, so it survives scrolling) and releasing copies a
+non-empty selection to the clipboard.
 
 ## Steer ordering
 

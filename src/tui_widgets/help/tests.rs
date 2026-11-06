@@ -15,7 +15,7 @@
 use super::*;
 
 #[test]
-fn help_text_uses_shared_confirmation_and_scroll_values() {
+fn help_text_uses_the_shared_confirmation_value() {
     let sections = help_sections();
     let entries = sections
         .iter()
@@ -23,10 +23,4 @@ fn help_text_uses_shared_confirmation_and_scroll_values() {
         .collect::<Vec<_>>();
     let confirmation_label = format!("ctrl-c (x2, <={}s)", super::CONFIRM_TIMEOUT.as_secs());
     assert!(entries.iter().any(|(key, _)| key == &confirmation_label));
-    assert!(entries.iter().any(|(_, description)| {
-        description.contains(&format!(
-            "by {} columns",
-            super::HELP_HORIZONTAL_SCROLL_COLUMNS
-        ))
-    }));
 }

@@ -356,19 +356,17 @@ type; for example, `temperature = "${TEMPERATURE}"`,
 values that cannot be parsed as the target type are hard startup errors;
 expanded secret values are never logged.
 
-`ylva init` writes code-owned starters (`SOUL.md`,
-`profiles/default/config.toml`, and `profiles/default/.env`) into `~/.ylva/`;
-it does not seed agent-type files. Use `ylva init --workspace` to seed the
-default profile config and `.env` starters plus `.gitignore` under the
-discovered workspace root. The workspace `.gitignore` lists `.env`, `.envrc`, and
-`chats/`. Both commands write only missing files unless
-`--force` is supplied; an existing `.gitignore` is never overwritten, and only
-its missing entries are appended. On Unix, `ylva init` creates the directories it
-needs with mode `0700` and each newly created `.env` with mode `0600`, as basic
-hygiene for a file that holds API keys; an existing `.env` keeps its permissions.
-Global, profile-scoped, and project-scoped `agents/*.md` and `agents/*.toml` files are discovered while
-resolving profiles; richer examples are documented below rather than shipped as
-repository templates.
+`ylva init` writes code-owned starters (`SOUL.md`, `profiles/default/config.toml`, and
+`profiles/default/.env`) into `~/.ylva/`; it does not seed agent-type files. Use
+`ylva init --workspace` to seed the default profile config and `.env` starters plus `.gitignore`
+under the discovered workspace root. The workspace `.gitignore` lists `.env`, `.envrc`, and
+`chats/`. Both commands write only missing files unless `--force` is supplied; an existing
+`.gitignore` is never overwritten, and only its missing entries are appended. On Unix, `ylva init`
+creates the directories it needs with mode `0700` and each newly created `.env` with mode `0600`, as
+basic hygiene for a file that holds API keys; an existing `.env` keeps its permissions. Global,
+profile-scoped, and project-scoped `agents/*.md` and `agents/*.toml` files are discovered while
+resolving profiles; richer examples are documented below rather than shipped as repository
+templates.
 
 ### Favorite and allowed models
 

@@ -198,6 +198,24 @@ pub(crate) fn agents_popup_render_state(
     }
 }
 
+/// Snapshot of the status popup for one frame; empty unless it is shown.
+pub(crate) fn status_popup_render_state(
+    state: &AppState,
+) -> crate::tui_render_state::StatusPopupRenderState {
+    if !state.show_status_popup() {
+        return Default::default();
+    }
+    crate::tui_render_state::StatusPopupRenderState {
+        snapshot: state.status_popup.snapshot.clone(),
+        scroll_offset: state.status_popup.scroll_offset,
+        popup_rect: state.layout.status_popup.rect,
+        visible_rows: state.layout.status_popup.visible_rows,
+        content_area: state.layout.status_popup.content_area,
+        rendered_lines: Vec::new(),
+        selection: state.status_popup.selection,
+    }
+}
+
 /// Project the canonical [`AppState`] to the legacy [`TuiState`] snapshot
 /// required by [`crate::tui_widgets::draw`].
 ///
@@ -212,7 +230,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
     // does a clarify banner); the prompt stays drawn beneath it.
     let pending_approval = match &state.focus {
         Focus::ToolApproval { tool_id, tool_name } => Some((*tool_id, tool_name.clone())),
-        Focus::AgentsPopup
+        Focus::AgentsPopup | Focus::StatusPopup
             if !matches!(
                 state.mode,
                 crate::tui_reducer_state::TuiMode::ClarifyPending { .. }
@@ -433,6 +451,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
             help_drag_active: state.help_popup.help_drag_active,
         },
         agents_popup: agents_popup_render_state(state),
+        status_popup: status_popup_render_state(state),
         clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
             pending_clarify: if let crate::tui_reducer_state::TuiMode::ClarifyPending {
                 question,
@@ -535,6 +554,11 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.layout.agents_popup.visible_rows = rendered.agents_popup.visible_rows;
     state.agents_popup.scroll_offset = rendered.agents_popup.scroll_offset;
     state.agents_popup.reveal_selection = rendered.agents_popup.reveal_selection;
+    state.layout.status_popup.rect = rendered.status_popup.popup_rect;
+    state.layout.status_popup.visible_rows = rendered.status_popup.visible_rows;
+    state.layout.status_popup.content_area = rendered.status_popup.content_area;
+    state.status_popup.scroll_offset = rendered.status_popup.scroll_offset;
+    state.status_popup.rendered_lines = rendered.status_popup.rendered_lines;
     state.layout.help_popup.rect = rendered.help_popup.help_popup_rect;
     state.layout.help_popup.content_area = rendered.help_popup.help_content_area;
     state.layout.slash_overlay = rendered.slash_overlay_layout;

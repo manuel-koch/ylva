@@ -491,7 +491,8 @@ unnecessary compaction.
   budget estimates the projected model view and tool definitions. During a
   request, the footer instead estimates the serialized JSON body, including
   transport framing; after compaction applies, it shows the model-view estimate.
-- Provider serialization: [`src/llm/openai_compatible_provider/messages.rs`](../../src/llm/openai_compatible_provider/messages.rs)
+- Provider serialization:
+  [`src/llm/openai_compatible_provider/messages.rs`](../../src/llm/openai_compatible_provider/messages.rs)
   and `src/llm/openai_compatible_provider.rs`.
 - `Context::set_token_estimator` recalculates cached message counts on model
   or estimator changes. The model-view readout does not sum these cached
@@ -538,9 +539,11 @@ actual response payloads.
 - OpenAI, [Token counting](https://platform.openai.com/docs/guides/token-counting):
   local tokenizer limitations; Responses input-token count API; tool/media
   support and count semantics.
-- OpenAI, [Input Tokens API reference](https://platform.openai.com/docs/api-reference/responses/input-tokens):
+- OpenAI,
+  [Input Tokens API reference](https://platform.openai.com/docs/api-reference/responses/input-tokens):
   `/v1/responses/input_tokens` input and response shape.
-- OpenAI, [Chat Completions API reference](https://platform.openai.com/docs/api-reference/chat/create):
+- OpenAI,
+  [Chat Completions API reference](https://platform.openai.com/docs/api-reference/chat/create):
   streamed usage via `stream_options.include_usage`; final usage chunk caveat.
 - OpenAI, [Prompt caching](https://platform.openai.com/docs/guides/prompt-caching):
   actual rendered context includes instructions, tools, messages and supported
@@ -556,9 +559,9 @@ actual response payloads.
   Chat Completions usage schema, usage chunk behavior, and model-native token
   counts; [streaming](https://openrouter.ai/docs/api/reference/streaming) details
   the final usage chunk.
-- OpenRouter, [List models and their properties](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties):
-  catalog `architecture.tokenizer`, model/context metadata, and model family
-  information.
+- OpenRouter,
+  [List models and their properties](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties):
+  catalog `architecture.tokenizer`, model/context metadata, and model family information.
 - Ollama, [Usage](https://docs.ollama.com/api/usage): `prompt_eval_count` and
   final streaming usage fields.
 - Ollama, [OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility):
@@ -569,7 +572,8 @@ actual response payloads.
 - Hugging Face, [Chat templates](https://huggingface.co/docs/transformers/main/en/chat_templating):
   role-based messages are rendered into model-specific control-token
   sequences; templates can add generation prompts and special tokens.
-- Hugging Face, [Tokenization algorithms](https://huggingface.co/docs/transformers/main/en/tokenizer_summary):
+- Hugging Face,
+  [Tokenization algorithms](https://huggingface.co/docs/transformers/main/en/tokenizer_summary):
   BPE, Unigram and WordPiece tokenizer differences.
 - Hugging Face, [Tokenizers](https://huggingface.co/docs/tokenizers/index):
   Rust tokenization library, serialized pipelines and supported algorithms.
@@ -581,9 +585,10 @@ actual response payloads.
   binding capabilities. The repository currently documents a v1 release
   candidate whose bindings have a narrower feature set, while the stable 0.23
   Rust crate documents the existing loading and encoding API.
-- Hugging Face Transformers, [Tokenizers](https://huggingface.co/docs/transformers/main/en/fast_tokenizers):
-  model-specific backend selection and cases where SentencePiece or specialized
-  tokenizers are used instead of the generic fast-tokenizer backend.
+- Hugging Face Transformers,
+  [Tokenizers](https://huggingface.co/docs/transformers/main/en/fast_tokenizers): model-specific
+  backend selection and cases where SentencePiece or specialized tokenizers are used instead of the
+  generic fast-tokenizer backend.
 - vLLM, [Renderer APIs](https://docs.vllm.ai/en/stable/serving/online_serving/renderer.html):
   server-side rendering/token IDs and multimodal preprocessing.
 - Rust, [`tiktoken-rs` 0.5.9 documentation](https://docs.rs/tiktoken-rs/0.5.9/tiktoken_rs/):

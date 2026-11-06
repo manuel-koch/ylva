@@ -258,6 +258,23 @@ where
                             Err(error) => selection_error(&mut state, picker_id, error.to_string()),
                         }
                     }
+                    SessionResult::Deleted { session_id, picker_id, deleted_id, result } => {
+                        if agent.store().map(|store| store.session_id()) != Some(session_id) {
+                            continue;
+                        }
+                        match result {
+                            Ok(()) => {
+                                if let Some(picker) = picker_mut(&mut state, picker_id) {
+                                    picker.remove_choice(deleted_id);
+                                    picker.phase = crate::tui_reducer_state::SessionPickerPhase::Ready;
+                                }
+                            }
+                            Err(error) => selection_error(&mut state, picker_id, error.to_string()),
+                        }
+                        if let Some(picker) = picker_mut(&mut state, picker_id) {
+                            picker.action = crate::tui_reducer_state::SessionAction::Resume;
+                        }
+                    }
                     SessionResult::Prepared { session_id, picker_id, created_clone, result } => {
                         let current = agent.store().map(|store| store.session_id()) == Some(session_id);
                         let wanted = current && picker_mut(&mut state, picker_id)
@@ -287,6 +304,14 @@ where
                                 ui_rx = prepared.updates;
                                 cmd_tx = agent.command_sender();
                                 engine = agent.engine();
+                                if let Some(previous_store) = exit_guard
+                                    .current_store
+                                    .lock()
+                                    .expect("current store mutex")
+                                    .as_ref()
+                                {
+                                    previous_store.discard_if_empty();
+                                }
                                 exit_guard.current_store = agent.current_store_handle();
                                 let display_metadata = state.display_metadata.clone();
                                 let tui_config = state.tui_config.clone();
@@ -306,7 +331,7 @@ where
                                 if let Some(store) = replay_store.as_ref() {
                                     state.session_title = Some(store.title());
                                     let configuration = engine.config();
-                                    store.record_model_changed(&configuration.provider_connection, &configuration.model);
+                                    store.record_model_changed(&configuration.provider_connection, &configuration.model, &crate::store::ModelParameters::from_engine(engine.as_ref()));
                                     if let Err(error) = set_terminal_title(Some(&store.title())) {
                                         tracing::warn!(%error, "could not set activated session title");
                                     }
@@ -391,16 +416,11 @@ where
             action = action_rx.recv() => {
                 let Some(mut action) = action else { break };
 
-                // Track mouse position for hover highlight in the footer.
-                // The last input device wins: pointer motion drops keyboard
-                // button focus so only one button looks active.
+                // Track mouse position for hover highlight on buttons. Hover
+                // never takes keyboard focus away; a key action that moves
+                // button focus clears the hover instead.
                 if let AppAction::MouseInput(mouse) = &action {
-                    let moved_pointer = matches!(mouse.kind, MouseEventKind::Moved)
-                        && mouse_pos != Some((mouse.column, mouse.row));
                     mouse_pos = Some((mouse.column, mouse.row));
-                    if moved_pointer {
-                        state.prompt_button_focus = None;
-                    }
                 }
 
                 // Input-area scroll wheel is not handled by the Presenter
@@ -485,11 +505,18 @@ where
                 let Some(event) = app_action_to_tui_event(action) else { continue };
                 let was_loading_models = matches!(state.slash_overlay, SlashOverlay::LoadingModels);
                 let focus_before = state.prompt_button_focus;
+                let session_action_before = session_picker_action(&state);
                 let parameter_cursor_before = state.model_parameters_mut().map(|edit| edit.cursor);
                 let is_key_event = matches!(event, TuiEvent::Input(_));
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
                 // Keyboard focus change replaces the pointer hover highlight.
                 if state.prompt_button_focus.is_some() && state.prompt_button_focus != focus_before {
+                    mouse_pos = None;
+                }
+                if is_key_event
+                    && session_action_before.is_some()
+                    && session_picker_action(&state) != session_action_before
+                {
                     mouse_pos = None;
                 }
                 if is_key_event
@@ -535,13 +562,16 @@ where
                 }
                     let (session_effects, immediate_slash_effects): (Vec<_>, Vec<_>) =
                         immediate_slash_effects.into_iter().partition(|effect| matches!(
-                            effect, Effect::ListSessions | Effect::SelectSession { .. } | Effect::CancelSessionSelection
+                            effect, Effect::ListSessions | Effect::SelectSession { .. } | Effect::DeleteSession { .. } | Effect::CancelSessionSelection
                         ));
                     for effect in session_effects {
                         match effect {
                             Effect::ListSessions => session_tasks.list(&mut state, agent.store()),
                             Effect::SelectSession { source_id, action } => {
                                 session_tasks.prepare(&mut state, source_id, action, &agent, title_driver.as_ref());
+                            }
+                            Effect::DeleteSession { source_id } => {
+                                session_tasks.delete(&mut state, source_id, agent.store());
                             }
                             Effect::CancelSessionSelection => {
                                 session_tasks.cancel();
@@ -752,4 +782,12 @@ pub(super) fn report_unactivated_clone(
         .lock()
         .expect("clone notice mutex")
         .push(clone_id);
+}
+
+/// The focused button of the open `/session` picker.
+fn session_picker_action(state: &AppState) -> Option<crate::tui_reducer_state::SessionAction> {
+    match &state.slash_overlay {
+        SlashOverlay::SessionPicker(picker) => Some(picker.action),
+        _ => None,
+    }
 }

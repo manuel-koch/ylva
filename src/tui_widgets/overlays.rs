@@ -33,8 +33,8 @@ use crate::theme::{
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, model_picker_row_is_details,
     model_picker_row_layout, slash_overlay_text_rows, visible_model_choices, BannerDragSelection,
-    ParameterField, ParameterGlyphHit, PickerRow, PickerRowLayout, PromptButton, SlashOverlay,
-    SlashOverlayLayout, GREATER_VALUE_GLYPH, SMALLER_VALUE_GLYPH,
+    ParameterField, ParameterGlyphHit, PickerRow, PickerRowLayout, PromptButton, SessionAction,
+    SlashOverlay, SlashOverlayLayout, GREATER_VALUE_GLYPH, SMALLER_VALUE_GLYPH,
 };
 
 use super::chat::{apply_selection_highlight_to_line, render_chat_scrollbar};
@@ -43,8 +43,9 @@ use super::footer::{
 };
 use super::ButtonAreas;
 
-const SESSION_RESUME_BUTTON_LABEL: &str = " Resume ";
-const SESSION_CLONE_BUTTON_LABEL: &str = " Clone ";
+const SESSION_RESUME_BUTTON_LABEL: &str = " [ Resume ] ";
+const SESSION_CLONE_BUTTON_LABEL: &str = " [ Clone ] ";
+const SESSION_DELETE_BUTTON_LABEL: &str = " [ Delete ] ";
 const SESSION_ACTION_BUTTON_GAP: &str = "  ";
 /// Indent of a `/models` details row, aligning it under the identity text
 /// (past the two-column selection marker).
@@ -194,29 +195,7 @@ pub(super) fn draw_slash_overlay(
     let detail_lines = if let SlashOverlay::SessionPicker(picker) = overlay {
         let mut details = Vec::new();
         if input_area.y >= 4 {
-            let button_style = |action| {
-                if picker.action == action {
-                    Style::default()
-                        .fg(list_selection_foreground_color())
-                        .bg(list_selection_background_color())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                        .fg(list_text_color())
-                        .bg(muted_text_color())
-                }
-            };
-            details.push(Line::from(vec![
-                Span::styled(
-                    SESSION_RESUME_BUTTON_LABEL,
-                    button_style(crate::tui_reducer_state::SessionAction::Resume),
-                ),
-                Span::raw(SESSION_ACTION_BUTTON_GAP),
-                Span::styled(
-                    SESSION_CLONE_BUTTON_LABEL,
-                    button_style(crate::tui_reducer_state::SessionAction::Clone),
-                ),
-            ]));
+            details.push(session_button_line(picker, None));
             let status = picker.status();
             if !picker.choices.is_empty() && !status.is_empty() {
                 details.push(Line::from(status));
@@ -375,20 +354,16 @@ pub(super) fn draw_slash_overlay(
                 return Line::styled(format!("{MODEL_PICKER_DETAIL_INDENT}{text}"), style);
             }
             let marker = if is_selected { "▸ " } else { "  " };
-            let button_style = |is_enabled: bool, is_focused: bool| {
-                if !is_enabled {
-                    Style::default().fg(muted_text_color())
-                } else if is_focused {
-                    // Filled like the focused Approve button.
-                    Style::default()
-                        .fg(crate::theme::button_text_color())
-                        .bg(approve_hover_background_color())
-                        .add_modifier(Modifier::BOLD)
+            let parameter_button_style = |is_enabled: bool, is_hovered: bool, is_focused: bool| {
+                if is_enabled {
+                    button_style(
+                        approve_background_color(),
+                        approve_hover_background_color(),
+                        is_hovered,
+                        is_focused,
+                    )
                 } else {
-                    // Outlined only, so focus is obvious in every theme.
-                    Style::default()
-                        .fg(approve_background_color())
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(muted_text_color())
                 }
             };
             if let SlashOverlay::ModelPicker {
@@ -414,8 +389,6 @@ pub(super) fn draw_slash_overlay(
                             );
                         let apply_hovered =
                             is_button_hovered(row_index, apply_column, apply_label.chars().count());
-                        // Pointer hover overrules keyboard focus so one button
-                        // looks active at a time.
                         let button_row = list_origin.1 + (row_index - first_visible) as u16;
                         if reset_enabled {
                             parameter_buttons.push((
@@ -437,21 +410,17 @@ pub(super) fn draw_slash_overlay(
                             ),
                             entry_index + 1,
                         ));
-                        let any_hovered = reset_hovered || apply_hovered;
-                        let apply_focused = selected == Some(entry_index + 1) && !any_hovered;
+                        let apply_focused = selected == Some(entry_index + 1);
                         return Line::from(vec![
                             Span::styled(marker, Style::default().fg(list_text_color())),
                             Span::styled(
                                 reset_label,
-                                button_style(
-                                    reset_enabled,
-                                    (is_selected && !any_hovered) || reset_hovered,
-                                ),
+                                parameter_button_style(reset_enabled, reset_hovered, is_selected),
                             ),
                             Span::raw(" "),
                             Span::styled(
                                 apply_label,
-                                button_style(true, apply_focused || apply_hovered),
+                                parameter_button_style(true, apply_hovered, apply_focused),
                             ),
                         ]);
                     }
@@ -475,7 +444,7 @@ pub(super) fn draw_slash_overlay(
                             Span::styled(marker, Style::default().fg(list_text_color())),
                             Span::styled(
                                 apply_label,
-                                button_style(true, is_selected || apply_hovered),
+                                parameter_button_style(true, apply_hovered, is_selected),
                             ),
                         ]);
                     }
@@ -602,6 +571,27 @@ pub(super) fn draw_slash_overlay(
             overlay_layout.detail_rows = detail_lines.iter().map(line_plain_text).collect();
         }
         let mut detail_lines = detail_lines;
+        if let SlashOverlay::SessionPicker(picker) = overlay {
+            let [resume_action, clone_action, delete_action] = session_button_areas(details_area);
+            overlay_layout.resume_action = resume_action;
+            overlay_layout.clone_action = clone_action;
+            overlay_layout.delete_action = delete_action;
+            let hovered_action = mouse_pos.and_then(|(column, row)| {
+                [
+                    (resume_action, SessionAction::Resume),
+                    (clone_action, SessionAction::Clone),
+                    (delete_action, SessionAction::Delete),
+                ]
+                .into_iter()
+                .find(|(area, _)| area.contains((column, row).into()))
+                .map(|(_, action)| action)
+            });
+            if hovered_action.is_some() {
+                if let Some(first_line) = detail_lines.first_mut() {
+                    *first_line = session_button_line(picker, hovered_action);
+                }
+            }
+        }
         if let Some(selection) = drag {
             apply_overlay_drag_highlight(&mut detail_lines, details_area, selection);
         }
@@ -609,25 +599,6 @@ pub(super) fn draw_slash_overlay(
             Paragraph::new(detail_lines).style(Style::default().fg(muted_text_color())),
             details_area,
         );
-        if matches!(overlay, SlashOverlay::SessionPicker(_)) {
-            let resume_width = SESSION_RESUME_BUTTON_LABEL.len() as u16;
-            let clone_offset = resume_width + SESSION_ACTION_BUTTON_GAP.len() as u16;
-            overlay_layout.resume_action = Rect::new(
-                details_area.x,
-                details_area.y,
-                details_area.width.min(resume_width),
-                1,
-            );
-            overlay_layout.clone_action = Rect::new(
-                details_area.x.saturating_add(clone_offset),
-                details_area.y,
-                details_area
-                    .width
-                    .saturating_sub(clone_offset)
-                    .min(SESSION_CLONE_BUTTON_LABEL.len() as u16),
-                1,
-            );
-        }
     }
 
     if rows.len() > content_height as usize {
@@ -641,6 +612,64 @@ pub(super) fn draw_slash_overlay(
             chat_scrollbar_color(),
         );
     }
+}
+
+/// Screen rects of the Resume, Clone and Delete buttons in the button row.
+fn session_button_areas(row_area: Rect) -> [Rect; 3] {
+    let gap = SESSION_ACTION_BUTTON_GAP.len() as u16;
+    let mut offset = 0u16;
+    [
+        SESSION_RESUME_BUTTON_LABEL,
+        SESSION_CLONE_BUTTON_LABEL,
+        SESSION_DELETE_BUTTON_LABEL,
+    ]
+    .map(|label| {
+        let width = label.len() as u16;
+        let area = Rect::new(
+            row_area.x.saturating_add(offset),
+            row_area.y,
+            row_area.width.saturating_sub(offset).min(width),
+            1,
+        );
+        offset = offset.saturating_add(width + gap);
+        area
+    })
+}
+
+/// The Resume / Clone / Delete button row. The focused button is filled;
+/// the hovered one is lighter, and focus always wins over hover.
+fn session_button_line(
+    picker: &crate::tui_reducer_state::SessionPicker,
+    hovered: Option<SessionAction>,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, (action, label)) in [
+        (SessionAction::Resume, SESSION_RESUME_BUTTON_LABEL),
+        (SessionAction::Clone, SESSION_CLONE_BUTTON_LABEL),
+        (SessionAction::Delete, SESSION_DELETE_BUTTON_LABEL),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::raw(SESSION_ACTION_BUTTON_GAP));
+        }
+        let (normal, hover) = if action == SessionAction::Delete {
+            (deny_background_color(), deny_hover_background_color())
+        } else {
+            (approve_background_color(), approve_hover_background_color())
+        };
+        spans.push(Span::styled(
+            label,
+            button_style(
+                normal,
+                hover,
+                hovered == Some(action),
+                picker.action == action,
+            ),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Shorten `text` to at most `width` characters, ending a cut text with `…`.

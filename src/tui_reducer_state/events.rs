@@ -93,6 +93,8 @@ pub enum Focus {
     /// Modal agents popup (`/agents`, `ctrl-x a`); captures all keyboard and
     /// mouse input, like [`Focus::HelpPopup`].
     AgentsPopup,
+    /// Modal status popup (`/status`); captures all keyboard and mouse input.
+    StatusPopup,
     /// Tool-approval banner; captures keyboard only (non-modal).
     /// Tool arguments are **not** stored here — they live solely in the
     /// corresponding `ToolBubble` chat entry.
@@ -100,10 +102,13 @@ pub enum Focus {
 }
 
 impl Focus {
-    /// Returns `true` only for modal focus variants ([`Focus::HelpPopup`] and
-    /// [`Focus::AgentsPopup`]).
+    /// Returns `true` only for modal focus variants ([`Focus::HelpPopup`],
+    /// [`Focus::AgentsPopup`] and [`Focus::StatusPopup`]).
     pub fn is_modal(&self) -> bool {
-        matches!(self, Focus::HelpPopup | Focus::AgentsPopup)
+        matches!(
+            self,
+            Focus::HelpPopup | Focus::AgentsPopup | Focus::StatusPopup
+        )
     }
 }
 
@@ -136,6 +141,9 @@ pub enum InputEvent {
     /// A completed `ctrl-x f` chord: toggle the favorite of the highlighted
     /// `/models` picker row. A no-op when no picker is open.
     ToggleFavoriteModel,
+    /// A completed `ctrl-x s` chord: toggle the status popup for the viewed
+    /// conversation (same as `/status`).
+    ShowStatus,
 }
 
 // ─── DomainEvent ──────────────────────────────────────────────────────────────
@@ -302,6 +310,8 @@ pub enum DomainEvent {
         entry_index: usize,
         summarized_messages: usize,
     },
+    /// The agent answered a `/status` request; open the status popup.
+    StatusSnapshot(Box<crate::agent::StatusSnapshot>),
 }
 
 impl DomainEvent {
@@ -338,6 +348,7 @@ impl DomainEvent {
             DomainEvent::BubbleExpansionFeedbackShown => "BubbleExpansionFeedbackShown",
             DomainEvent::ContextUsage { .. } => "ContextUsage",
             DomainEvent::CompactionApplied { .. } => "CompactionApplied",
+            DomainEvent::StatusSnapshot(_) => "StatusSnapshot",
         }
     }
 
@@ -439,8 +450,16 @@ pub enum Effect {
         source_id: Uuid,
         action: super::SessionAction,
     },
+    /// Delete a root session (with its subagent transcripts) from disk.
+    DeleteSession {
+        source_id: Uuid,
+    },
     CancelSessionSelection,
     Compact,
+    /// `/status` — ask the viewed agent (`None` = root) for a status snapshot.
+    ShowStatus {
+        run_id: Option<Uuid>,
+    },
     /// Read a replay-discovered subagent transcript before entering its view.
     LoadSubagentTranscript {
         run_id: Uuid,

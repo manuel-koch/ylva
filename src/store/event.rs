@@ -101,6 +101,10 @@ pub enum StoreEvent {
         changed_at: String,
         provider_connection: String,
         model: String,
+        /// The effective parameters the model runs with from here on. Empty
+        /// for events written before they were recorded.
+        #[serde(default, flatten)]
+        parameters: ModelParameters,
     },
     /// The root agent type serving this session changed — written when an
     /// explicit `--agent <type>` override on a resumed session differs from
@@ -138,10 +142,84 @@ pub enum StoreEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transcript_boundary: Option<usize>,
         summary: String,
+        /// Estimated model-view tokens just before this compaction. Absent
+        /// for events written before the effect was recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        estimated_tokens_before: Option<usize>,
+        /// Estimated model-view tokens just after this compaction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        estimated_tokens_after: Option<usize>,
     },
     ModelProjection {
         projection: Box<crate::agent::compaction::ModelProjectionSnapshot>,
     },
+}
+
+/// The effective, non-secret engine parameters recorded with every
+/// [`StoreEvent::ModelChanged`], so a finished conversation's `/status` can be
+/// derived from its transcript alone. Every field is optional because older
+/// events lack them and a parameter may simply be unset.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelParameters {
+    /// The profile's `[engines.*]` key, when the engine has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
+    /// The effective context window in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<usize>,
+}
+
+impl ModelParameters {
+    /// The parameters `engine` currently runs with.
+    pub fn from_engine(engine: &dyn crate::llm::Engine) -> Self {
+        let display = crate::llm::EngineDisplayInfo::from_engine(engine);
+        let config = engine.config();
+        Self {
+            engine_name: Some(display.engine_name).filter(|name| !name.is_empty()),
+            reasoning_effort: display.reasoning_effort,
+            temperature: config
+                .temperature
+                .map(|temperature| temperature.to_string()),
+            max_output_tokens: config.max_output_tokens,
+            context_length: Some(engine.effective_context_length()),
+        }
+    }
+}
+
+/// Estimated model-view size around one compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionEffect {
+    pub estimated_tokens_before: usize,
+    pub estimated_tokens_after: usize,
+}
+
+impl CompactionEffect {
+    /// Share of the tokens the compaction removed, in percent. Negative when
+    /// the summary made the view larger.
+    pub fn reduction_percent(self) -> f64 {
+        if self.estimated_tokens_before == 0 {
+            return 0.0;
+        }
+        (self.estimated_tokens_before as f64 - self.estimated_tokens_after as f64) * 100.0
+            / self.estimated_tokens_before as f64
+    }
+}
+
+/// One applied compaction as the [`StoreEvent::Compaction`] event persists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionRecord {
+    /// First kept index in live model-context coordinates.
+    pub boundary: usize,
+    /// The same cut in persisted-transcript coordinates.
+    pub transcript_boundary: Option<usize>,
+    pub summary: String,
+    pub effect: Option<CompactionEffect>,
 }
 
 /// The `meta` header record written as the first line of every session file.
@@ -195,6 +273,12 @@ pub struct SessionMeta {
     /// source file is never rewritten, so this link is one-way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloned_from: Option<Uuid>,
+    /// Set only for a subagent's own session file: the names of the tools it
+    /// was registered with, so `/status` of the finished run can list them
+    /// (and ignore calls to unknown tools). Omitted while unset, so existing
+    /// headers keep their shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 /// Current UTC timestamp in RFC 3339 (`…Z`) shape, millisecond precision —
