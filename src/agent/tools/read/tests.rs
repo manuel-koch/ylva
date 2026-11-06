@@ -205,7 +205,7 @@ fn read_schema_explains_autodetect_and_explicit_modes() {
         .as_array()
         .expect("encoding variants")
         .iter()
-        .filter_map(|variant| variant["enum"][0].as_str())
+        .filter_map(|variant| variant["const"].as_str())
         .collect::<Vec<_>>();
     assert_eq!(variants, vec!["utf8", "base64"]);
 }

@@ -75,7 +75,7 @@ pub use MAX_CONCURRENT_PROVIDER_REQUESTS as DEFAULT_MAX_CONCURRENT_PROVIDER_REQU
 /// A single tool definition in the OpenAI chat-completions wire shape.
 ///
 /// This is the `{"type":"function","function":{name, description, parameters}}`
-/// envelope. `parameters` is a serde-serialized [`schemars::schema::RootSchema`]
+/// envelope. `parameters` is a serde-serialized [`schemars::Schema`]
 /// produced by deriving `JsonSchema` on a typed arguments struct — never a
 /// hand-written JSON schema.
 #[derive(Debug, Clone)]

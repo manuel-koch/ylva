@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use schemars::schema::RootSchema;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
+use schemars::Schema;
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -287,8 +287,8 @@ impl Tool for GatedOutputTool {
     fn description(&self) -> &str {
         "Fetch one test page, recording its exactly-once side effect."
     }
-    fn input_schema(&self) -> RootSchema {
-        schema_for!(SleepArgs)
+    fn input_schema(&self) -> Schema {
+        ylva::tool_schema_for::<SleepArgs>()
     }
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
         ApprovalCheck::AutoApproved
@@ -494,8 +494,8 @@ impl Tool for SleepTool {
     fn description(&self) -> &str {
         "sleeps almost forever"
     }
-    fn input_schema(&self) -> RootSchema {
-        schema_for!(SleepArgs)
+    fn input_schema(&self) -> Schema {
+        ylva::tool_schema_for::<SleepArgs>()
     }
     fn needs_approval(&self, _args: &serde_json::Value) -> ApprovalCheck {
         ApprovalCheck::AutoApproved

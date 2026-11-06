@@ -124,7 +124,8 @@ pub const HARNESS_NOTICE_MARKER: &str = crate::prompt::PromptBlockKind::HarnessN
 /// `LazyLock` because the schema is generated at first use.
 pub static TOOL_PROTOCOL_SYSTEM_PROMPT: LazyLock<String> = LazyLock::new(|| {
     let mut schema_json =
-        serde_json::to_value(schemars::schema_for!(ToolEnvelope)).unwrap_or_default();
+        serde_json::to_value(crate::agent::tools::tool_schema_for::<ToolEnvelope>())
+            .unwrap_or_default();
     // The struct's doc comment is the document: schemars mirrors it into the
     // schema's `description`, which we lift out as the leading phrase, then
     // drop so the embedded schema stays a pure shape (no comment text inside).

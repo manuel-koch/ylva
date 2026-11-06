@@ -97,7 +97,11 @@ pub fn project_key(cwd: &Path) -> String {
     let canonical = SandboxContext::canonicalize_best_effort(cwd);
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_os_str().as_encoded_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 /// Directory holding every session file of one project.

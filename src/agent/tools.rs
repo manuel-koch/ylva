@@ -22,8 +22,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use schemars::schema::RootSchema;
+use schemars::generate::SchemaSettings;
+use schemars::transform::transform_subschemas;
 use schemars::JsonSchema;
+use schemars::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -181,7 +183,7 @@ pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
     ///
     /// Only fields emitted for this result instance should appear. Conditional
     /// fields may be omitted by returning a narrower schema.
-    fn metadata_schema(&self) -> Option<RootSchema> {
+    fn metadata_schema(&self) -> Option<Schema> {
         None
     }
 
@@ -477,7 +479,7 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
 
     /// The `schemars`-derived parameter schema for the tool's arguments.
-    fn input_schema(&self) -> RootSchema;
+    fn input_schema(&self) -> Schema;
 
     /// Validates `arguments` against this tool's [`input_schema`](Tool::input_schema).
     ///
@@ -524,28 +526,26 @@ pub trait Tool: Send + Sync {
     /// schemars emits the outer struct's properties inside an `allOf` branch
     /// alongside the inner `oneOf`/`anyOf` for the enum variants.
     fn argument_order(&self, key: &str) -> usize {
-        use schemars::schema::Schema;
-
-        fn collect_property_names(schema: &Schema, out: &mut Vec<String>) {
-            let Schema::Object(obj) = schema else { return };
-            if let Some(object) = &obj.object {
-                for name in object.properties.keys() {
+        fn collect_property_names(schema: &Value, out: &mut Vec<String>) {
+            if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                for name in properties.keys() {
                     if !out.contains(name) {
                         out.push(name.clone());
                     }
                 }
             }
-            if let Some(subschemas) = &obj.subschemas {
-                for branch in subschemas.all_of.iter().flatten() {
-                    collect_property_names(branch, out);
-                }
+            for branch in schema
+                .get("allOf")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                collect_property_names(branch, out);
             }
         }
 
-        let schema = self.input_schema();
-        let root = Schema::Object(schema.schema);
         let mut names: Vec<String> = Vec::new();
-        collect_property_names(&root, &mut names);
+        collect_property_names(self.input_schema().as_value(), &mut names);
         names
             .iter()
             .position(|name| name.as_str() == key)
@@ -689,15 +689,34 @@ fn to_tool_schema(tool: &dyn Tool) -> ToolSchema {
     }
 }
 
+/// Derives the Draft-07 schema of `T` with doc-comment line wraps joined into
+/// single spaces (blank lines stay paragraph breaks), so the text a model reads
+/// does not depend on how the source comment was wrapped. Use instead of
+/// `schema_for!` for every model-facing schema.
+pub fn tool_schema_for<T: JsonSchema>() -> Schema {
+    fn join_description_wraps(schema: &mut Schema) {
+        if let Some(Value::String(description)) = schema.get_mut("description") {
+            *description = description
+                .split("\n\n")
+                .map(|paragraph| paragraph.replace('\n', " "))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+        }
+        transform_subschemas(&mut join_description_wraps, schema);
+    }
+
+    SchemaSettings::draft07()
+        .with_transform(join_description_wraps)
+        .into_generator()
+        .into_root_schema_for::<T>()
+}
+
 /// Validates `arguments` against the compiled JSON Schema derived from `schema`.
 ///
 /// This is the building block used by the [`Tool::validate_args`] default implementation.
 /// Tool overrides that add cross-field constraints should call this first, then layer
 /// their own checks on top.
-pub(super) fn validate_args_with_schema(
-    schema: &RootSchema,
-    arguments: &Value,
-) -> Result<(), String> {
+pub(super) fn validate_args_with_schema(schema: &Schema, arguments: &Value) -> Result<(), String> {
     let schema_value = serde_json::to_value(schema)
         .map_err(|error| format!("failed to serialize schema: {error}"))?;
     let validator = jsonschema::validator_for(&schema_value)

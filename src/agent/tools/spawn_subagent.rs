@@ -28,7 +28,7 @@
 //! special-casing, not a normal execution path.
 
 use futures::FutureExt;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -146,8 +146,8 @@ impl Tool for SpawnSubagentTool {
         &self.description
     }
 
-    fn input_schema(&self) -> schemars::schema::RootSchema {
-        schema_for!(SpawnSubagentArgs)
+    fn input_schema(&self) -> schemars::Schema {
+        crate::agent::tools::tool_schema_for::<SpawnSubagentArgs>()
     }
 
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {

@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -81,8 +81,8 @@ impl ToolCallResult for LoadSkillResult {
         )
     }
 
-    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
-        Some(schema_for!(LoadSkillMetadata))
+    fn metadata_schema(&self) -> Option<schemars::Schema> {
+        Some(crate::agent::tools::tool_schema_for::<LoadSkillMetadata>())
     }
 
     fn display_summary(&self) -> Vec<(String, String)> {
@@ -148,8 +148,8 @@ impl Tool for LoadSkillTool {
     fn description(&self) -> &str {
         "Load complete instructions for an exact advertised skill name. Relative references resolve against the returned source directory. This does not load sidecars, execute scripts, or grant permissions."
     }
-    fn input_schema(&self) -> schemars::schema::RootSchema {
-        schema_for!(LoadSkillArgs)
+    fn input_schema(&self) -> schemars::Schema {
+        crate::agent::tools::tool_schema_for::<LoadSkillArgs>()
     }
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
         match self.selected_skill(arguments) {

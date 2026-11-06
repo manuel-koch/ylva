@@ -14,8 +14,8 @@
 
 //! Applied-edit outcome and the result type of a successful `edit` call.
 
-use schemars::schema::RootSchema;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
+use schemars::Schema;
 use serde::Serialize;
 
 use super::super::{DiffSection, Section, ToolCallResult};
@@ -99,8 +99,8 @@ impl ToolCallResult for EditResult {
         serde_json::to_value(meta).ok()
     }
 
-    fn metadata_schema(&self) -> Option<RootSchema> {
-        Some(schema_for!(EditResultMetadata))
+    fn metadata_schema(&self) -> Option<Schema> {
+        Some(crate::agent::tools::tool_schema_for::<EditResultMetadata>())
     }
 
     fn content_sections(&self) -> Vec<Section> {

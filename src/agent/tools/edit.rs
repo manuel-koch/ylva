@@ -23,8 +23,8 @@
 //! (before approval). Approval is required via sandbox path check. On approval, the
 //! patched content is written to disk.
 
-use schemars::schema::RootSchema;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
+use schemars::Schema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -117,8 +117,8 @@ impl Tool for EditTool {
         they are expanded before use."
     }
 
-    fn input_schema(&self) -> RootSchema {
-        schema_for!(EditFileArgs)
+    fn input_schema(&self) -> Schema {
+        crate::agent::tools::tool_schema_for::<EditFileArgs>()
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {

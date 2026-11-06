@@ -188,8 +188,8 @@ impl ToolCallResult for GlobResult {
         serde_json::to_value(metadata).ok()
     }
 
-    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
-        Some(schemars::schema_for!(GlobResultMetadata))
+    fn metadata_schema(&self) -> Option<schemars::Schema> {
+        Some(crate::agent::tools::tool_schema_for::<GlobResultMetadata>())
     }
 
     fn content_sections(&self) -> Vec<Section> {

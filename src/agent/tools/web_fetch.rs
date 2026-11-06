@@ -35,7 +35,7 @@
 
 use std::sync::Arc;
 
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -141,8 +141,8 @@ impl Tool for WebFetchTool {
         &WEB_FETCH_DESCRIPTION
     }
 
-    fn input_schema(&self) -> schemars::schema::RootSchema {
-        schema_for!(WebFetchInputArgs)
+    fn input_schema(&self) -> schemars::Schema {
+        crate::agent::tools::tool_schema_for::<WebFetchInputArgs>()
     }
 
     /// User approval by default: the sandbox abstains (no floor for network

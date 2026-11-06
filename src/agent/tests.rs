@@ -210,7 +210,7 @@ impl tools::Tool for GatedReadTool {
     fn description(&self) -> &str {
         "Gated read regression fixture"
     }
-    fn input_schema(&self) -> schemars::schema::RootSchema {
+    fn input_schema(&self) -> schemars::Schema {
         tools::Tool::input_schema(&self.inner)
     }
     fn needs_approval(&self, _: &serde_json::Value) -> crate::sandbox::ApprovalCheck {

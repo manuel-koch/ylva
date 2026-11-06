@@ -181,8 +181,8 @@ impl ToolCallResult for SearchResult {
         serde_json::to_value(metadata).ok()
     }
 
-    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
-        Some(schemars::schema_for!(SearchResultMetadata))
+    fn metadata_schema(&self) -> Option<schemars::Schema> {
+        Some(crate::agent::tools::tool_schema_for::<SearchResultMetadata>())
     }
 
     fn content_sections(&self) -> Vec<Section> {

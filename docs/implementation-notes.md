@@ -298,6 +298,15 @@ in `lib.rs` (agent types via `with_deserializer_from_str_with_options`, so
 - `strict_booleans` stays off because `bool_or_string` already accepts string
   forms.
 
+## Model-facing JSON schemas
+
+Derive every schema a model reads with `tool_schema_for` (re-exported as
+`ylva::tool_schema_for` for integration tests), never `schemars::schema_for!`.
+The helper pins Draft-07 (`definitions`, `#/definitions/...`) so provider
+payloads do not change with schemars' default 2020-12 dialect, and joins
+hard-wrapped doc-comment lines into spaces (blank lines stay paragraph breaks)
+because schemars 1.x keeps the source newlines in `description`.
+
 ## Path-like argument normalization
 
 `ToolRegistry::create_call` applies `sandbox::expand_path_tokens` to keys

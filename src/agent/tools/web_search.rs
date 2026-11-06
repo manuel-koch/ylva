@@ -35,7 +35,7 @@
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::time::Instant;
@@ -175,18 +175,21 @@ impl Tool for WebSearchTool {
         &WEB_SEARCH_DESCRIPTION
     }
 
-    fn input_schema(&self) -> schemars::schema::RootSchema {
-        let mut schema = schema_for!(WebSearchInputArgs);
-        if let Some(object) = schema.schema.object.as_mut() {
-            if let Some(schemars::schema::Schema::Object(limit)) =
-                object.properties.get_mut("limit")
-            {
-                limit.number().maximum = Some(WEB_SEARCH_MAX_RESULT_LIMIT as f64);
-                limit.metadata().description = Some(format!(
+    fn input_schema(&self) -> schemars::Schema {
+        let mut schema = crate::agent::tools::tool_schema_for::<WebSearchInputArgs>();
+        if let Some(limit) = schema
+            .pointer_mut("/properties/limit")
+            .and_then(Value::as_object_mut)
+        {
+            limit.insert("maximum".into(), WEB_SEARCH_MAX_RESULT_LIMIT.into());
+            limit.insert(
+                "description".into(),
+                format!(
                     "Maximum number of results to return (max {}; omit it for the configured default).",
                     WEB_SEARCH_MAX_RESULT_LIMIT
-                ));
-            }
+                )
+                .into(),
+            );
         }
         schema
     }

@@ -36,7 +36,7 @@ mod execution;
 mod output;
 mod result;
 
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::Instrument;
@@ -261,8 +261,8 @@ impl Tool for BashTool {
         &self.description
     }
 
-    fn input_schema(&self) -> schemars::schema::RootSchema {
-        schema_for!(BashInputArgs)
+    fn input_schema(&self) -> schemars::Schema {
+        crate::agent::tools::tool_schema_for::<BashInputArgs>()
     }
 
     /// Delegates to the sandbox, which structurally analyses the command

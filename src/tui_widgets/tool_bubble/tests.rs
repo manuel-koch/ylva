@@ -218,11 +218,8 @@ fn load_skill_bubble_keeps_name_primary_and_source_in_expanded_body() {
         assert!(result
             .metadata_schema()
             .unwrap()
-            .schema
-            .object
-            .unwrap()
-            .properties
-            .contains_key("name"));
+            .pointer("/properties/name")
+            .is_some());
         let legacy_sections = result
             .content_sections()
             .into_iter()

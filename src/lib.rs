@@ -81,8 +81,8 @@ pub use run_outcome::RunOutcome;
 
 pub use agent::subagent_manager;
 pub use agent::tools::{
-    default_registry, spawn_subagent::AgentTypeInfo, AutoApproveTool, Tool, ToolCall,
-    ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig, DEFAULT_CLI_TOOLS,
+    default_registry, spawn_subagent::AgentTypeInfo, tool_schema_for, AutoApproveTool, Tool,
+    ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig, DEFAULT_CLI_TOOLS,
     DEFAULT_TUI_TOOLS,
 };
 pub use agent::{

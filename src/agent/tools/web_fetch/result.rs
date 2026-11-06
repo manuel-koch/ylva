@@ -15,7 +15,7 @@
 //! Text/media rendering, token-budget fitting and metadata of `web_fetch` results.
 
 use base64::Engine as _;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -204,8 +204,10 @@ impl ToolCallResult for WebFetchResult {
         .ok()
     }
 
-    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
-        let mut schema = serde_json::to_value(schema_for!(WebFetchResultMetadata)).ok()?;
+    fn metadata_schema(&self) -> Option<schemars::Schema> {
+        let mut schema =
+            serde_json::to_value(crate::agent::tools::tool_schema_for::<WebFetchResultMetadata>())
+                .ok()?;
         let properties = schema.get_mut("properties")?.as_object_mut()?;
         if self.detected_content_type.is_none() {
             properties.remove("detected_content_type");

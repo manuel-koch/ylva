@@ -88,8 +88,8 @@ impl ToolCallResult for BashResult {
         serde_json::to_value(metadata).ok()
     }
 
-    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
-        Some(schemars::schema_for!(BashResultMetadata))
+    fn metadata_schema(&self) -> Option<schemars::Schema> {
+        Some(crate::agent::tools::tool_schema_for::<BashResultMetadata>())
     }
 
     fn content_sections(&self) -> Vec<Section> {

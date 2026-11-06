@@ -14,7 +14,6 @@
 
 //! Numbered-list rendering, token-budget fitting and metadata of `web_search` results.
 
-use schemars::schema_for;
 use serde_json::Value;
 
 use super::super::backends::web_search::{WebSearchHit, WEB_SEARCH_SNIPPET_MAX_CHARS};
@@ -67,8 +66,8 @@ impl ToolCallResult for WebSearchResult {
         serde_json::to_value(&self.hits).ok()
     }
 
-    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
-        Some(schema_for!(Vec<WebSearchHit>))
+    fn metadata_schema(&self) -> Option<schemars::Schema> {
+        Some(crate::agent::tools::tool_schema_for::<Vec<WebSearchHit>>())
     }
 
     fn content_sections(&self) -> Vec<Section> {

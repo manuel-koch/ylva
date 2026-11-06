@@ -24,7 +24,7 @@
 use std::path::Path;
 use std::sync::LazyLock;
 
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -138,8 +138,8 @@ impl Tool for SearchTool {
         &SEARCH_DESCRIPTION
     }
 
-    fn input_schema(&self) -> schemars::schema::RootSchema {
-        schema_for!(SearchInputArgs)
+    fn input_schema(&self) -> schemars::Schema {
+        crate::agent::tools::tool_schema_for::<SearchInputArgs>()
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {

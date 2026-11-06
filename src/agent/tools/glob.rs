@@ -24,8 +24,8 @@
 //! enforced — there is no "no-timeout" value; `0` merely selects the module
 //! default.
 
-use schemars::schema::RootSchema;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
+use schemars::Schema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -155,8 +155,8 @@ impl Tool for GlobTool {
         expanded before use. Use the optional `limit` to keep large result sets manageable."
     }
 
-    fn input_schema(&self) -> RootSchema {
-        schema_for!(GlobInputArgs)
+    fn input_schema(&self) -> Schema {
+        crate::agent::tools::tool_schema_for::<GlobInputArgs>()
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {

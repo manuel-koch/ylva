@@ -27,8 +27,8 @@
 use std::path::Path;
 
 use base64::Engine as _;
-use schemars::schema::RootSchema;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
+use schemars::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::Instrument;
@@ -123,8 +123,8 @@ impl ToolCallResult for WriteResult {
         serde_json::to_value(metadata).ok()
     }
 
-    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
-        Some(schemars::schema_for!(WriteResultMetadata))
+    fn metadata_schema(&self) -> Option<schemars::Schema> {
+        Some(crate::agent::tools::tool_schema_for::<WriteResultMetadata>())
     }
 
     fn content_sections(&self) -> Vec<Section> {
@@ -281,8 +281,8 @@ impl Tool for WriteTool {
         argument accepts `~` and `$ENVVAR`/`${ENVVAR}` tokens; they are expanded before use."
     }
 
-    fn input_schema(&self) -> RootSchema {
-        schema_for!(WriteFileArgs)
+    fn input_schema(&self) -> Schema {
+        crate::agent::tools::tool_schema_for::<WriteFileArgs>()
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {

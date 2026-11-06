@@ -23,7 +23,7 @@
 //! exempt from `DEFAULT_MAX_TOOL_USE_ITERATIONS`.
 
 use futures::FutureExt;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -145,8 +145,8 @@ impl Tool for AgentFinishTool {
          deliverable belongs in `result`/`error`."
     }
 
-    fn input_schema(&self) -> schemars::schema::RootSchema {
-        schema_for!(AgentFinishArgs)
+    fn input_schema(&self) -> schemars::Schema {
+        crate::agent::tools::tool_schema_for::<AgentFinishArgs>()
     }
 
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
@@ -423,12 +423,9 @@ mod tests {
         let schema = AgentFinishTool::new(test_config()).input_schema();
         assert!(
             !schema
-                .schema
-                .object
-                .as_ref()
-                .expect("object schema")
-                .required
-                .contains("status"),
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|required| required.iter().any(|name| name == "status")),
             "status must stay optional in the schema so omitting it is not auto-denied"
         );
     }

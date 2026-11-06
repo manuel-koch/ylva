@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use futures::FutureExt;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -104,18 +104,21 @@ impl Tool for ClarifyTool {
         Markdown; use real newlines, never `\\n`."
     }
 
-    fn input_schema(&self) -> schemars::schema::RootSchema {
-        let mut schema = schema_for!(ClarifyArgs);
-        if let Some(object) = schema.schema.object.as_mut() {
-            if let Some(schemars::schema::Schema::Object(choices)) =
-                object.properties.get_mut("choices")
-            {
-                choices.array().max_items = Some(CLARIFY_MAX_CHOICES as u32);
-                choices.metadata().description = Some(format!(
+    fn input_schema(&self) -> schemars::Schema {
+        let mut schema = crate::agent::tools::tool_schema_for::<ClarifyArgs>();
+        if let Some(choices) = schema
+            .pointer_mut("/properties/choices")
+            .and_then(Value::as_object_mut)
+        {
+            choices.insert("maxItems".into(), CLARIFY_MAX_CHOICES.into());
+            choices.insert(
+                "description".into(),
+                format!(
                     "Up to {CLARIFY_MAX_CHOICES} choices for the user to pick from \
                      (max {CLARIFY_MAX_CHOICES}). Free-text answers are still accepted."
-                ));
-            }
+                )
+                .into(),
+            );
         }
         schema
     }

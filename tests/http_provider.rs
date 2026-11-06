@@ -1621,7 +1621,7 @@ async fn edenai_profile_and_typed_selections_serialize_effort_and_preserve_reque
     let tools = vec![ylva::ToolSchema {
         name: "inspect".to_string(),
         description: "Inspect the fixture".to_string(),
-        parameters: serde_json::to_value(schemars::schema_for!(ToolArguments))
+        parameters: serde_json::to_value(ylva::tool_schema_for::<ToolArguments>())
             .expect("tool schema"),
     }];
     assert!(

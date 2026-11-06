@@ -61,8 +61,8 @@ use stream::{
 };
 use windows::{CharWindowScanner, LineWindowScanner, SourceLineCounter};
 
-use schemars::schema::RootSchema;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
+use schemars::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::LazyLock;
@@ -299,8 +299,10 @@ impl ToolCallResult for ReadResult {
         .ok()
     }
 
-    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
-        let mut schema = serde_json::to_value(schemars::schema_for!(ReadResultMetadata)).ok()?;
+    fn metadata_schema(&self) -> Option<schemars::Schema> {
+        let mut schema =
+            serde_json::to_value(crate::agent::tools::tool_schema_for::<ReadResultMetadata>())
+                .ok()?;
         let properties = schema.get_mut("properties")?.as_object_mut()?;
         if metadata_read_lines(self).is_none() {
             properties.remove("read_lines");
@@ -520,8 +522,8 @@ impl Tool for ReadTool {
         &DESCRIPTION
     }
 
-    fn input_schema(&self) -> RootSchema {
-        schema_for!(ReadFileArgs)
+    fn input_schema(&self) -> Schema {
+        crate::agent::tools::tool_schema_for::<ReadFileArgs>()
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {

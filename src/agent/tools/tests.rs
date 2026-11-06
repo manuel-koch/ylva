@@ -82,7 +82,7 @@ impl Tool for TestTool {
     fn description(&self) -> &str {
         "a test tool"
     }
-    fn input_schema(&self) -> RootSchema {
+    fn input_schema(&self) -> Schema {
         schema_for!(TestArgs)
     }
     fn path_like_arguments(&self) -> &'static [&'static str] {
@@ -118,7 +118,7 @@ mod titles;
 
 #[test]
 fn validate_args_with_schema_does_not_resolve_external_references() {
-    let schema: RootSchema = serde_json::from_value(serde_json::json!({
+    let schema: Schema = serde_json::from_value(serde_json::json!({
         "type": "object",
         "properties": { "field": { "$ref": "http://127.0.0.1:1/schema.json" } }
     }))

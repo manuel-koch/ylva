@@ -224,10 +224,7 @@ pub(crate) fn capture_logs_with_format(
 ///
 /// Call this from each tool's input-args schema test to guard against fields that
 /// the LLM would see without any explanation.
-pub(crate) fn assert_all_properties_have_descriptions(
-    schema: &schemars::schema::RootSchema,
-    context: &str,
-) {
+pub(crate) fn assert_all_properties_have_descriptions(schema: &schemars::Schema, context: &str) {
     let value = serde_json::to_value(schema).expect("schema serializes");
     let properties = value["properties"]
         .as_object()
