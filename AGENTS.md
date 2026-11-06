@@ -17,6 +17,8 @@ A Rust-based terminal UI that implements an agent-harness.
    - [keybindings](./docs/keybindings.md) (keybindings implemented in the TUI)
    - [provider-notes](./docs/provider-notes.md) (what each model provider reports or lacks, e.g.
      usage and costs)
+   - [persistence](./docs/persistence.md) (on-disk session layout, storage behavior and resume
+     contracts)
    - [plans](./docs/plans/) (planned implementations, one file per subject/feature)
    - [known-test-issues](./docs/known-test-issues.md) (persistent quirks and required workarounds
      for testing)

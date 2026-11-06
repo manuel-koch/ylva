@@ -425,9 +425,10 @@ the real binary instead:
   `tests/cli_version.rs` for the minimal form, and
   `tests/store_persistence_e2e.rs` for the full pattern).
 - Give it a `tempfile::TempDir` as **both** `YLVA_HOME` (`Command::env`) and its
-  working directory (`Command::current_dir`): `YLVA_HOME` names the Ylva home
-  directly (`<tempdir>/chats`, `<tempdir>/profiles`, and the fixed cwd makes
-  any cwd-derived key deterministic. `YLVA_HOME` redirects Ylva's state and nothing else.
+  working directory (`Command::current_dir`). `YLVA_HOME` names the Ylva home
+  directly, so state lives under `<tempdir>/chats` and `<tempdir>/profiles`.
+  The fixed cwd makes any cwd-derived key deterministic. `YLVA_HOME` redirects
+  Ylva's state and nothing else.
 - Point it at a `common::mock_llm_server::MockLlmServer` through the same
   environment variable a user would use (`OLLAMA_BASE_URL`).
 - Isolate the child's environment with an **allowlist**: `Command::env_clear()`

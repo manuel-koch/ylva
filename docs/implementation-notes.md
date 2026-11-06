@@ -959,9 +959,10 @@ root loop rebuilds the snapshot from the persisted subagent transcript
 the latest `model_changed`, agent type and allowed tools from the header, a `Context`
 hydrated from the messages plus the latest compaction snapshot. The allowed tools
 are persisted in the subagent header because the popup lists only them, which keeps
-calls to unknown tools out; transcripts written before that list empty. System
-prompt and tool schemas are not persisted, so those segments are dropped and the
-popup adds a note (`finished_subagent`). An unreadable transcript yields a notice in
+calls to unknown tools out; transcripts written before that list was persisted
+are treated as having an empty allowed-tools list. System prompt and tool schemas
+are not persisted, so those segments are dropped and the popup adds a note
+(`finished_subagent`). An unreadable transcript yields a notice in
 the subagent's own view.
 
 `StatusSnapshot::tool_call_counts` counts every assistant tool call by name over the whole
