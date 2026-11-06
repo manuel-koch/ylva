@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0](https://github.com/manuel-koch/ylva/compare/v0.34.0...v0.35.0) - 2026-11-06
+
+### Added
+
+- [**breaking**] add /status popup, session deletion and related store changes
+- Refactor model picker and footer rendering of selected model
+- Allow configuring max_output_tokens on engines to constrain LLM
+- Show triggered tool calls in agents popup for root and subagent
+- Align /agents popup sizing to /models and /sessions popup
+- Change keybindings to not collide with standard cursor movement
+- Refactor footer rendering for narrow terminal
+- Improve SSE parsing for EdenAI provider wrt thinking events
+- Improve handling of reasoning-effort for EdenAI provider
+- Improve sandbox detection of harmless bash command redirect
+- Sent session-id with EdenAI requests to benefit from sticky
+- Add EdenAI provider implementation
+- Show popup dialog with all agent conversations ( root and
+
+### Documentation
+
+- Improve docs after review
+- Improve docs after review
+- Improve docs after review
+- Improve docs after review
+- rewrite persistence reference and add implementation-notes
+- Update bash rule examples
+- Update sample bash rule configuration
+- Fix typos
+
+### Fixed
+
+- Ensure compaction will always use a sufficient max_output_tokens
+- Allow manual focus switch on buttons via tab key to overrule mouse
+
 ## [0.34.0](https://github.com/manuel-koch/ylva/compare/v0.33.0...v0.34.0) - 2026-10-28
 
 ### Added
