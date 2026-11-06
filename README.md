@@ -82,10 +82,9 @@ Provider setup:
   machine. OpenRouter requests also carry attribution headers that identify
   Ylva as the calling application, and EdenAI requests carry a usage tag
   with the application name and version only (no user data).
-- **Local transcripts.** Sessions are stored unencrypted under `~/.ylva/chats`
-  (workspace-scoped profiles may use `<workspace>/.ylva/chats`) and may contain
-  secrets that appeared in a conversation; see
-  [persistence](docs/persistence.md).
+- **Local transcripts.** Sessions are stored unencrypted under
+  `${YLVA_HOME:-~/.ylva}/chats`, grouped by the launch directory, and may contain
+  secrets that appeared in a conversation; see [persistence](docs/persistence.md).
 - **Diagnostic dumps are sensitive.** `YLVA_REQUEST_DUMP_PATH` writes request
   and response bodies, including conversation content, to disk; see
   [CLI options](docs/cli-options.md#http-request-and-response-dumps-ylva_request_dump_path).
@@ -129,7 +128,7 @@ Ylva is highly customizable to adapt to user needs.
   - [x] Copilot
   - [x] EdenAI
   - [x] Ollama
-  - [x] Openrouter
+  - [x] OpenRouter
 - [x] Configurable `engines` ( combination of provider + model + config )
 - [x] Tracking billed token usage and cost totals
 - [x] Session / context compaction
@@ -164,3 +163,5 @@ Ylva is highly customizable to adapt to user needs.
   - [x] `/clear` to clear/reset current session
   - [x] `/session` to resume or clone a recent root session without exiting
   - [x] `/compact` to manually summarize the root model view, retaining the transcript
+  - [x] `/agents` to inspect the session's agents
+  - [x] `/status` to inspect the viewed agent's setup and context usage

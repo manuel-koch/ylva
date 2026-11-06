@@ -400,20 +400,18 @@ title is restored when the TUI exits.
 
 Currently the following AI model providers are supported:
 
+- Ollama (OpenAI-compatible chat plus native model discovery endpoints)
+- OpenRouter (via OpenAI-compatible endpoints; requests carry app attribution
+  headers identifying Ylva, see [provider notes](./provider-notes.md#openrouter))
+- EdenAI (via its OpenAI-compatible `/v3` endpoints; requests carry a usage tag
+  with the application name and version, see [provider notes](./provider-notes.md#edenai))
+- Copilot (via OpenAI-compatible endpoints, using the Responses API for models
+  that only support it; log in with `ylva connect copilot`)
+
 An optional per-engine `max_output_tokens` limits the tokens a model may emit;
 see [configuration](./configuration.md#output-limit-max_output_tokens). When the provider
 reports a response cut off at that limit, a red trailer appears below the truncated
 response or thinking bubble.
-
-- Ollama (OpenAI-compatible chat plus native model discovery endpoints)
-- OpenRouter ( via OpenAI compatible endpoints; requests carry app
-  attribution headers identifying Ylva, see
-  [provider notes](./provider-notes.md#openrouter) )
-- EdenAI ( via its OpenAI compatible `/v3` endpoints; requests carry a usage
-  tag with the application name and version, see
-  [provider notes](./provider-notes.md#edenai) )
-- Copilot ( via OpenAI compatible endpoints, using the Responses API for
-  models that only support it; log in with `ylva connect copilot` )
 
 `ylva connect <provider>` sets up a connection for any of them: Copilot with a
 device-flow login, EdenAI, Ollama and OpenRouter by asking for the base URL

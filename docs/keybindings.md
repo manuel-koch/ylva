@@ -21,7 +21,7 @@ When root and subagent tool approvals overlap, approving or denying one
 restores the controls for another outstanding approval in its owning
 conversation. The original draft returns after all approvals are resolved.
 
-## TUI keybindings (Phase 4)
+## TUI keybindings
 
 | Key | Context | Action |
 |---|---|---|

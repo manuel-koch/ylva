@@ -59,9 +59,9 @@ them explicitly, or `--color=yes` to force them even for non-terminal output,
 ## Exit codes
 
 Every `ylva` process ends with exactly one of these codes. The table covers chat
-runs in headless and TUI mode and the `ylva session`, `ylva profile`, and
-`ylva skill` subcommands. The `--help`
-epilog lists the same codes, generated from the same source.
+runs in headless and TUI mode, the `ylva session`, `ylva profile`, and `ylva skill`
+subcommands, and immediate TUI termination on SIGHUP. The `--help` epilog lists
+run and subcommand outcomes, generated from the same source.
 
 | Code | Meaning | Examples |
 | --- | --- | --- |
@@ -69,11 +69,13 @@ epilog lists the same codes, generated from the same source.
 | `1` | General execution error | A provider or stream failure, a root-level error such as the tool-use iteration cap, an I/O failure while a run is in progress, a partial `ylva session` maintenance failure, or a non-zero exit from the editor run by `ylva profile edit`. |
 | `2` | Usage or startup error; no run started | An unknown flag, a missing flag value, a `--log-file` that cannot be opened, an unresolvable profile or `--agent`, an unknown `--conversation-id`, a failing `init`, or a `ylva profile` refusal such as an invalid name, an existing profile without `--force`, or a broken `config.toml` in scope. |
 | `3` | Approval required but denied | A tool needed approval and was denied. Headless mode cannot ask, so it denies every such call; in the TUI a user denial counts too. The run continues after a denial. |
+| `129` | SIGHUP in the TUI | The TUI restores the terminal and exits immediately. Headless CLI mode does not handle SIGHUP. |
 | `130` | User interruption (SIGINT or SIGTERM) | An external SIGINT or SIGTERM that aborts the run: ctrl-c in headless mode, or a signal to the TUI in any state. `130` is the shell convention `128 + 2`. |
 
 When several outcomes occur in one run, the highest-precedence one sets the code:
 `130`, then `1`, then `3`, then `0`. A usage or startup error (`2`) ends the
-process before a run starts, so it never competes with them.
+process before a run starts, so it never competes with them. TUI SIGHUP is an
+immediate exit with code `129`, outside this run-outcome precedence.
 
 Headless ctrl-c (SIGINT) and SIGTERM are cooperative. The first signal stops the
 agent, the run ends through the normal path, the resume hint is printed, and the
