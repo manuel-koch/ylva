@@ -244,22 +244,21 @@ contract.
 A long conversation must keep fitting the active model's context window
 without losing anything the user can still read.
 
-- **Summarizer capacity warnings.** CLI and TUI check the selected root and all
+- **Compaction-engine capacity warnings.** CLI and TUI check the selected root and all
   configured agent types at startup, even before any user prompt or subagent
   spawn. Equivalent startup warnings are consolidated into one notice listing
   all affected agent types; different capacity conditions remain separate.
-  They warn when a root or subagent's
-  soft compaction trigger, including prompt and request overhead, can exceed
-  its selected compaction engine's effective context window. `/models` switches
-  recheck capacity immediately, even while idle, without repeating an unchanged
-  warning on the next prompt. They also warn
-  before an actual oversized summary request. Warnings are advisory: attempts
-  still run and existing failure recovery is unchanged. Each agent type can
-  select its own compaction engine. When neither the profile nor agent type
-  explicitly selects one, the summarizer follows that agent's active
-  conversation engine. An explicit summarizer retains its named engine's
-  configured model and settings in an independent Engine runtime, even when
-  the conversation uses the same engine name. See
+  They warn when a root or subagent's soft compaction trigger, including prompt
+  and request overhead, can exceed its selected compaction engine's effective
+  context window. `/models` switches recheck capacity immediately, even while
+  idle, without repeating an unchanged warning on the next prompt. They also
+  warn before an actual oversized summary request. Warnings are advisory:
+  attempts still run and existing failure recovery is unchanged. Each agent
+  type can select its own compaction engine. When neither the profile nor
+  agent type explicitly selects one, compaction follows that agent's active
+  conversation engine. An explicitly selected compaction engine retains its
+  named engine's configured model and settings in an independent Engine
+  runtime, even when the conversation uses the same engine name. See
   [per-agent configuration](./configuration.md#per-agent-configuration).
 - **Transcript vs. model view.** The transcript is the durable, ordered
   record of every message and never loses one. The *model view* is what a
@@ -271,15 +270,15 @@ without losing anything the user can still read.
   receives an immutable snapshot of the prefix it summarizes.
 - **Token estimates.** The compaction budget estimates the model view and
   active tool definitions using `tiktoken-rs` `cl100k_base`. The footer instead
-  applies `cl100k_base` to the serialized JSON Chat Completions request body
+  estimates tokens for the serialized JSON Chat Completions request body
   sent by OpenAI-compatible providers, including its roles, JSON structure,
   tools, and provider-specific fields. It counts the JSON body as text. It does
   not reproduce provider-side request processing or the selected model's
-  tokenizer, so it is not the serving model's actual input-token count.
+  tokenizer, so it is not the serving model's actual input-token usage.
   The footer can also show a model-view estimate; see the
   [context-usage readout lifecycle](#tui-architecture) for request, startup,
   model-selection, compaction, and clear updates. The footer shows the
-  token count and percentage without an estimate-source label. With
+  token estimate and percentage without an estimate-source label. With
   `YLVA_TOKEN_USAGE_DUMP_PATH` set, Ylva appends a metadata-only JSONL record
   with the same local estimate, a UTC
   timestamp, its session ID when available, and any provider-reported
@@ -365,7 +364,7 @@ requests during one run.
 
 - **What counts.** Only provider-reported costs; there are no price tables and no token-based
   estimates. Currently OpenRouter reports a cost (USD, `usage.cost`), EdenAI one (USD, top-level
-  `cost`) and Copilot one in AI credits (`AIC`, `usage.copilot_usage.total_nano_aiu`); Ollama (local
+  `cost`) and Copilot one in `AIC` (`usage.copilot_usage.total_nano_aiu`); Ollama (local
   and Cloud) and plain OpenAI-compatible providers report none and contribute nothing; see
   [provider notes](./provider-notes.md#usage-and-cost-reporting). Root, subagent, session-title and
   compaction requests all count, including requests that failed or were cancelled after the provider
@@ -539,6 +538,13 @@ guarantee readable thinking.
   Chat requests use the same retry policy before streaming begins; a provider
   error frame or a stream that closes without `[DONE]` is surfaced as a
   conversation error instead of a successful empty reply.
+
+### HTTP retries
+
+All provider connections share the bounded retry and `Retry-After` cooldown
+policy described above. In particular, OpenRouter admission-control responses
+may carry a `Retry-After` of about 10 seconds even when sufficient credits are
+available.
 
 ## Tools to be used by models
 
@@ -795,50 +801,23 @@ user approval.
 
 ### `web_search`
 
-Search the web for `terms` and return ranked results from
-the configured search backend (`docs/configuration.md`): `duckduckgo` (the
-default — DuckDuckGo's HTML endpoint), `searxng`, which requires a
-`[web_search.backends.searxng] base_url` naming the instance to query, or
-`brave`, which requires a `[web_search.backends.brave] api_key` holding the
-Brave Search API subscription token.
-`text` lists each hit as a numbered title with its URL; the structured
-result metadata carries one `{title, url, snippet}` entry per hit, with
-snippets whitespace-normalized and truncated to 300 characters. Optional
-`limit` caps the number of results (schema maximum 20; omit it for the
-configured default — `[web_search] result_limit`, 15 unless overridden). A
-search with no recognizable results returns an empty result list; a
-backend block/challenge page or unparseable response fails with an error
-instead of a silently-empty answer. Requires user approval before
-execution unless a `[tools.web_search]` `network_request` rule (optionally
-scoped to the backend endpoint's `scheme://host` with `target`, see
-`docs/configuration.md`) or `--auto-approve-web-search` states a verdict.
+Search the web for `terms` and return ranked results from the configured backend; see
+[web-search configuration](./configuration.md#web-search-configuration). `text` lists numbered
+titles and URLs, with structured snippets normalized and truncated to 300 characters. The `limit`
+argument supports at most 20 results; when omitted, the configured result limit applies. Results
+that are blocked or cannot be parsed produce an error rather than a silently empty response. See
+[tool-approval rules](./configuration.md#sandbox-tool-approval-rules).
 
 ### `web_fetch`
 
-Fetch the web content at `url` over HTTP `GET` and return it
-as text. Only absolute `http://`/`https://` URLs are accepted; other schemes
-fail before any request is made. HTML is converted to markdown as a no-JS
-reading: `<script>`/`<style>` payloads (inline JavaScript, JSON config
-blobs, CSS) are dropped and `<noscript>` fallback text is kept as visible
-content. Text/JSON/XML bodies (`text/*`, `application/json`,
-`application/xml`, and
-`+json`/`+xml` suffixes) pass through verbatim; a response without a
-content type is autodetected (UTF-8 without NUL bytes is text, HTML when it
-starts with a doctype or `<html`) and the detected type is reported as
-`detected_content_type` in the result metadata and `Response` section; the magic-number-sniffed
-media types PNG/JPEG/WebP/GIF/PDF are returned as a Base64 result with a
-typed attachment exactly like a whole-file `read` — complete response only,
-up to 8388608 bytes (8 MiB); a larger response fails with an explicit size
-error, never a truncated attachment. Other binary or non-UTF-8 bodies fail
-with a clear error naming the content type. Returned text (markdown or
-verbatim) is capped at 65536 bytes (64 KiB): longer output is truncated
-with `truncated: true` result metadata and a `Partial output` content
-section, the same vocabulary capped `read`/`bash`/`search` output uses.
-Result metadata carries `url`, `final_url` (after redirects), `status`,
-`content_type`, and `media_type` for media results. The done tool bubble
-renders these response facts as a wrapped `Response` content section
-(`final_url` only when a redirect was followed) instead of truncating
-them into the one-line summary, which keeps only the `truncated` flag.
+Fetch a URL using HTTP `GET`; only absolute `http://` and `https://` URLs are
+accepted. HTML is converted to readable Markdown; supported text content is
+returned as text. Recognized PNG, JPEG, WebP, GIF, and PDF responses are returned
+as Base64 attachments up to 8 MiB; larger media responses fail. Returned text is
+capped at 64 KiB and marked as truncated when necessary. See
+[web-fetch configuration](./configuration.md#web-fetch-configuration) and
+[tool-approval rules](./configuration.md#sandbox-tool-approval-rules).
+
 Redirects are followed by the backend under a non-interactive hop policy:
 at most 10 hops, `http`/`https` only, and no loopback, private, link-local
 or otherwise reserved destination address unless a `network_private_address`
@@ -1391,10 +1370,9 @@ and is sent to the model unchanged, as is any `/` that is not the first
 character of the input.
 
 The `/models` picker displays provider-reported context lengths as
-`context: <count>` labels using the same compact decimal token counts as the
-TUI footer (`2048` appears as `context: 2.0K`; `131_072` appears as
-`context: 131.1K`; `1_048_576` appears as `context: 1.0M`). These are token
-counts, not byte sizes. Rows of models that
+`context: <count>` labels using compact decimal formatting (`2048` appears as
+`context: 2.0K`; `131_072` appears as `context: 131.1K`; `1_048_576` appears as
+`context: 1.0M`). These are provider-reported context lengths, not byte sizes. Rows of models that
 advertise a non-text input modality append a bracketed marker with one
 upper-case letter per modality — `[I]` for image, `[F]` for file, `[IF]` for
 both; known text-only models and models whose modalities the provider did
@@ -1450,11 +1428,11 @@ list and discards the parameter edits. `esc` in the list cancels and clears the 
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |
-| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights; a double-click acts like `enter`); page keys move by a page; `enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
+| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews compaction effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights; a double-click acts like `enter`); page keys move by a page; `enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |
 | `/session` | Opens the recent-session picker in either conversation view. Focus Resume, Clone, or Delete, then activate it on a root session. | Transient; activation and subsequent work use the selected persisted identity |
 | `/agents` | Opens the Agents popup (same as `ctrl-x a`); available while busy and in either conversation view. | Transient |
-| `/status` | Opens a modal Status popup (also `ctrl-x s`, from any focus) for the viewed agent (root or drilled-in subagent): a "Current setup" section (agent type, engine, provider connection, model with configured parameters, and allowed tools, tools sorted by call count, then name, each used tool followed by its call count in parentheses; calls to tools that are not allowed are not listed), and estimated context usage as percentages of the effective context window (the title shows the used and free share of the window; two stacked bars, one relative to the window and one relative to the used context, plus a titled table by origin with `% window`, `% used` and `Tokens` columns (the `% window` column is dropped first on narrow terminals) and the free remainder). A History section lists model changes (with the parameters that changed) and compactions (estimated tokens before, after and reduction) in order as text lines with their UTC date and time, plus the average reduction. A finished subagent can be inspected too: within the live session its exact final status is kept; after a resume its status is rebuilt from the persisted transcript (without system prompt and tool schemas, which are not recorded; allowed tools come from the subagent transcript header, so transcripts written before that was recorded list none). Left-drag selects text; releasing copies it to the clipboard. Available while busy. Context groups: system prompt (soul layer, trusted instruction files by sentinel source, persona, skills), tool schemas, compaction summary, user messages, assistant messages, tool calls and results. Token figures are advisory estimates. The popup is the terminal width minus six columns wide and uses the full height of the conversation list and scrolls with a scrollbar, separated from the text by one column, when the content overflows. | Transient |
+| `/status` | Opens a modal Status popup (also `ctrl-x s`, from any focus) for the viewed agent (root or drilled-in subagent): a "Current setup" section (agent type, engine, provider connection, model with configured parameters, and allowed tools, tools sorted by call count, then name, each used tool followed by its call count in parentheses; calls to tools that are not allowed are not listed), and estimated context usage as percentages of the effective context window (the title shows the used and free share of the window; two stacked bars, one relative to the window and one relative to the used context, plus a titled table by origin with `% window`, `% used` and `Tokens` columns (the `% window` column is dropped first on narrow terminals) and the free remainder). A History section lists model changes (with the parameters that changed) and compactions (estimated tokens before, after and reduction) in order as text lines with their UTC date and time, plus the average reduction. A finished subagent can be inspected too: its live completion outcome is retained, and after resume it is rebuilt from the persisted transcript (see [Run outcome](../CONTEXT.md#run-outcome)) (without system prompt and tool schemas, which are not recorded; allowed tools come from the subagent transcript header, so transcripts written before that was recorded list none). Left-drag selects text; releasing copies it to the clipboard. Available while busy. Context groups: system prompt (soul layer, trusted instruction files by sentinel source, persona, skills), tool schemas, compaction summary, user messages, assistant messages, tool calls and results. Token figures are advisory estimates. The popup is the terminal width minus six columns wide and uses the full height of the conversation list and scrolls with a scrollbar, separated from the text by one column, when the content overflows. | Transient |
 | `/compact` | Requests a useful completed-prefix summary in the root conversation, regardless of automatic thresholds. | Transient outcomes; an applied summary is persisted |
 
 `/session` and `/compact` are TUI-only; they do not change headless CLI parsing

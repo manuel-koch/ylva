@@ -84,13 +84,6 @@ pub struct ProfileConfig {
         deserialize_with = "deserialize_max_concurrent_subagents"
     )]
     pub max_concurrent_subagents: Option<usize>,
-    /// Reserved key-to-action map. Accepted and validated as a table of
-    /// strings so a profile carrying one still loads, but Phase 7 ships a
-    /// fixed key map (`docs/keybindings.md`) and does not apply these
-    /// entries yet.
-    #[serde(default)]
-    pub keybindings: HashMap<String, String>,
-    /// Map of agent-type name to its configuration.
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
     /// Map of tool name (e.g. `read`, `write`) to its `[tools.<name>]`
@@ -593,7 +586,6 @@ impl Default for ProfileConfig {
             theme: ThemeName::default(),
             input_history_limit: default_input_history_limit(),
             max_concurrent_subagents: default_max_concurrent_subagents(),
-            keybindings: HashMap::new(),
             agents: HashMap::from([(DEFAULT_PROFILE_NAME.to_string(), default_agent_config())]),
             tools: HashMap::new(),
             web_search: WebSearchConfig::default(),

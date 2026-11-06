@@ -55,7 +55,6 @@ const KNOWN_KEYS: &[&str] = &[
     "favorite_models",
     "hard_compaction_threshold",
     "input_history_limit",
-    "keybindings",
     "max_concurrent_subagents",
     "max_output_tokens",
     "max_tool_iterations",

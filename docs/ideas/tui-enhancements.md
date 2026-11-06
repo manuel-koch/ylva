@@ -2,9 +2,8 @@
 
 ## Configurable keybindings
 
-Profiles already accept a `keybindings` table, but the TUI uses the fixed map in
-[keybindings](../keybindings.md). Apply configured bindings rather than only
-validating and storing them.
+The TUI currently uses the fixed map in [keybindings](../keybindings.md).
+A future implementation could let profiles override selected bindings.
 
 Before implementation, decide the action names and key syntax, how overrides
 combine with built-in defaults, and how conflicting or unsupported bindings

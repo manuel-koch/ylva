@@ -105,9 +105,6 @@ input_history_limit = 25
 engine = "cheap"
 timeout_sec = 180
 
-[keybindings]
-submit = "enter"
-
 [engines.fast]
 provider = "ollama"
 api_base_url = "http://localhost:11434"
@@ -145,10 +142,6 @@ persona = "You explore code."
     assert_eq!(profile.compaction.timeout_sec, 180);
     assert_eq!(profile.theme, ThemeName::Light);
     assert_eq!(profile.input_history_limit, 25);
-    assert_eq!(
-        profile.keybindings.get("submit").map(String::as_str),
-        Some("enter")
-    );
 
     let fast = profile.engines.get("fast").expect("the fast engine");
     assert_eq!(fast.provider_connection, "ollama");

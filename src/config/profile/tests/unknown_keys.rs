@@ -35,6 +35,8 @@ modle = "llama"
 [web_search]
 backend = "duckduckgo"
 result_limt = 3
+[keybindings]
+submit = "enter"
 [agents.helper]
 descripton = "helps"
 "#,
@@ -52,6 +54,7 @@ descripton = "helps"
             ("agents.helper.descripton", Some("description")),
             ("default_engin", Some("default_engine")),
             ("engines.main.modle", Some("model")),
+            ("keybindings", None),
             (
                 "provider_connections.local.api_bsae_url",
                 Some("api_base_url")

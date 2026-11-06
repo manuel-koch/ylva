@@ -159,7 +159,7 @@ An opt-in per-request diagnostic dump records this local estimate beside any
 provider-reported prompt/input token count observed on the same request. The
 provider count reflects the serving side's accounting when available. Local
 estimates are advisory and are never billed usage.
-_Avoid_: token count, usage
+_Avoid_: token count, usage, summarizer
 
 **Reported input-token count**:
 A provider-reported prompt/input token count for one completed model request,

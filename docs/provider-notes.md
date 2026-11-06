@@ -66,8 +66,9 @@ from a price table.
   OpenRouter answer `429` with `limit_source: openrouter_admission_control`
   ("could not verify available credits in time") and a `Retry-After` header
   (about 10 s), even with sufficient credits. Ylva honors the header (the body
-  copy is ignored), pauses all requests of the connection for that delay,
-  adds jitter and retries up to 6 times within about 90 s.
+  copy is ignored), pauses all requests of the connection for that delay, and
+  adds jitter. For Ylva's general retry policy, see
+  [HTTP retries](./features.md#http-retries).
 
 ### EdenAI
 
@@ -116,16 +117,13 @@ from a price table.
 
 ### Copilot
 
-- Chat and model listing use the OpenAI-compatible API at the base URL the
-  token exchange returns (fallback `https://api.githubcopilot.com`). Ylva
-  reads the per-request cost from the final usage frame:
-  `usage.copilot_usage.total_nano_aiu` divided by 1e9 gives GitHub AI Credits,
-  totalled under the currency `AIC`, GitHub's own billing unit (no USD
-  conversion; see [GitHub's billing docs][copilot-billing]). Copilot bills in AI
-  credits since June 2026; premium-request multipliers apply only to legacy
-  annual Pro/Pro+ plans and are not tracked. The field comes from GitHub's own
-  clients' source; it has not been confirmed against a live account, and a
-  frame without it simply records no cost.
+- Chat and model listing use the OpenAI-compatible API at the base URL the token exchange returns
+  (fallback `https://api.githubcopilot.com`). Ylva reads `usage.copilot_usage.total_nano_aiu` from
+  the final usage frame. For Ylva's reported cost unit and accounting details, see
+  [model usage costs](./features.md#model-usage-costs) and
+  [GitHub's billing documentation](https://docs.github.com/en/copilot/concepts/billing-and-usage/individuals/billing).
+  The field comes from GitHub's own clients' source; it has not been confirmed against a live
+  account, and a frame without it simply records no cost.
 - Authentication is the device flow with a long-lived GitHub OAuth token
   (`ghu_…`) that has no refresh token and is revoked after a year of
   inactivity. It is exchanged for a session token (about 25–30 minutes) held

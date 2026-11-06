@@ -217,13 +217,13 @@ over values from either profile environment file.
     [exit codes](./cli-options.md#exit-codes)) naming the missing profile when no
     project or home file exists — the user asked for that specific profile, so
     it is never silently substituted.
-  - **Implicit** (no `--profile` flag; the `default` profile): not an error —
-    Ylva supplies a built-in default profile with one `default` agent type
-    that may spawn subagents, the dark theme, and no configured engines. The
-    backend then comes from the environment variables in
-    `docs/cli-options.md`, so Ylva runs without writing a config file. With
-    neither engines nor environment providers, an ordinary conversation fails
-    at startup with setup guidance (`ylva connect <provider>`); there is no mock fallback.
+  - **Implicit** (no `--profile` flag; the `default` profile): not an error — Ylva supplies a
+    built-in default profile with one `default` agent type that may spawn subagents, the dark theme,
+    and no configured engines. The backend then comes from `OLLAMA_MODEL`, `OPENROUTER_MODEL`,
+    `EDENAI_MODEL`, or `COPILOT_MODEL`, as documented in the
+    [CLI environment variables](./cli-options.md#environment-variables), so Ylva runs without
+    writing a config file. With neither engines nor environment providers, an ordinary conversation
+    fails at startup with setup guidance (`ylva connect <provider>`).
 - An **unreadable or malformed** file is always a hard error (a startup error,
   see [exit codes](./cli-options.md#exit-codes)) naming the file and the parse
   problem, explicit or implicit; a config the user did write is never silently
@@ -304,10 +304,9 @@ engine = "ollama/local"
 | `default_model` | string (optional) | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Colour theme for the whole TUI and CLI output, not only syntax highlighting: `dark` for dark terminal backgrounds (default), `light` for light ones. See [features — rendering](./features.md#tui-architecture). |
 | `input_history_limit` | number | Maximum number of explicit messages from prior root sessions loaded into TUI input history. Defaults to `50`; `0` disables prior-session history. |
-| `max_concurrent_subagents` | integer or integer string | Profile-level cap on simultaneously running subagents across the delegation tree. Defaults to `4`; values `<= 0` mean unlimited. `--max-concurrent-subagents <N>` overrides this for one run. The cap limits subagent runs, not the root request. Provider request concurrency is separately limited per connection (4 open requests, held for the whole streamed response, shared by root, subagents, title generation and compaction); excess agents wait for a free permit. |
+| `max_concurrent_subagents` | integer or integer string | Profile-level cap on simultaneously running subagents across the delegation tree. Defaults to `4`; values `<= 0` mean unlimited. `--max-concurrent-subagents <N>` overrides this for one run. The cap limits subagent runs, not the root request. The [provider request concurrency cap](../CONTEXT.md#models-and-providers) separately allows 4 simultaneous requests per connection, shared by root, subagents, title generation and compaction; excess requests wait for a free permit. |
 | `[tui]` | table | TUI presentation settings — see [TUI configuration](#tui-configuration) below. |
-| `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
-| `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind (`copilot`, `edenai`, `mock`, `ollama` or `openrouter`; any other value fails at load); its endpoint and credentials belong to this connection. |
+| `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind (`copilot`, `edenai`, `mock`, `ollama` or `openrouter`; any other value fails at load); its endpoint and credentials belong to this connection. For `copilot`, `api_base_url` is ignored: the endpoint comes from the session-token exchange. |
 | `[engines.<name>]` | table | A named engine — see [Engine configuration](#engine-configuration) below. |
 | `[agents.<type>]` | table | Per-agent-type settings — see [Per-agent configuration](#per-agent-configuration) below. |
 
@@ -387,7 +386,9 @@ allowed_models = [
 ]
 ```
 
-The IDs illustrate syntax, not current model availability.
+The IDs illustrate syntax, not current model availability. In the `/models` picker, favorite models
+are listed before the remaining catalog entries and marked with `⚑`; see
+[model picker behavior](./features.md#slash-commands).
 
 - `favorite_models`: exact, case-sensitive model IDs, never patterns. Order is
   the order shown in the picker. Entries are not checked against any provider
@@ -752,11 +753,11 @@ Choosing a value (rules of thumb, to be confirmed by real usage):
   - reasoning `high` or heavy file writing 32K–64K
   - compaction engines: leave unlimited, or allow roughly 25–50% of the summarized
     prefix (e.g. 32K–64K for a 128K conversation); a truncated summary loses context.
-    Ylva raises a lower limit per summary request to the largest usable value (the
-    window left after the request, within the catalog maximum) and
-    logs a warning; this also applies when compaction follows the conversation engine.
-    A summary still cut off by the limit is never used: the compaction fails with an
-    error
+    When a configured limit is lower than the usable output budget, Ylva raises it
+    for that summary request to the largest usable value (the window left after the
+    request, within the catalog maximum) and logs a warning; this also applies when
+    compaction follows the conversation engine. If the summary response is cut off
+    despite that adjustment, it is never used and compaction fails with an error.
   - utility engine (session titles): no setting needed; each title request is capped at
     2048 tokens, or at your lower limit, since titles are one short line
 - Never above the model's catalog maximum; on gateways that reserve credit
@@ -823,9 +824,9 @@ field table, defaults, and engine-reference requirements.
 | `allowed_tools` | list of strings (optional) | Restrict which tool names this agent may invoke. When absent, the caller's flat default tool list applies (the CLI's or TUI's standard tool set, whichever is unset). When set, a distinct agent type — including one used only for spawned subagents — can be restricted to a genuinely different tool set than the root or any other agent type. |
 | `allowed_skills` | list of strings (optional) | Restrict callable discovered skills. Omission permits all retained names; `[]` permits none; explicit values replace inherited lists. See [Agent Skills](#agent-skills). |
 | `timeout_secs` | number (optional) | Maximum wall-clock seconds before the agent is cancelled. Omitted means no timeout. |
-| `max_tool_iterations` | number (optional) | Cap on consecutive tool-use rounds one turn may spend, for this agent type's root and subagent loops alike. Defaults to `50` when omitted; `0` is rejected at profile load because it would trip the guard on the very first tool-use round. |
+| `max_tool_iterations` | number (optional) | Cap on consecutive tool-use rounds one turn may spend, for this agent type's root and subagent loops alike. Defaults to the runtime limit of `50` when omitted, for any agent type; `0` is rejected at profile load because it would trip the guard on the very first tool-use round. |
 | `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or subagent. |
-| `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to concurrent subagents (one level deep; subagents cannot spawn further subagents). The profile-level `max_concurrent_subagents` setting caps running subagents across the delegation tree; excess spawns wait FIFO. Running agents also share the provider connection's cap of 4 concurrent requests, so excess agents wait for a free permit. Use `--auto-approve-spawn` to skip the human-approval prompt. See "Subagent delegation" in `docs/features.md`. |
+| `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to concurrent subagents (one level deep; subagents cannot spawn further subagents). The profile-level `max_concurrent_subagents` setting caps running subagents across the delegation tree; excess spawns wait FIFO. Running agents also share the [provider request concurrency cap](../CONTEXT.md#models-and-providers) of 4 concurrent requests per connection, so excess requests wait for a free permit. Use `--auto-approve-spawn` to skip the human-approval prompt. See "Subagent delegation" in `docs/features.md`. |
 | `[agents.<type>.compaction].engine` | string (optional) | Explicit compaction engine for this agent type's context. Overrides `[compaction].engine`; if neither is set, summaries follow the agent type's active conversation engine. Applies to root and subagent runs of this agent type. |
 | `[agents.<type>.compaction].timeout_sec` | number (optional) | Summary request timeout for this agent type, in seconds. Overrides `[compaction].timeout_sec` (default `60`); must be greater than `0`. |
 | `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tools.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
