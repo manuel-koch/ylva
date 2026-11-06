@@ -40,6 +40,7 @@ classDiagram
             -running: Vec~RunningSubagent~
             -queue: VecDeque~SpawnRequest~
             -max_concurrent_subagents: Option~usize~
+            -finished_status: FinishedStatusRegistry
             -spawn_fn: SpawnFn
         }
         class AgentLoop {
@@ -57,6 +58,7 @@ classDiagram
         class CompactionRuntime {}
         class Store {}
         class SkillCatalog {}
+        class FinishedStatusRegistry {}
     }
 
     namespace EngineExecution {
@@ -126,6 +128,10 @@ classDiagram
     }
 
     namespace DriversAndTUI {
+        class StatusPopupState {
+            +snapshot: Option~StatusSnapshot~
+            +scroll_offset: usize
+        }
         class AppState {
             +mode: TuiMode
             +focus: Focus
@@ -171,6 +177,8 @@ classDiagram
     AgentFactory o-- SkillCatalog : discovery snapshot
     AgentFactory ..> SubagentManager : wires spawn closure
     SubagentManager ..> AgentLoop : starts subagent via closure
+    SubagentManager o-- FinishedStatusRegistry : final status snapshots
+    StatusPopupState ..> AppState : projection
     AgentLoop ..> RunState : run() starts outer-loop task
     AgentLoop o-- Engine
     AgentLoop o-- ToolRegistry

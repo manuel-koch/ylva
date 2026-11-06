@@ -49,7 +49,7 @@ Chosen option: **release-plz in release-PR mode**
 * CI (`.github/workflows/ci.yml`) runs on macOS for PRs and non-`main` pushes and
   reuses Makefile targets: `format-check`, `lint`, `test-coverage`, and `audit` when
   `Cargo.toml` or `Cargo.lock` change. No secrets and no live-provider tests.
-* `make tag-version` is removed. The baseline tag is `v0.31.1`.
+* `make tag-version` is removed. The baseline tag at decision time is `v0.31.1`.
 
 ## Consequences
 

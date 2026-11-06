@@ -31,13 +31,23 @@ stateDiagram-v2
         Loading --> Active : Cancel
         Loading --> Ready : Discovery failure shown in picker
         Ready --> Preparing : Confirm Resume / Clone
+        Ready --> Deleting : Confirm Delete
         Ready --> Active : Cancel
+        Deleting --> Ready : Done (session removed from list) / failure kept as picker error
         Preparing --> Ready : Barrier refused or target preparation fails
         Preparing --> Active : Cancel / release old root barrier
         Preparing --> Publishing : Target prepared / barrier rechecked / identities current
         Publishing --> Active : Join old loop / replace channels, state, store / start target
         Publishing --> [*] : Shutdown failure / report error
         Active --> [*] : Quit / process exit
+
+        note right of Deleting
+            Deleting runs Store::delete_session_family for the
+            selected root and its subagent transcripts on a
+            blocking task. A repeated confirm while deleting is
+            ignored; the deleted session is dropped from the
+            picker list and the action resets to Resume.
+        end note
 
         note right of Preparing
             PrepareSessionSwitch freezes mutations only when quiescent:

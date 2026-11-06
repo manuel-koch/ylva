@@ -741,7 +741,10 @@ not user-facing workflows, planned features, or exhaustive generated inventories
 - [Reducer state diagram](diagrams/tui-reducer-state-diagram.mmd): separate projections
   of `TuiMode` and `Focus`, not an exhaustive product of valid combinations.
   `ConversationView`, `SlashOverlay`, compaction activity, and per-subagent
-  state are independent dimensions. An idle root mode does not imply that
+  state are independent dimensions. The `/status` and `/agents` popups are
+  `Focus` states reached from `MainInput` (or, for the status popup, from the
+  `StatusSnapshot` domain event); both close back through the outstanding
+  approval or the main input. An idle root mode does not imply that
   all subagents have finished. Edges describe the current presenter, including
   immediate ctrl-c denial in approval focus.
 - [Turn-execution sequence](diagrams/turn-execution-sequence.mmd): model requests,

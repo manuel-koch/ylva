@@ -7,11 +7,14 @@ config:
 flowchart LR
     %% Sources: events.rs, tui_driver.rs, tui_driver/{input,effects,updates,models,sessions}.rs,
     %% presenter.rs, presenter/{keyboard,mouse,domain}.rs, render.rs, tui_widgets.rs.
+    %% The /status round trip (ShowStatus effect → AgentCommand::RequestStatus →
+    %% UiUpdate::StatusSnapshot → DomainEvent::StatusSnapshot → status popup)
+    %% travels over the same Select/Map/Effect/DomainEvent paths shown here.
 
     Terminal["Terminal input / mouse / paste / resize<br/>External SIGINT / SIGTERM relay"]
     Bridge["Crossterm bridge / AppAction"]
     Agent["AgentLoop<br/>AgentCommand in / UiUpdate out"]
-    Tasks["Catalog, title, session tasks<br/>Identity-scoped results"]
+    Tasks["Catalog, title, session tasks<br/>Identity-scoped results<br/>Status snapshot requests (AgentCommand::RequestStatus<br/>→ UiUpdate::StatusSnapshot → status popup)"]
     Timer["Frame ticks / confirm expiry / bubble-click expiry"]
 
     subgraph Driver["tui_driver: async orchestration and I/O"]

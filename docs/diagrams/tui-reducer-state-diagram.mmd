@@ -15,6 +15,8 @@ stateDiagram-v2
     %% Sources: tui_reducer_state/events.rs, presenter/{keyboard,domain,tool_bubbles}.rs,
     %% tui_reducer_state/conversation/{navigation,tools}.rs, tui_driver/effects.rs.
     %% SlashOverlay and ConversationView are separate state dimensions, omitted here.
+    %% The /status and /agents popups (Focus::StatusPopup, Focus::AgentsPopup) are
+    %% included; their content state lives in StatusPopupState and the agents popup.
 
     state "AppState projections" as Reducer {
         state "Execution / interaction mode (TuiMode)" as Mode {
@@ -112,6 +114,36 @@ stateDiagram-v2
             HelpPopup --> MainInput : ClarifyPending / show question
             HelpPopup --> MainInput : AgentIdle (Idle / Pending / Streaming)
             ToolApproval --> MainInput : AgentIdle (Idle / Pending / Streaming)
+
+            MainInput --> StatusPopup : /status or ctrl-x s (Effect::ShowStatus round trip)
+            StatusPopup --> MainInput : /status again / Esc (toggle closes, resume outstanding approval)
+            StatusPopup --> AgentsPopup : ctrl-x a (closes status, opens agents)
+            StatusPopup --> StatusPopup : StatusSnapshot (refresh, keep scroll)
+
+            MainInput --> AgentsPopup : ctrl-x a or /agents
+            HelpPopup --> AgentsPopup : ctrl-x a
+            ToolApproval --> AgentsPopup : ctrl-x a (draft restored on close)
+            StatusPopup --> AgentsPopup : ctrl-x a
+            AgentsPopup --> MainInput : ctrl-x a / Esc (close, resume outstanding approval)
+            AgentsPopup --> HelpPopup : F1
+
+            note right of StatusPopup
+                The popup opens on the StatusSnapshot domain event,
+                not on the keypress itself; the keypress only
+                emits Effect::ShowStatus.
+                A second ShowStatus or Escape closes it and
+                resumes an outstanding tool approval via
+                restore_focus_after_help, like the help popup.
+                ShowStatus is ignored while help, approval,
+                clarify, or an overlay has focus.
+            end note
+
+            note right of AgentsPopup
+                Opened synchronously by ctrl-x a or /agents;
+                Escape or a repeated ctrl-x a closes it.
+                While open, ShowStatus and model-favorite keys
+                are ignored.
+            end note
 
             note right of ToolApproval
                 Root/subagent approvals share a FIFO queue.
