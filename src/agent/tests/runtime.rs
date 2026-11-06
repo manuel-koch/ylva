@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::store::SubagentSessionHeader;
 
 #[test]
 fn stream_failure_emits_one_user_visible_error() {
@@ -235,6 +236,153 @@ fn clear_context_records_the_root_agent_type_in_the_replacement_session() {
 }
 
 #[test]
+fn status_request_for_a_finished_subagent_notices_in_its_own_view() {
+    crate::test_support::run_locked(async {
+        let registry = Arc::new(ToolRegistry::new());
+        let (mut agent_loop, mut ui_rx) = AgentLoop::new(test_engine(), registry);
+        let handle = agent_loop.run();
+        let finished_run_id = Uuid::new_v4();
+        agent_loop
+            .send_command(AgentCommand::ForSubagent {
+                run_id: finished_run_id,
+                command: Box::new(AgentCommand::RequestStatus),
+            })
+            .await;
+        let run_id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(UiUpdate::Notice { run_id, .. }) = ui_rx.recv().await {
+                    break run_id;
+                }
+            }
+        })
+        .await
+        .expect("a notice arrives");
+        assert_eq!(run_id, Some(finished_run_id));
+        drop(agent_loop);
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    });
+}
+
+#[test]
+fn status_request_for_a_finished_subagent_is_rebuilt_from_its_transcript() {
+    crate::test_support::run_locked(async {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = crate::store::Store::create(
+            &temp.path().join("chats"),
+            temp.path(),
+            Uuid::new_v4(),
+            "mock",
+            "test-model",
+            None,
+        )
+        .expect("store");
+        let finished_run_id = Uuid::new_v4();
+        store
+            .write_subagent_transcript_for_run(
+                finished_run_id,
+                &SubagentSessionHeader {
+                    provider_connection_and_model: Some((
+                        "mock".to_string(),
+                        "test-model".to_string(),
+                    )),
+                    agent_type: Some("research".to_string()),
+                    ..Default::default()
+                },
+                &[Message::User {
+                    content: "task".to_string(),
+                    kind: UserMessageKind::Explicit,
+                }],
+                &[],
+            )
+            .await
+            .expect("transcript written");
+        let (agent_loop, mut ui_rx) = AgentLoop::new(test_engine(), Arc::new(ToolRegistry::new()));
+        let mut agent_loop = agent_loop.with_store(store);
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::ForSubagent {
+                run_id: finished_run_id,
+                command: Box::new(AgentCommand::RequestStatus),
+            })
+            .await;
+        let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(UiUpdate::StatusSnapshot(snapshot)) = ui_rx.recv().await {
+                    break snapshot;
+                }
+            }
+        })
+        .await
+        .expect("a status snapshot arrives");
+        assert!(snapshot.finished_subagent);
+        assert_eq!(snapshot.run_id, Some(finished_run_id));
+        assert_eq!(snapshot.agent_type.as_deref(), Some("research"));
+        drop(agent_loop);
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    });
+}
+
+#[test]
+fn status_request_for_a_finished_subagent_prefers_its_kept_final_snapshot() {
+    crate::test_support::run_locked(async {
+        let finished_run_id = Uuid::new_v4();
+        let registry = crate::agent::FinishedStatusRegistry::default();
+        let (mut source_loop, mut source_ui_rx) =
+            AgentLoop::new(test_engine(), Arc::new(ToolRegistry::new()));
+        let source_handle = source_loop.run();
+        source_loop.send_command(AgentCommand::RequestStatus).await;
+        let mut kept = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(UiUpdate::StatusSnapshot(snapshot)) = source_ui_rx.recv().await {
+                    break *snapshot;
+                }
+            }
+        })
+        .await
+        .expect("a status snapshot arrives");
+        drop(source_loop);
+        let _ = tokio::time::timeout(Duration::from_secs(2), source_handle).await;
+        kept.allowed_tools = vec!["read".to_string()];
+        registry.insert(finished_run_id, kept);
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::unbounded_channel();
+        let manager = crate::subagent_manager::SubagentManager::new(
+            subagent_ui_tx,
+            Box::new(
+                |_request, _cancel, _ui_tx| crate::subagent_manager::SpawnOutcome {
+                    command_sender: None,
+                    handle: tokio::spawn(async {}),
+                },
+            ),
+            None,
+        )
+        .with_finished_status(registry);
+        let (_finish_tx, finish_rx) = mpsc::unbounded_channel();
+        let (_parent_ui_tx, parent_ui_rx) = mpsc::unbounded_channel();
+        let (agent_loop, mut ui_rx) = AgentLoop::new(test_engine(), Arc::new(ToolRegistry::new()));
+        let mut agent_loop = agent_loop.with_subagent_manager(manager, finish_rx, parent_ui_rx);
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::ForSubagent {
+                run_id: finished_run_id,
+                command: Box::new(AgentCommand::RequestStatus),
+            })
+            .await;
+        let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(UiUpdate::StatusSnapshot(snapshot)) = ui_rx.recv().await {
+                    break snapshot;
+                }
+            }
+        })
+        .await
+        .expect("a status snapshot arrives");
+        assert_eq!(snapshot.allowed_tools, vec!["read".to_string()]);
+        drop(agent_loop);
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    });
+}
+
+#[test]
 fn agent_command_dispatch_logs_every_command_variant() {
     let log = capture_logs(async {
         tracing::callsite::rebuild_interest_cache();
@@ -268,6 +416,7 @@ fn agent_command_dispatch_logs_every_command_variant() {
         agent_loop.send_command(AgentCommand::ClearContext).await;
         agent_loop
             .send_command(AgentCommand::RecordModelChanged {
+                parameters: Default::default(),
                 provider_connection: "private connection".to_string(),
                 model: "private model".to_string(),
             })
@@ -367,6 +516,7 @@ fn model_change_re_reports_context_usage_against_the_new_window() {
         *engine.context_length.lock().expect("lock") = 128_000;
         agent_loop
             .send_command(AgentCommand::RecordModelChanged {
+                parameters: Default::default(),
                 provider_connection: "mock".to_string(),
                 model: "bigger".to_string(),
             })

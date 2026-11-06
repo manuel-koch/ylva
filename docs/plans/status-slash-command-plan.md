@@ -51,52 +51,52 @@ Definition of done:
 Implementing agent: flip `[ ]` to `[x]` immediately after completing each step and rewrite this file
 in place so progress is resumable across sessions.
 
-1. [ ] Read `docs/development-workflow.md` and `docs/known-test-issues.md` (tracing, cwd and
+1. [x] Read `docs/development-workflow.md` and `docs/known-test-issues.md` (tracing, cwd and
        integration-test quirks) before writing tests.
-2. [ ] Define a pure `ContextBreakdown` model (new file `src/context_breakdown.rs`, re-exported in
+2. [x] Define a pure `ContextBreakdown` model (new file `src/context_breakdown.rs`, re-exported in
        `src/lib.rs`): origin categories (soul, instruction file with source, tool schemas, tool
        calls and results, assistant messages, user messages, compaction summary/recovery handoff;
        tool calls and results form one category), token counts, and a function computing
        percentages. Write its unit tests first (TDD): percentage rounding, zero total, ordering.
-3. [ ] Make the system prompt's origins recoverable. Extend `src/config/instructions.rs`
+3. [x] Make the system prompt's origins recoverable. Extend `src/config/instructions.rs`
        (`compose_root_system_prompt`, `compose_soul_with_instructions`, `InstructionFile::source`)
        and `src/config/soul.rs` (`load_soul`) so the composer also returns structured parts (soul
        text + resolved soul layer, ordered instruction files with sources, safety preamble) while
        producing the identical prompt string. Keep one source of truth: the string is derived from
        the parts.
-4. [ ] Carry those parts (and persona/skill advertisement from `compose_agent_system_prompt` in
+4. [x] Carry those parts (and persona/skill advertisement from `compose_agent_system_prompt` in
        `src/agent_factory.rs`) to where the TUI can read them: attach a `SystemPromptOrigins` value
        to the agent construction path, per agent (root and each subagent).
-5. [ ] Compute the breakdown from an agent's `Context` (`src/agent/context.rs`: `messages()`,
+5. [x] Compute the breakdown from an agent's `Context` (`src/agent/context.rs`: `messages()`,
        `token_count(index)`, `leading_system_len()`, `tool_schema_token_count`,
        compaction/model-view accounting) using the system prompt origins; estimate each origin with
        `TokenEstimator::estimate_tokens` (`src/llm/token_estimate.rs`).
-6. [ ] Add a driver effect/event pair (e.g. `Effect::ShowStatus` → `AppEvent` carrying a
+6. [x] Add a driver effect/event pair (e.g. `Effect::ShowStatus` → `AppEvent` carrying a
        `StatusSnapshot` with engine info, agent type config and `ContextBreakdown`) handled in
        `src/tui_driver.rs`, since engine/agent state lives in the driver, not the reducer. Support
        subagent views by targeting the viewed agent.
-7. [ ] Register the command in `src/slash_command.rs`: add `STATUS_COMMAND_NAME`,
+7. [x] Register the command in `src/slash_command.rs`: add `STATUS_COMMAND_NAME`,
        `SlashCommand::Status`, a `SLASH_COMMANDS` entry (no argument) and extend the
        parsing/suggestion tests.
-8. [ ] Handle `SlashCommand::Status` in `src/presenter/keyboard.rs` (next to `SlashCommand::Agents`,
+8. [x] Handle `SlashCommand::Status` in `src/presenter/keyboard.rs` (next to `SlashCommand::Agents`,
        incl. the busy-allowed match around line 798): clear the textarea and emit the status effect.
-9. [ ] Add popup state and focus: `Focus::StatusPopup` (modal, `src/tui_reducer_state/events.rs`),
+9. [x] Add popup state and focus: `Focus::StatusPopup` (modal, `src/tui_reducer_state/events.rs`),
        `StatusPopupState` in a new `src/tui_reducer_state/status_popup.rs` (snapshot, scroll
        offset), wiring into `AppState` (`app_state.rs`), keyboard/mouse routing (`esc` close,
        arrows/page/wheel scroll) and layout (`src/tui_reducer_state/layout.rs`).
-10. [ ] Render the popup in a new `src/tui_widgets/status_popup.rs` (model on `agents_popup.rs`):
+10. [x] Render the popup in a new `src/tui_widgets/status_popup.rs` (model on `agents_popup.rs`):
         sections for provider/engine, agent type, usage table, and a coloured horizontal stacked bar
         with legend; add theme colours in `src/theme.rs`.
-11. [ ] Add tests: reducer/presenter tests for opening, closing, scrolling, busy and subagent cases;
+11. [x] Add tests: reducer/presenter tests for opening, closing, scrolling, busy and subagent cases;
         render tests for the popup and bar graph; slash parser/suggestion tests; a context-breakdown
         test against a hand-built `Context`.
-12. [ ] Update docs in the same change: `docs/features.md` (slash-command table and a `/status`
+12. [x] Update docs in the same change: `docs/features.md` (slash-command table and a `/status`
         description), `docs/implementation-notes.md` (Slash commands section: effect/event flow,
         breakdown model, prompt origins), `docs/keybindings.md` (popup keys), `CONTEXT.md` (terms
         such as "Context breakdown"), and, after asking the user, delete
         `docs/ideas/slash-commands.md` (it is empty once `/status` is removed) and drop references
         to it. Run `rumdl` on changed markdown.
-13. [ ] Verify: `make format lint`, `make test-coverage` (maintain the coverage threshold from
+13. [x] Verify: `make format lint`, `make test-coverage` (maintain the coverage threshold from
         `docs/development-workflow.md`); `make audit` only if dependencies changed.
 
 ## Implementation Hints

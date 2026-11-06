@@ -24,6 +24,7 @@ fn session_summary(identity: u128, parent: Option<u128>, day: u32) -> SessionSum
         title: format!("session {identity}"),
         provider_connection: "mock".into(),
         model: "mock".into(),
+        has_messages: true,
         path: std::path::PathBuf::from(format!("{identity}.jsonl")),
     }
 }

@@ -32,6 +32,7 @@ use crate::sandbox::Sandbox;
 use crate::session_title::TitleAttempt;
 use crate::store::Store;
 use crate::subagent_manager::{FinishResult, FinishResultOrigin, SpawnRequest, SubagentManager};
+use crate::system_prompt_origins::{PromptOrigin, SystemPromptOrigins};
 
 /// Constructs [`AgentLoop`] instances from a named set of [`Engine`]s and a
 /// [`ProfileConfig`].
@@ -53,7 +54,7 @@ pub struct AgentFactory {
     /// when persistence is enabled.
     store: Option<Store>,
     /// Resolved `SOUL.md` text used only for newly created root contexts.
-    system_prompt: Option<String>,
+    system_prompt: Option<SystemPromptOrigins>,
 }
 
 #[derive(Clone, Default)]
@@ -277,8 +278,14 @@ impl AgentFactory {
     /// Set the initial system message for root agents built by this factory.
     /// The resolved agent-type persona and system-prompt body are appended
     /// when an agent is created. The same global text is inherited by subagents.
-    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(system_prompt.into());
+    pub fn with_system_prompt(self, system_prompt: impl Into<String>) -> Self {
+        self.with_system_prompt_origins(SystemPromptOrigins::unattributed(system_prompt))
+    }
+
+    /// Like [`Self::with_system_prompt`], keeping where each section came from
+    /// so `/status` can attribute the prompt's tokens.
+    pub fn with_system_prompt_origins(mut self, system_prompt: SystemPromptOrigins) -> Self {
+        self.system_prompt = Some(system_prompt);
         self
     }
 
@@ -381,7 +388,7 @@ impl AgentFactory {
         agent_type: &str,
         role: Role,
         store: Option<Store>,
-        system_prompt: Option<String>,
+        system_prompt: Option<SystemPromptOrigins>,
         inherited_engine: Option<Arc<dyn Engine>>,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
         let engine_name = resolve_engine_name(profile, agent_type);
@@ -489,11 +496,11 @@ impl AgentFactory {
             .with_agent_type(agent_type)
             .with_max_tool_iterations(profile.max_tool_iterations_for(agent_type));
         if let Some(system_prompt) = compose_agent_system_prompt(
-            system_prompt.as_deref(),
+            system_prompt.as_ref(),
             profile.agents.get(agent_type),
             &callable_skills,
         ) {
-            agent_loop = agent_loop.with_system_prompt(system_prompt);
+            agent_loop = agent_loop.with_system_prompt_origins(system_prompt);
         }
 
         if let Some(subagent_role_config) = subagent_role_config {
@@ -625,11 +632,13 @@ impl AgentFactory {
         parent_store: Arc<std::sync::Mutex<Option<Store>>>,
         parent_engine: Arc<dyn Engine>,
         parent_engine_name: String,
-        system_prompt: Option<String>,
+        system_prompt: Option<SystemPromptOrigins>,
     ) -> BuiltSubagentManager {
         let (finish_tx, finish_rx) = mpsc::unbounded_channel::<FinishResult>();
         let (subagent_ui_tx, subagent_ui_rx) = mpsc::unbounded_channel::<UiUpdate>();
         let max_concurrent_subagents = profile.max_concurrent_subagents_limit();
+        let finished_status = crate::agent::FinishedStatusRegistry::default();
+        let spawn_finished_status = finished_status.clone();
 
         let spawn_fn: crate::subagent_manager::SpawnFn = Box::new(
             move |request: SpawnRequest,
@@ -694,7 +703,10 @@ impl AgentFactory {
                     inherited_engine,
                 );
                 let (subagent_loop, subagent_ui_rx) = match built {
-                    Ok(built) => built,
+                    Ok((subagent_loop, subagent_ui_rx)) => (
+                        subagent_loop.with_finished_status_registry(spawn_finished_status.clone()),
+                        subagent_ui_rx,
+                    ),
                     Err(error) => {
                         tracing::error!(%run_id, %error, "failed to construct subagent");
                         // The failure report goes to the unbounded shared finish
@@ -716,6 +728,7 @@ impl AgentFactory {
                 };
 
                 let subagent_engine = subagent_loop.engine();
+                let subagent_tool_names = subagent_loop.registered_tool_names();
                 let subagent_engine_config = Some(subagent_engine.config());
                 let subagent_engine_display = subagent_loop.engine_display_info();
                 let _ = forward_ui_tx.send(UiUpdate::SubagentEngineConfigured {
@@ -740,6 +753,11 @@ impl AgentFactory {
                             SubagentTranscriptTarget {
                                 parent_store,
                                 engine_config: subagent_engine_config,
+                                agent_type: request.agent_type.clone(),
+                                engine_parameters: crate::store::ModelParameters::from_engine(
+                                    subagent_engine.as_ref(),
+                                ),
+                                allowed_tools: subagent_tool_names,
                                 utility_engine,
                             },
                         )
@@ -756,7 +774,8 @@ impl AgentFactory {
         );
 
         BuiltSubagentManager {
-            manager: SubagentManager::new(subagent_ui_tx, spawn_fn, max_concurrent_subagents),
+            manager: SubagentManager::new(subagent_ui_tx, spawn_fn, max_concurrent_subagents)
+                .with_finished_status(finished_status),
             finish_rx,
             subagent_ui_rx,
         }
@@ -764,27 +783,26 @@ impl AgentFactory {
 }
 
 fn compose_agent_system_prompt(
-    global_system_prompt: Option<&str>,
+    global_system_prompt: Option<&SystemPromptOrigins>,
     agent_config: Option<&crate::config::AgentConfig>,
     skills: &crate::skills::policy::CallableSkills,
-) -> Option<String> {
-    let mut prompt_sections = Vec::new();
-    if let Some(global_system_prompt) = global_system_prompt {
-        prompt_sections.push(global_system_prompt);
+) -> Option<SystemPromptOrigins> {
+    let mut prompt = global_system_prompt.cloned().unwrap_or_default();
+    if let Some(persona) = agent_config.and_then(|agent_config| agent_config.persona.as_deref()) {
+        prompt.push(PromptOrigin::AgentPersona, persona);
     }
-    if let Some(agent_config) = agent_config {
-        if let Some(persona) = agent_config.persona.as_deref() {
-            prompt_sections.push(persona);
+    if let Some(advertisement) = skills.advertisement() {
+        if prompt.is_empty() {
+            prompt.push(
+                PromptOrigin::Soul {
+                    source: "built-in".to_string(),
+                },
+                crate::config::soul::DEFAULT_SOUL,
+            );
         }
+        prompt.push(PromptOrigin::SkillAdvertisement, advertisement);
     }
-    let advertisement = skills.advertisement();
-    if let Some(advertisement) = &advertisement {
-        if prompt_sections.is_empty() {
-            prompt_sections.push(crate::config::soul::DEFAULT_SOUL);
-        }
-        prompt_sections.push(advertisement);
-    }
-    (!prompt_sections.is_empty()).then(|| prompt_sections.join("\n\n"))
+    (!prompt.is_empty()).then_some(prompt)
 }
 
 /// Return value of [`AgentFactory::build_subagent_manager`]: the manager
@@ -816,6 +834,14 @@ struct SubagentTranscriptTarget {
     /// validation, but persisting nothing is safer than persisting a
     /// misleading empty pair.
     engine_config: Option<EngineConfig>,
+    /// The subagent's agent type, stamped into its session header.
+    agent_type: String,
+    /// The subagent engine's effective parameters, recorded with its initial
+    /// `ModelChanged` event.
+    engine_parameters: crate::store::ModelParameters,
+    /// Names of the tools the subagent was registered with, recorded in its
+    /// session header for `/status` of the finished run.
+    allowed_tools: Vec<String>,
     /// The independently resolved utility engine used to title this subagent
     /// transcript without routing through the subagent's active engine.
     utility_engine: Option<Arc<dyn Engine>>,
@@ -971,15 +997,21 @@ async fn write_subagent_transcript(
     let Some(parent_store) = &target.parent_store else {
         return;
     };
-    let provider_connection_and_model = target
-        .engine_config
-        .as_ref()
-        .map(|config| (config.provider_connection.as_str(), config.model.as_str()));
+    let header = crate::store::SubagentSessionHeader {
+        provider_connection_and_model: target
+            .engine_config
+            .as_ref()
+            .map(|config| (config.provider_connection.clone(), config.model.clone())),
+        agent_type: Some(target.agent_type.clone()),
+        parameters: target.engine_parameters.clone(),
+        allowed_tools: target.allowed_tools.clone(),
+    };
     match parent_store
         .write_subagent_transcript_for_run_store(
             run_id,
-            provider_connection_and_model,
+            &header,
             context.messages(),
+            context.compaction_history(),
         )
         .await
     {

@@ -285,7 +285,7 @@ fn dragging_scrolled_help_popup_line_copies_rendered_text() {
         .help_popup
         .help_rendered_lines
         .iter()
-        .position(|line| line == "Help popup")
+        .position(|line| line == "Slash commands")
         .expect("help popup heading should be rendered");
     state.help_popup.help_scroll_offset = target_line;
     terminal
@@ -306,7 +306,7 @@ fn dragging_scrolled_help_popup_line_copies_rendered_text() {
         state.help_popup.help_scroll_offset, target_line,
         "the target heading should be visible at the top of the scrolled popup"
     );
-    let target_column_end = content_area.x + "Help popup".chars().count() as u16;
+    let target_column_end = content_area.x + "Slash commands".chars().count() as u16;
     let target_row = content_area.y;
     let textarea_context = TextareaContext {
         is_empty: true,
@@ -347,9 +347,9 @@ fn dragging_scrolled_help_popup_line_copies_rendered_text() {
     );
 
     assert!(
-        effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::CopyToClipboard(text) if text == "Help popup")),
+        effects.iter().any(
+            |effect| matches!(effect, Effect::CopyToClipboard(text) if text == "Slash commands")
+        ),
         "dragging a scrolled help line should copy its rendered text: {effects:?}"
     );
 }

@@ -25,13 +25,18 @@ use uuid::Uuid;
 use crate::llm::engine::Engine;
 use crate::llm::{ToolEnvelope, ToolSchema};
 use crate::store::Store;
+use crate::system_prompt_origins::SystemPromptOrigins;
 
 pub mod compaction;
 mod context;
+mod finished_status;
+pub(crate) use finished_status::tool_call_counts;
+pub use finished_status::FinishedStatusRegistry;
 mod message;
 mod protocol;
 mod request;
 mod runtime;
+mod status_timeline;
 pub mod subagent_manager;
 mod tool_execution;
 mod tool_queue;
@@ -58,8 +63,10 @@ pub use message::{
 };
 use protocol::log_agent_command;
 pub use protocol::{
-    AgentCommand, AgentEvent, AgentMode, ContextUsageSource, DeltaChunk, StreamEvent, UiUpdate,
+    AgentCommand, AgentEvent, AgentMode, ContextUsageSource, DeltaChunk, StatusSnapshot,
+    StreamEvent, UiUpdate,
 };
+pub use status_timeline::StatusTimelineEntry;
 
 use tools::{ToolCall, ToolRegistry};
 
@@ -221,7 +228,7 @@ pub struct AgentLoop {
     briefing: Option<String>,
     /// Root-only initial system message loaded from `SOUL.md`. Subagent loops
     /// leave this unset and retain [`Context::new`]'s compatibility prompt.
-    system_prompt: Option<String>,
+    system_prompt: Option<SystemPromptOrigins>,
     /// Set via [`AgentLoop::with_subagent_role`] from `config.run_id` for a
     /// `Role::Subagent` agent; `None` for `Role::Root`. Stamped onto every
     /// `UiUpdate::ToolPending`/`ClarifyPending` this loop emits so the root
@@ -260,6 +267,9 @@ pub struct AgentLoop {
     /// Set via [`AgentLoop::with_store`] when persistence is enabled: the
     /// session file this loop's committed messages are appended to.
     store: Option<Store>,
+    /// Set via [`AgentLoop::with_finished_status_registry`] for a subagent:
+    /// receives the loop's final status snapshot when it finishes.
+    finished_status: Option<FinishedStatusRegistry>,
     /// Session identity attached to model requests, including subagent requests
     /// that are attributed to their persisted parent conversation.
     session_id: Option<Uuid>,
@@ -308,6 +318,7 @@ impl AgentLoop {
             startup_compaction_checks: Vec::new(),
             agent_type: None,
             store: None,
+            finished_status: None,
             session_id: None,
             current_store,
         };
@@ -346,8 +357,13 @@ impl AgentLoop {
     }
 
     /// Set the root agent's initial system message.
-    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(system_prompt.into());
+    pub fn with_system_prompt(self, system_prompt: impl Into<String>) -> Self {
+        self.with_system_prompt_origins(SystemPromptOrigins::unattributed(system_prompt))
+    }
+
+    /// Set the root agent's initial system message from origin-tagged sections.
+    pub fn with_system_prompt_origins(mut self, system_prompt: SystemPromptOrigins) -> Self {
+        self.system_prompt = Some(system_prompt);
         self
     }
 
@@ -392,6 +408,13 @@ impl AgentLoop {
         checks: Vec<compaction::AgentCompactionCapacityCheck>,
     ) -> Self {
         self.startup_compaction_checks = checks;
+        self
+    }
+
+    /// Publish this subagent loop's final status snapshot into `registry` when
+    /// it finishes.
+    pub fn with_finished_status_registry(mut self, registry: FinishedStatusRegistry) -> Self {
+        self.finished_status = Some(registry);
         self
     }
 
@@ -442,6 +465,15 @@ impl AgentLoop {
     /// queries (the model list) without reaching through the factory.
     pub fn engine(&self) -> Arc<dyn Engine> {
         self.engine.clone()
+    }
+
+    /// Names of the tools registered on this loop.
+    pub(crate) fn registered_tool_names(&self) -> Vec<String> {
+        self.registry
+            .schemas()
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect()
     }
 
     /// The explicitly configured compaction engine with its name, when it is

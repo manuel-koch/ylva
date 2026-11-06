@@ -243,6 +243,8 @@ pub(super) fn route_mouse(
                 }
             } else if matches!(state.focus, Focus::AgentsPopup) {
                 state.agents_popup_scroll(if scroll_up { -1 } else { 1 });
+            } else if matches!(state.focus, Focus::StatusPopup) {
+                state.status_popup_scroll(if scroll_up { -1 } else { 1 });
             } else if matches!(
                 state.slash_overlay,
                 SlashOverlay::ModelPicker { .. } | SlashOverlay::SessionPicker(_)
@@ -280,6 +282,24 @@ pub(super) fn route_mouse(
         }
 
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            if matches!(state.focus, Focus::StatusPopup) {
+                if !state.layout.status_popup.hit(column, row) {
+                    state.close_status_popup();
+                } else if let Some((line, column)) =
+                    state.status_popup_content_position(column, row)
+                {
+                    state.status_popup.selection = Some(ChatSelection {
+                        anchor_line: line,
+                        anchor_col: column,
+                        cursor_line: line,
+                        cursor_col: column,
+                    });
+                    state.status_popup.drag_active = true;
+                } else {
+                    state.status_popup.selection = None;
+                }
+                return vec![];
+            }
             if matches!(state.focus, Focus::AgentsPopup) {
                 if !state.layout.agents_popup.hit(column, row) {
                     state.close_agents_popup();
@@ -321,20 +341,27 @@ pub(super) fn route_mouse(
             if state.slash_overlay.is_visible() {
                 if let SlashOverlay::SessionPicker(picker) = &mut state.slash_overlay {
                     if picker.phase == crate::tui_reducer_state::SessionPickerPhase::Ready {
-                        if state
-                            .layout
-                            .slash_overlay
-                            .resume_action
-                            .contains((column, row).into())
-                        {
-                            picker.action = crate::tui_reducer_state::SessionAction::Resume;
-                        } else if state
-                            .layout
-                            .slash_overlay
-                            .clone_action
-                            .contains((column, row).into())
-                        {
-                            picker.action = crate::tui_reducer_state::SessionAction::Clone;
+                        let layout = &state.layout.slash_overlay;
+                        let clicked_action = [
+                            (
+                                layout.resume_action,
+                                crate::tui_reducer_state::SessionAction::Resume,
+                            ),
+                            (
+                                layout.clone_action,
+                                crate::tui_reducer_state::SessionAction::Clone,
+                            ),
+                            (
+                                layout.delete_action,
+                                crate::tui_reducer_state::SessionAction::Delete,
+                            ),
+                        ]
+                        .into_iter()
+                        .find(|(area, _)| area.contains((column, row).into()))
+                        .map(|(_, action)| action);
+                        if let Some(action) = clicked_action {
+                            picker.action = action;
+                            return super::keyboard::confirm_session_picker_selection(picker);
                         } else if let Some(index) = state.layout.slash_overlay.row_at(column, row) {
                             if index < picker.choices.len() {
                                 picker.selected = index;
@@ -589,6 +616,15 @@ pub(super) fn route_mouse(
                     return vec![];
                 }
             }
+            if state.status_popup.drag_active {
+                if let Some((line, column)) = state.status_popup_drag_position(column, row) {
+                    if let Some(selection) = state.status_popup.selection.as_mut() {
+                        selection.cursor_line = line;
+                        selection.cursor_col = column;
+                    }
+                }
+                return vec![];
+            }
             if state.help_popup.help_drag_active {
                 if let Some((line, column)) = state.help_popup_drag_position(column, row) {
                     if let Some(selection) = state.help_popup.help_selection.as_mut() {
@@ -699,6 +735,15 @@ pub(super) fn route_mouse(
                 return vec![];
             }
 
+            if state.status_popup.drag_active {
+                state.status_popup.drag_active = false;
+                if let Some(text) = state.extract_status_selection_text() {
+                    if !text.is_empty() {
+                        return vec![Effect::CopyToClipboard(text)];
+                    }
+                }
+                return vec![];
+            }
             if state.help_popup.help_drag_active {
                 state.help_popup.help_drag_active = false;
                 if let Some(text) = state.extract_help_selection_text() {

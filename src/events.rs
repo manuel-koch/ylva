@@ -54,6 +54,8 @@ pub enum AppAction {
     /// `ctrl-x p` completed — step back to the parent conversation from a
     /// subagent drill-in view.
     LeaderParentView,
+    /// `ctrl-x s` completed — show the status popup (same as `/status`).
+    LeaderStatus,
     /// External SIGINT or SIGTERM (e.g. `kill -INT`): stop immediately, no
     /// double-press. Distinct from `CtrlC`, which is a terminal key event that
     /// follows the double-press confirm.

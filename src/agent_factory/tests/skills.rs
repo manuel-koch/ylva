@@ -39,7 +39,9 @@ fn skill_advertisement_preserves_the_library_default_identity() {
         ))),
     )
     .unwrap();
-    let prompt = compose_agent_system_prompt(None, None, &callable).unwrap();
+    let prompt = compose_agent_system_prompt(None, None, &callable)
+        .unwrap()
+        .render();
     assert!(prompt.starts_with(crate::DEFAULT_SOUL));
     assert!(prompt.contains("alpha description"));
     assert!(!prompt.contains("PRIVATE BODY"));

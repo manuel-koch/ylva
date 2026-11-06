@@ -61,7 +61,8 @@ conversation. The original draft returns after all approvals are resolved.
 | `ctrl-c` | Clarify sub-mode | Abort the clarify prompt; sends a tool error to the model |
 | `esc` | Clarify sub-mode | Remove button focus and clear the input field (never aborts) |
 | `F1` | Any | Toggle Help popup |
-| `ctrl-x a` | Any (including approval, clarify and Help popup) | Toggle the Agents popup; the draft is untouched |
+| `ctrl-x a` | Any (including approval, clarify and Help popup) | Toggle the Agents popup (from the Status popup it switches to the Agents popup); the draft is untouched |
+| `ctrl-x s` | Any (including busy, approval, clarify and other popups) | Toggle the Status popup for the viewed conversation (same as `/status`); the draft is untouched |
 | `↑` / `↓`, `page-up` / `page-down` | Agents popup open | Move the highlight (queued rows are skipped) |
 | `enter` | Agents popup open | Switch to the highlighted conversation |
 | `esc` / `ctrl-x a` | Agents popup open | Close popup |
@@ -89,6 +90,15 @@ conversation. The original draft returns after all approvals are resolved.
 | `ctrl-p` | Any other view | Forwarded to the input field (cursor up) |
 | `esc` (input non-empty) | Subagent drill-in view | Clear the input field (same as elsewhere; does not navigate back) |
 | `enter` | Subagent drill-in view | No-op; the subagent conversation doesn't accept input and Enter no longer steers the root agent from here (footer omits `enter send`) |
+
+## Status popup
+
+| Key | Context | Action |
+|---|---|---|
+| `↑` / `↓`, `page-up` / `page-down`, `home` / `end` | Status popup open (`/status`) | Scroll the popup |
+| Mouse wheel | Status popup open | Scroll the popup |
+| `esc` / left-click outside popup | Status popup open | Close popup |
+| Left-drag | Status popup open | Select popup text; release copies a non-empty selection to the clipboard |
 
 ## Slash-command overlay
 
@@ -119,11 +129,11 @@ conversation. The original draft returns after all approvals are resolved.
 | `esc` | `/models` parameter popup open | Return to the model list and discard the parameter edits |
 | typing / backspace | `/models` parameter popup open | Ignored; the filter stays as it was |
 | `↑` / `↓`, page keys, mouse wheel | `/session` picker ready | Move the highlighted session |
-| `←` / `→` | `/session` picker ready | Select Resume / Clone; every new open defaults to Resume |
-| `left-click` on action | `/session` picker ready | Choose Resume or Clone without activating |
+| `tab` / `shift-tab` | `/session` picker ready | Move button focus between Resume, Clone and Delete (wraps; overrides mouse hover); every new open focuses Resume |
+| `left-click` on button | `/session` picker ready | Activate Resume, Clone or Delete on the highlighted row |
 | `left-click` on row | `/session` picker ready | Highlight only; `enter` confirms |
-| double-click on row | `/session` picker ready | Same as `enter` with the chosen Resume / Clone action |
-| `enter` | `/session` picker ready | Resume the highlighted root or activate a new clone; reject while root/subagent/compaction work remains |
+| double-click on row | `/session` picker ready | Same as `enter` with the focused button |
+| `enter` | `/session` picker ready | Activate the focused button: resume the highlighted root, activate a new clone (rejected while root/subagent/compaction work remains), or delete it from disk |
 | `esc` | `/session` loading or preparing | Cancel before activation and clear the draft; a durable clone is retained with an ID-bearing notice |
 | ordinary typing/paste | `/session` picker open | Ignored, never submitted as a prompt |
 | `/compact`, then `enter` | Root view | Snapshot a useful older completed prefix; retain the latest explicit task and following tail |
@@ -131,8 +141,8 @@ conversation. The original draft returns after all approvals are resolved.
 
 During session preparation, rendering, help, interrupt, and quit remain
 available; prompt submission and `/models`, `/clear`, `/compact` are blocked.
-Session-picker keybinding hints appear only in the TUI footer. Resume/Clone
-buttons highlight the chosen action; clicking selects without activating.
+Session-picker keybinding hints appear only in the TUI footer. The
+*Resume* / *Clone* (green) and *Delete* (red) buttons fill when focused.
 Approval/clarify UI temporarily owns input over an open picker, then restores
 the picker. Cancelled preparation cannot publish late. A clone already created
 is kept and its ID is shown, including after terminal restoration on quit.

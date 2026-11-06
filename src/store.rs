@@ -35,6 +35,7 @@
 //! trailing line left behind by a power cut is repaired on the next resume.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
@@ -58,11 +59,12 @@ mod writer;
 
 pub use error::StoreError;
 pub use event::{
-    now_timestamp, SessionMeta, StoreEvent, SubagentRunRecord, EVENT_VERSION, SCHEMA_VERSION,
-    TITLE_MAX_CHARS,
+    now_timestamp, CompactionEffect, CompactionRecord, ModelParameters, SessionMeta, StoreEvent,
+    SubagentRunRecord, EVENT_VERSION, SCHEMA_VERSION, TITLE_MAX_CHARS,
 };
 pub use maintenance::{MaintenanceAction, MaintenanceReport, SessionSelection};
 pub use replay::{SessionState, SessionSummary};
+pub use subagent::SubagentSessionHeader;
 
 use session_file::{
     file_length, lock_project, open_locked_session_file, read_meta_line_with_length,
@@ -126,6 +128,9 @@ struct StoreInner {
     path: PathBuf,
     command_tx: mpsc::Sender<WriterCommand>,
     title_snapshot: Mutex<TitleSnapshot>,
+    /// Set synchronously when a message is enqueued, so an exit path can
+    /// decide emptiness without waiting for the writer queue to drain.
+    has_messages: AtomicBool,
     span: tracing::Span,
 }
 
@@ -173,6 +178,7 @@ impl Store {
                 parent_session: None,
                 agent_type: agent_type.map(str::to_string),
                 cloned_from: None,
+                allowed_tools: None,
             };
             let meta_line_len = write_meta_line(&mut file, &path, &meta)?;
             Some((meta, meta_line_len))
@@ -189,6 +195,7 @@ impl Store {
                 meta_awaiting_title,
             },
             TitleSnapshot::default(),
+            false,
         ))
     }
 
@@ -210,19 +217,21 @@ impl Store {
         }
         let mut file = open_locked_session_file(&path, session_id, true)?;
         repair_trailing_corruption(&mut file, &path)?;
-        let (meta_awaiting_title, title_snapshot) = match read_meta_line_with_length(&path)? {
-            Some((meta, meta_line_len)) => {
-                let messages = Store::read_messages(&path)?;
-                let snapshot = title_snapshot(&meta, &messages);
-                let title_state = if meta.title.is_empty() {
-                    Some((meta, meta_line_len))
-                } else {
-                    None
-                };
-                (title_state, snapshot)
-            }
-            None => (None, TitleSnapshot::default()),
-        };
+        let (meta_awaiting_title, title_snapshot, has_messages) =
+            match read_meta_line_with_length(&path)? {
+                Some((meta, meta_line_len)) => {
+                    let messages = Store::read_messages(&path)?;
+                    let snapshot = title_snapshot(&meta, &messages);
+                    let title_state = if meta.title.is_empty() {
+                        Some((meta, meta_line_len))
+                    } else {
+                        None
+                    };
+                    (title_state, snapshot, !messages.is_empty())
+                }
+                // An unreadable header is never treated as an empty shell.
+                None => (None, TitleSnapshot::default(), true),
+            };
         Ok(Store::spawn_writer(
             session_id,
             project_key,
@@ -233,6 +242,7 @@ impl Store {
                 meta_awaiting_title,
             },
             title_snapshot,
+            has_messages,
         ))
     }
 
@@ -253,6 +263,7 @@ impl Store {
             model,
             parent_session,
             agent_type,
+            None,
         )
     }
 
@@ -263,6 +274,7 @@ impl Store {
         model: &str,
         parent_session: Option<Uuid>,
         agent_type: Option<&str>,
+        allowed_tools: Option<Vec<String>>,
     ) -> Result<Store, StoreError> {
         let directory = project_directory(&self.inner.chats_root, &self.inner.project_key);
         let path = directory.join(format!("{session_id}.jsonl"));
@@ -281,6 +293,7 @@ impl Store {
             parent_session,
             agent_type: agent_type.map(str::to_string),
             cloned_from: None,
+            allowed_tools,
         };
         let meta_line_len = write_meta_line(&mut file, &path, &meta)?;
         Ok(Store::spawn_writer(
@@ -293,6 +306,7 @@ impl Store {
                 meta_awaiting_title: Some((meta, meta_line_len)),
             },
             TitleSnapshot::default(),
+            false,
         ))
     }
 
@@ -331,6 +345,7 @@ impl Store {
             return;
         }
         if let StoreEvent::Message { message, .. } = event {
+            self.inner.has_messages.store(true, Ordering::Release);
             self.update_title_snapshot(&message);
         }
     }
@@ -348,12 +363,18 @@ impl Store {
     /// (fresh session or resume) and again after every successful `/models`
     /// switch. See [`StoreEvent::ModelChanged`] for why this — not
     /// `meta.provider_connection`/`meta.model` — is the authoritative history.
-    pub fn record_model_changed(&self, provider_connection: &str, model: &str) {
+    pub fn record_model_changed(
+        &self,
+        provider_connection: &str,
+        model: &str,
+        parameters: &ModelParameters,
+    ) {
         self.record_event(StoreEvent::ModelChanged {
             version: EVENT_VERSION,
             changed_at: now_timestamp(),
             provider_connection: provider_connection.to_string(),
             model: model.to_string(),
+            parameters: parameters.clone(),
         });
     }
 
@@ -372,17 +393,18 @@ impl Store {
     /// Enqueue a `compaction` record: written by the outer loop when a
     /// background summary is applied to the model view. See
     /// [`StoreEvent::Compaction`] for the append-only supersession rules.
-    /// `boundary` indexes the live model context, where the rebuilt leading
-    /// system prompts occupy the first slots; `leading_system_len` is how many
-    /// of those there are, so the event can also carry the cut in
-    /// persisted-transcript coordinates for replay-only readers (the TUI).
-    pub fn record_compaction(&self, boundary: usize, leading_system_len: usize, summary: &str) {
+    /// `record.boundary` indexes the live model context, where the rebuilt
+    /// leading system prompts occupy the first slots; `transcript_boundary` is
+    /// the same cut without them, for replay-only readers (the TUI).
+    pub fn record_compaction(&self, record: &CompactionRecord) {
         self.record_event(StoreEvent::Compaction {
             version: EVENT_VERSION,
             compacted_at: now_timestamp(),
-            boundary,
-            transcript_boundary: Some(boundary.saturating_sub(leading_system_len)),
-            summary: summary.to_string(),
+            boundary: record.boundary,
+            transcript_boundary: record.transcript_boundary,
+            summary: record.summary.clone(),
+            estimated_tokens_before: record.effect.map(|effect| effect.estimated_tokens_before),
+            estimated_tokens_after: record.effect.map(|effect| effect.estimated_tokens_after),
         });
     }
 
@@ -393,6 +415,29 @@ impl Store {
         self.record_event(StoreEvent::ModelProjection {
             projection: Box::new(projection),
         });
+    }
+
+    /// Remove this session's files when no message was ever recorded, i.e. it
+    /// only holds the header and selection events. Returns whether the session
+    /// was discarded. Synchronous so exit paths can call it from `Drop`.
+    pub fn discard_if_empty(&self) -> bool {
+        if self.inner.has_messages.load(Ordering::Acquire) {
+            return false;
+        }
+        let directory = project_directory(&self.inner.chats_root, &self.inner.project_key);
+        let Ok(_coordination) = lock_project(&directory) else {
+            return false;
+        };
+        let lock_path = self.inner.path.with_extension("lock");
+        // Remove the sidecar last, matching deletion.
+        let removed = archive::paths(&self.inner.path)
+            .into_iter()
+            .all(|path| std::fs::remove_file(path).is_ok());
+        let _ = std::fs::remove_file(lock_path);
+        if removed {
+            tracing::info!(session_id = %self.inner.session_id, "discarded empty session");
+        }
+        removed
     }
 
     /// Barrier: resolves once every event enqueued before this call has been

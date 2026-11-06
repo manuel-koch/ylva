@@ -48,8 +48,16 @@ fn exact_and_suggested_subagent_compact_refuse_and_session_remains_available() {
         assert!(!effects
             .iter()
             .any(|effect| matches!(effect, Effect::SubmitPrompt { .. } | Effect::Compact)));
-        if typed.starts_with("/comp") {
-            assert!(state.chat_entries.iter().any(|entry| matches!(entry, ChatEntry::Notice { text } if text.contains("only in the root"))));
+        let is_refusal = |entry: &ChatEntry| matches!(entry, ChatEntry::Notice { text } if text.contains("only in the root"));
+        assert!(!state.chat_entries.iter().any(is_refusal));
+        if typed == "/compact \n" {
+            let subagent_entries = state.subagent_conversations.get(&run_id).expect("subagent");
+            assert!(subagent_entries.messages.iter().any(is_refusal));
+        } else if typed == "/comp" {
+            assert!(matches!(
+                state.slash_overlay,
+                ylva::tui_reducer_state::SlashOverlay::Hidden
+            ));
         } else {
             assert!(effects.contains(&Effect::ListSessions));
         }

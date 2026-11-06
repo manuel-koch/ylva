@@ -21,6 +21,7 @@ use super::{
 };
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument;
@@ -235,6 +236,7 @@ impl SessionWriter {
 }
 
 impl Store {
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn spawn_writer(
         session_id: Uuid,
         project_key: String,
@@ -243,6 +245,7 @@ impl Store {
         file: LockedSessionFile,
         title_state: TitleState,
         title_snapshot: TitleSnapshot,
+        has_messages: bool,
     ) -> Store {
         let (command_tx, command_rx) = mpsc::channel::<WriterCommand>(WRITER_CHANNEL_CAPACITY);
         let span = if title_state
@@ -275,6 +278,7 @@ impl Store {
                 path,
                 command_tx,
                 title_snapshot: Mutex::new(title_snapshot),
+                has_messages: AtomicBool::new(has_messages),
                 span,
             }),
         }

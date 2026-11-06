@@ -37,6 +37,20 @@ of the system prompt. Which file names are trusted, where they are discovered,
 and how they are composed is code-owned; arbitrary Markdown is never loaded.
 _Avoid_: agents file, conventions file
 
+**Status popup**:
+The modal opened by `/status` showing the viewed agent's engine, agent type
+and context breakdown.
+
+**Context breakdown**:
+Estimated token usage of a Context grouped by origin (system prompt parts,
+tool schemas, compaction summary, user, assistant, tool calls). Advisory
+estimates, shown as percentages of the effective context window.
+
+**Prompt origin**:
+The source of a system prompt section (soul layer, instruction safety
+preamble, instruction file, agent persona, skill advertisement), identified by
+a sentinel label rather than an absolute path.
+
 **Profile**:
 A named configuration that selects engines and supplies settings for agents.
 

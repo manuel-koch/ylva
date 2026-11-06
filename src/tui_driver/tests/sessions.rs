@@ -151,6 +151,7 @@ fn write_session(
         parent_session,
         agent_type: agent_type.map(str::to_owned),
         cloned_from: None,
+        allowed_tools: None,
     };
     let events = [
         StoreEvent::Meta(meta),
@@ -217,10 +218,10 @@ fn picker_results_reach_parked_approval_input_but_ignore_dismissed_or_reopened_p
 }
 
 #[test]
-fn session_listing_filters_before_fixed_limit_and_uses_instant_uuid_order() {
+fn session_listing_lists_all_root_sessions_and_uses_instant_uuid_order() {
     let directory = tempfile::tempdir().unwrap();
     let current_id = Uuid::from_u128(200);
-    for index in 1..=36 {
+    for index in 1..=120 {
         write_session(
             directory.path(),
             directory.path(),
@@ -230,7 +231,7 @@ fn session_listing_filters_before_fixed_limit_and_uses_instant_uuid_order() {
             None,
         );
     }
-    for index in 100..=150 {
+    for index in 1000..=1050 {
         write_session(
             directory.path(),
             directory.path(),
@@ -259,7 +260,10 @@ fn session_listing_filters_before_fixed_limit_and_uses_instant_uuid_order() {
     );
     let mut meta = Store::read_session_meta(&latest_path).unwrap().unwrap();
     meta.title = "Duplicate\n\u{1b}Title".into();
-    let content = serde_json::to_string(&StoreEvent::Meta(meta)).unwrap() + "\n";
+    let original = std::fs::read_to_string(&latest_path).unwrap();
+    let content = serde_json::to_string(&StoreEvent::Meta(meta)).unwrap()
+        + "\n"
+        + original.split_once('\n').unwrap().1;
     std::fs::write(&latest_path, &content).unwrap();
     let project_key = crate::store::project_key(directory.path());
     let report = Store::maintain_sessions(
@@ -274,13 +278,47 @@ fn session_listing_filters_before_fixed_limit_and_uses_instant_uuid_order() {
     let (choices, diagnostics) =
         list_candidates(directory.path().into(), project_key, current_id).unwrap();
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    assert_eq!(choices.len(), 32);
+    assert_eq!(choices.len(), 120);
     assert_eq!(choices[0].session_id, latest_id);
-    assert_eq!(choices[1].session_id, Uuid::from_u128(36));
-    assert_eq!(choices.last().unwrap().session_id, Uuid::from_u128(6));
+    assert_eq!(choices[1].session_id, Uuid::from_u128(120));
+    assert_eq!(choices.last().unwrap().session_id, Uuid::from_u128(2));
     assert!(!choices[0].title.contains(['\n', '\u{1b}']));
     assert_eq!(choices[1].title, "Untitled");
     assert!(choices[0].last_used_at.contains(['+', '-']));
+}
+
+#[tokio::test]
+async fn session_listing_hides_sessions_without_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let kept = Uuid::from_u128(1);
+    write_session(
+        directory.path(),
+        directory.path(),
+        kept,
+        "2026-01-01T00:00:00Z",
+        None,
+        None,
+    );
+    let empty = Store::create(
+        directory.path(),
+        directory.path(),
+        Uuid::from_u128(2),
+        "mock",
+        "mock",
+        None,
+    )
+    .unwrap();
+    empty.flush().await;
+    let project_key = crate::store::project_key(directory.path());
+    let (choices, _) =
+        list_candidates(directory.path().into(), project_key, Uuid::from_u128(3)).unwrap();
+    assert_eq!(
+        choices
+            .iter()
+            .map(|choice| choice.session_id)
+            .collect::<Vec<_>>(),
+        vec![kept]
+    );
 }
 
 #[test]
@@ -701,9 +739,9 @@ fn cancelling_after_clone_creation_keeps_clone_visible_and_old_root_usable() {
         let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
         let controller = async {
             submit(&actions, "/session").await;
-            wait_for_frame(&mut frames, "enter confirm").await;
+            wait_for_frame(&mut frames, "enter activate").await;
             actions
-                .send(AppAction::KeyInput(key_event(KeyCode::Right)))
+                .send(AppAction::KeyInput(key_event(KeyCode::Tab)))
                 .await
                 .unwrap();
             actions
@@ -825,10 +863,10 @@ fn assembled_session_picker_switches_resume_and_clone_and_exit_identity() {
             let (actions, action_rx) = mpsc::channel(32);
             let controller = async {
                 submit(&actions, "/ses").await;
-                wait_for_frame(&mut frames, "enter confirm").await;
+                wait_for_frame(&mut frames, "enter activate").await;
                 if action == SessionAction::Clone {
                     actions
-                        .send(AppAction::KeyInput(key_event(KeyCode::Right)))
+                        .send(AppAction::KeyInput(key_event(KeyCode::Tab)))
                         .await
                         .unwrap();
                 }
@@ -842,7 +880,7 @@ fn assembled_session_picker_switches_resume_and_clone_and_exit_identity() {
                 wait_for_frame(&mut frames, "finished answer").await;
                 if return_to_original {
                     submit(&actions, "/session").await;
-                    wait_for_frame(&mut frames, "enter confirm").await;
+                    wait_for_frame(&mut frames, "enter activate").await;
                     actions
                         .send(AppAction::KeyInput(key_event(KeyCode::Enter)))
                         .await
@@ -895,10 +933,14 @@ fn assembled_session_picker_switches_resume_and_clone_and_exit_identity() {
                 selected_id,
             );
             assert_eq!(Store::read_messages(&target_path).unwrap().len(), 3);
-            assert_eq!(
-                Store::read_messages(&original_path).unwrap().len(),
-                if return_to_original { 3 } else { 0 }
-            );
+            if return_to_original {
+                assert_eq!(Store::read_messages(&original_path).unwrap().len(), 3);
+            } else {
+                assert!(
+                    !original_path.exists(),
+                    "an empty session is discarded when switching away"
+                );
+            }
             assert_eq!(selected_id == source_id, action == SessionAction::Resume);
             if action == SessionAction::Clone {
                 assert_eq!(std::fs::read(source_path).unwrap(), source_bytes);
@@ -909,6 +951,9 @@ fn assembled_session_picker_switches_resume_and_clone_and_exit_identity() {
                         .cloned_from,
                     Some(source_id)
                 );
+            }
+            if !return_to_original {
+                continue;
             }
             let reopened = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
@@ -997,4 +1042,24 @@ fn queued_continuous_mouse_motion_is_drawn_as_one_frame() {
             assert!(frame_count < 10, "drew {frame_count} frames");
         });
     }
+}
+
+#[test]
+fn delete_session_removes_the_transcript_and_reports_missing_sessions() {
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = Uuid::from_u128(7);
+    let path = write_session(
+        directory.path(),
+        directory.path(),
+        session_id,
+        "2026-01-01T00:00:00Z",
+        None,
+        None,
+    );
+    let project_key = crate::store::project_key(directory.path());
+    super::super::sessions::delete_session(directory.path(), &project_key, session_id).unwrap();
+    assert!(!path.exists());
+    assert!(
+        super::super::sessions::delete_session(directory.path(), &project_key, session_id).is_err()
+    );
 }

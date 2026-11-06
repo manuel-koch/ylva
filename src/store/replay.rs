@@ -16,7 +16,8 @@
 
 use super::archive;
 use super::{
-    project_directory, session_path, SessionMeta, Store, StoreError, StoreEvent, SubagentRunRecord,
+    project_directory, session_path, CompactionEffect, CompactionRecord, SessionMeta, Store,
+    StoreError, StoreEvent, SubagentRunRecord,
 };
 use crate::agent::{Message, UserMessageKind};
 use crate::home_relative_path::display_path;
@@ -37,6 +38,9 @@ pub struct SessionSummary {
     /// Set only for a subagent's own session file. See
     /// [`SessionMeta::parent_session`].
     pub parent_session: Option<Uuid>,
+    /// Whether the transcript holds at least one committed message; sessions
+    /// with only header and selection events are empty shells.
+    pub has_messages: bool,
     /// Path of the resolved raw `.jsonl` or archived `.jsonl.gz` transcript.
     pub path: PathBuf,
 }
@@ -60,6 +64,9 @@ pub struct SessionState {
     /// the field.
     pub compaction_transcript_boundary: Option<usize>,
     pub model_projection: Option<crate::agent::compaction::ModelProjectionSnapshot>,
+    /// Every compaction event in append order, superseded ones included — the
+    /// history `/status` reports.
+    pub compactions: Vec<CompactionRecord>,
 }
 
 impl Store {
@@ -170,6 +177,16 @@ impl Store {
             .collect())
     }
 
+    /// The persisted state of the subagent run `run_id` of this project, or
+    /// `None` when its transcript does not exist or cannot be read.
+    pub fn read_subagent_session_state(&self, run_id: Uuid) -> Option<SessionState> {
+        let path = session_path(&self.inner.chats_root, &self.inner.project_key, run_id);
+        if !archive::transcript_exists(&path) {
+            return None;
+        }
+        Self::read_session_state(&path).ok()
+    }
+
     /// The `meta` header of a persisted session, if the file exists and its
     /// first line parses. A pure read: no lock is taken and nothing is
     /// modified, so it is safe to call before [`Store::resume`] decides
@@ -223,6 +240,7 @@ impl Store {
         let mut compaction: Option<crate::agent::compaction::CompactionSnapshot> = None;
         let mut compaction_transcript_boundary: Option<usize> = None;
         let mut model_projection: Option<crate::agent::compaction::ModelProjectionSnapshot> = None;
+        let mut compactions = Vec::new();
         for event in &events {
             match event {
                 StoreEvent::Message { message, .. } => messages.push(message.clone()),
@@ -230,8 +248,21 @@ impl Store {
                     boundary,
                     transcript_boundary,
                     summary,
+                    estimated_tokens_before,
+                    estimated_tokens_after,
                     ..
                 } => {
+                    compactions.push(CompactionRecord {
+                        boundary: *boundary,
+                        transcript_boundary: *transcript_boundary,
+                        summary: summary.clone(),
+                        effect: estimated_tokens_before.zip(*estimated_tokens_after).map(
+                            |(before, after)| CompactionEffect {
+                                estimated_tokens_before: before,
+                                estimated_tokens_after: after,
+                            },
+                        ),
+                    });
                     // Append-only supersession: the newest snapshot wins, and
                     // a boundary never rewinds.
                     let is_newer = compaction.as_ref().is_none_or(|current| {
@@ -264,6 +295,7 @@ impl Store {
             compaction,
             compaction_transcript_boundary,
             model_projection,
+            compactions,
         })
     }
 
@@ -463,6 +495,16 @@ pub(super) fn last_used_at(
     metadata: &SessionMeta,
     path: &Path,
 ) -> Result<String, StoreError> {
+    session_activity(bytes, metadata, path).map(|(last_used_at, _)| last_used_at)
+}
+
+/// Latest activity timestamp and whether any committed message exists.
+fn session_activity(
+    bytes: &[u8],
+    metadata: &SessionMeta,
+    path: &Path,
+) -> Result<(String, bool), StoreError> {
+    let mut has_messages = false;
     let mut latest = chrono::DateTime::parse_from_rfc3339(&metadata.created_at)
         .map_err(|error| archive::invalid(path, format!("invalid creation timestamp: {error}")))?;
     let mut latest_value = metadata.created_at.clone();
@@ -478,6 +520,7 @@ pub(super) fn last_used_at(
                 continue;
             }
         };
+        has_messages |= event.get("type").and_then(|kind| kind.as_str()) == Some("message");
         for field in [
             "timestamp",
             "created_at",
@@ -515,7 +558,7 @@ pub(super) fn last_used_at(
             }
         }
     }
-    Ok(latest_value)
+    Ok((latest_value, has_messages))
 }
 
 /// Read metadata and derive last use without changing either representation.
@@ -523,7 +566,7 @@ fn read_session_summary(path: &Path) -> Result<SessionSummary, StoreError> {
     let bytes = archive::read_bytes(path)?;
     let meta = archive::header(&bytes, path)?;
     archive::validate_identity(&meta, path)?;
-    let last_used_at = last_used_at(&bytes, &meta, path)?;
+    let (last_used_at, has_messages) = session_activity(&bytes, &meta, path)?;
     Ok(SessionSummary {
         session_id: meta.session_id,
         created_at: meta.created_at,
@@ -532,6 +575,7 @@ fn read_session_summary(path: &Path) -> Result<SessionSummary, StoreError> {
         provider_connection: meta.provider_connection,
         model: meta.model,
         parent_session: meta.parent_session,
+        has_messages,
         path: if path.is_file() {
             path.to_path_buf()
         } else {

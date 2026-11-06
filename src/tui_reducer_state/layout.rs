@@ -89,6 +89,22 @@ impl HelpPopupLayout {
     }
 }
 
+/// Screen-space geometry for the status popup, written by the View each frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StatusPopupLayout {
+    pub rect: Rect,
+    /// Number of content rows that fit in the popup.
+    pub visible_rows: usize,
+    /// Text area inside the popup, excluding border, padding and scrollbar.
+    pub content_area: Rect,
+}
+
+impl StatusPopupLayout {
+    pub fn hit(&self, col: u16, row: u16) -> bool {
+        self.rect.contains((col, row).into())
+    }
+}
+
 /// Screen-space geometry for the agents popup, written by the View each frame.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentsPopupLayout {
@@ -118,6 +134,7 @@ pub struct SlashOverlayLayout {
     pub content_area: Rect,
     pub resume_action: Rect,
     pub clone_action: Rect,
+    pub delete_action: Rect,
     /// Absolute row in the overlay's content list corresponding to the first
     /// row currently rendered in `content_area`.
     pub first_visible_row: usize,
@@ -226,6 +243,7 @@ pub struct AppLayout {
     pub input_area: InputAreaLayout,
     pub help_popup: HelpPopupLayout,
     pub agents_popup: AgentsPopupLayout,
+    pub status_popup: StatusPopupLayout,
     pub slash_overlay: SlashOverlayLayout,
     /// Rect of the clarify banner. Zero-sized when no clarify is pending.
     pub clarify_banner: ratatui::layout::Rect,

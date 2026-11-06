@@ -41,8 +41,8 @@ const CLARIFY_FRAMES: &[char] = &[
 
 const SESSION_PICKER_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("↑/↓", "select"),
-    FooterHint::key("←/→", "resume/clone"),
-    FooterHint::key("enter", "confirm"),
+    FooterHint::key("tab", "button"),
+    FooterHint::key("enter", "activate"),
     FooterHint::key("esc", "cancel"),
 ];
 
@@ -127,6 +127,10 @@ const HELP_POPUP_BUSY_FOOTER_HINTS: &[FooterHint] = &[
 const AGENTS_POPUP_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("↑/↓", "select"),
     FooterHint::key("enter", "switch"),
+    FooterHint::key("esc", "close"),
+];
+const STATUS_POPUP_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("↑/↓", "scroll"),
     FooterHint::key("esc", "close"),
 ];
 const CLARIFY_FOOTER_HINTS: &[FooterHint] = &[
@@ -254,6 +258,10 @@ fn base_footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'sta
 
 pub(super) fn agents_popup_footer_hints() -> &'static [FooterHint] {
     AGENTS_POPUP_FOOTER_HINTS
+}
+
+pub(super) fn status_popup_footer_hints() -> &'static [FooterHint] {
+    STATUS_POPUP_FOOTER_HINTS
 }
 
 pub(super) fn help_popup_footer_hints(state: &TuiState) -> &'static [FooterHint] {
@@ -855,8 +863,8 @@ fn draw_footer_context_usage(
     area
 }
 
-/// Only a focused or hovered button is drawn filled; idle buttons are
-/// outlined in their colour, so a freshly shown prompt (no focus) never looks
+/// Only a focused or hovered button is drawn filled, and focus always wins
+/// over hover; idle buttons are outlined in their colour, so a freshly shown prompt (no focus) never looks
 /// as if a button were selected.
 pub(super) fn button_style(
     normal: Color,
@@ -864,15 +872,15 @@ pub(super) fn button_style(
     is_hovered: bool,
     is_focused: bool,
 ) -> Style {
-    if is_hovered {
-        Style::default()
-            .fg(button_text_color())
-            .bg(hover)
-            .add_modifier(Modifier::BOLD)
-    } else if is_focused {
+    if is_focused {
         Style::default()
             .fg(button_text_color())
             .bg(normal)
+            .add_modifier(Modifier::BOLD)
+    } else if is_hovered {
+        Style::default()
+            .fg(button_text_color())
+            .bg(hover)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(normal)

@@ -239,6 +239,7 @@ fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
             iteration_cap_exceeded: None,
             stream_error: None,
             session_switch_frozen: false,
+            finished_status: None,
             execution_span: tracing::Span::none(),
         },
         ui_rx,
@@ -359,6 +360,7 @@ fn session_replacement_barrier_is_idempotent_blocks_mutations_and_requires_shutd
             AgentCommand::ClearContext,
             AgentCommand::Compact,
             AgentCommand::RecordModelChanged {
+                parameters: Default::default(),
                 provider_connection: "blocked".to_string(),
                 model: "blocked".to_string(),
             },
@@ -421,6 +423,7 @@ fn session_replacement_barrier_is_idempotent_blocks_mutations_and_requires_shutd
         assert!(!state.session_switch_frozen);
         state
             .handle_command(Some(AgentCommand::RecordModelChanged {
+                parameters: Default::default(),
                 provider_connection: "allowed".to_string(),
                 model: "allowed".to_string(),
             }))
@@ -913,4 +916,20 @@ fn busy_manual_summary_waits_for_a_completed_turn_and_releases_the_stream_barrie
             &state.context.messages()[boundary..],
         );
     });
+}
+
+#[test]
+fn a_finishing_subagent_publishes_its_final_status() {
+    let (mut state, _updates) = run_state();
+    let run_id = Uuid::new_v4();
+    let registry = crate::agent::FinishedStatusRegistry::default();
+    state.own_run_id = Some(run_id);
+    state.finished_status = Some(registry.clone());
+
+    let context = state.into_final_context();
+
+    assert!(!context.messages().is_empty());
+    let snapshot = registry.get(run_id).expect("snapshot published");
+    assert_eq!(snapshot.run_id, Some(run_id));
+    assert!(!snapshot.finished_subagent);
 }

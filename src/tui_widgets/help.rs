@@ -23,7 +23,7 @@ use ratatui::Frame;
 use crate::build_info::BUILD_INFO;
 use crate::home_relative_path::display_path;
 use crate::theme::{chat_selection_bg, help_popup_border_color, help_popup_heading_color};
-use crate::tui_reducer_state::{CONFIRM_TIMEOUT, HELP_HORIZONTAL_SCROLL_COLUMNS};
+use crate::tui_reducer_state::CONFIRM_TIMEOUT;
 use crate::tui_render_state::TuiState;
 
 use super::chat::apply_selection_highlight_to_line;
@@ -67,6 +67,7 @@ fn help_sections() -> Vec<HelpSection> {
                 ),
                 help_entry("esc", "Close popup"),
                 help_entry("ctrl-x a", "Toggle the agents popup (same as /agents)"),
+                help_entry("ctrl-x s", "Toggle the status popup (same as /status)"),
                 help_entry(
                     "ctrl-x p",
                     "Back to the parent conversation (subagent view)",
@@ -102,18 +103,6 @@ fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            heading: "Help popup",
-            entries: vec![
-                help_entry("↑ / ↓", "Scroll up / down one line"),
-                help_entry(
-                    "← / →",
-                    format!("Scroll left / right by {HELP_HORIZONTAL_SCROLL_COLUMNS} columns"),
-                ),
-                help_entry("page-up / page-down", "Scroll up / down"),
-                help_entry("mouse wheel", "Scroll up / down"),
-            ],
-        },
-        HelpSection {
             heading: "Environment",
             entries: vec![],
         },
@@ -123,18 +112,6 @@ fn help_sections() -> Vec<HelpSection> {
                 .into_iter()
                 .map(|command| help_entry(command.name, command.description))
                 .collect(),
-        },
-        HelpSection {
-            heading: "Session picker",
-            entries: vec![
-                help_entry("↑ / ↓, page keys, wheel", "Select a root session"),
-                help_entry("← / →, action click", "Choose Resume / Clone"),
-                help_entry(
-                    "enter",
-                    "Confirm when root/subagent/compaction work is idle",
-                ),
-                help_entry("esc", "Cancel; retain and report any created clone"),
-            ],
         },
         HelpSection {
             heading: "Build",

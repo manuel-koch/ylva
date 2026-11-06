@@ -34,12 +34,28 @@ pub(super) fn route_keyboard(
     event: InputEvent,
     textarea: &TextareaContext,
 ) -> Vec<Effect> {
+    if event == InputEvent::ShowStatus {
+        return toggle_status_popup(state);
+    }
     match &state.focus {
         Focus::HelpPopup => keyboard_help(state, event),
         Focus::AgentsPopup => keyboard_agents_popup(state, event),
+        Focus::StatusPopup => keyboard_status_popup(state, event),
         Focus::ToolApproval { .. } => keyboard_approval(state, event, textarea),
         Focus::MainInput => keyboard_main(state, event, textarea),
     }
+}
+
+/// `ctrl-x s`: close the status popup when open, otherwise request a snapshot
+/// of the viewed conversation from any focus (modal popups, approvals, busy).
+fn toggle_status_popup(state: &mut AppState) -> Vec<Effect> {
+    if state.show_status_popup() {
+        state.close_status_popup();
+        return vec![];
+    }
+    vec![Effect::ShowStatus {
+        run_id: state.viewed_subagent_run_id(),
+    }]
 }
 
 fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
@@ -62,7 +78,7 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
         }
         InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => handle_ctrl_c_generic(state, true),
-        InputEvent::ToggleFavoriteModel => vec![],
+        InputEvent::ToggleFavoriteModel | InputEvent::ShowStatus => vec![],
         InputEvent::ParentView => vec![],
         InputEvent::KeyInput(key_event) => {
             match key_event.code {
@@ -92,13 +108,48 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
     }
 }
 
+fn keyboard_status_popup(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
+    match event {
+        InputEvent::Escape => {
+            state.close_status_popup();
+            vec![]
+        }
+        InputEvent::StopSignal => handle_stop_signal(state),
+        InputEvent::CtrlC => handle_ctrl_c_generic(state, true),
+        InputEvent::ShowAgents => {
+            state.close_status_popup();
+            state.open_agents_popup();
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) => {
+            let page = state
+                .layout
+                .status_popup
+                .visible_rows
+                .saturating_sub(1)
+                .max(1) as isize;
+            match key_event.code {
+                KeyCode::Up => state.status_popup_scroll(-1),
+                KeyCode::Down => state.status_popup_scroll(1),
+                KeyCode::PageUp => state.status_popup_scroll(-page),
+                KeyCode::PageDown => state.status_popup_scroll(page),
+                KeyCode::Home => state.status_popup_scroll(isize::MIN),
+                KeyCode::End => state.status_popup_scroll(isize::MAX),
+                _ => {}
+            }
+            vec![]
+        }
+        _ => vec![],
+    }
+}
+
 fn keyboard_agents_popup(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
     match event {
         InputEvent::ShowAgents | InputEvent::Escape => {
             state.close_agents_popup();
             vec![]
         }
-        InputEvent::ToggleFavoriteModel => vec![],
+        InputEvent::ToggleFavoriteModel | InputEvent::ShowStatus => vec![],
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
             state.clear_help_selection();
@@ -212,7 +263,7 @@ fn keyboard_approval(
         }
         InputEvent::KeyInput(key_event) => vec![Effect::TextareaKey(key_event)],
         InputEvent::ParentView => vec![Effect::TextareaKey(parent_view_key_event())],
-        InputEvent::ToggleFavoriteModel => vec![],
+        InputEvent::ToggleFavoriteModel | InputEvent::ShowStatus => vec![],
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
             state.clear_help_selection();
@@ -250,6 +301,7 @@ fn keyboard_main(
         InputEvent::StopSignal => handle_stop_signal(state),
         InputEvent::CtrlC => handle_ctrl_c_generic(state, textarea.is_empty),
         InputEvent::ToggleFavoriteModel => toggle_highlighted_model_favorite(state),
+        InputEvent::ShowStatus => vec![],
         InputEvent::ParentView
             if matches!(state.active_view, ConversationView::Subagent { .. }) =>
         {
@@ -312,7 +364,7 @@ fn keyboard_clarify(
             vec![]
         }
         InputEvent::ParentView => vec![Effect::TextareaKey(parent_view_key_event())],
-        InputEvent::ToggleFavoriteModel => vec![],
+        InputEvent::ToggleFavoriteModel | InputEvent::ShowStatus => vec![],
         InputEvent::KeyInput(key_event) if is_focus_cycle_key(&key_event).is_some() => {
             state.cycle_prompt_button(is_focus_cycle_key(&key_event) == Some(true));
             vec![]
@@ -560,7 +612,10 @@ fn slash_command_effects(state: &mut AppState, invocation: SlashCommandInvocatio
     if matches!(state.active_view, ConversationView::Subagent { .. })
         && invocation.command == SlashCommand::Compact
     {
-        state.push_notice("Manual compaction is available only in the root conversation.".into());
+        state.push_notice_to(
+            state.viewed_subagent_run_id(),
+            "Manual compaction is available only in the root conversation.".into(),
+        );
         return vec![Effect::ClearTextarea];
     }
     match invocation.command {
@@ -582,6 +637,12 @@ fn slash_command_effects(state: &mut AppState, invocation: SlashCommandInvocatio
             vec![Effect::ClearTextarea]
         }
         SlashCommand::Compact => vec![Effect::ClearTextarea, Effect::Compact],
+        SlashCommand::Status => vec![
+            Effect::ClearTextarea,
+            Effect::ShowStatus {
+                run_id: state.viewed_subagent_run_id(),
+            },
+        ],
     }
 }
 
@@ -601,7 +662,7 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
             state.open_agents_popup();
             vec![]
         }
-        InputEvent::ToggleFavoriteModel => vec![],
+        InputEvent::ToggleFavoriteModel | InputEvent::ShowStatus => vec![],
         InputEvent::ParentView => vec![],
         InputEvent::KeyInput(key) => {
             let page_entry_count = state.layout.slash_overlay.page_entry_count();
@@ -616,8 +677,8 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
                 KeyCode::Down => picker.move_selection(1),
                 KeyCode::PageUp => picker.move_selection(-page_entry_count),
                 KeyCode::PageDown => picker.move_selection(page_entry_count),
-                KeyCode::Left => picker.action = crate::tui_reducer_state::SessionAction::Resume,
-                KeyCode::Right => picker.action = crate::tui_reducer_state::SessionAction::Clone,
+                KeyCode::Tab => picker.cycle_action(false),
+                KeyCode::BackTab => picker.cycle_action(true),
                 KeyCode::Enter if key.modifiers.is_empty() => {
                     return confirm_session_picker_selection(picker);
                 }
@@ -629,19 +690,22 @@ fn keyboard_session_picker(state: &mut AppState, event: InputEvent) -> Vec<Effec
     }
 }
 
-/// Resume or clone the highlighted session (`enter` or double-click).
+/// Run the focused button on the highlighted session (`enter`, double-click
+/// on a row, or click on a button).
 pub(super) fn confirm_session_picker_selection(
-    picker: &crate::tui_reducer_state::SessionPicker,
+    picker: &mut crate::tui_reducer_state::SessionPicker,
 ) -> Vec<Effect> {
-    picker
-        .selected()
-        .map(|choice| {
-            vec![Effect::SelectSession {
-                source_id: choice.session_id,
-                action: picker.action,
-            }]
-        })
-        .unwrap_or_default()
+    let Some(source_id) = picker.selected().map(|choice| choice.session_id) else {
+        return vec![];
+    };
+    match picker.action {
+        crate::tui_reducer_state::SessionAction::Delete => {
+            picker.phase = crate::tui_reducer_state::SessionPickerPhase::Deleting;
+            picker.error = None;
+            vec![Effect::DeleteSession { source_id }]
+        }
+        action => vec![Effect::SelectSession { source_id, action }],
+    }
 }
 
 /// Run the highlighted command suggestion (`enter` or double-click).
@@ -795,7 +859,10 @@ fn handle_key_main(
             if let Some(invocation) = parse_slash_command_invocation(&textarea.text) {
                 if matches!(
                     invocation.command,
-                    SlashCommand::Session | SlashCommand::Compact | SlashCommand::Agents
+                    SlashCommand::Session
+                        | SlashCommand::Compact
+                        | SlashCommand::Agents
+                        | SlashCommand::Status
                 ) {
                     state.slash_overlay = SlashOverlay::Hidden;
                     return slash_command_effects(state, invocation);

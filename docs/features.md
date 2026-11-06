@@ -1091,9 +1091,9 @@ for the full mechanics.
   bare `enter` or `esc`
   never resolves an approval: `tab`/`shift-tab` focus a button (idle
   buttons are outlined in their colour; only the focused or hovered one is
-  drawn filled, so a freshly shown prompt has no apparent selection; the
-  last input device wins: `tab` clears the mouse hover highlight and moving
-  the mouse drops keyboard focus) and
+  drawn filled, so a freshly shown prompt has no apparent selection; focus
+  always wins over hover: moving the mouse never drops keyboard focus, and
+  `tab` clears the mouse hover highlight) and
   `enter` activates only the focused one. Approve
   leaves the input text alone (it is dimmed while Approve is focused, as a
   hint it is not used); Deny sends the input text as the reason and clears
@@ -1454,33 +1454,41 @@ list and discards the parameter edits. `esc` in the list cancels and clears the 
 | --- | --- | --- |
 | `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights; a double-click acts like `enter`); page keys move by a page; `enter` opens the parameter popup (context length and reasoning effort) for the highlighted model; `esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |
-| `/session` | Opens the recent-session picker in either conversation view. Select Resume or Clone, then confirm a root session. | Transient; activation and subsequent work use the selected persisted identity |
+| `/session` | Opens the recent-session picker in either conversation view. Focus Resume, Clone, or Delete, then activate it on a root session. | Transient; activation and subsequent work use the selected persisted identity |
 | `/agents` | Opens the Agents popup (same as `ctrl-x a`); available while busy and in either conversation view. | Transient |
+| `/status` | Opens a modal Status popup (also `ctrl-x s`, from any focus) for the viewed agent (root or drilled-in subagent): a "Current setup" section (agent type, engine, provider connection, model with configured parameters, and allowed tools, tools sorted by call count, then name, each used tool followed by its call count in parentheses; calls to tools that are not allowed are not listed), and estimated context usage as percentages of the effective context window (the title shows the used and free share of the window; two stacked bars, one relative to the window and one relative to the used context, plus a titled table by origin with `% window`, `% used` and `Tokens` columns (the `% window` column is dropped first on narrow terminals) and the free remainder). A History section lists model changes (with the parameters that changed) and compactions (estimated tokens before, after and reduction) in order as text lines with their UTC date and time, plus the average reduction. A finished subagent can be inspected too: within the live session its exact final status is kept; after a resume its status is rebuilt from the persisted transcript (without system prompt and tool schemas, which are not recorded; allowed tools come from the subagent transcript header, so transcripts written before that was recorded list none). Left-drag selects text; releasing copies it to the clipboard. Available while busy. Context groups: system prompt (soul layer, trusted instruction files by sentinel source, persona, skills), tool schemas, compaction summary, user messages, assistant messages, tool calls and results. Token figures are advisory estimates. The popup is the terminal width minus six columns wide and uses the full height of the conversation list and scrolls with a scrollbar, separated from the text by one column, when the content overflows. | Transient |
 | `/compact` | Requests a useful completed-prefix summary in the root conversation, regardless of automatic thresholds. | Transient outcomes; an applied summary is persisted |
 
 `/session` and `/compact` are TUI-only; they do not change headless CLI parsing
 or session maintenance commands. The session picker is available only within
 a running TUI, not at startup.
 
-`/session` lists recent **root sessions** in the active store's
+`/session` lists **root sessions** in the active store's
 launch-directory group, excluding the active session and subagent transcripts.
-It includes archives, clones, and empty sessions.
+It includes archives and clones; sessions without any message are hidden (and are discarded
+when the session that created them ends).
 Newest persisted activity comes first, with descending UUID as the tie-breaker.
 Rows show local date/time with a UTC offset before the sanitized title;
-empty titles display `Untitled`. The fixed limit adds no configuration key.
+empty titles display `Untitled`.
 Browsing is allowed while busy, but activation requires root work, queued
 steers, queued/running subagents, and running/pending compaction to be quiescent.
 
-The popup title is `Sessions`; styled Resume/Clone buttons highlight the selected
-action. Keybinding hints appear only in the TUI footer. The popup shows status
-or errors only when relevant, without repeating footer controls.
-Each open starts in **Resume**. `Left`/`Right` or clicking the action selects
-Resume/Clone; arrows, page keys, and wheel navigate; clicking a row only
-highlights it. `enter` or a double-click on a row confirms. Loading and `Resuming`/`Cloning` remain
-responsive to cancellation and quit; other mutations are blocked during
-preparation. `esc` dismisses and clears the draft without changing the
-conversation. Selection errors keep the picker, chosen action, and old view.
-Cancelled or superseded results never activate a target.
+The popup title is `Sessions`; the *Resume* and *Clone* buttons are green and the *Delete*
+button is red.
+The focused button is filled; hovering another button lightens it but never takes the focus away.
+Keybinding hints appear only in the TUI footer. The popup shows status or errors only when relevant,
+without repeating footer controls. Each open focuses **Resume**. `Tab`/`Shift-Tab` move button focus
+(keyboard focus overrides any mouse hover highlight); arrows, page keys, and wheel navigate rows.
+`enter` activates the focused button on the highlighted row, a click on a button activates it on the
+highlighted row, and a double-click on a row acts like `enter`; a single click on a row only
+highlights it. *Delete* removes the highlighted root session and its subagent transcripts from
+disk (no confirmation; it must be focused first, and focus returns to *Resume* afterwards) and drops
+it from the list; subagent transcripts still referenced by a clone of the session are kept. A
+refused or failed deletion keeps the row and shows the error. Loading,
+`Resuming`/`Cloning`, and `Deleting` remain responsive to cancellation and quit; other mutations are
+blocked during the operation. `esc` dismisses and clears the draft without changing the
+conversation. Selection errors keep the picker, focused button, and old view. Cancelled or
+superseded results never activate a target.
 
 Activation restores the stored root agent type (`default` for legacy sessions)
 and constructs fresh conversation engines from that type's **current profile**
@@ -1493,7 +1501,8 @@ A clone durably created before cancellation or activation failure is retained
 and reported as `Clone created but not activated: <id>`, including after
 terminal restoration on quit.
 
-`/compact` refuses explicitly from every subagent view. It immediately
+`/compact` is not offered in the slash suggestions of a subagent view; typing
+it there still refuses explicitly, with the notice shown in that subagent view. It immediately
 snapshots an eligible completed prefix, even while the root is busy, retaining
 the latest explicit task and every subsequent message verbatim. Queued steers
 are not yet part of that snapshot. An unchanged/one-task/empty context produces

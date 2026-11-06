@@ -797,10 +797,20 @@ terminal teardown and title restoration keep a fixed order.
   actions are queued after such an event, the event loop skips the next frame
   (`skip_frame`), so a burst over a long draft, e.g. drag-selecting text,
   costs one frame instead of one per event. Presses and releases always draw.
-- Prompt-button hover and focus are mutually exclusive (last input device
-  wins): the event loop clears `mouse_pos` when a key action moves
-  `prompt_button_focus`, and clears `prompt_button_focus` on a `Moved` mouse
-  event that changes the pointer position.
+- Button hover never overrides focus, in every dialog that has buttons
+  (approval/clarify prompts, `/session`, `/models` parameter popup): the shared
+  `button_style` draws a focused button filled even when hovered, and the
+  event loop clears `mouse_pos` when a key action moves the focus
+  (`prompt_button_focus`, the session picker's action, or the parameter
+  cursor). Pointer motion leaves focus untouched.
+- The picker's *Delete* calls `Store::delete_session_family` (`store/maintenance.rs`),
+  not the bulk `maintain_sessions` path. It reads only file headers
+  project-wide (raw first line, or the `.meta.json` sidecar for archives) and
+  parses events solely for the target, its clone family (connected via
+  `cloned_from`) and their subagents, since only clones copy a source's
+  subagent events. Descendants reachable from the rest of the family are
+  retained; the rest are deleted via `process_group`. Unreadable unrelated
+  files neither block nor slow the deletion.
 - Measured (release build, 100x40 terminal): a frame with a ~1 MB / 28,000
   line draft in the textarea takes ~27 ms, below the 50 ms budget, so the
   per-frame `lines().join("\n")` and measurement clones are left as is.
@@ -854,13 +864,19 @@ Given that, the policy is:
   do, so any keybinding that turns out to be undeliverable in some terminal
   is an inconvenience, never a lockout.
 
-Current leader chords: `ctrl-x a` (agents popup, same as `/agents`),
-`ctrl-x f` (toggle `/models` favorite), `ctrl-x p` (back to the parent
-conversation from a subagent drill-in view). Completed chords re-enter the
-presenter as dedicated `InputEvent`s (`ShowAgents`, `ToggleFavoriteModel`,
-`ParentView`), not as synthesized raw keys, so bare `ctrl-a`/`ctrl-f`/`ctrl-p`
-keep their readline meanings in every draft. `ctrl-c` (the universal
-interrupt/quit convention) is the one intentional bare-`ctrl` exception.
+Current leader chords:
+
+- `ctrl-x a`: agents popup, same as `/agents`
+- `ctrl-x p`: back to the parent conversation from a subagent drill-in view
+- `ctrl-x f`: toggle `/models` favorite
+- `ctrl-x s`: status popup, same as `/status`
+
+Leader chords is intercepted before focus routing so it works from any focus.
+Completed chords re-enter the presenter as dedicated `InputEvent`s (`ShowAgents`,
+`ToggleFavoriteModel`, `ParentView`, `ShowStatus`), not as synthesized raw keys, so bare
+`ctrl-a`/`ctrl-f`/`ctrl-p` keep their readline meanings in every draft.
+`ctrl-c` (the universal interrupt/quit convention) is the one intentional
+bare-`ctrl` exception.
 
 ### Conversation layout cache
 
@@ -938,6 +954,62 @@ cancellable background task so input and agent updates continue. The parked
 slash overlay (`Effect::ParkSlashOverlay`/`RestoreSlashOverlay`) keeps fetched
 model choices across an approval/clarify; the draft is never parked. See
 [features](./features.md#slash-commands).
+
+## Status popup
+
+`/status` is a driver round trip because only the agent loop owns `Context`.
+The presenter emits `Effect::ShowStatus{run_id}` (viewed subagent id or none);
+the driver sends `AgentCommand::RequestStatus` (wrapped in `ForSubagent` for a
+subagent). The loop answers with `UiUpdate::StatusSnapshot`, mapped to
+`DomainEvent::StatusSnapshot`, which opens `Focus::StatusPopup` (modal) via
+`AppState::open_status_popup`. When a subagent loop exits, `RunState::into_final_context`
+publishes its exact final snapshot into the `FinishedStatusRegistry` shared with the root's
+`SubagentManager` (`finished_status`), and the root loop answers a later request for that run
+from it. For a finished subagent without a kept snapshot (e.g. after a resume) the
+root loop rebuilds the snapshot from the persisted subagent transcript
+(`StatusSnapshot::from_finished_subagent`, `agent/finished_status.rs`, via
+`Store::read_subagent_session_state`): model, parameters and context length from
+the latest `model_changed`, agent type and allowed tools from the header, a `Context`
+hydrated from the messages plus the latest compaction snapshot. The allowed tools
+are persisted in the subagent header because the popup lists only them, which keeps
+calls to unknown tools out; transcripts written before that list empty. System
+prompt and tool schemas are not persisted, so those segments are dropped and the
+popup adds a note (`finished_subagent`). An unreadable transcript yields a notice in
+the subagent's own view.
+
+`StatusSnapshot::tool_call_counts` counts every assistant tool call by name over the whole
+transcript (`tool_call_counts`, `agent/finished_status.rs`); the popup appends `(n)` to used tools
+to allowed tools only; calls to tools that are not allowed (unknown tools) are not listed.
+
+`StatusSnapshot::timeline` (`agent/status_timeline.rs`) merges `model_changed` and `compaction`
+events in file order; identical consecutive model entries (every process start records one) are
+dropped. A loop with a session store flushes it and reads the events, so the history covers startup
+and resume; a loop without one (a running subagent) falls back to the active model plus
+`Context::compaction_history`, without timestamps. The popup renders it as a "History" list of one
+text line per event, prefixed with the UTC date and time (`YYYY-MM-DD HH:MMZ`, blank when unknown)
+so multi-day sessions stay readable (long lines wrap with a hanging indent under the event text
+instead of being truncated): model lines show the model and only the parameters that changed,
+compaction lines show `before → after tokens (change)` or `effect not recorded`, followed by the
+average reduction.
+
+The snapshot is built in `RunState::status_snapshot`. Its `ContextBreakdown`
+(`context_breakdown.rs`) comes from `Context::context_breakdown`
+(`agent/context/breakdown.rs`), which splits message 0 by the
+`SystemPromptOrigins` (`system_prompt_origins.rs`). The prompt string is
+rendered from those origins, so they stay the single source of truth; sources
+are sentinel labels, never absolute paths. Percentages use
+`max(effective context length, used)` as the denominator. The widget
+(`tui_widgets/status_popup.rs`) writes its rect, visible rows and clamped
+scroll offset back through `sync_from_draw`. The popup is always the terminal
+width minus six columns wide (three-column margin on each side) and spans the
+full height of the conversation list (`conversation.chat_area`; 80% of the frame as a
+fallback before the first chat draw). When the content overflows it keeps a
+one-column gap between the text and the scrollbar. Text selection mirrors the
+help popup: `StatusPopupState` keeps the plain text of every line as drawn
+(`rendered_lines`) plus `selection`/`drag_active`; the widget writes
+`layout.status_popup.content_area` each frame, left-drag inside it selects (in
+absolute line coordinates, so it survives scrolling) and releasing copies a
+non-empty selection to the clipboard.
 
 ## Steer ordering
 

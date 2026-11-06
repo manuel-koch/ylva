@@ -48,10 +48,11 @@ pub(crate) struct SessionExitGuard {
 
 impl Drop for SessionExitGuard {
     fn drop(&mut self) {
+        let store = self.current_store.lock().expect("current store mutex");
+        let kept_store = store.as_ref().filter(|store| !store.discard_if_empty());
         if let Some(snapshot) = &self.snapshot {
-            let store = self.current_store.lock().expect("current store mutex");
             *snapshot.lock().expect("exit snapshot mutex") =
-                store.as_ref().map(|store| SessionExitSnapshot {
+                kept_store.map(|store| SessionExitSnapshot {
                     session_id: store.session_id(),
                     title: store.title(),
                 });
@@ -86,6 +87,10 @@ mod tests {
             .set_title("Replacement".to_string())
             .await
             .unwrap();
+        replacement.record_message(&crate::Message::User {
+            content: "task".into(),
+            kind: crate::UserMessageKind::Explicit,
+        });
         *current_store.lock().unwrap() = Some(replacement.clone());
         drop(guard);
         assert_eq!(

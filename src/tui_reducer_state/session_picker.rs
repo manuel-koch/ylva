@@ -21,13 +21,18 @@ pub enum SessionAction {
     #[default]
     Resume,
     Clone,
+    Delete,
 }
 
 impl SessionAction {
+    /// Buttons in display and tab order.
+    pub const ALL: [Self; 3] = [Self::Resume, Self::Clone, Self::Delete];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Resume => "Resume",
             Self::Clone => "Clone",
+            Self::Delete => "Delete",
         }
     }
 }
@@ -44,6 +49,7 @@ pub enum SessionPickerPhase {
     Loading,
     Ready,
     Preparing,
+    Deleting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +81,28 @@ impl SessionPicker {
             .min(self.choices.len().saturating_sub(1));
     }
 
+    /// Focus the next (or previous) button, wrapping around.
+    pub fn cycle_action(&mut self, backwards: bool) {
+        let count = SessionAction::ALL.len();
+        let index = SessionAction::ALL
+            .iter()
+            .position(|action| *action == self.action)
+            .unwrap_or_default();
+        let next = if backwards {
+            (index + count - 1) % count
+        } else {
+            (index + 1) % count
+        };
+        self.action = SessionAction::ALL[next];
+    }
+
+    /// Drop a deleted session from the list, keeping the selection in range.
+    pub fn remove_choice(&mut self, session_id: Uuid) {
+        self.choices
+            .retain(|choice| choice.session_id != session_id);
+        self.selected = self.selected.min(self.choices.len().saturating_sub(1));
+    }
+
     pub fn selected(&self) -> Option<&SessionChoice> {
         self.choices.get(self.selected)
     }
@@ -85,7 +113,9 @@ impl SessionPicker {
             SessionPickerPhase::Preparing => match self.action {
                 SessionAction::Resume => "Resuming...".into(),
                 SessionAction::Clone => "Cloning...".into(),
+                SessionAction::Delete => "Deleting...".into(),
             },
+            SessionPickerPhase::Deleting => "Deleting...".into(),
             SessionPickerPhase::Ready => self.error.clone().unwrap_or_else(|| {
                 if self.choices.is_empty() {
                     "No other root sessions.".into()
@@ -136,5 +166,37 @@ mod tests {
         assert_eq!(picker.status(), "Clone failed");
         assert_ne!(picker.identity, SessionPicker::loading().identity);
         assert_eq!(SessionPicker::loading().action, SessionAction::Resume);
+    }
+
+    #[test]
+    fn button_focus_cycles() {
+        let mut picker = SessionPicker::loading();
+        picker.cycle_action(false);
+        assert_eq!(picker.action, SessionAction::Clone);
+        picker.cycle_action(false);
+        assert_eq!(picker.action, SessionAction::Delete);
+        picker.cycle_action(false);
+        assert_eq!(picker.action, SessionAction::Resume);
+        picker.cycle_action(true);
+        assert_eq!(picker.action, SessionAction::Delete);
+    }
+
+    #[test]
+    fn removing_a_choice_keeps_selection_in_range() {
+        let mut picker = SessionPicker::loading();
+        picker.choices = (0..3)
+            .map(|index| SessionChoice {
+                session_id: Uuid::from_u128(index),
+                title: "Untitled".into(),
+                last_used_at: "date".into(),
+            })
+            .collect();
+        picker.selected = 2;
+        picker.remove_choice(Uuid::from_u128(2));
+        assert_eq!(picker.selected, 1);
+        picker.remove_choice(Uuid::from_u128(0));
+        picker.remove_choice(Uuid::from_u128(1));
+        assert_eq!(picker.selected, 0);
+        assert!(picker.choices.is_empty());
     }
 }

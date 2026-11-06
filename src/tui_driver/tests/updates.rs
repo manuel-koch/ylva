@@ -56,11 +56,21 @@ async fn assert_subagent_compaction_replay(archived: bool) {
         },
     ];
     let subagent_store = store
-        .write_subagent_transcript_for_run_store(run_id, None, &messages)
+        .write_subagent_transcript_for_run_store(run_id, &Default::default(), &messages, &[])
         .await
         .expect("subagent transcript written");
-    subagent_store.record_compaction(2, 1, "old summary");
-    subagent_store.record_compaction(3, 1, "latest summary");
+    subagent_store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 2,
+        transcript_boundary: Some(1),
+        summary: "old summary".into(),
+        effect: None,
+    });
+    subagent_store.record_compaction(&crate::store::CompactionRecord {
+        boundary: 3,
+        transcript_boundary: Some(2),
+        summary: "latest summary".into(),
+        effect: None,
+    });
     subagent_store.flush().await;
     let subagent_path = subagent_store.path().to_path_buf();
     drop(subagent_store);

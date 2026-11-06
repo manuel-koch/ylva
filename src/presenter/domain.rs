@@ -200,6 +200,10 @@ fn domain_subagent_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Ef
             state.pending_bubble_expansion = None;
             vec![]
         }
+        DomainEvent::StatusSnapshot(snapshot) => {
+            state.open_status_popup(*snapshot);
+            vec![]
+        }
         DomainEvent::CompactionApplied {
             run_id,
             entry_index,

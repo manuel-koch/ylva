@@ -108,6 +108,9 @@ impl LeaderChord {
             KeyCode::Char('p') if event.modifiers == KeyModifiers::NONE => {
                 Some(AppAction::LeaderParentView)
             }
+            KeyCode::Char('s') if event.modifiers == KeyModifiers::NONE => {
+                Some(AppAction::LeaderStatus)
+            }
             _ => None,
         }
     }
@@ -144,6 +147,17 @@ mod tests {
             Some(AppAction::LeaderAgents)
         );
         assert!(!chord.is_armed(now), "a completed chord is disarmed");
+    }
+
+    #[test]
+    fn armed_chord_resolves_s_into_show_status() {
+        let mut chord = LeaderChord::default();
+        let now = Instant::now();
+        chord.arm(now);
+        assert_eq!(
+            chord.key_event(press(KeyCode::Char('s'), KeyModifiers::NONE), now),
+            Some(AppAction::LeaderStatus)
+        );
     }
 
     #[test]

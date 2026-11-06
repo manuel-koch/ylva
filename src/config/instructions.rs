@@ -67,8 +67,9 @@ use std::path::{Path, PathBuf};
 
 use crate::ylva_home::{ylva_home, YLVA_DIR_NAME, YLVA_HOME_ENVIRONMENT_VARIABLE};
 
-use super::soul::load_soul;
+use super::soul::{load_soul_with_layer, LoadedSoul};
 use super::ConfigError;
+use crate::system_prompt_origins::{PromptOrigin, SystemPromptOrigins};
 
 /// The code-owned allowlist of trusted instruction file names, in the order
 /// they are composed within one directory: `CLAUDE.md` first, `AGENTS.md`
@@ -376,7 +377,16 @@ pub fn compose_root_system_prompt(
     workspace_root: Option<&Path>,
     working_directory: Option<&Path>,
 ) -> Result<String, ConfigError> {
-    let soul = load_soul(workspace_root)?;
+    compose_root_system_prompt_origins(workspace_root, working_directory)
+        .map(|origins| origins.render())
+}
+
+/// The origin-tagged sections [`compose_root_system_prompt`] renders.
+pub fn compose_root_system_prompt_origins(
+    workspace_root: Option<&Path>,
+    working_directory: Option<&Path>,
+) -> Result<SystemPromptOrigins, ConfigError> {
+    let soul = load_soul_with_layer(workspace_root)?;
     let instruction_files = load_trusted_instructions(workspace_root, working_directory)?;
     Ok(compose_soul_with_instructions(&soul, &instruction_files))
 }
@@ -385,33 +395,50 @@ pub fn compose_root_system_prompt(
 /// already-discovered files, so unit tests never depend on the process
 /// environment.
 ///
-/// Sections are joined with a blank line. Each section's content is
+/// Sections are joined with a blank line when rendered. Each section's content is
 /// `trim_end()`-ed. Sentinels are paired tags rather than Markdown
 /// headings or `---` rules because instruction files contain their own
 /// headings and frontmatter separators, which would collide with either.
-fn compose_soul_with_instructions(soul: &str, instruction_files: &[InstructionFile]) -> String {
+fn compose_soul_with_instructions(
+    soul: &LoadedSoul,
+    instruction_files: &[InstructionFile],
+) -> SystemPromptOrigins {
+    let mut origins = SystemPromptOrigins::default();
+    origins.push(
+        PromptOrigin::Soul {
+            source: soul.source().to_string(),
+        },
+        soul.text.clone(),
+    );
     if instruction_files.is_empty() {
-        return soul.to_string();
+        return origins;
     }
-    let mut sections = Vec::with_capacity(instruction_files.len() + 2);
-    sections.push(soul.to_string());
-    sections.push(INSTRUCTION_SAFETY_PREAMBLE.to_string());
+    origins.push(
+        PromptOrigin::InstructionSafetyPreamble,
+        INSTRUCTION_SAFETY_PREAMBLE,
+    );
     for instruction_file in instruction_files {
-        sections.push(crate::prompt::format_prompt_block(
-            crate::prompt::PromptBlockKind::TrustedInstructions,
-            &format!(
-                "Source: {}\n\n{}",
-                serde_json::to_string(&instruction_file.source).expect("source serializes"),
-                instruction_file.contents.trim_end(),
+        origins.push(
+            PromptOrigin::InstructionFile {
+                source: instruction_file.source.clone(),
+            },
+            crate::prompt::format_prompt_block(
+                crate::prompt::PromptBlockKind::TrustedInstructions,
+                &format!(
+                    "Source: {}\n\n{}",
+                    serde_json::to_string(&instruction_file.source).expect("source serializes"),
+                    instruction_file.contents.trim_end(),
+                ),
             ),
-        ));
+        );
     }
-    sections.join("\n\n")
+    origins
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::layered::ConfigLayer;
 
     fn write_file(path: &Path, contents: &str) {
         std::fs::create_dir_all(path.parent().expect("instruction file parent")).expect("mkdir");
@@ -818,7 +845,7 @@ mod tests {
         let temporary_directory = tempfile::tempdir().expect("tempdir");
         let workspace_root = temporary_directory.path().join("workspace");
         std::fs::create_dir_all(&workspace_root).expect("workspace directory");
-        let soul = load_soul(Some(&workspace_root)).expect("soul loads");
+        let soul = load_soul_with_layer(Some(&workspace_root)).expect("soul loads");
         let instruction_files = load_trusted_instructions_from_roots(
             Some(&workspace_root),
             Some(&workspace_root),
@@ -828,8 +855,8 @@ mod tests {
 
         assert!(instruction_files.is_empty());
         assert_eq!(
-            compose_soul_with_instructions(&soul, &instruction_files),
-            soul
+            compose_soul_with_instructions(&soul, &instruction_files).render(),
+            soul.text
         );
     }
 
@@ -856,10 +883,16 @@ mod tests {
             },
         ];
 
-        let composed = compose_soul_with_instructions("soul text", &instruction_files);
+        let composed = compose_soul_with_instructions(
+            &LoadedSoul {
+                text: "soul text".to_string(),
+                layer: ConfigLayer::BuiltIn,
+            },
+            &instruction_files,
+        );
 
         assert_eq!(
-            composed,
+            composed.render(),
             format!(
                 "soul text\n\n\
                  {INSTRUCTION_SAFETY_PREAMBLE}\n\n\

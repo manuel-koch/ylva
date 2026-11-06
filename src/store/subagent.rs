@@ -17,9 +17,30 @@
 use uuid::Uuid;
 
 use super::title::subagent_title_outcome;
-use super::{now_timestamp, Store, StoreError, StoreEvent, EVENT_VERSION};
+use super::{
+    now_timestamp, CompactionRecord, ModelParameters, Store, StoreError, StoreEvent, EVENT_VERSION,
+};
 use crate::agent::Message;
 use crate::subagent_manager::FinishResultOrigin;
+
+/// What a finished subagent's session file records about the run besides its
+/// messages and compactions.
+#[derive(Debug, Clone, Default)]
+pub struct SubagentSessionHeader {
+    /// The subagent's own resolved provider-connection/model. `None` (the
+    /// engine configuration could not be resolved) leaves the header's pair
+    /// empty and skips the initial [`StoreEvent::ModelChanged`] record rather
+    /// than persisting a misleading empty one.
+    pub provider_connection_and_model: Option<(String, String)>,
+    /// The subagent's type, stamped into its header.
+    pub agent_type: Option<String>,
+    /// The engine's effective parameters, recorded with the initial
+    /// `ModelChanged` event.
+    pub parameters: ModelParameters,
+    /// Names of the tools the subagent was registered with, stamped into its
+    /// header so `/status` of the finished run can list them.
+    pub allowed_tools: Vec<String>,
+}
 
 impl Store {
     /// Enqueue the `subagent_start` record written to the **parent** session
@@ -107,7 +128,11 @@ impl Store {
             None,
         )?;
         if provider_connection_and_model.is_some() {
-            subagent_store.record_model_changed(provider_connection, model);
+            subagent_store.record_model_changed(
+                provider_connection,
+                model,
+                &ModelParameters::default(),
+            );
         }
         subagent_store.record_subagent_transcript_messages(messages);
         subagent_store.flush().await;
@@ -121,39 +146,49 @@ impl Store {
     pub async fn write_subagent_transcript_for_run(
         &self,
         run_id: Uuid,
-        provider_connection_and_model: Option<(&str, &str)>,
+        header: &SubagentSessionHeader,
         messages: &[Message],
+        compactions: &[CompactionRecord],
     ) -> Result<Uuid, StoreError> {
         Ok(self
-            .write_subagent_transcript_for_run_store(
-                run_id,
-                provider_connection_and_model,
-                messages,
-            )
+            .write_subagent_transcript_for_run_store(run_id, header, messages, compactions)
             .await?
             .session_id())
     }
 
     /// Write a subagent transcript using the run id and retain its store handle
-    /// for follow-up metadata operations.
+    /// for follow-up metadata operations. `header` is stamped into the
+    /// subagent's session file and `compactions` are every compaction the run
+    /// applied (a subagent has no live store, so they are persisted here),
+    /// which together let `/status` be derived for the finished run.
     pub async fn write_subagent_transcript_for_run_store(
         &self,
         run_id: Uuid,
-        provider_connection_and_model: Option<(&str, &str)>,
+        header: &SubagentSessionHeader,
         messages: &[Message],
+        compactions: &[CompactionRecord],
     ) -> Result<Store, StoreError> {
-        let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
+        let (provider_connection, model) = header
+            .provider_connection_and_model
+            .as_ref()
+            .map_or(("", ""), |(connection, model)| {
+                (connection.as_str(), model.as_str())
+            });
         let subagent_store = self.start_new_session_with_id(
             run_id,
             provider_connection,
             model,
             Some(self.inner.session_id),
-            None,
+            header.agent_type.as_deref(),
+            (!header.allowed_tools.is_empty()).then(|| header.allowed_tools.clone()),
         )?;
-        if provider_connection_and_model.is_some() {
-            subagent_store.record_model_changed(provider_connection, model);
+        if header.provider_connection_and_model.is_some() {
+            subagent_store.record_model_changed(provider_connection, model, &header.parameters);
         }
         subagent_store.record_subagent_transcript_messages(messages);
+        for record in compactions {
+            subagent_store.record_compaction(record);
+        }
         subagent_store.flush().await;
         Ok(subagent_store)
     }

@@ -65,6 +65,9 @@ pub enum AgentCommand {
     Prompt(String),
     /// Summarize a completed prefix while retaining the latest explicit task.
     Compact,
+    /// `/status`: reply with a [`UiUpdate::StatusSnapshot`] of this agent's
+    /// engine, agent type and context usage. Read-only, so allowed in any mode.
+    RequestStatus,
     /// Freeze mutations if the receiving root runtime is authoritatively idle.
     /// Repeating this command rechecks quiescence while keeping the freeze.
     PrepareSessionSwitch {
@@ -122,6 +125,8 @@ pub enum AgentCommand {
     RecordModelChanged {
         provider_connection: String,
         model: String,
+        /// The switched-to engine's effective parameters.
+        parameters: crate::store::ModelParameters,
     },
 }
 
@@ -129,6 +134,7 @@ pub(super) fn agent_command_name(command: &AgentCommand) -> &'static str {
     match command {
         AgentCommand::Prompt(_) => "prompt",
         AgentCommand::Compact => "compact",
+        AgentCommand::RequestStatus => "request_status",
         AgentCommand::PrepareSessionSwitch { .. } => "prepare_session_switch",
         AgentCommand::CancelSessionSwitch => "cancel_session_switch",
         AgentCommand::Shutdown => "shutdown",
@@ -206,6 +212,7 @@ pub(super) fn log_agent_command(
         AgentCommand::RecordModelChanged {
             provider_connection,
             model,
+            ..
         } => {
             tracing::debug!(
                 command = command_name,
@@ -220,6 +227,7 @@ pub(super) fn log_agent_command(
         AgentCommand::AbortClarify
         | AgentCommand::ClearContext
         | AgentCommand::Compact
+        | AgentCommand::RequestStatus
         | AgentCommand::PrepareSessionSwitch { .. }
         | AgentCommand::CancelSessionSwitch
         | AgentCommand::Shutdown => {
@@ -501,6 +509,34 @@ pub enum UiUpdate {
         entry_index: usize,
         summarized_messages: usize,
     },
+    /// Reply to [`AgentCommand::RequestStatus`]; opens the `/status` popup.
+    StatusSnapshot(Box<StatusSnapshot>),
+}
+
+/// Point-in-time view of one agent for the `/status` popup. Holds display
+/// text only: no credentials, base URLs or absolute paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusSnapshot {
+    /// The reporting subagent, or `None` for the root agent.
+    pub run_id: Option<Uuid>,
+    pub engine_name: String,
+    pub provider_connection: String,
+    pub model: String,
+    /// Only parameters that are configured or reported are `Some`.
+    pub reasoning_effort: Option<String>,
+    pub temperature: Option<String>,
+    pub max_output_tokens: Option<usize>,
+    pub agent_type: Option<String>,
+    /// Tool names the agent can call.
+    pub allowed_tools: Vec<String>,
+    /// How often each tool was called in the conversation; unused tools are absent.
+    pub tool_call_counts: std::collections::BTreeMap<String, usize>,
+    pub breakdown: crate::context_breakdown::ContextBreakdown,
+    /// Model changes and compactions, oldest first.
+    pub timeline: Vec<crate::agent::StatusTimelineEntry>,
+    /// Derived from the transcript of a finished subagent: its system prompt,
+    /// tool schemas and allowed tools are not recorded, so they are absent.
+    pub finished_subagent: bool,
 }
 
 /// Identifies which request/model-view representation a token estimate covers.

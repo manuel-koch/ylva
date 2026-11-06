@@ -271,6 +271,7 @@ pub struct SubagentManager {
     /// The **parent** session's store, when persistence is enabled: every
     /// subagent run appends a `subagent_start`/`subagent_result` pair to it.
     store: Option<Store>,
+    finished_status: crate::agent::FinishedStatusRegistry,
 }
 
 /// Builds the `UiUpdate::ToolProgress` title-argument pairs shown on the
@@ -298,6 +299,7 @@ impl SubagentManager {
             subagent_ui_tx,
             spawn_fn,
             store: None,
+            finished_status: crate::agent::FinishedStatusRegistry::default(),
         }
     }
 
@@ -311,6 +313,18 @@ impl SubagentManager {
     pub fn with_store(mut self, store: Store) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// Share `registry` with the subagent loops this manager spawns, so their
+    /// final status snapshots can be looked up after they finish.
+    pub fn with_finished_status(mut self, registry: crate::agent::FinishedStatusRegistry) -> Self {
+        self.finished_status = registry;
+        self
+    }
+
+    /// The final status snapshot of a finished subagent run, if it was kept.
+    pub(crate) fn finished_status(&self, run_id: Uuid) -> Option<crate::agent::StatusSnapshot> {
+        self.finished_status.get(run_id)
     }
 
     pub(crate) fn set_store(&mut self, store: Option<Store>) {

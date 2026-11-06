@@ -15,7 +15,7 @@
 use super::*;
 
 #[test]
-fn session_picker_mouse_selects_actions_and_rows_without_confirmation() {
+fn session_picker_mouse_activates_buttons_and_selects_rows() {
     use crate::tui_reducer_state::{
         SessionAction, SessionChoice, SessionPicker, SessionPickerPhase,
     };
@@ -33,12 +33,33 @@ fn session_picker_mouse_selects_actions_and_rows_without_confirmation() {
     state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(0, 4, 40, 3);
     state.layout.slash_overlay.resume_action = ratatui::layout::Rect::new(0, 8, 10, 1);
     state.layout.slash_overlay.clone_action = ratatui::layout::Rect::new(14, 8, 9, 1);
+    state.layout.slash_overlay.delete_action = ratatui::layout::Rect::new(25, 8, 8, 1);
+    let click = |column, row| crossterm::event::MouseEvent {
+        column,
+        row,
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        update(&mut state, TuiEvent::Mouse(click(15, 8)), &empty_textarea()),
+        vec![Effect::SelectSession {
+            source_id: Uuid::from_u128(0),
+            action: SessionAction::Clone
+        }]
+    );
+    assert_eq!(
+        update(&mut state, TuiEvent::Mouse(click(26, 8)), &empty_textarea()),
+        vec![Effect::DeleteSession {
+            source_id: Uuid::from_u128(0)
+        }]
+    );
+    let SlashOverlay::SessionPicker(picker) = &mut state.slash_overlay else {
+        panic!()
+    };
+    assert_eq!(picker.phase, SessionPickerPhase::Deleting);
+    picker.phase = SessionPickerPhase::Ready;
+    picker.action = SessionAction::Clone;
     for (column, row, kind) in [
-        (
-            15,
-            8,
-            MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        ),
         (
             2,
             6,
@@ -1066,6 +1087,50 @@ fn help_popup_drag_mouse_up_emits_copy_to_clipboard_effect() {
     assert!(
         !state.help_popup.help_drag_active,
         "help popup drag should be cleared"
+    );
+}
+
+#[test]
+fn status_popup_drag_selects_text_and_copies_it_on_release() {
+    let mut state = AppState::new();
+    state.focus = Focus::StatusPopup;
+    state.layout.status_popup.rect = ratatui::layout::Rect::new(8, 3, 24, 6);
+    state.layout.status_popup.content_area = ratatui::layout::Rect::new(10, 5, 20, 3);
+    state.status_popup.rendered_lines = vec!["first".to_string(), "hello world".to_string()];
+    state.status_popup.scroll_offset = 1;
+    let mouse = |kind, column| crossterm::event::MouseEvent {
+        kind,
+        column,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    let left = crossterm::event::MouseButton::Left;
+    update(
+        &mut state,
+        TuiEvent::Mouse(mouse(MouseEventKind::Down(left), 10)),
+        &empty_textarea(),
+    );
+    update(
+        &mut state,
+        TuiEvent::Mouse(mouse(MouseEventKind::Drag(left), 15)),
+        &empty_textarea(),
+    );
+    let effects = update(
+        &mut state,
+        TuiEvent::Mouse(mouse(MouseEventKind::Up(left), 15)),
+        &empty_textarea(),
+    );
+
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CopyToClipboard(text) if text == "hello")),
+        "expected CopyToClipboard(\"hello\"), got {effects:?}"
+    );
+    assert!(!state.status_popup.drag_active);
+    assert!(
+        state.show_status_popup(),
+        "a drag inside keeps the popup open"
     );
 }
 

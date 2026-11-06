@@ -112,8 +112,17 @@ fn session_and_compact_commands_never_submit_prompts_in_either_view() {
                     assert!(effects.contains(&Effect::ListSessions));
                 } else if subagent {
                     assert!(!effects.contains(&Effect::Compact));
-                    assert!(state.chat_entries.iter().any(|entry| matches!(entry,
-                        ChatEntry::Notice { text } if text.contains("only in the root"))));
+                    if suggestions {
+                        // `/compact` is not suggested in a subagent view.
+                        continue;
+                    }
+                    let run_id = state.viewed_subagent_run_id().expect("subagent view");
+                    let is_notice = |entry: &ChatEntry| matches!(entry, ChatEntry::Notice { text } if text.contains("only in the root"));
+                    assert!(state
+                        .target_messages_mut(Some(run_id))
+                        .iter()
+                        .any(is_notice));
+                    assert!(!state.chat_entries.iter().any(is_notice));
                 } else {
                     assert!(effects.contains(&Effect::Compact));
                 }
@@ -178,7 +187,7 @@ fn session_picker_owns_keyboard_action_selection_confirmation_and_cancellation()
     };
     picker.phase = SessionPickerPhase::Ready;
     for code in [
-        KeyCode::Right,
+        KeyCode::Tab,
         KeyCode::Down,
         KeyCode::PageDown,
         KeyCode::Char('x'),
@@ -211,6 +220,53 @@ fn session_picker_owns_keyboard_action_selection_confirmation_and_cancellation()
     );
     assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
     assert_eq!(SessionPicker::loading().action, SessionAction::Resume);
+}
+
+#[test]
+fn session_picker_tab_moves_button_focus_and_enter_deletes_with_delete_focused() {
+    use crate::tui_reducer_state::{
+        SessionAction, SessionChoice, SessionPicker, SessionPickerPhase,
+    };
+    let source_id = Uuid::new_v4();
+    let mut picker = SessionPicker::loading();
+    picker.phase = SessionPickerPhase::Ready;
+    picker.choices = vec![SessionChoice {
+        session_id: source_id,
+        title: "Untitled".into(),
+        last_used_at: "date".into(),
+    }];
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::SessionPicker(picker);
+    for code in [KeyCode::Tab, KeyCode::Tab] {
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(code))),
+            &empty_textarea(),
+        );
+    }
+    let SlashOverlay::SessionPicker(picker) = &state.slash_overlay else {
+        panic!()
+    };
+    assert_eq!(picker.action, SessionAction::Delete);
+    assert_eq!(
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &empty_textarea()
+        ),
+        vec![Effect::DeleteSession { source_id }]
+    );
+    let SlashOverlay::SessionPicker(picker) = &state.slash_overlay else {
+        panic!()
+    };
+    assert_eq!(picker.phase, SessionPickerPhase::Deleting);
+    // A second enter while deleting is ignored.
+    assert!(update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &empty_textarea()
+    )
+    .is_empty());
 }
 
 #[test]
@@ -1453,4 +1509,95 @@ fn go_to_agent_from_a_subagent_view_returns_to_the_root_owning_a_clarify() {
 
     assert_eq!(state.active_view, ConversationView::Root);
     assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
+}
+
+#[test]
+fn status_command_requests_status_for_the_viewed_agent_even_when_busy() {
+    let mut state = AppState::new();
+    state.mode = TuiMode::Streaming;
+    let textarea = TextareaContext {
+        text: "/status \n".into(),
+        ..empty_textarea()
+    };
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &textarea,
+    );
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::ShowStatus { run_id: None })));
+
+    let run_id = tracked_subagent(&mut state);
+    state.switch_to_subagent_view(run_id);
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+        &textarea,
+    );
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::ShowStatus { run_id: Some(id) } if *id == run_id)));
+}
+
+#[test]
+fn status_chord_requests_status_from_any_focus_and_toggles_the_popup_closed() {
+    let textarea = empty_textarea();
+    let mut state = AppState::new();
+    state.mode = TuiMode::Streaming;
+    state.focus = Focus::AgentsPopup;
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::ShowStatus),
+        &textarea,
+    );
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::ShowStatus { run_id: None })));
+
+    let run_id = tracked_subagent(&mut state);
+    state.switch_to_subagent_view(run_id);
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::ShowStatus),
+        &textarea,
+    );
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::ShowStatus { run_id: Some(id) } if *id == run_id)));
+
+    state.focus = Focus::StatusPopup;
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::ShowStatus),
+        &textarea,
+    );
+    assert!(effects.is_empty());
+    assert!(!state.show_status_popup());
+}
+
+#[test]
+fn agents_chord_switches_from_the_status_popup_to_the_agents_popup() {
+    let mut state = AppState::new();
+    state.focus = Focus::StatusPopup;
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::ShowAgents),
+        &empty_textarea(),
+    );
+    assert!(effects.is_empty());
+    assert_eq!(state.focus, Focus::AgentsPopup);
+    assert!(!state.show_status_popup());
+}
+
+#[test]
+fn status_popup_escape_closes_it() {
+    let mut state = AppState::new();
+    state.focus = Focus::StatusPopup;
+    update(
+        &mut state,
+        TuiEvent::Input(InputEvent::Escape),
+        &empty_textarea(),
+    );
+    assert_eq!(state.focus, Focus::MainInput);
 }

@@ -51,7 +51,7 @@ async fn read_subagent_runs_recovers_tool_call_counts_from_run_transcripts() {
     store.flush().await;
 
     let subagent_store = store
-        .write_subagent_transcript_for_run_store(run_id, None, &[])
+        .write_subagent_transcript_for_run_store(run_id, &Default::default(), &[], &[])
         .await
         .expect("subagent session written");
     subagent_store.record_message(&user_message("find it"));
@@ -213,6 +213,62 @@ fn read_events(path: &Path) -> Vec<StoreEvent> {
         .lines()
         .map(|line| serde_json::from_str::<StoreEvent>(line).expect("parseable store event"))
         .collect()
+}
+
+#[tokio::test]
+async fn subagent_transcript_persists_parameters_and_compactions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let chats_root = temp.path().join("chats");
+    let store = Store::create(&chats_root, temp.path(), Uuid::new_v4(), "mock", "m", None)
+        .expect("parent store created");
+    let run_id = Uuid::new_v4();
+    let parameters = ModelParameters {
+        engine_name: Some("main".to_string()),
+        temperature: Some("0.2".to_string()),
+        context_length: Some(1000),
+        ..Default::default()
+    };
+    let effect = CompactionEffect {
+        estimated_tokens_before: 800,
+        estimated_tokens_after: 200,
+    };
+    let compactions = [CompactionRecord {
+        boundary: 3,
+        transcript_boundary: Some(2),
+        summary: "summary".to_string(),
+        effect: Some(effect),
+    }];
+    store
+        .write_subagent_transcript_for_run(
+            run_id,
+            &SubagentSessionHeader {
+                provider_connection_and_model: Some(("mock".to_string(), "m".to_string())),
+                agent_type: Some("research".to_string()),
+                parameters: parameters.clone(),
+                ..Default::default()
+            },
+            &[user_message("task"), assistant_message("done")],
+            &compactions,
+        )
+        .await
+        .expect("transcript written");
+
+    let state = store
+        .read_subagent_session_state(run_id)
+        .expect("subagent state readable");
+    assert_eq!(state.compactions.len(), 1);
+    assert_eq!(state.compactions[0].effect, Some(effect));
+    assert_eq!(effect.reduction_percent(), 75.0);
+    let persisted_parameters = state
+        .events
+        .iter()
+        .find_map(|event| match event {
+            StoreEvent::ModelChanged { parameters, .. } => Some(parameters.clone()),
+            _ => None,
+        })
+        .expect("parameters persisted");
+    assert_eq!(persisted_parameters, parameters);
+    assert!(store.read_subagent_session_state(Uuid::new_v4()).is_none());
 }
 
 fn user_message(text: &str) -> Message {
@@ -453,7 +509,15 @@ async fn subagent_transcript_does_not_duplicate_task_already_in_context() {
     ];
 
     let subagent_session_id = store
-        .write_subagent_transcript_for_run(run_id, Some(("ollama", "llama3")), &context_messages)
+        .write_subagent_transcript_for_run(
+            run_id,
+            &SubagentSessionHeader {
+                provider_connection_and_model: Some(("ollama".to_string(), "llama3".to_string())),
+                ..Default::default()
+            },
+            &context_messages,
+            &[],
+        )
         .await
         .expect("subagent transcript written");
 
@@ -517,7 +581,7 @@ async fn cloning_replays_the_source_into_a_new_session_and_leaves_the_source_unt
     .expect("source created");
     source.record_message(&user_message("first turn"));
     source.record_message(&assistant_message("first reply"));
-    source.record_model_changed("ollama", "llama3.2");
+    source.record_model_changed("ollama", "llama3.2", &Default::default());
     let run_id = Uuid::new_v4();
     let call_id = Uuid::new_v4();
     source.record_subagent_start(run_id, call_id, "research", "investigate", "Investigate");
