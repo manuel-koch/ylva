@@ -123,9 +123,11 @@ extending grammars or suggesting persistent rules.
 
 ## Improved grammar
 
-Maybe improve/add grammar for the following commands
+Maybe improve/add grammar for the following commands or propose modified bash rules
+in `tests/sandbox_evaluation/sample.config.toml`:
 
-- rumdl
+- `rumdl`
+- `git tag --sort=version:refname`
 
 ## Grammar coverage and adversarial validation
 

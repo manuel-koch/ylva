@@ -458,6 +458,7 @@ Only review, don't touch any file!
 
 - `docs/*.md`
 - `docs/*.mmd`
+- `docs/architecture-design-records/*.md`
 - `docs/ideas/*.md` ( treat them as non-authoritative, WIP )
 - `docs/plans/*.md` ( treat them as authoritative, may be WIP )
 - `AGENTS.md`
