@@ -1,16 +1,17 @@
 # Ylva agent-harness persistence
 
-Reference for Ylva's persisted data.
+Reference for what Ylva stores on disk and how to resume, clone and maintain
+your sessions.
 
-Every conversation is written to a plain [JSON Lines](https://jsonlines.org)
-file as it happens, so a killed process leaves every already-committed line
-intact and a session file can be inspected with `cat`, `grep`, or `jq` without
-any Ylva-specific tooling.
+Ylva writes every conversation to a plain [JSON Lines](https://jsonlines.org)
+file as it happens. If Ylva is killed, the lines already written stay intact.
+You can read a session file with `cat`, `grep` or `jq`. No Ylva tooling is
+needed.
 
-Persistence is mandatory for normal sessions. Startup fails if the Ylva home
-cannot be resolved, or if the chats root or session file cannot be created or
-opened. Set `YLVA_HOME` to a writable state directory when the operating-system
-home directory is unavailable.
+Normal sessions always persist. Startup fails if Ylva cannot find its home
+directory, or cannot create or open the chats directory or the session file. Set
+`YLVA_HOME` to a writable directory when your operating system home directory is
+unavailable.
 
 ## On-disk layout
 
@@ -20,60 +21,55 @@ home directory is unavailable.
 
 | Segment | Meaning |
 | --- | --- |
-| `~/.ylva/chats` | Root of all persisted sessions. `~/.ylva` is resolved by `ylva_home::ylva_home()`: the `YLVA_HOME` environment variable, used verbatim as the Ylva home when it is set and non-empty, otherwise `<operating-system-home>/.ylva` (`dirs::home_dir()`). |
-| `<project_key>` | SHA-256 hex digest grouping every session launched from the same physical directory — see below. |
-| `<session_id>` | The session's UUID v4. `--conversation-id <session_id>` re-attaches it. |
+| `~/.ylva/chats` | Root of all stored sessions. `~/.ylva` is the value of `YLVA_HOME` when it is set and non-empty, otherwise `.ylva` in your operating system home directory. |
+| `<project_key>` | Groups all sessions started from the same physical directory. See below. |
+| `<session_id>` | The session's UUID. `--conversation-id <session_id>` re-attaches it. |
 
-A subagent's transcript is a session file of its own in the **same**
-`<project_key>` directory, written once when the subagent finishes.
+A subagent's transcript is a session file of its own in the same
+`<project_key>` directory. Ylva writes it once, when the subagent finishes.
 
 Manual compression replaces `<session_id>.jsonl` with a lossless
-`<session_id>.jsonl.gz` archive and a `<session_id>.meta.json` sidecar containing
-the metadata header fields. Stable `<session_id>.lock` files and
-`.project.lock` coordinate writers and maintenance; they are retained and are
-not transcripts. Temporary transition/rewrite files are ignored by discovery.
+`<session_id>.jsonl.gz` archive and a `<session_id>.meta.json` file holding the
+header fields. `<session_id>.lock` and `.project.lock` files coordinate writers
+and maintenance. They stay in place and hold no transcript data. Listing
+sessions ignores temporary files left by an interrupted operation.
 
-On Unix, Ylva creates session, lock and project-lock files with mode `0600` and
-the chats root and project directories with mode `0700`, as basic hygiene so
-other local users cannot read them. Existing files and directories keep their
-permissions. Transcripts are not a secure store: Ylva does not guarantee that
-they are free of secrets, so keep secrets out of conversations.
+On Unix, Ylva creates session and lock files with mode `0600` and the chats and
+project directories with mode `0700`, so other local users cannot read them.
+Existing files and directories keep their permissions. Transcripts are not a
+secure store. Ylva does not guarantee they are free of secrets, so keep secrets
+out of conversations.
 
 ### Workspace trust store
 
-`~/.ylva/trusted-workspaces.toml` (mode `0600`, replaced atomically) holds the
-approvals made by `ylva trust`: `[workspaces."<canonical workspace path>"]`
-maps each profile name to a SHA-256 hex digest of its covered workspace files.
-See [workspace trust](configuration.md#workspace-trust).
+`~/.ylva/trusted-workspaces.toml` (mode `0600`) records the approvals you give
+with `ylva trust`. For each workspace path it maps every approved profile name to
+a fingerprint of the workspace files the approval covers. See
+[workspace trust](configuration.md#workspace-trust).
 
 ### Relocating the Ylva home with `YLVA_HOME`
 
-Setting `YLVA_HOME=/some/dir` makes Ylva read and write `/some/dir` directly
-— chats *and* profiles — instead of `~/.ylva`. `YLVA_HOME` names the Ylva home
-directly, matching the convention of `CARGO_HOME`/`RUSTUP_HOME`/`GOPATH`/
-`XDG_DATA_HOME`: it is *the* Ylva home. The dedicated variable exists so
-an isolated setup (a test harness, a throwaway sandbox) can redirect Ylva's own
-state. An unset or empty `YLVA_HOME` falls back to
-`~/.ylva`. A workspace-local `YLVA_HOME` (for example `$(PWD)` from
-`.ylva/.envrc`) keeps chats under `<workspace>/.ylva/chats/`, which the workspace
-`.gitignore` ignores (see [configuration](configuration.md)).
+`YLVA_HOME=/some/dir` makes Ylva read and write `/some/dir` directly, for chats
+and profiles, instead of `~/.ylva`. It names the Ylva home itself, like
+`CARGO_HOME` or `GOPATH`. Use it for an isolated setup such as a test harness or
+a throwaway sandbox. An unset or empty `YLVA_HOME` falls back to `~/.ylva`. A
+workspace-local `YLVA_HOME` (for example `$(PWD)` from `.ylva/.envrc`) keeps
+chats under `<workspace>/.ylva/chats/`, which the workspace `.gitignore` ignores.
+See [configuration](configuration.md).
 
 ### `project_key` derivation
 
-`project_key` is the SHA-256 hex digest of the **canonicalized** launch
-directory (symlinks resolved, `..` collapsed, using the same
-`SandboxContext::canonicalize_best_effort` helper the sandbox uses for its
-sandbox root). Two paths that resolve to one directory — a symlink and its
-target, or macOS's `/var` and `/private/var` — therefore share one key, while
-two genuinely different directories never collide.
+`project_key` is the SHA-256 hex digest of the launch directory after Ylva
+resolves symlinks and `..`. Paths that lead to the same directory share a key,
+for example a symlink and its target, or macOS's `/var` and `/private/var`. Two
+different directories never share one.
 
-It is deliberately **not** the git root: a plain, non-git directory is a
-first-class project.
+The key does not use the git root. A plain, non-git directory is a project too.
 
 ## File format
 
-Each line is one JSON object with a `type` tag. The **first line of every file
-is the `meta` header**; every following line is an event.
+Each line is one JSON object with a `type` field. The first line of every file is
+the `meta` header. Every later line is an event.
 
 ```json
 {"type":"meta","version":1,"created_at":"2026-01-08T09:41:07.123Z","schema_version":2,"app_version":"0.7.0","project_key":"7f3c…","provider_connection":"openrouter","model":"gpt-4o","session_id":"6f1e…","title":"Store Layout Summary"}
@@ -84,8 +80,7 @@ is the `meta` header**; every following line is an event.
 {"type":"subagent_result","version":1,"completed_at":"…","id":"…","parent_session":"6f1e…","status":"success","result":"…","sources":[],"origin":"agent"}
 ```
 
-A subagent's own session file carries `parent_session` in its own `meta`
-line too:
+A subagent's own session file also carries `parent_session` in its header:
 
 ```json
 {"type":"meta","version":1,"created_at":"…","schema_version":2,"app_version":"0.7.0","project_key":"7f3c…","provider_connection":"ollama","model":"llama3","session_id":"9a2d…","title":"…","parent_session":"6f1e…"}
@@ -95,411 +90,373 @@ line too:
 
 | Field | Description |
 | --- | --- |
-| `version` | Per-line version of the `meta` event's own shape — see [Schema tolerance](#schema-tolerance) below for how this differs from `schema_version`. |
-| `created_at` | Session creation time in RFC 3339 UTC, millisecond precision. Never updated by resume; it is the baseline for derived last-use time, not the maintenance age by itself. |
-| `schema_version` | Version marker governing the whole file. Written **once**, when the session is created, and never rewritten afterwards — not even across a later resume under a newer Ylva build. A session created by an old build and resumed for months by newer ones keeps that original `schema_version` forever; it is not a "current shape" indicator, only a record of what the file's format was when it was created (see [Schema tolerance](#schema-tolerance)). |
+| `version` | Version of this line's own shape. [Schema tolerance](#schema-tolerance) explains how it differs from `schema_version`. |
+| `created_at` | Session creation time in UTC, millisecond precision. Resuming never changes it. |
+| `schema_version` | Version of the file format. Ylva writes it once when it creates the session and never changes it, even when a newer Ylva resumes the session. It records the format the file started with. See [Schema tolerance](#schema-tolerance). |
 | `app_version` | Ylva version that created the session. |
 | `project_key` | The [`project_key`](#project_key-derivation) of the launch directory. |
-| `provider_connection` / `model` | The provider-connection/model resolved for this session at creation time — mirrors the very first `model_changed` record (see below) so it's readable from the header alone. Never rewritten after creation; a later `/models` switch or a different resolution on a fresh process start is tracked only by `model_changed`. |
-| `session_id` | The session's UUID — matches the file name. |
-| `title` | Generated by the configured `utility_engine`. Roots use the first explicit user message and first non-empty `complete` assistant reply. Subagents prefer their original task plus the completed structured `agent_finish` result or error; without such an outcome, the existing text-reply flow remains available. The response is normalized to the first non-empty line, matching surrounding quote characters are removed, and the result is limited to 80 characters. It remains empty when no eligible outcome exists or generation fails; it is never replaced with a task label or copied user message. |
-| `parent_session` | Present **only** on a subagent's own session file, naming the parent's `session_id` — mirrors the parent-side `subagent_start`/`subagent_result` events so the link is discoverable from either file. Omitted entirely (not even `null`) for every root session and for `/clear` rollovers, which start a fresh session but are not a subagent run. |
-| `agent_type` | The root agent type resolved for this session at creation (or when `/clear` started its replacement session, or when a `--clone` copied the source's type). `None` for sessions written before the field existed — those read back as the `default` agent type. Later selections are tracked only by `agent_type_changed` below; the header is never rewritten. Omitted entirely while unset. |
-| `cloned_from` | Present **only** on a session created by `--clone`, naming the source session's `session_id`. The link is one-way: the source header is never rewritten, so a clone cannot be discovered from the source file. Omitted entirely (not even `null`) for every session that was not cloned. |
+| `provider_connection` / `model` | The provider connection and model chosen at creation. Ylva never updates them. `model_changed` events record later changes. |
+| `session_id` | The session's UUID. It matches the file name. |
+| `title` | A short title that your configured `utility_engine` generates from the conversation. See [Session titles](#session-titles). |
+| `parent_session` | Only in a subagent's own session file. The `session_id` of the session that started it. Absent for root sessions and for sessions that `/clear` starts. |
+| `agent_type` | The agent type the session started with. A `/clear` replacement session gets the current type, and a clone copies its source's type. Sessions created before this field existed count as the `default` agent type. `agent_type_changed` events record later selections. Absent while unset. |
+| `allowed_tools` | Only in a subagent's own session file. The tools that subagent could use. Absent in older transcripts. |
+| `cloned_from` | Only in a session created with `--clone`. The `session_id` of the source. The link goes one way, and the source never records its clones. Absent otherwise. |
 
-The header is written to disk **immediately** when the session is created —
-with an empty `title` — so every event committed after it is durable the
-instant it is written; no event is held in memory waiting on an LLM call.
-After a root's first non-empty complete assistant reply is committed, the CLI or TUI driver
-builds the same prompt returned by `Store::title_prompt()` and sends it to the
-raw configured utility engine with no tools, store, or visible UI updates.
-Successful output is supplied to `Store::set_title()`, which atomically
-rewrites only the first line (temporary file plus `rename()`); all transcript
-events remain byte-for-byte in their original order. A failed or interrupted
-utility task leaves the title empty. `Store::resume` re-derives the first
-explicit user message and first non-empty complete assistant reply from the persisted
-transcript, allowing the next process to retry the same flow.
+Ylva writes the header as soon as it creates the session, with an empty `title`,
+so everything recorded afterwards is on disk the moment it is written.
 
-Finished subagent transcripts use the same utility request and title-persistence
-flow, but also accept a structured terminal outcome. An `agent_finish` call must
-have a matching successful tool-completion record by call ID and tool name;
-an intended call, failed tool execution, or acknowledgement text is not an outcome.
-Successful tasks use the nonempty `result`; failed tasks use the nonempty `error`,
-with the same status inference as the tool itself. The terminal outcome is
-preferred over intermediate assistant commentary. Original messages stay
-unchanged: no synthetic assistant reply is inserted. Resume reconstructs these
-inputs from the persisted call arguments and completion record. Existing titles
-are preserved. No automatic backfilling or provider requests occur during listing.
+A session where you never sent a message is not kept. Ylva removes its file when
+you exit, run `/clear` or switch to another session. After a crash, an empty file
+like this can remain.
 
-`Store::resume` never reconstructs `SessionMeta` from scratch — the only
-rewrite of the `meta` line mutates `title` on the already-parsed struct,
-leaving `schema_version`, `app_version`, and every other field unchanged.
+#### Session titles
+
+After the first non-empty, complete assistant reply in a root session, Ylva asks
+the `utility_engine` for a title. The request uses no tools and shows nothing in
+the UI. Ylva keeps the first non-empty line of the answer, removes surrounding
+quotes, cuts it to 80 characters and stores it in the header. Only the header
+line changes. If title generation fails or is interrupted, the title stays empty
+and the next process that resumes the session tries again.
+
+For a finished subagent, the title comes from its original task and its final
+outcome. That outcome is the `result` of a successful `agent_finish` call, or the
+`error` of a failed one. An intended call, a failed tool run or acknowledgement
+text does not count. Without an outcome, Ylva uses the subagent's text reply.
+Ylva adds no message to the transcript, keeps existing titles, and never
+generates titles or contacts a provider while listing sessions.
+
+Apart from the title, resuming never changes the header.
 
 ### `message`
 
-Wraps one **committed** conversation message: an explicit or implicit user
-turn, a completed or interrupted assistant turn, a tool result, or a tool
-error. Live streaming deltas are ephemeral UI state and never reach disk; a
-message is written once, at the moment the agent loop commits it to its
-`Context`, so the on-disk order is the commit order.
+One committed conversation message. It is a user turn, a completed or
+interrupted assistant turn, a tool result or a tool error. Ylva does not store
+live streaming output. It writes a message once, when the agent finishes it, so
+the file order is the conversation order.
 
-`timestamp` (RFC 3339 UTC, millisecond precision) records that same commit
-instant — effectively "sent" for a user message and "response fully
-assembled" for an assistant message, since a message has exactly one commit
-point. It is *not* a stream-start or first-token instant: no such event is
-persisted, so per-message generation latency (e.g. time-to-first-token) can't
-be derived from the transcript today. Lines written before this field existed
-read back with `timestamp: ""`.
+`timestamp` is that moment in UTC with millisecond precision. It is when you
+sent a user message, or when Ylva received the complete assistant message. Stream start and
+first-token times are not stored, so you cannot derive response latency from a
+transcript. Lines written before this field existed have an empty timestamp.
 
-The two system prompts every context starts with are deliberately not
-persisted: they are rebuilt from the running binary on every start, so storing
-them would pin a stale copy into the transcript.
+Ylva does not store the two system prompts that start every conversation. The
+running Ylva rebuilds them on every start, and a stored copy would go stale.
 
 ### `agent_type_changed`
 
-Written when an explicit `--agent <type>` override on a resumed session
-differs from the type that session was already using, so later resumes
-without the flag continue under it. `meta.agent_type` only captures the type
-resolved at creation; this event is the authoritative, replayable history of
-every later selection and the last one wins. A `--clone` run needs no such
-record: the clone's header already carries its effective type.
+Ylva writes it when you resume a session with `--agent <type>` and that type
+differs from the one the session already uses. Later resumes without the flag
+keep the new type. `meta.agent_type` holds only the type from creation, so this
+event is the history of every later selection. The last one wins. A clone needs
+no such event, because its header already holds its type.
 
 ### `model_changed`
 
-Records the actual `provider_connection`/`model` serving the session — written once on
-**every process start** (fresh session or resume alike, since resuming under
-a different `--profile` or an edited config can resolve to a different
-provider connection or model than last time) and again after every successful
-`/models` switch. `meta.provider_connection`/`meta.model` only capture the pair resolved at
-creation and are never rewritten afterwards, so `model_changed` is the only
-authoritative, replayable history of every value that has actually served the
-conversation, including that first one. A subagent session gets its own
-independent `model_changed` history, starting with the subagent's own resolved
-engine — it never needs to cross-reference the parent's.
+Records the provider connection and model that serve the session. Ylva writes it
+on every start, for a new session and for a resume, because a different
+`--profile` or an edited config can select another model. It writes it again
+after every successful `/models` switch. Together these events are the full
+history of the models a conversation used, including the first. A subagent
+session has its own history, starting with its own model.
 
-Named-engine identity and reasoning effort are not persisted. Resuming resolves
-the current profile and starts from its configured agent/default engine; a
-same-provider/model shortcut activation may therefore have no distinguishable
-engine-only record. Engine runtime settings are not restored from the session
-history.
+The event also records the model settings in effect at that moment. All of them
+are optional: `engine_name`, `reasoning_effort`, `temperature`,
+`max_output_tokens` and `context_length`. Older sessions lack them. Resuming does
+not restore these settings. It starts from the engine your current profile
+configures.
 
 ### `subagent_start` / `subagent_result`
 
-Written to the **parent** session when a subagent run begins and when it
-finishes. The result's `origin` is `agent` when the subagent called
-`agent_finish`, or the serialized value `runtime` when the harness produced
-the outcome. Here `runtime` means Ylva's harness, not an Engine runtime. Both
-carry `parent_session`, so a subagent's records are always
-attributable. The subagent's own transcript is written separately, once, at
-completion, and its own `meta` line carries `parent_session` too (see above) —
-so the link is discoverable from either file, not just top-down from the
-parent.
+Ylva writes them to the parent session when a subagent starts and when it
+finishes. The result's `origin` is `agent` when the subagent reported its outcome
+with `agent_finish`, and `runtime` when Ylva produced the outcome itself. Both
+events name the parent in `parent_session`. Ylva saves the subagent's own
+transcript separately when it finishes, and that file names its parent too. You
+can follow the link from either file.
 
 ### `compaction`
 
-Written by the outer loop when a background summary is applied to the model
-view. Appended, never rewritten: a later event with a larger `boundary`
-supersedes an earlier one, and replay keeps the newest snapshot while every
-summarized message stays in the file (the transcript is never pruned).
+Ylva writes it when a background summary replaces older conversation in the
+model's view. Ylva only appends these events. A later event that cuts further
+into the conversation supersedes an earlier one, and resume uses the newest.
+Every summarized message stays in the file. Ylva never shortens the transcript.
 
 | Field | Description |
 | --- | --- |
-| `compacted_at` | RFC 3339 UTC timestamp, millisecond precision. |
-| `boundary` | First retained tail index in the **live model context**, including the leading system block. Current restore rebases `transcript_boundary` against rebuilt systems rather than assuming this live coordinate stays unchanged. |
-| `transcript_boundary` | The same cut in **persisted-transcript coordinates**: the system prompts excluded, so it indexes this file's `message` records directly. The TUI reads this to place its compaction marker without building a model context. `None` (omitted) for events written before the marker existed — those snapshots replay without a marker. |
-| `summary` | The compact-engine text representing `[..boundary]`. On resume it is projected as one marked user message ahead of the verbatim tail; it is never inserted into the transcript itself. |
+| `compacted_at` | When Ylva applied the compaction, in UTC with millisecond precision. |
+| `boundary` | Position of the first message kept verbatim, counted in the model's view including the system prompts. |
+| `transcript_boundary` | The same position counted in the stored messages, so it points at a `message` line. The TUI uses it to show the compaction marker. Absent in older sessions, which show no marker. |
+| `estimated_tokens_before` / `estimated_tokens_after` | Estimated token count of the conversation sent to the model before and after the compaction. Absent in older sessions. |
+| `summary` | The text that stands in for everything before the boundary. On resume the model sees it as one marked user message ahead of the verbatim messages. Ylva never adds it to the transcript. |
+
+A subagent's transcript also lists the compactions it performed, the model
+settings it used and its agent type.
 
 ### `model_projection`
 
-Written whenever the bounded model view changes, before dispatch or after a safe
-compaction sweep. Canonical `message` records and UI sections are never replaced.
-Replay chooses the highest `projection_revision`, including updates at an
-unchanged boundary. Clone copies these events unchanged.
+Ylva writes it whenever the trimmed view it sends to the model changes. It never
+replaces the stored messages or the visible conversation. On resume, Ylva uses
+the update with the highest `projection_revision`. Cloning copies these events
+unchanged.
 
-The `projection` object carries `projection_revision`, `transcript_start`,
-`message_overrides` (transcript-relative index/message pairs), `summary_override`,
-and optional `handoff`/`anchor` messages. Overrides contain bounded model bodies,
-not duplicate rich UI sections. Tool IDs/names and safe boundaries are validated
-on restore; invalid state is logged and ignored. Coordinates exclude leading
-system messages, so rebuilt system blocks may have different lengths. A newer
-summary boundary supersedes obsolete overrides and recovery handoffs. Synthetic
-summaries/anchors are projected only; hydration never appends transcript copies.
+The `projection` object holds `projection_revision`, `transcript_start`,
+`message_overrides` (pairs of message position and shortened message),
+`summary_override`, and optional `handoff` and `anchor` messages. Overrides hold
+only the shortened text for the model, not the rich display content. On resume,
+Ylva checks them against the conversation and ignores invalid data with a log
+message. A newer compaction supersedes older overrides and recovery handoffs.
+Synthetic summaries and anchors exist only in the model's view. Resuming never
+copies them into the transcript.
 
 ## Schema tolerance
 
-Events are `#[serde(tag = "type")]` and **never**
-`#[serde(deny_unknown_fields)]`: unknown fields are ignored and an unknown
-`type` fails only that one line. Readers can load recognized events across
-versions, but this does not guarantee complete replay after a breaking change. The
-per-event `version` field lets a reader take an event-type-specific path even
-without consulting the header.
+Readers ignore unknown fields in a line. An unknown event `type` makes only that
+line unreadable, not the file. A reader can load the events it knows across Ylva
+versions, but that does not guarantee a complete replay after a breaking change.
+The per-line `version` lets a reader treat an event type differently by age
+without reading the header.
 
-`version` and `schema_version` deliberately track two different things, at
-two different scopes, and can drift apart within a single file:
+`version` and `schema_version` track different things and can differ within one
+file.
 
-- `schema_version` lives only on the `meta` header and describes the file as
-  a whole. It is written once, at creation, and — as noted above — never
-  rewritten, not even across a resume by a newer Ylva build.
-- `version` lives on event lines (`meta` included), except `model_projection`,
-  which uses its nested `projection_revision` only, and describes just that
-  one line's own shape. It is stamped fresh, from the *currently running*
-  binary, every time a line is written.
+- `schema_version` lives only in the `meta` header and describes the whole file.
+  Ylva writes it once at creation and never changes it, even when a newer Ylva
+  resumes the session.
+- `version` is on every event line, `meta` included, except `model_projection`,
+  which uses only `projection_revision`. It describes that line's own shape, and
+  the Ylva version that writes the line sets it.
 
-Consequently, a session file created under an old build and resumed later
-under a newer one can end up with a `meta.schema_version` frozen at its
-original value while later lines in the very same file carry a higher
-`version` than that — the newer binary's per-event shape moved on even though
-nothing rewrote the header to say so. Only a hard, whole-file semantic break
-(requiring migration or discarding affected data) is meant to bump `schema_version`;
-ordinary per-event evolution is exactly what the per-line `version` field
-exists to tolerate without that.
+A session that an old Ylva created and a newer one resumed can therefore keep its
+original `schema_version` while newer lines carry a higher `version`. Ylva bumps
+`schema_version` only for a hard break that requires migrating or discarding
+data. Ordinary changes to single events use `version`.
 
-The current schema is **2**. Delegation events are now `subagent_start` and
-`subagent_result`, replacing schema 1's `child_start` and `child_result`.
-There are no aliases or automatic migration. The header version is informational,
-not a rejection gate: old delegation events are unrecognized and skipped by
-replay, so an old root transcript may appear readable while losing delegation
-links, outcomes, and drill-in state.
+The current schema is 2. Delegation events are now `subagent_start` and
+`subagent_result`. They replace schema 1's `child_start` and `child_result`.
+There is no alias and no automatic migration. The header version is informational
+and does not reject a file. Replay skips old delegation events, so an old root
+transcript can look readable while it misses its delegation links, outcomes and
+drill-in state.
 
-Before using sessions created before this rename, discard affected root sessions
-(including clones containing the old events) and their associated subagent
-transcripts, whether raw or archived. Do not rely on the new binary's cascading
-deletion to discover links encoded with old event names. Sessions that never
-recorded delegation remain readable; profiles, credentials, skills, and other
-configuration do not need to be removed. No persisted data is deleted automatically.
+Before you use sessions created before this rename, discard the affected root
+sessions, including clones that contain the old events, and their subagent
+transcripts, raw or archived. Cascading deletion cannot find links stored under
+the old event names. Sessions that never used delegation stay readable. Profiles,
+credentials, skills and other configuration need no changes. Ylva never deletes
+any of this automatically.
 
 ## Locking
 
-An open session holds a **non-blocking exclusive advisory lock** (`flock`) on
-a stable `<session_id>.lock` identity file until its writer drains. Title
-replacement cannot release this lock. Identity lock files are retained, never
-unlinked or recreated during maintenance. A second Ylva that tries to open the
-same session fails immediately with "session … is open in another Ylva
-process" instead of blocking or silently interleaving writes. The lock is
-released when the session is closed.
+While a session is open, Ylva holds an exclusive lock on its
+`<session_id>.lock` file. A second Ylva that opens the same session fails at once
+with "session … is open in another Ylva process". It does not wait or mix its
+writes into the file. The lock is released when the session closes. Ylva keeps
+lock files and never deletes them during maintenance. Writing the title does not
+release the lock.
 
-Listing sessions takes no lock — it is a pure read.
+Listing sessions takes no lock.
 
-A project coordination lock serializes clone/subagent publication with reference
-discovery and deletion, preventing removal of a subagent while another session
-publishes a reference to it. It is held only during coordinated operations, not
-for the lifetime of a conversation. Compression and decompression do not take
-this project lock. Session/clone creation and subagent-reference publication may
-wait while deletion holds it. These locks contain no transcript data.
+A per-project lock stops cloning and subagent publication from racing with
+deletion, so nobody can remove a subagent while another session records a
+reference to it. Ylva holds it only during those operations, not for the life of
+a conversation. Compression and decompression do not take it. Creating a session
+or clone and publishing a subagent reference can wait briefly for a running
+deletion.
 
-Other sessions in the project may remain open during maintenance. Only selected
-open transcripts, or deletion groups containing them, are refused; independent
-unlocked targets continue.
+Other sessions in the project can stay open during maintenance. Ylva refuses only
+the selected transcripts that are open, or deletion groups that contain one.
+Other targets continue.
 
 ## Manual maintenance and archive recovery
 
-See [Session commands](cli-options.md#session-commands) for syntax and selectors.
-There are no automatic sweeps, age/size settings, or automatic compression.
-New sessions remain raw JSONL until explicitly archived.
+See [Session commands](cli-options.md#session-commands) for syntax and
+selectors. Ylva has no automatic cleanup, no age or size settings and no
+automatic compression. New sessions stay plain JSONL until you archive them.
+
 Compression and decompression report `compressed <uuid>` and
-`decompressed <uuid>`; dry-run reports `would compress <uuid>` and
-`would uncompress <uuid>`. Neither lists storage files. Already-transformed
-targets report `already compressed <uuid>` or `already uncompressed <uuid>`,
-including in previews.
+`decompressed <uuid>`. A dry run reports `would compress <uuid>` and
+`would uncompress <uuid>`. Neither lists storage files. A session already in the
+requested state reports `already compressed <uuid>` or
+`already uncompressed <uuid>`, also in a dry run.
 
-Compression writes and synchronizes a complete temporary metadata sidecar,
-publishes it atomically, then publishes a verified gzip archive in the same
-directory. Both destinations and the directory are synchronized before removing
-the raw source. Decompression publishes and synchronizes raw JSONL before
-removing the archive, then removes redundant metadata. An interruption leaves a
-complete recoverable copy. Repeating the manual operation under its identity
-lock finishes an interrupted transition.
+Both operations survive interruption. Compression writes the metadata file and
+the verified archive first and removes the plain transcript last. Decompression
+restores the plain transcript, then removes the archive and the redundant
+metadata file. An interruption always leaves a complete copy. Running the same
+command again finishes the job.
 
-Discovery and every replay reader recognize raw and archived transcripts,
-including root/subagent links, clones, titles, agent selection, compaction,
-model projections, attachments, and input history. Reads never decompress,
-repair, or migrate files. Equivalent raw/archive copies appear once; differing
-copies produce diagnostics and block maintenance, resume, and cloning. Sidecars
-must agree with the filename, project, and archive header. A sidecar alone is
-not a transcript; corrupt gzip or inconsistent metadata is an explicit error.
-A matching sidecar beside raw JSONL without an archive is a recoverable
-interrupted transition.
+Every feature that reads sessions understands plain and archived transcripts,
+including links between roots and subagents. That covers listing, resume, clone,
+titles, agent selection, compaction, projections, attachments and input history.
+Reading never decompresses, repairs or migrates files.
 
-Deletion coordinates reference discovery with clone and delegation publication.
-Deleting a root includes unshared descendants, but descendants still referenced
-by surviving roots or clones are retained and reported. Explicit deletion of a
-referenced subagent transcript fails. `cloned_from` is historical provenance:
-deleting the source never cascades to its clones. A locked root blocks deletion
-of its entire descendant group. Independent groups continue after runtime
-failures; a partial batch exits with the general-error code (see
-[exit codes](./cli-options.md#exit-codes)). Deletion is not a multi-file
-transaction. Normal deletion reports each deleted session by UUID, including
-descendants, as `deleted <uuid>`; dry-run reports the same selected sessions as
-`would delete <uuid>`. Neither lists storage files. Retained descendants and
-failures remain visible, with file-level failures naming the path.
+- If a plain copy and an archived copy are equivalent, the session is listed once.
+- If they differ, Ylva reports a diagnostic and refuses maintenance, resume and
+  cloning for that session.
+- The metadata file must agree with the file name, the project and the archive
+  header. A metadata file alone is not a transcript.
+- A corrupt archive or inconsistent metadata is an error.
+- A matching metadata file next to a plain transcript with no archive is an
+  interrupted compression. You can complete it.
 
-Maintenance is supported on Unix only. Other platforms explicitly refuse
-maintenance and archived resume requiring restoration; ordinary raw sessions
-remain supported.
+Deleting a root session also deletes its subagent transcripts, unless surviving
+sessions or clones still refer to them. Ylva keeps those and reports them.
+Deleting a referenced subagent transcript explicitly fails. `cloned_from` is
+history only, so deleting a source never deletes its clones. An open root session
+blocks deletion of its whole group. Independent groups continue when another
+group fails. A partly failed batch exits with the general-error code. See
+[exit codes](./cli-options.md#exit-codes). Deletion does not roll back across
+files.
+
+Ylva reports each deleted session by UUID as `deleted <uuid>`, subagents
+included. A dry run reports `would delete <uuid>`. Neither lists storage files.
+Kept subagents and failures stay visible, and a failure on a file names its path.
+
+Maintenance works on Unix only. Other platforms refuse maintenance and refuse to
+resume archived sessions that need restoring. Plain sessions work everywhere.
 
 ## Resume contract
 
-- Without `--conversation-id`, every start — TUI and headless alike — begins a
-  **fresh** session. Ylva never auto-resumes and shows no startup picker.
-- `--conversation-id <uuid>` re-attaches that session for **append**: the
-  existing transcript is preserved. Archived sessions are restored under the
-  identity lock before append-open and trailing-line repair.
-- An unknown id is a **hard error**, never a silent fresh-session fallback.
-- **Repair-on-open:** if the last line of a resumed file is incomplete or
-  unparseable (a write cut short by a power loss), it is truncated before the
-  first append, so the repaired file never carries mid-file corruption. Only
-  resume repairs; reads never mutate.
-- **Discoverability:** on exit, Ylva prints the final active session id, its
-  persisted title when available, and a
-  `ylva --conversation-id <uuid>` command to stderr so the id never has to be
-  hunted down in the chats directory. See [Resuming a session](cli-options.md#resuming-a-session).
-- **Replay:** when a store is attached, `Context::set_store` reads the
-  committed messages and `Context::hydrate` appends them after the two system
-  prompts rebuilt by the current binary. Hydration bypasses `Context::commit`,
-  so reading a session never writes its messages back or duplicates them on a
-  later flush. The rule is unconditional for fresh and resumed sessions; a
-  new file simply has no messages to hydrate.
-- **TUI input history:** On startup, the TUI also reads explicit user messages
-  from prior root sessions in the same project, newest prompts first until
-  the configured `input_history_limit` is reached, then presents those
-  messages oldest to newest. Subagent transcripts and the current session
-  are excluded from this lookup; the current session is replayed separately.
-  Exact duplicate prompts are collapsed across sessions and only the newest
-  occurrence is retained. These messages seed only the draft input history and
-  never hydrate the visible transcript or model context, so this does not
-  change the fresh-session/no-auto-resume contract.
-- **Full-fidelity tool bubbles:** `Message::ToolResult` persists `summary`,
-  `content_sections`, `duration`, and specialized result-section identifiers;
-  `Message::ToolError` persists `content_sections` in addition to its
-  duration. These additive fields use `#[serde(default)]`, so files written
-  before replay support deserialize and show silently degraded (blanker) tool
-  bubbles.
-- `Message::ToolResult` also has an additive `attachments` field. It defaults
-  to an empty list when an older JSONL line omits it. Each
-  `ToolAttachment` stores only provider-neutral media metadata and references
-  the containing result's canonical Base64 `result`; it does not duplicate the
-  payload in the session file.
-- Attachment-bearing results remain ordinary persisted tool messages. During a
-  capable provider request, serialization may add a synthetic user message
-  after the contiguous tool-response group, but that message is wire-only: it
-  is never committed, hydrated, rendered, or written to JSONL. Resume therefore
-  reconstructs the same media projection from the persisted descriptor and
-  Base64 result without creating a duplicate message.
-- Assistant tool calls also persist their tool-specific `title_arguments`,
-  captured from the created tool call before execution. Replay uses this
-  exact projection, so tools such as `write` do not show body content in the
-  bubble title. Calls without title arguments persist an empty list.
-- **Subagent-run replay:** `SubagentStart` and `SubagentResult` persist `call_id`, and
-  `SubagentStart` also persists `label`. On resume, lifecycle records repair a
-  `spawn_subagent` bubble to the subagent's actual completed state or to a
-  terminal error when the subagent has no result. Replay discovers subagent
-  metadata eagerly, but reads the subagent's own transcript from the stable
-  run-id session path only on first drill-in. That read also restores the
-  latest persisted compaction marker at its transcript-relative boundary;
-  subsequent drill-ins reuse the loaded entries without duplicating the marker.
-  Snapshots without a transcript-relative boundary replay without a marker.
-  A `SubagentStart`/`SubagentResult`
-  record without a `call_id` is legacy data: its bubble keeps the persisted
-  running/queued text and is not drillable.
-- **Interrupted tools:** an unanswered non-`spawn_subagent` tool call is
-  synthesized as an in-memory-only `Message::ToolError` with
-  `"Tool call did not complete before the session ended."`. This keeps the
-  next provider payload protocol-valid and renders a visible terminal Error
-  bubble; the synthetic message is never appended to disk.
+- Without `--conversation-id`, every start begins a new session, in the TUI and
+  headless alike. Ylva never resumes automatically and shows no startup picker.
+- `--conversation-id <uuid>` re-attaches that session and appends to it. The
+  existing transcript stays. Ylva restores an archived session first.
+- An unknown id is a hard error. Ylva never falls back to a new session.
+- **Repair on resume.** If the last line of the file is incomplete or unreadable,
+  for example after a power loss, Ylva cuts it off before the first new line. The
+  file never holds damage in the middle. Only resuming repairs a file. Reading
+  never changes one.
+- **Finding the id.** On exit, Ylva prints the final session id, its title when
+  available and a `ylva --conversation-id <uuid>` command to stderr. You do not
+  need to search the chats directory. See
+  [Resuming a session](cli-options.md#resuming-a-session).
+- **Replay.** Ylva loads the stored messages after the two system prompts that
+  the running Ylva rebuilds. Loading never writes messages back, so resuming
+  duplicates nothing.
+- **TUI input history.** On startup the TUI loads your explicit prompts from
+  earlier root sessions of the same project. It takes the newest first until it
+  reaches `input_history_limit`, then offers them oldest to newest for recall.
+  The lookup skips subagent transcripts and the current session. Ylva replays the
+  current session separately. Identical prompts appear once, at their newest
+  position. These prompts fill only the input history. They never enter the
+  visible conversation or the model's context, so Ylva still starts a new
+  session.
+- **Tool results.** Tool results store their summary, display sections, duration
+  and result type. Tool errors store their display sections and duration. A
+  resumed session shows the same tool output as the live one. Sessions written
+  before this was added show plainer tool output.
+- **Attachments.** A tool result can carry attachments such as images. Ylva
+  stores only provider-independent metadata that refers to the Base64 data
+  already in the result, so the data is not duplicated. Older sessions have no
+  attachments. When a provider accepts media, Ylva can add an extra user message
+  to the request. Ylva only sends that message to the provider. It never stores
+  or shows it, and resuming rebuilds the same media input from the stored data.
+- **Tool call titles.** Ylva stores the arguments a tool shows in its title with
+  the call. A tool such as `write` never shows file content in its title after
+  resuming.
+- **Subagent runs.** `subagent_start` and `subagent_result` store the id of the
+  tool call that started the run, and `subagent_start` also stores its label. On
+  resume these events bring the subagent's entry in the conversation to its real
+  final state, or to an error if the subagent has no result. Ylva reads the
+  subagent's own transcript only when you first open it, and restores its latest
+  compaction marker there. Opening it again reuses the loaded content. Records
+  without a call id are legacy data. Their entry keeps the stored running or
+  queued text and cannot be opened.
+- **Interrupted tools.** A tool call without a stored answer, other than a
+  subagent start, shows as the error "Tool call did not complete before the
+  session ended." Ylva sends the same error to the provider, so the next request
+  stays valid. It never writes this message to disk.
 
 ## Clone contract
 
-The TUI `/session` picker provides explicit same-process Resume and Clone
-actions under these same storage contracts. It includes archived and cloned
-roots, excludes the active root and subagent transcripts, and lists the newest
-32 eligible roots by persisted activity (UUID tie-breaker). Dates display local
-time with a UTC offset; empty titles display `Untitled`.
+The TUI `/session` picker offers Resume and Clone for other sessions, under the
+same storage rules. It lists archived and cloned root sessions, leaves out the
+active session and subagent transcripts, and shows the 32 most recently used.
+Dates show in local time with a UTC offset. Empty titles show as `Untitled`.
 
-Preparation validates root eligibility and the source's latest stored agent
-type against the current profile before opening where possible, then rechecks
-the opened target. The type falls back to `default` only for legacy missing
-metadata; neither launch `--agent` nor the old live `/models` choice overrides
-picker selection. Fresh configured engines, transcript/model projections,
-subagent-run replay, input history, title handling, and final exit identity all
-follow the activated store. The old loop is joined and its obsolete stores
-released; hydration never appends historical messages again.
+Before it switches, Ylva checks that the session is usable. That includes
+checking that the agent type last stored for it exists in your current profile.
+Ylva checks again once it opens the session. The type falls back to `default`
+only for older sessions without one. Neither the launch `--agent` nor an earlier
+`/models` choice overrides your picker selection. The new session gets freshly
+configured engines. Its transcript, model view, subagent runs, input history,
+title and final exit message all follow it. Ylva shuts down and releases the
+previous session, and loading never adds historical messages twice.
 
-`esc` cancels publication, not an already-running blocking archive restoration,
-normal repair-on-resume, or durable clone creation. If a clone exists but is
-not activated, it is retained and its ID explicitly reported as
-`Clone created but not activated`; it remains eligible for later resume.
-Clone cancellation never resumes/appends to the source as a fallback. All
-new work after activation writes exclusively to the clone; source bytes and
-shared historical subagent transcripts remain unchanged.
+`esc` cancels the switch. It does not cancel an archive restoration that is
+already running, the repair on resume, or a clone that is already being created.
+If Ylva created a clone but did not activate it, Ylva keeps it, reports its ID as
+`Clone created but not activated`, and you can resume it later. Cancelling a
+clone never falls back to resuming the source. After activation, all new work
+goes to the clone. The source and the shared subagent transcripts stay unchanged.
 
-Root `/compact` uses the same persisted compaction snapshots, without pruning
-the transcript. A failed, empty, or non-shrinking manual summary writes no
-compaction event and changes no model view; separate request-pressure recovery
-is unaffected. See [slash commands](features.md#slash-commands) for controls
-and retained-task semantics.
+`/compact` on a root session uses the same stored compactions and never shortens
+the transcript. A failed, empty or non-shrinking summary writes no compaction and
+changes nothing in the model's view. Recovery from a too-large request works
+independently. See [slash commands](features.md#slash-commands) for the controls
+and how an ongoing task is handled.
 
-- `--conversation-id <uuid> --clone` starts a **brand-new** session that
-  replays the source's logical event stream. Without `--clone`, the same id
-  resumes for append as usual; both modes work in the TUI and headless runs.
-- The clone gets a fresh `session_id` (its own file name), its own `meta`
-  header with `cloned_from` naming the source, `parent_session` unset, and the
-  source's `title`, `provider_connection`, `model`, and `agent_type` copied
-  over — an explicit `--agent` overrides the type **on the clone only**.
-- Every logical event after the source header is copied: messages,
-  `model_changed`/`agent_type_changed` selection records, compaction
-  snapshots, and subagent-run lifecycle records. `subagent_start`/`subagent_result`
-  records are rebased onto the clone's id so a later resume of the clone
-  resolves its subagent runs from its own session; the subagent transcript files
-  themselves are untouched and stay shared read-only history.
-- **The source is never modified.** It is read under a nonblocking exclusive
-  lock held only for the read, and it is never repaired, rewritten, or
-  appended to: the clone run's new messages land only in the clone's file.
-- A source that is a **subagent transcript** (`parent_session` set), a source
-  another Ylva process holds open, an unknown id, or a file without a readable
-  `meta` header is a hard error that creates no session at all.
-- Hydration and TUI replay read the clone's own file, so the copied turns
-  appear as an ordinary resumed conversation on the fresh session id.
+- `--conversation-id <uuid> --clone` starts a brand-new session that replays the
+  source's conversation. Without `--clone`, the same id resumes and appends. Both
+  modes work in the TUI and in headless runs.
+- The clone gets a new `session_id` and file name, and its own header. The header
+  has `cloned_from` naming the source and no `parent_session`. Ylva copies the
+  source's `title`, `provider_connection`, `model` and `agent_type`. An explicit
+  `--agent` overrides the type on the clone only.
+- Ylva copies everything after the source header: messages, `model_changed` and
+  `agent_type_changed` events, compactions and subagent run events. It re-points
+  the subagent events to the clone's id, so resuming the clone finds its own
+  subagent runs. It does not copy the subagent transcript files. They stay shared
+  read-only history.
+- Ylva never modifies the source. It reads the source under a lock held only for
+  the read, and never repairs, rewrites or appends to it. New messages from the
+  clone run go to the clone's file.
+- Cloning is a hard error and creates no session if the source is a subagent
+  transcript, is open in another Ylva process, does not exist or has no readable
+  header.
+- The copied turns appear as an ordinary resumed conversation under the new
+  session id.
 
 ## Listing sessions
 
-`Store::list_sessions(chats_root, project_key)` returns every session of one
-project, most recently used first, with UUID tie-breakers. It reads the full
-resolved transcript, takes no lock, and mutates nothing. Archives are decoded
-in memory, never restored as a side effect. Invalid headers, representations,
-or nonempty activity timestamps produce diagnostics rather than qualifying
-silently for age-based maintenance.
+Listing returns every session of one project, most recently used first, with the
+UUID as tie-breaker. It reads the full transcripts, takes no lock and changes
+nothing. It reads archives in memory and never restores them. Invalid headers,
+file representations or non-empty activity timestamps produce diagnostics. Ylva
+never treats such a session as old enough for age-based maintenance.
 
-`SessionSummary.last_used_at` is derived, not added to the persisted header.
-It is the latest top-level `timestamp`, `created_at`, `changed_at`, `completed_at`,
-or `compacted_at` found in readable event lines, using the header's `created_at`
-as the baseline. Comparison uses RFC 3339 instants, not string order or file
-modification time. Out-of-order events and timestamps with offsets are supported.
-Legacy messages can omit timestamps or contain empty ones; model-projection
-entries have no timestamp. Such entries do not advance last use. Malformed JSON
-event lines remain tolerated and are skipped with a logging diagnostic.
+Ylva calculates the last-use time and does not store it in the header. It is the
+latest `timestamp`, `created_at`, `changed_at`, `completed_at` or `compacted_at`
+among the readable event lines, starting from the header's `created_at`. Ylva
+compares real instants, not text and not file modification time, so out-of-order
+events and time zones work. Older messages can have no timestamp or an empty one,
+and `model_projection` events have none. These do not advance the last use.
+Ylva skips unreadable JSON lines and logs a diagnostic.
 
-Every application start/resume records a timestamped `model_changed` event.
-Messages, subagent lifecycle events, selection changes, and compaction can advance
-last use. Listing, title rewrites, compression/decompression, and cloning the
-source do not. A clone's own creation time is its baseline, so copied historical
-timestamps cannot make the new clone appear older than its creation.
+Every start or resume records a timestamped `model_changed` event. Messages,
+subagent events, selection changes and compactions can advance the last use.
+Listing, title updates, compression, decompression and cloning the source cannot.
+A clone starts from its own creation time, so copied historical timestamps never
+make a new clone look older than it is.
 
-The CLI displays last use and reverses the library's order; included subagents
-are grouped beneath their stored parent. All maintenance `--before` selectors
-use the same last-use timestamp, revalidated under the identity lock before
-mutation. A target/group that was used again and no longer qualifies is skipped.
-See [Session commands](cli-options.md#session-commands).
+The CLI shows the last use and lists the oldest first. It groups included
+subagents beneath their parent. All maintenance `--before` selectors use this
+same time and check it again under the session's lock before they change
+anything. Ylva skips a session or group that you used again and that no longer
+qualifies. See [Session commands](cli-options.md#session-commands).
 
 ## Durability
 
-Writes go through a dedicated writer task fed by a channel, so the agent loop
-never waits on disk. Every line is written and flushed immediately, but **not**
-`fsync`ed: an interactive chat is not worth an `fsync` per turn, and a flushed
-line already survives a process crash. The one exception is the `meta` line's
-`title`, which is intentionally rewritten once, in place, after it is first
-written empty — see "The header is written to disk immediately…" above; the
-rewrite itself goes through the shared `private_fs::replace_file` helper (see
-[implementation-notes](./implementation-notes.md)): temp file, `fsync`, `rename()`,
-directory `fsync`. A crash mid-rewrite never corrupts the file (the reader either
-still sees the old, empty-titled line or the new one, never a torn mix of both),
-and the replacement is durable once the title is reported as persisted.
+Ylva writes in the background, so the conversation never waits for the disk. It
+writes and flushes every line at once but does not sync it to physical storage.
+A sync after every turn costs too much for an interactive chat, and a flushed
+line survives a crash of Ylva itself. A power loss can still lose recent lines.
+
+The title in the header is the one exception. Ylva replaces it once, after
+writing it empty, as [Session titles](#session-titles) describes. The replacement writes
+a complete temporary file, syncs it, swaps it into place and syncs the
+directory. See [implementation-notes](./implementation-notes.md). A crash in the
+middle never corrupts the file. Afterwards you see either the old empty-titled
+header or the new one, never a mix. The new title is durable once Ylva reports it
+as stored.

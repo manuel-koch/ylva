@@ -8,8 +8,9 @@ A Rust-based terminal UI that implements an agent-harness.
    - [README](./README.md) (project intro and quickstart)
    - [CONTEXT](./CONTEXT.md) (Ylva's ubiquitous language and domain terms)
    - [features](./docs/features.md) (implemented feature reference)
-   - [implementation-notes](./docs/implementation-notes.md) (internal mechanics
-     behind the features above; module/struct-level detail for contributors)
+   - [implementation-notes](./docs/implementation-notes.md) (cross-module
+     interactions, constraints/workarounds and design rationale only; no module
+     inventories, constants or field lists, read the source)
    - [architecture-design-records](./docs/architecture-design-records/) (recorded architecture
      decisions)
    - [configuration](./docs/configuration.md) (how to configure Ylva profiles and engines)
@@ -72,6 +73,11 @@ a documentation step naming the `docs/*` files it updates; executing the
 implementation without those doc updates is incomplete.
 If a doc doesn't exist yet, ask the user before creating a new doc file.
 Out-of-date docs are treated as bugs.
+
+Before editing `docs/implementation-notes.md`, re-read the guideline at the top
+of that file. Add a note only when the code alone does not explain it; put
+persisted field-level detail in [persistence](./docs/persistence.md) and keep
+notes to a few sentences.
 
 If you notice a stale doc while working on something else, report it; do not fix it unless
 asked (consent rule applies).
