@@ -128,6 +128,7 @@ in `tests/sandbox_evaluation/sample.config.toml`:
 
 - `rumdl`
 - `git tag --sort=version:refname`
+- `set -o pipefail` seems to be used by LLM to enforce exit code on piped commands
 
 ## Grammar coverage and adversarial validation
 
