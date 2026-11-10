@@ -25,6 +25,14 @@ rules = [
     # Each bash call is a fresh shell, so `cd dir; cmd` equals `cmd dir/...`.
     { command = ["cd", "**"],     verdict = "auto_approved", only_arguments = [] },
 
+    # set has a grammar for -e, -u and -o pipefail|errexit|nounset only; bare `set` (dumps
+    # variables), `set -- args`, `set -x`, `set -f` etc. are incomplete and never match.
+    { command = ["set", "**"],    verdict = "auto_approved", only_arguments = ["-e", "-u", "pipefail"] },
+
+    # rumdl has a grammar for `check` only; --fix, --config, --watch and other subcommands (fmt) are
+    # incomplete and never match.
+    { command = ["rumdl", "**"],  verdict = "auto_approved", only_arguments = ["check", "--diff", "--disable", "--enable", "--exclude", "--include", "--no-cache", "--output-format", "--quiet", "--statistics", "--verbose", "--no-config"] },
+
     { command = ["cat", "**"],    verdict = "auto_approved", only_arguments = ["-n", "-b", "-s", "-v", "-e", "-t", "-E", "-T"] },
 
     { command = ["find", "**"],   verdict = "auto_approved", only_arguments = ["-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth", "-depth", "-a", "-o", "!", "-print"] },
@@ -34,6 +42,9 @@ rules = [
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["diff", "--no-pager", "--stat", "--check", "--no-index", "--cached", "--numstat", "--name-only", "--unified"] },
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["status", "--no-pager", "--short", "--branch", "--untracked-files"] },
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["branch", "--no-pager", "--show-current"] },
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["branch", "--no-pager", "--list", "--all", "--remotes", "--verbose", "--sort", "--contains", "--merged", "--no-merged", "--points-at"] },
+    # tag/branch operands are only recognized together with --list, so `git tag v1` (creates) never matches.
+    { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["tag", "--no-pager", "--list", "--sort", "--contains", "--no-contains", "--points-at", "--merged", "--no-merged", "--format", "-n"] },
     # Git log -N (ASCII digits only) shares the -n/--max-count identity.
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["log", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },
     { command = ["git", "**"],    verdict = "auto_approved", only_arguments = ["show", "--no-pager", "--oneline", "--stat", "--check", "--numstat", "--name-only", "--max-count", "--unified"] },

@@ -249,3 +249,35 @@ pub(super) const SORT: &[OptionSpec] = &[
     flag(&["--help"]),
     flag(&["--version"]),
 ];
+
+// rumdl 0.3.2 `check`, report-only (`rumdl check --help`). Omitted: -f/--fix and
+// --preflight (write files); -c/--config (config files and inline overrides can
+// configure code-block tools that run programs); --only-code-block-tools;
+// -w/--watch; --stdin* modes; --stdin-batch-targets (reads a file);
+// --cache-dir (chooses where the cache is written); global options before the
+// subcommand. `--no-code-block-tools` stays so a rule can insist on it.
+pub(super) const RUMDL_CHECK: &[OptionSpec] = &[
+    flag(&["--diff"]),
+    required(&["-d", "--disable"]),
+    required(&["-e", "--enable", "--rules"]),
+    required(&["--extend-enable"]),
+    required(&["--extend-disable"]),
+    flag(&["--no-code-block-tools"]),
+    required(&["--exclude"]),
+    flag(&["--no-exclude"]),
+    required(&["--include"]),
+    required(&["--color"]),
+    optional(&["--respect-gitignore"]),
+    flag(&["-q", "--quiet"]),
+    flag(&["--no-config", "--isolated"]),
+    flag(&["--show-full-path"]),
+    flag(&["--stderr"]),
+    flag(&["--no-cache"]),
+    flag(&["--deny-config-warnings"]),
+    flag(&["-v", "--verbose"]),
+    flag(&["--statistics"]),
+    required(&["--output-format"]),
+    required(&["--flavor"]),
+    flag(&["-s", "--silent"]),
+    required(&["--fail-on"]),
+];

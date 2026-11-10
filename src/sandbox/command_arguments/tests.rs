@@ -740,7 +740,7 @@ fn grep_and_ripgrep_require_a_pattern_except_standalone_modes() {
 fn generated_unknown_arity_never_completes_or_exposes_later_evidence() {
     let commands = [
         "cat", "ls", "head", "tail", "wc", "grep", "rg", "sort", "find", "git", "sed", "printf",
-        "cd",
+        "cd", "set",
     ];
     let suffixes = [
         "",
@@ -968,6 +968,149 @@ fn cd_accepts_one_literal_operand_only() {
         vec!["cd", "-x"],
         vec!["cd", "a", "b"],
         vec!["cd", "--", "a", "b"],
+    ] {
+        assert!(!parse(&command(&arguments)).complete, "{arguments:?}");
+    }
+}
+
+#[test]
+fn git_tag_and_branch_list_but_never_create_or_modify() {
+    for (arguments, expected) in [
+        (vec!["git", "tag"], vec!["tag"]),
+        (
+            vec!["git", "tag", "--sort=version:refname"],
+            vec!["tag", "--sort"],
+        ),
+        (
+            vec!["git", "tag", "-l", "v1.*", "--sort", "-v:refname"],
+            vec!["tag", "-l", "--sort"],
+        ),
+        (vec!["git", "tag", "-n5", "--list"], vec!["tag", "-n", "-l"]),
+        (
+            vec!["git", "tag", "--points-at", "HEAD"],
+            vec!["tag", "--points-at"],
+        ),
+        (
+            vec!["git", "branch", "--show-current"],
+            vec!["branch", "--show-current"],
+        ),
+        (
+            vec!["git", "branch", "-a", "-v"],
+            vec!["branch", "-a", "-v"],
+        ),
+        (
+            vec!["git", "branch", "--list", "feat/*"],
+            vec!["branch", "-l"],
+        ),
+        (
+            vec!["git", "branch", "--merged", "main"],
+            vec!["branch", "--merged"],
+        ),
+    ] {
+        let analysis = parse(&command(&arguments));
+        assert_eq!(
+            (analysis.complete, canonical(&analysis)),
+            (true, expected),
+            "{arguments:?}"
+        );
+    }
+    for arguments in [
+        vec!["git", "tag", "v1"],
+        vec!["git", "tag", "v1", "HEAD"],
+        vec!["git", "tag", "-a", "v1", "-m", "msg"],
+        vec!["git", "tag", "-d", "v1"],
+        vec!["git", "tag", "-f", "v1"],
+        vec!["git", "tag", "-s", "v1"],
+        vec!["git", "tag", "-v", "v1"],
+        vec!["git", "tag", "--contains", "-d", "v1"],
+        vec!["git", "branch", "topic"],
+        vec!["git", "branch", "-a", "topic"],
+        vec!["git", "branch", "-d", "topic"],
+        vec!["git", "branch", "-D", "topic"],
+        vec!["git", "branch", "-m", "new"],
+        vec!["git", "branch", "--set-upstream-to=origin/main"],
+        vec!["git", "branch", "--edit-description"],
+        vec!["git", "branch", "--list", "--delete", "x"],
+    ] {
+        assert!(!parse(&command(&arguments)).complete, "{arguments:?}");
+    }
+}
+
+#[test]
+fn set_accepts_only_errexit_nounset_and_pipefail() {
+    for (arguments, expected) in [
+        (vec!["set", "-e"], vec!["-e"]),
+        (vec!["set", "-eu"], vec!["-e", "-u"]),
+        (vec!["set", "-o", "pipefail"], vec!["pipefail"]),
+        (
+            vec!["set", "-euo", "pipefail"],
+            vec!["-e", "-u", "pipefail"],
+        ),
+        (vec!["set", "-e", "-o", "nounset"], vec!["-e", "-u"]),
+    ] {
+        assert_eq!(analyze(&arguments), (true, expected), "{arguments:?}");
+    }
+    for arguments in [
+        vec!["set"],
+        vec!["set", "-o"],
+        vec!["set", "+o"],
+        vec!["set", "-o", "xtrace"],
+        vec!["set", "-o", "allexport"],
+        vec!["set", "-oe", "pipefail"],
+        vec!["set", "-x"],
+        vec!["set", "-f"],
+        vec!["set", "-a"],
+        vec!["set", "-n"],
+        vec!["set", "-eX"],
+        vec!["set", "+e"],
+        vec!["set", "--"],
+        vec!["set", "--", "a"],
+        vec!["set", "-e", "a"],
+        vec!["set", "foo"],
+        vec!["set", "-"],
+    ] {
+        assert!(!parse(&command(&arguments)).complete, "{arguments:?}");
+    }
+}
+
+#[test]
+fn rumdl_check_is_report_only() {
+    for (arguments, expected) in [
+        (vec!["rumdl", "check"], vec!["check"]),
+        (vec!["rumdl", "check", "docs"], vec!["check"]),
+        (
+            vec![
+                "rumdl",
+                "check",
+                "--no-cache",
+                "--output-format",
+                "json",
+                "docs/a.md",
+            ],
+            vec!["check", "--no-cache", "--output-format"],
+        ),
+        (
+            vec!["rumdl", "check", "docs", "--diff", "-d", "MD013"],
+            vec!["check", "--diff", "-d"],
+        ),
+    ] {
+        assert_eq!(analyze(&arguments), (true, expected), "{arguments:?}");
+    }
+    for arguments in [
+        vec!["rumdl"],
+        vec!["rumdl", "fmt", "docs"],
+        vec!["rumdl", "--no-config", "check"],
+        vec!["rumdl", "docs"],
+        vec!["rumdl", "check", "--fix"],
+        vec!["rumdl", "check", "-f", "docs"],
+        vec!["rumdl", "check", "docs", "--fix"],
+        vec!["rumdl", "check", "--preflight"],
+        vec!["rumdl", "check", "-c", "other.toml"],
+        vec!["rumdl", "check", "--config", "x = 1"],
+        vec!["rumdl", "check", "--watch"],
+        vec!["rumdl", "check", "--cache-dir", "out"],
+        vec!["rumdl", "check", "--stdin-batch-targets", "f"],
+        vec!["rumdl", "check", "--output-format"],
     ] {
         assert!(!parse(&command(&arguments)).complete, "{arguments:?}");
     }

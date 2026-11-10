@@ -1349,9 +1349,36 @@ For example, `find . -name -exec` has a `-name` predicate whose value is
 `-exec`; it does not supply `-exec` evidence.
 
 Conditional rules require a literal **bare executable name** with a built-in
-grammar. The roster is `cat`, `ls`, `head`, `tail`, `wc`, `grep`, `rg`, `sort`,
-`find`, `sed`, `printf`, `cd`, and `git` with `check-ignore`, `status`, `log`,
-`diff`, `show`, `ls-files`, `blame`, `rev-parse`, `grep`, or `stash list`/`stash show`.
+grammar. The roster is:
+
+- `cat`
+- `cd`
+- `find`
+- `git`:
+  - `git check-ignore`
+  - `git status`
+  - `git log`
+  - `git diff`
+  - `git show`
+  - `git ls-files`
+  - `git blame`
+  - `git rev-parse`
+  - `git grep`
+  - `git tag`
+  - `git branch`
+  - `git stash list`
+  - `git stash show`
+- `grep`
+- `head`
+- `ls`
+- `printf`
+- `rg`
+- `sed`
+- `set`
+- `sort`
+- `tail`
+- `wc`
+
 This is a conservative subset of BSD/macOS and GNU forms plus Git/ripgrep, not every option those
 tools implement. Tables record documentation provenance and review dates in
 the source. GNU long options, supported short bundles/attached values, and
@@ -1380,6 +1407,16 @@ these forms without numeric wildcard patterns. Unlike `head`/`tail`, the
 count may follow other options or revisions, but not the `--` terminator.
 This shorthand recognition is limited to `git log`; other Git subcommands
 are unchanged. Option values such as `git log --grep -5` are not counts.
+`git tag` and `git branch` support listing filters only (`--list`, `--sort`,
+`--contains`, `--merged`, `--points-at`, `--show-current`, …); a positional
+operand (which would create a ref) is complete only together with `-l`/`--list`,
+and deleting, renaming or signing options are unknown. `set` supports only `-e`,
+`-u` and `-o pipefail|errexit|nounset` (also bundled, e.g. `-euo pipefail`);
+the `-o` value is the identity (`pipefail`, `-e`, `-u`), and bare `set`,
+`set +o`, operands, `--` and every other flag are incomplete.
+`rumdl` supports only `check`, as the first argument, with report-only options;
+`--fix`, `--preflight`, `-c`/`--config`, `--watch`, `--stdin*`, `--cache-dir`,
+global options before the subcommand and other subcommands (`fmt`) are incomplete.
 Git global options and subcommand options have separate scopes; find predicates
 have their own operand/value rules. `awk` has no conditional grammar.
 `sed` recognizes `-n`/`--quiet`/`--silent`, `-E`/`-r`, `-s`, `-u`, `--posix`,

@@ -123,12 +123,8 @@ extending grammars or suggesting persistent rules.
 
 ## Improved grammar
 
-Maybe improve/add grammar for the following commands or propose modified bash rules
-in `tests/sandbox_evaluation/sample.config.toml`:
-
-- `rumdl`
-- `git tag --sort=version:refname`
-- `set -o pipefail` seems to be used by LLM to enforce exit code on piped commands
+Maybe improve/add grammar for further commands or propose modified bash rules
+in `tests/sandbox_evaluation/sample.config.toml`.
 
 ## Grammar coverage and adversarial validation
 

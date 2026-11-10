@@ -261,6 +261,41 @@ const GREP: &[OptionSpec] = &[
     flag(&["-p", "--show-function"]),
 ];
 
+// https://git-scm.com/docs/git-tag and https://git-scm.com/docs/git-branch
+// Listing filters only. Without -l/--list a positional operand creates a tag or
+// branch, so `parse` demands --list whenever operands are present. The commit
+// filters take an optional value in git; treating it as required stays
+// conservative because a swallowed option can only make the analysis incomplete.
+// Omitted: -a/-s/-u/-f/-d/-m/-F/-e/-v of tag and -d/-D/-m/-M/-c/-C/-f/-u/
+// --set-upstream-to/--edit-description of branch (write refs or run gpg).
+const REF_LISTING: &[OptionSpec] = &[
+    flag(&["-l", "--list"]),
+    flag(&["-i", "--ignore-case"]),
+    required(&["--sort"]),
+    equals(&["--format"]),
+    required(&["--contains"]),
+    required(&["--no-contains"]),
+    required(&["--merged"]),
+    required(&["--no-merged"]),
+    required(&["--points-at"]),
+    optional(&["--column"]),
+    flag(&["--no-column"]),
+    optional(&["--color"]),
+    flag(&["--no-color"]),
+    optional(&["--abbrev"]),
+    flag(&["--no-abbrev"]),
+    flag(&["--omit-empty"]),
+];
+
+const TAG: &[OptionSpec] = &[optional(&["-n"])];
+
+const BRANCH: &[OptionSpec] = &[
+    flag(&["--show-current"]),
+    flag(&["-a", "--all"]),
+    flag(&["-r", "--remotes"]),
+    flag(&["-v", "--verbose"]),
+];
+
 struct Subcommand {
     name: &'static str,
     identity: &'static [&'static str],
@@ -293,6 +328,8 @@ const SUBCOMMANDS: &[Subcommand] = &[
     subcommand("blame", &["blame"], &[BLAME]),
     subcommand("rev-parse", &["rev-parse"], &[REV_PARSE]),
     subcommand("grep", &["grep"], &[GREP]),
+    subcommand("tag", &["tag"], &[TAG, REF_LISTING]),
+    subcommand("branch", &["branch"], &[BRANCH, REF_LISTING]),
     Subcommand {
         name: "stash",
         identity: &["stash"],
@@ -369,6 +406,15 @@ pub(super) fn parse(arguments: &[ArgvToken], analysis: &mut ArgumentAnalysis) {
         }
     }
     if subcommand.identity[0] == "check-ignore" && analysis.operands.is_empty() {
+        analysis.complete = false;
+    }
+    if matches!(subcommand.identity[0], "tag" | "branch")
+        && !analysis.operands.is_empty()
+        && !analysis
+            .identities
+            .iter()
+            .any(|aliases| aliases.contains(&"--list"))
+    {
         analysis.complete = false;
     }
 }

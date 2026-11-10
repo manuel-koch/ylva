@@ -108,6 +108,9 @@ enum Grammar {
     Sed,
     ChangeDirectory,
     Printf,
+    Set,
+    /// `rumdl check` only; every other subcommand is unknown.
+    Rumdl,
     /// A plain option table. `permutes_options` allows options after operands.
     Options {
         options: &'static [OptionSpec],
@@ -142,6 +145,8 @@ fn grammar_for(name: &str) -> Option<Grammar> {
         "rg" => options_grammar(tables::RIPGREP, true),
         // Only the first argument can be an option (`-v var` assigns shell state).
         "printf" => Grammar::Printf,
+        "set" => Grammar::Set,
+        "rumdl" => Grammar::Rumdl,
         _ => return None,
     })
 }
@@ -167,6 +172,26 @@ pub(super) fn parse(command: &ExtractedCommand) -> ArgumentAnalysis {
         Some(Grammar::Git) => git::parse(&command.argv, &mut analysis),
         Some(Grammar::Sed) => sed::parse(&command.argv, &mut analysis),
         Some(Grammar::Printf) => parse_printf(&command.argv, &mut analysis),
+        Some(Grammar::Set) => parse_set(&command.argv, &mut analysis),
+        Some(Grammar::Rumdl) => {
+            if command
+                .argv
+                .get(1)
+                .is_some_and(|token| token.text == "check")
+            {
+                analysis.identify(&["check"]);
+                parse_options(
+                    name,
+                    &command.argv,
+                    2,
+                    utility_options::RUMDL_CHECK,
+                    true,
+                    &mut analysis,
+                );
+            } else {
+                analysis.complete = false;
+            }
+        }
         Some(Grammar::ChangeDirectory) => parse_change_directory(&command.argv, &mut analysis),
         Some(Grammar::Options {
             options,
@@ -174,6 +199,7 @@ pub(super) fn parse(command: &ExtractedCommand) -> ArgumentAnalysis {
         }) => parse_options(
             name,
             &command.argv,
+            1,
             options,
             permutes_options,
             &mut analysis,
@@ -203,6 +229,48 @@ fn parse_printf(arguments: &[ArgvToken], analysis: &mut ArgumentAnalysis) {
     analysis.operands.extend(position..arguments.len());
 }
 
+/// `set` accepts only `-e`, `-u` and `-o pipefail|errexit|nounset`, alone or
+/// bundled (`-eu`, `-euo pipefail`). The `-o` value is the identity
+/// (`pipefail`, `-e` for errexit, `-u` for nounset), so rules cannot allow other
+/// option names by allowing `-o`. Bare `set` and `set -o` print every shell
+/// variable, operands and `--` replace positional parameters, and all other
+/// flags change tracing, globbing, exports or execution; those stay incomplete.
+fn parse_set(arguments: &[ArgvToken], analysis: &mut ArgumentAnalysis) {
+    let mut position = 1;
+    while position < arguments.len() {
+        let text = arguments[position].text.as_str();
+        let Some(bundle) = text.strip_prefix('-').filter(|bundle| !bundle.is_empty()) else {
+            analysis.complete = false;
+            return;
+        };
+        for (offset, flag_character) in bundle.char_indices() {
+            match flag_character {
+                'e' => analysis.identify(&["-e", "errexit"]),
+                'u' => analysis.identify(&["-u", "nounset"]),
+                'o' if offset + 1 == bundle.len() => {
+                    position += 1;
+                    match arguments.get(position).map(|value| value.text.as_str()) {
+                        Some("pipefail") => analysis.identify(&["pipefail"]),
+                        Some("errexit") => analysis.identify(&["-e", "errexit"]),
+                        Some("nounset") => analysis.identify(&["-u", "nounset"]),
+                        _ => {
+                            analysis.complete = false;
+                            return;
+                        }
+                    }
+                    analysis.option_values.push(position);
+                }
+                _ => {
+                    analysis.complete = false;
+                    return;
+                }
+            }
+        }
+        position += 1;
+    }
+    analysis.complete &= position > 1;
+}
+
 /// `cd [--] DIR`: no options and exactly one literal operand. Bare `cd`
 /// (`$HOME`) and `cd -` (`$OLDPWD`) resolve through the environment and stay
 /// incomplete; `CDPATH` resolution is the shell's and equals a path operand.
@@ -230,11 +298,12 @@ fn is_numeric_count_option(text: &str) -> bool {
 fn parse_options(
     name: &str,
     arguments: &[ArgvToken],
+    first_position: usize,
     options: &'static [OptionSpec],
     permutes_options: bool,
     analysis: &mut ArgumentAnalysis,
 ) {
-    let mut position = 1;
+    let mut position = first_position;
     let mut terminated = false;
     let mut saw_operand = false;
     let mut supplied_pattern = false;
@@ -243,7 +312,9 @@ fn parse_options(
         if !terminated && text == "--" {
             terminated = true;
             position += 1;
-        } else if position == 1 && matches!(name, "head" | "tail") && is_numeric_count_option(text)
+        } else if position == first_position
+            && matches!(name, "head" | "tail")
+            && is_numeric_count_option(text)
         {
             // GNU legacy forms are first-argument-only; suffixes stay unsupported.
             analysis.identify(&["-n", "--lines"]);
