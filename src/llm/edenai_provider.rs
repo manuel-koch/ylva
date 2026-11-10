@@ -67,6 +67,19 @@ fn parse_reported_cost(data: &str) -> Option<RequestCost> {
     Some(RequestCost::new(amount, "USD"))
 }
 
+/// Reads the effective `pricing` object (USD per token, floats); tier and
+/// variant keys and `list_pricing` are ignored.
+fn parse_pricing(pricing: Option<&serde_json::Value>) -> Option<crate::llm::ModelPricing> {
+    let pricing = pricing?;
+    let price = |key: &str| pricing.get(key).and_then(serde_json::Value::as_f64);
+    crate::llm::ModelPricing::from_per_token(
+        price("input_cost_per_token"),
+        price("output_cost_per_token"),
+        price("cache_read_input_token_cost"),
+        price("cache_creation_input_token_cost"),
+    )
+}
+
 /// Reads Eden AI's `/v3/models` shape. Models that cannot produce text or
 /// that explicitly lack function calling are dropped; alias entries are kept.
 /// Capability evidence and advertised alternatives remain separate.
@@ -83,6 +96,8 @@ impl ModelCatalog for EdenAiModelCatalog {
                 let (reasoning_evidence, reasoning_efforts, reasoning_default) =
                     parse_reasoning_evidence(entry);
                 Some(ModelInfo {
+                    pricing: parse_pricing(entry.get("pricing")),
+                    score: None,
                     reasoning_evidence,
                     id: entry.get("id")?.as_str()?.to_string(),
                     context_length: entry
@@ -708,6 +723,25 @@ mod tests {
 mod policy_tests {
     use super::*;
     use crate::llm::{ReasoningEffortProvenance, ReasoningEvidence};
+
+    #[test]
+    fn catalog_reads_effective_pricing_per_million_tokens() {
+        let body = serde_json::json!({"data": [{
+            "id": "model",
+            "capabilities": {},
+            "pricing": {"input_cost_per_token": 0.000002, "output_cost_per_token": 0.00001,
+                "cache_creation_input_token_cost": 0.0000025,
+                "input_cost_per_token_flex": 0.0000001},
+            "list_pricing": {"input_cost_per_token": 0.5, "output_cost_per_token": 0.5}
+        }]});
+        let model = EdenAiModelCatalog::default().parse(&body).remove(0);
+        let pricing = model.pricing.expect("pricing");
+        assert!((pricing.input_per_million_tokens.unwrap() - 2.0).abs() < 1e-9);
+        assert!((pricing.output_per_million_tokens.unwrap() - 10.0).abs() < 1e-9);
+        assert!((pricing.cache_write_per_million_tokens.unwrap() - 2.5).abs() < 1e-9);
+        assert_eq!(pricing.cache_read_per_million_tokens, None);
+        assert_eq!(catalog_model(serde_json::json!({})).pricing, None);
+    }
 
     fn catalog_model(capabilities: serde_json::Value) -> ModelInfo {
         EdenAiModelCatalog::default()

@@ -451,6 +451,38 @@ serializing the resolved configuration:
   Only the favorite list changes: the active model, engine settings and other
   profile values are not reloaded.
 
+### Model scores
+
+An optional `model-scores.toml` in the Ylva home (`~/.ylva/`, or `$YLVA_HOME`)
+adds a `score:` segment to `/models` rows. A score is your own unitless rating,
+higher is better; Ylva neither validates nor converts the scale (negative
+values are allowed). One entry covers all providers. No file, or no matching
+entry, shows nothing.
+
+```toml
+"claude-opus-4.5" = 90
+"gpt-5" = { low = 60, medium = 75, high = 90 }
+"qwen3" = { default = 50, high = 70 }
+```
+
+- A value is a TOML integer or float, or a table of reasoning effort to
+  number with an optional `default` key. Strings, booleans and non-finite
+  values are invalid entries.
+- The list row shows the plain value or the minimum–maximum over all values
+  (`score: 60–90`). The parameter popup shows the score of the draft effort
+  (falling back to `default`), and the selected row's detail area lists the
+  full map with the active effort's score.
+- Keys are matched exactly after normalization (applied to catalog names
+  and file keys alike): lowercase; the vendor prefix up to the last `/`, a
+  `:suffix` routing tag, an `@…` suffix, a leading letters-only dotted vendor
+  prefix (`anthropic.claude-…`) and a trailing `-` plus 4, 6 or 8 digits or an
+  ISO date are dropped; `.` and `-` between digits are equal.
+  `gpt-5-mini` never inherits the `gpt-5` entry. If two keys normalize
+  equally, a warning is logged and the key sorting later wins.
+- The file is read when `/models` populates and cached for 30 minutes within a
+  run. A broken file or invalid entry is logged and never blocks the picker;
+  with `--strict-config` it is a startup error.
+
 ### Copilot connection
 
 `ylva connect copilot` creates this table and stores the token for you (see

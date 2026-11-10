@@ -232,6 +232,16 @@ See [configuration](./configuration.md),
   (`SummaryFailed`, reason shown) like any failed compaction, so a partial summary
   never replaces history.
 
+## Model scores in the `/models` picker
+
+- Scores are attached to `ModelInfo` when `/models` populates, so a row never
+  reads the file while rendering. The parsed file lives in a process-level
+  cache with the catalog's 30-minute lifetime, keyed by path; startup uses the
+  same cache so `--strict-config` validation and the picker share one load.
+- Names are matched exactly on the normalized form; there is deliberately no
+  prefix inheritance, so a sibling model never borrows another's rating.
+- The file sits in the Ylva home to stay with the rest of the per-user state.
+
 ## Tool-result wire protocol
 
 Each `role: "tool"` message carries JSON derived from `ToolEnvelope`:

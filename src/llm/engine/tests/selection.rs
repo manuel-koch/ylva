@@ -45,6 +45,8 @@ fn direct_engine_previews_the_selected_effective_context_length() {
             max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "candidate".to_string(),
                 context_length,

@@ -47,6 +47,32 @@ const SESSION_RESUME_BUTTON_LABEL: &str = " [ Resume ] ";
 const SESSION_CLONE_BUTTON_LABEL: &str = " [ Clone ] ";
 const SESSION_DELETE_BUTTON_LABEL: &str = " [ Delete ] ";
 const SESSION_ACTION_BUTTON_GAP: &str = "  ";
+/// A `/models` list row with the model name (the model ID after its last `/`)
+/// in bold. The name is searched only within the identity part of the row;
+/// `None` when it is not found, e.g. because eliding cut it.
+fn model_name_emphasized_line<'a>(
+    marker: &str,
+    text: &str,
+    choice: &crate::tui_reducer_state::ModelChoice,
+    style: Style,
+) -> Option<Line<'a>> {
+    let model_id = &choice.selection.model.id;
+    let model_name = model_id
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())?;
+    let identity_end = (0..=choice.label.identity.len().min(text.len()))
+        .rev()
+        .find(|index| text.is_char_boundary(*index))?;
+    let start = text[..identity_end].rfind(model_name)?;
+    let end = start + model_name.len();
+    Some(Line::from(vec![
+        Span::styled(format!("{marker}{}", &text[..start]), style),
+        Span::styled(model_name.to_string(), style.add_modifier(Modifier::BOLD)),
+        Span::styled(text[end..].to_string(), style),
+    ]))
+}
+
 /// Indent of a `/models` details row, aligning it under the identity text
 /// (past the two-column selection marker).
 const MODEL_PICKER_DETAIL_INDENT: &str = "    ";
@@ -519,6 +545,13 @@ pub(super) fn draw_slash_overlay(
                     return Line::from(spans);
                 }
             }
+            if list_is_shown && !is_model_details_row {
+                if let Some(choice) = visible_model_choices_in_overlay.get(entry_index) {
+                    if let Some(line) = model_name_emphasized_line(marker, &text, choice, style) {
+                        return line;
+                    }
+                }
+            }
             Line::styled(format!("{marker}{text}"), style)
         })
         .collect();
@@ -829,7 +862,22 @@ fn model_picker_detail_lines(
     if compaction_effect.width() > width {
         return Vec::new();
     }
-    vec![compaction_effect]
+    let draft_reasoning_effort = match parameters {
+        Some(edit) if Some(edit.choice_index) == selected_choice_index => {
+            edit.reasoning_effort.as_deref()
+        }
+        _ => None,
+    };
+    let mut lines = vec![compaction_effect];
+    if let Some(choice) = selected_choice {
+        lines.extend(
+            crate::tui_reducer_state::selected_choice_detail_texts(choice, draft_reasoning_effort)
+                .into_iter()
+                .filter(|text| text.chars().count() <= width)
+                .map(Line::from),
+        );
+    }
+    lines
 }
 
 /// Draw the OK / Cancel buttons on `button_row` and return their rects.

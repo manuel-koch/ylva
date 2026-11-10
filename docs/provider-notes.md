@@ -38,7 +38,8 @@ Keep these three things apart:
 
 Ylva totals only costs that the provider itself reports in a response (see
 [model usage costs](./features.md#model-usage-costs)). It never computes a cost
-from a price table.
+from a price table. Prices shown in the `/models` picker (see
+[catalog prices](#catalog-prices)) are display-only and never enter the cost total.
 
 | Provider | Tokens in final stream frame | Cost reported per request | Counted in the cost total |
 | --- | --- | --- | --- |
@@ -182,6 +183,24 @@ from a price table.
   brittle (rates and off-peak windows change), and the account-level APIs
   include usage from other clients, so neither is a provider-reported
   per-request cost.
+
+## Catalog prices
+
+The `/models` picker shows `price: input/output $ per 1M` (USD per million
+tokens; `AIC per 1M` for Copilot's AI credits, which are never converted to
+USD) when the provider's own model catalog advertises prices. Free models
+(`0`) show `price: free`; unknown prices show nothing. Ylva normalizes the
+catalog values to per million tokens and ignores other price keys.
+
+| Provider | Source | Notes |
+| --- | --- | --- |
+| OpenRouter | `pricing.prompt`, `completion`, `input_cache_read`, `input_cache_write` (strings) | Negative values (variable-priced routers such as `openrouter/auto`) and malformed values count as unknown |
+| EdenAI | `pricing.input_cost_per_token`, `output_cost_per_token`, `cache_read_input_token_cost`, `cache_creation_input_token_cost` | Effective `pricing` is preferred over `list_pricing` (they differ when `discount` is set); tier and variant keys are ignored; the 5.5 % platform fee is not included |
+| Copilot | `billing.token_prices` (see [Copilot billing][copilot-billing]): `default` (`input_price`, `output_price`, `cache_read_price` or `cache_price`, `cache_write_price`; AI credits per `batch_size` tokens) | Only returned for `x-github-api-version` `2026-06-01` or newer (Ylva sends `2026-08-01`; older versions return `billing.multiplier`, unknown versions are rejected with HTTP 400). `batch_size` 0 (models included in the plan) counts as unknown; a `long_context` tier that differs from `default` is kept as long-context prices; the token thresholds are ignored, so Ylva does not say where "long" begins |
+| Ollama, Ollama-Cloud, plain OpenAI-compatible | none | Catalogs carry no prices |
+
+Prices are per token and exclude the extra reasoning tokens a higher effort
+produces, so they are not bound to the selected effort.
 
 [copilot-billing]: https://docs.github.com/en/copilot/concepts/billing-and-usage/individuals/billing
 [github-terms]: https://docs.github.com/en/site-policy/github-terms/github-terms-of-service

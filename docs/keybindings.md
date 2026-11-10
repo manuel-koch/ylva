@@ -120,6 +120,7 @@ conversation. The original draft returns after all approvals are resolved.
 | `left-drag` | Slash-command overlay open | Select visible popup text; release copies it to the clipboard. A drag stays within its region: the list rows or the footer text (e.g. the compaction preview) |
 | any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices by engine name, provider connection, or model ID; no re-query |
 | `ctrl-x f` | `/models` picker list or parameter popup | Save the highlighted provider-connection/model as a favorite, or remove it if already marked; does not switch models or edit parameter drafts. |
+| `←` / `→` | `/models` picker list | Move the cursor in the filter draft (`/models <filter>`); only the parameter popup uses them to adjust values |
 | `enter` | `/models` picker open | Open the parameter popup for the highlighted model; nothing switches yet |
 | `esc` | `/models` picker open | Cancel without switching and clear the input |
 | `↑` / `↓` | `/models` parameter popup open | Move between the parameter rows (context length, reasoning effort, output limit) |

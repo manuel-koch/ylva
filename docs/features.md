@@ -434,7 +434,13 @@ active named engine and model while the live configuration equals the engine's c
 parameter edit deviates, it shows `provider_connection → model` instead, and the compaction switch
 notice names `provider_connection/model` likewise. Direct unnamed engines show only the model.
 `/models` queries each connection once, reuses a successful result for 30 minutes within the run
-(failures are retried on the next `/models`), and lists configured named engine shortcuts before
+(failures are retried on the next `/models`), renders the model name (the ID after its last `/`) in
+bold, shows the provider catalog price as a `price: input/output $ per 1M` segment (USD per million
+tokens, or `AIC per 1M` for Copilot AI credits; `price: free` for zero; a provider-advertised
+long-context tier adds `long-context price:` lines under the selected row, without a context-size
+boundary; nothing when the catalog advertises none; display-only, never part of the cost total),
+shows an optional user-supplied `score:` segment from `model-scores.toml` (see
+[model scores](./configuration.md#model-scores)), and lists configured named engine shortcuts before
 favorite models and the remaining raw `provider_connection/model` catalog entries. Favorite
 membership is an exact, case-sensitive provider-connection preference saved with ctrl-f from the
 highlighted row in either the list or parameter popup; it does not switch the model or alter

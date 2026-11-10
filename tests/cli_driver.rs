@@ -304,6 +304,8 @@ impl Engine for SwitchableTestEngine {
         let model = self.config().model;
         Box::pin(async move {
             Ok(vec![ModelInfo {
+                pricing: None,
+                score: None,
                 id: model,
                 max_output_tokens: None,
                 context_length: None,
@@ -493,6 +495,8 @@ async fn catalog_context_length_rebudgets_the_first_request_before_dispatch() {
         fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
             Box::pin(async {
                 Ok(vec![ModelInfo {
+                    pricing: None,
+                    score: None,
                     id: common::test_engine_config().model,
                     max_output_tokens: None,
                     context_length: Some(4_096),
@@ -610,6 +614,8 @@ async fn subagent_spawn_after_root_model_switch_uses_the_root_active_engine() {
                 max_output_tokens_override: None,
                 provider_connection: "alternate-provider".to_string(),
                 model: ModelInfo {
+                    pricing: None,
+                    score: None,
                     max_output_tokens: None,
                     id: "alternate-model".to_string(),
                     context_length: None,
@@ -736,6 +742,8 @@ async fn running_subagent_uses_a_shared_engine_switch_on_its_next_request() {
             max_output_tokens_override: None,
             provider_connection: "alternate-provider".to_string(),
             model: ModelInfo {
+                pricing: None,
+                score: None,
                 max_output_tokens: None,
                 id: "alternate-model".to_string(),
                 context_length: None,
@@ -851,6 +859,8 @@ async fn subagent_with_explicit_engine_override_keeps_its_named_engine() {
             max_output_tokens_override: None,
             provider_connection: "alternate-provider".to_string(),
             model: ModelInfo {
+                pricing: None,
+                score: None,
                 max_output_tokens: None,
                 id: "alternate-model".to_string(),
                 context_length: None,

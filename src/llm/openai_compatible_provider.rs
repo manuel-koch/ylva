@@ -353,6 +353,8 @@ impl ModelCatalog for DefaultModelCatalog {
                 let (reasoning_efforts, reasoning_default) =
                     crate::llm::parse_reasoning_object(entry.get("reasoning"));
                 Some(crate::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: id.to_string(),
                     context_length: entry

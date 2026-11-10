@@ -33,6 +33,8 @@ fn picker_preview_and_confirmation_keep_explicit_compaction_fixed_and_implicit_c
             max_output_tokens_override: None,
             provider_connection: connection.to_string(),
             model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 max_output_tokens: None,
                 id: model.to_string(),
                 context_length: Some(context_length),
@@ -284,6 +286,8 @@ fn compaction_switch_notices_explain_engine_selection_effects() {
         max_output_tokens_override: None,
         provider_connection: "mock".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "model-b".to_string(),
             context_length: None,
             max_output_tokens: None,
@@ -387,6 +391,8 @@ async fn interrupted_model_list_discovery_resumes_after_the_pause() {
             max_output_tokens_override: None,
             provider_connection: "healthy".to_string(),
             model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 id: "available".to_string(),
                 context_length: None,
                 max_output_tokens: None,
@@ -932,6 +938,8 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
         max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "thinking".to_string(),
             context_length: None,
             max_output_tokens: None,
@@ -973,8 +981,14 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
         )
     };
 
-    // Left/right do nothing in the list itself.
-    assert!(press(&mut state, KeyCode::Right).is_empty());
+    // In the list, left/right move the filter draft's cursor, not the model.
+    assert_eq!(
+        press(&mut state, KeyCode::Right),
+        vec![
+            Effect::ExitBrowsing,
+            Effect::TextareaKey(key_event(KeyCode::Right))
+        ]
+    );
     assert_eq!(
         state
             .selected_model()
@@ -1034,6 +1048,8 @@ async fn model_picker_parameter_popup_esc_returns_to_the_list_and_discards_the_d
         max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "thinking".to_string(),
             context_length: None,
             max_output_tokens: None,
@@ -1398,6 +1414,8 @@ fn picker_orders_engines_then_favorites_in_configured_order_then_the_rest() {
                 max_output_tokens_override: None,
                 provider_connection: "stub".to_string(),
                 model: crate::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     id: id.to_string(),
                     context_length: None,
                     max_output_tokens: None,
@@ -1634,6 +1652,8 @@ fn gateway_catalog_evidence_reaches_named_and_raw_picker_rows() {
     let option = crate::llm::ProviderModelOption {
         provider_connection: "not-a-provider-kind".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "upstream/model".to_string(),
             context_length: Some(128_000),
             reasoning_evidence: crate::llm::ReasoningEvidence::Supported,
@@ -1733,6 +1753,8 @@ fn gateway_shortcut_outage_retains_active_runtime_capability_evidence() {
     let option = crate::llm::ProviderModelOption {
         provider_connection: "not-a-provider-kind".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "upstream/model".to_string(),
             context_length: Some(128_000),
             reasoning_evidence: crate::llm::ReasoningEvidence::Supported,
@@ -1782,6 +1804,8 @@ fn gateway_outage_retains_inactive_named_engine_evidence() {
         configuration.clone(),
     ));
     let evidence = crate::llm::ModelInfo {
+        pricing: None,
+        score: None,
         id: configuration.model.clone(),
         context_length: Some(128_000),
         max_output_tokens: None,
@@ -1877,6 +1901,8 @@ async fn named_engine_switch_notices(catalog_models: &[&str]) -> (String, Option
         option: crate::llm::ProviderModelOption {
             provider_connection: "stub".to_string(),
             model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 id: "haiku".to_string(),
                 max_output_tokens: None,
                 context_length: None,
@@ -1979,6 +2005,8 @@ fn warning_option(effort: Option<&str>) -> crate::llm::ProviderModelOption {
     crate::llm::ProviderModelOption {
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "m".to_string(),
             max_output_tokens: Some(50),
             context_length: Some(100),
@@ -2040,4 +2068,33 @@ fn engine_warnings_are_empty_for_advertised_or_unstated_settings() {
         &engine
     )
     .is_empty());
+}
+
+#[test]
+fn attach_model_scores_matches_normalized_names_and_skips_unmatched_models() {
+    let scores = crate::llm::model_scores::parse_model_scores("\"gpt-5\" = 80\n").scores;
+    let option = |model_id: &str| crate::llm::ProviderModelOption {
+        context_length_override: None,
+        max_output_tokens_override: None,
+        provider_connection: "connection".to_string(),
+        model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
+            id: model_id.to_string(),
+            context_length: None,
+            max_output_tokens: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+    };
+    let mut models = vec![option("openai/gpt-5"), option("gpt-5-mini")];
+    super::super::models::attach_model_scores(&mut models, &scores);
+    assert_eq!(
+        models[0].model.score,
+        Some(crate::llm::ModelScore::Plain(80.0))
+    );
+    assert_eq!(models[1].model.score, None);
 }

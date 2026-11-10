@@ -44,6 +44,24 @@ fn parse_reported_cost(data: &str) -> Option<RequestCost> {
     Some(RequestCost::new(amount, "USD"))
 }
 
+/// Reads OpenRouter's `pricing` object (decimal strings, USD per token).
+/// Negative values mark variable-priced routers and count as unknown.
+fn parse_pricing(pricing: Option<&serde_json::Value>) -> Option<crate::llm::ModelPricing> {
+    let pricing = pricing?;
+    let price = |key: &str| {
+        pricing
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| text.trim().parse::<f64>().ok())
+    };
+    crate::llm::ModelPricing::from_per_token(
+        price("prompt"),
+        price("completion"),
+        price("input_cache_read"),
+        price("input_cache_write"),
+    )
+}
+
 /// Reads OpenRouter's `/models` shape: `context_length`,
 /// `architecture.input_modalities` and `reasoning`.
 #[derive(Debug, Default)]
@@ -57,6 +75,8 @@ impl ModelCatalog for OpenRouterModelCatalog {
                 let (reasoning_efforts, reasoning_default) =
                     parse_reasoning_object(entry.get("reasoning"));
                 Some(ModelInfo {
+                    pricing: parse_pricing(entry.get("pricing")),
+                    score: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: id.to_string(),
                     context_length: entry
@@ -248,6 +268,8 @@ mod tests {
         assert_eq!(
             models,
             vec![ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "openai/gpt-oss-120b".to_string(),
                 context_length: Some(131072),
@@ -257,6 +279,27 @@ mod tests {
                 max_output_tokens: None,
             }]
         );
+    }
+
+    #[test]
+    fn model_list_reads_prices_per_million_tokens() {
+        let models = parse_models(serde_json::json!({
+            "data": [
+                {"id": "normal", "pricing": {"prompt": "0.000003", "completion": "0.000015",
+                    "input_cache_read": "0.0000003"}},
+                {"id": "free", "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "router", "pricing": {"prompt": "-1", "completion": "-1"}},
+                {"id": "malformed", "pricing": {"prompt": "abc", "completion": 3}},
+                {"id": "missing"}
+            ]
+        }));
+        let pricing: Vec<_> = models.iter().map(|model| model.pricing).collect();
+        let normal = pricing[0].expect("normal price");
+        assert!((normal.input_per_million_tokens.unwrap() - 3.0).abs() < 1e-9);
+        assert!((normal.output_per_million_tokens.unwrap() - 15.0).abs() < 1e-9);
+        assert!((normal.cache_read_per_million_tokens.unwrap() - 0.3).abs() < 1e-9);
+        assert_eq!(pricing[1].unwrap().input_per_million_tokens, Some(0.0));
+        assert_eq!(&pricing[2..], &[None, None, None]);
     }
 
     #[test]

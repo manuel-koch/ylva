@@ -115,7 +115,7 @@ stateDiagram-v2
             HelpPopup --> MainInput : AgentIdle (Idle / Pending / Streaming)
             ToolApproval --> MainInput : AgentIdle (Idle / Pending / Streaming)
 
-            MainInput --> StatusPopup : /status or ctrl-x s (Effect::ShowStatus round trip)
+            MainInput --> StatusPopup : /status or ctrl-x s (ShowStatus effect round trip)
             StatusPopup --> MainInput : /status again / Esc (toggle closes, resume outstanding approval)
             StatusPopup --> AgentsPopup : ctrl-x a (closes status, opens agents)
             StatusPopup --> StatusPopup : StatusSnapshot (refresh, keep scroll)

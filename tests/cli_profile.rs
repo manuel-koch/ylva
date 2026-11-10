@@ -775,3 +775,41 @@ fn strict_config_rejects_an_unknown_auto_expand_tool_name() {
     );
     assert!(!stderr.contains("unknown tool name `read`"), "{stderr}");
 }
+
+/// `--strict-config` also covers `model-scores.toml`: an invalid entry is a
+/// startup error that names the entry.
+#[test]
+fn strict_config_rejects_an_invalid_model_score_entry() {
+    let ylva_home = TempDir::new().expect("tempdir");
+    let profile_directory = ylva_home
+        .path()
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join("tui");
+    fs::create_dir_all(&profile_directory).expect("create profile directory");
+    fs::write(profile_directory.join("config.toml"), "").expect("write profile config");
+    fs::write(
+        ylva_home.path().join("model-scores.toml"),
+        "good = 1\nbroken = \"high\"\n",
+    )
+    .expect("write scores");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
+        .current_dir(ylva_home.path())
+        .args([
+            "--no-tui",
+            "--prompt",
+            "hi",
+            "--profile",
+            "tui",
+            "--strict-config",
+        ])
+        .output()
+        .expect("spawn the ylva binary");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("`broken`"), "{stderr}");
+}

@@ -472,6 +472,8 @@ async fn switching_models_rechecks_compaction_capacity_before_any_prompt() {
         summary_config.model = "small-summarizer".to_string();
         summary_config.context_length = Some(32_768);
         let large_model = ModelInfo {
+            pricing: None,
+            score: None,
             id: "large-conversation".to_string(),
             max_output_tokens: None,
             context_length: Some(98_304),
@@ -485,6 +487,8 @@ async fn switching_models_rechecks_compaction_capacity_before_any_prompt() {
                 provider: MockProvider::new(vec!["the answer".to_string()], Duration::ZERO),
                 models: vec![
                     ModelInfo {
+                        pricing: None,
+                        score: None,
                         id: "safe-conversation".to_string(),
                         context_length: Some(32_768),
                         ..large_model.clone()
@@ -654,6 +658,8 @@ async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pendi
                 max_output_tokens_override: None,
                 provider_connection: provider_connection.clone(),
                 model: ModelInfo {
+                    pricing: None,
+                    score: None,
                     max_output_tokens: None,
                     id: model.clone(),
                     context_length: None,
@@ -1042,6 +1048,8 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                     max_output_tokens_override: None,
                     provider_connection: "stub".to_string(),
                     model: ModelInfo {
+                        pricing: None,
+                        score: None,
                         max_output_tokens: None,
                         id: "thinking".to_string(),
                         context_length: None,
@@ -1140,6 +1148,8 @@ fn model_picker_details_show_highlighted_compaction_effect() {
                     max_output_tokens_override: None,
                     provider_connection: provider_connection.to_string(),
                     model: ModelInfo {
+                        pricing: None,
+                        score: None,
                         max_output_tokens: None,
                         id: model_id.to_string(),
                         context_length: Some(context_length),
@@ -1795,6 +1805,8 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
                     max_output_tokens_override: None,
                     provider_connection: "stub".to_string(),
                     model: ModelInfo {
+                        pricing: None,
+                        score: None,
                         max_output_tokens: None,
                         id: "thinking".to_string(),
                         context_length: None,
@@ -2085,6 +2097,8 @@ fn long_model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state
                 max_output_tokens_override: None,
                 provider_connection: "stub".to_string(),
                 model: ylva::ModelInfo {
+                    pricing: None,
+                    score: None,
                     max_output_tokens: None,
                     id: format!("model-{index}"),
                     context_length: Some(131_072),
@@ -2616,6 +2630,8 @@ fn gateway_reasoning_parameter_row_renders_unverified_and_default_reset() {
                 max_output_tokens_override: None,
                 provider_connection: "arbitrary".to_string(),
                 model: ylva::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     max_output_tokens: None,
                     reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                     id: "upstream/model".to_string(),

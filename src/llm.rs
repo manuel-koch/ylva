@@ -25,6 +25,7 @@ pub mod copilot_provider;
 pub mod edenai_provider;
 pub mod engine;
 pub mod mock_provider;
+pub mod model_scores;
 pub mod ollama_provider;
 pub mod openai_compatible_provider;
 pub(crate) mod openai_responses;
@@ -64,6 +65,7 @@ pub use engine::{
     ReasoningEffortChange, DEFAULT_CONTEXT_LENGTH,
 };
 pub use mock_provider::{MockEvent, MockProvider};
+pub use model_scores::{ModelScore, ModelScores};
 pub use ollama_provider::OllamaProvider;
 pub use openai_compatible_provider::OpenAiCompatibleProvider;
 pub use openrouter_provider::OpenRouterProvider;
@@ -259,6 +261,12 @@ pub struct ReasoningEffortOptions {
 /// Metadata describing a single model available from a provider.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelInfo {
+    /// Catalog price advertised by the provider; display-only, never used for
+    /// the usage cost total. `None` means the catalog advertises no price.
+    pub pricing: Option<ModelPricing>,
+    /// User-supplied rating from `model-scores.toml`, attached when the
+    /// picker is populated; `None` when the file has no matching entry.
+    pub score: Option<ModelScore>,
     /// Capability evidence, neutral for providers using legacy strict enumeration.
     pub reasoning_evidence: ReasoningEvidence,
     pub id: String,
@@ -289,6 +297,73 @@ pub struct ModelInfo {
     /// `Some([])` is a known text-only model. Supported values are `Image`
     /// and `File`; unknown provider modality names are ignored.
     pub input_modalities: Option<Vec<InputModality>>,
+}
+
+/// Currency of a [`ModelPricing`]; amounts are never converted between them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PriceCurrency {
+    #[default]
+    Usd,
+    /// GitHub AI credits, as reported by Copilot.
+    AiCredits,
+}
+
+/// Catalog prices per one million tokens in [`ModelPricing::currency`]; `None`
+/// means not advertised, `Some(0.0)` means free.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ModelPricing {
+    pub currency: PriceCurrency,
+    pub input_per_million_tokens: Option<f64>,
+    pub output_per_million_tokens: Option<f64>,
+    pub cache_read_per_million_tokens: Option<f64>,
+    pub cache_write_per_million_tokens: Option<f64>,
+    /// Higher rates the provider applies to long contexts. The boundary is
+    /// deliberately not modelled; `None` when no separate tier is advertised.
+    pub long_context: Option<LongContextPricing>,
+}
+
+/// Long-context tier of a [`ModelPricing`], in the same currency and unit.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LongContextPricing {
+    pub input_per_million_tokens: Option<f64>,
+    pub output_per_million_tokens: Option<f64>,
+    pub cache_read_per_million_tokens: Option<f64>,
+    pub cache_write_per_million_tokens: Option<f64>,
+}
+
+// Sound because constructors only admit finite, non-negative prices (no NaN).
+impl Eq for ModelPricing {}
+impl Eq for LongContextPricing {}
+
+impl ModelPricing {
+    /// Converts a catalog USD-per-token price to USD per million tokens.
+    ///
+    /// Negative or non-finite values mean "variable or unknown" and yield `None`.
+    pub fn per_million_from_per_token(price_per_token: f64) -> Option<f64> {
+        (price_per_token.is_finite() && price_per_token >= 0.0)
+            .then_some(price_per_token * 1_000_000.0)
+    }
+
+    /// Builds pricing from per-token prices; `None` when no input or output
+    /// price is known, so rows without data show nothing.
+    pub fn from_per_token(
+        input: Option<f64>,
+        output: Option<f64>,
+        cache_read: Option<f64>,
+        cache_write: Option<f64>,
+    ) -> Option<Self> {
+        let convert = |price: Option<f64>| price.and_then(Self::per_million_from_per_token);
+        let pricing = Self {
+            currency: PriceCurrency::Usd,
+            input_per_million_tokens: convert(input),
+            output_per_million_tokens: convert(output),
+            cache_read_per_million_tokens: convert(cache_read),
+            cache_write_per_million_tokens: convert(cache_write),
+            long_context: None,
+        };
+        (pricing.input_per_million_tokens.is_some() || pricing.output_per_million_tokens.is_some())
+            .then_some(pricing)
+    }
 }
 
 impl ModelInfo {

@@ -782,8 +782,6 @@ fn handle_model_picker_key(
             state.move_slash_selection(page_entry_count);
         }
         KeyCode::Enter => state.open_model_parameters(),
-        // Left/right have no meaning in the list; they must not reach the draft.
-        KeyCode::Left | KeyCode::Right => {}
         _ => return None,
     }
     Some(vec![])

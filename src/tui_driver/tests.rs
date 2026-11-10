@@ -569,6 +569,8 @@ impl StubEngine {
             models: model_ids
                 .iter()
                 .map(|id| crate::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     id: (*id).to_string(),
                     context_length: None,
                     max_output_tokens: None,
@@ -621,6 +623,8 @@ impl StubEngine {
             models: model_ids
                 .iter()
                 .map(|id| crate::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     id: (*id).to_string(),
                     max_output_tokens: None,
                     context_length: if *id == engine_model {

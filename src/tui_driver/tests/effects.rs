@@ -823,6 +823,8 @@ async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
                 max_output_tokens_override: None,
                 provider_connection: "stub".to_string(),
                 model: crate::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     id: "deepseek-v3".to_string(),
                     context_length: None,
                     max_output_tokens: None,

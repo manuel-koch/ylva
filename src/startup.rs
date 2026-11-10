@@ -219,6 +219,14 @@ pub fn run(
             return Err(format!("{notice}\n(--strict-config)"));
         }
     }
+    let model_scores = crate::llm::model_scores::cached_model_scores();
+    if cli.strict_config && !model_scores.problems.is_empty() {
+        return Err(format!(
+            "{} has problems:\n{}\n(--strict-config)",
+            crate::llm::model_scores::MODEL_SCORES_FILE_NAME,
+            model_scores.problems.join("\n")
+        ));
+    }
     apply_cli_profile_overrides(cli, &mut profile);
     let profile_path =
         selected_profile_path(explicit_profile_name, profile_workspace_root.as_deref())?;

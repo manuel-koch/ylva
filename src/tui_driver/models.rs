@@ -172,7 +172,7 @@ pub(super) fn apply_model_list_result(
     result: ModelListResult,
     engine: &Arc<dyn Engine>,
 ) {
-    let (models, outage) = match result {
+    let (mut models, outage) = match result {
         ModelListResult::Models(models) => (models, None),
         ModelListResult::PartialFailure { models, failures } => {
             (models, Some(CatalogOutage::PartialFailure(failures)))
@@ -183,6 +183,10 @@ pub(super) fn apply_model_list_result(
         ),
         ModelListResult::Timeout => (Vec::new(), Some(CatalogOutage::Timeout)),
     };
+    attach_model_scores(
+        &mut models,
+        &crate::llm::model_scores::cached_model_scores().scores,
+    );
     let choices = assemble_model_choices(engine, models);
     if choices.is_empty() {
         state.slash_overlay = SlashOverlay::Hidden;
@@ -222,6 +226,23 @@ pub(super) fn apply_model_list_result(
         filter,
         selected,
     };
+}
+
+/// Attach the user-supplied score to every catalog model it matches. A model
+/// without an entry is only logged: a missing score is not an error.
+pub(super) fn attach_model_scores(
+    models: &mut [crate::llm::ProviderModelOption],
+    scores: &crate::llm::ModelScores,
+) {
+    if scores.is_empty() {
+        return;
+    }
+    for option in models {
+        option.model.score = scores.lookup(&option.model.id).cloned();
+        if option.model.score.is_none() {
+            tracing::debug!(model = %option.model.id, "no model score entry");
+        }
+    }
 }
 
 /// Favorite rank of every `(connection, model id)` pair the engine reports,
@@ -428,6 +449,8 @@ fn build_named_choice(settings: NamedChoiceSettings<'_>) -> ModelChoice {
         ))
         .or(fallback_model_info.filter(|model| model.id == engine_config.model));
     let model = crate::llm::ModelInfo {
+        pricing: catalog_model.and_then(|model| model.pricing),
+        score: catalog_model.and_then(|model| model.score.clone()),
         id: engine_config.model.clone(),
         context_length: engine_config
             .context_length
@@ -667,6 +690,8 @@ async fn active_engine_warnings(engine: &Arc<dyn Engine>) -> Vec<String> {
     let option = crate::llm::ProviderModelOption {
         provider_connection: config.provider_connection.clone(),
         model: catalog_model.cloned().unwrap_or(crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: config.model.clone(),
             max_output_tokens: None,
             context_length: None,

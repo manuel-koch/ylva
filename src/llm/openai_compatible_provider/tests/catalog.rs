@@ -38,6 +38,8 @@ fn default_catalog_reads_generic_model_metadata() {
         DefaultModelCatalog.parse(&body),
         vec![
             crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "openai/gpt-oss-120b".to_string(),
                 context_length: Some(131072),
@@ -47,6 +49,8 @@ fn default_catalog_reads_generic_model_metadata() {
                 max_output_tokens: None,
             },
             crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "plain".to_string(),
                 context_length: None,

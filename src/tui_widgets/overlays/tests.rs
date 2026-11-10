@@ -29,6 +29,8 @@ fn model_choice(context_length: usize) -> ModelChoice {
         selection: ProviderModelOption {
             provider_connection: "stub".to_string(),
             model: ModelInfo {
+                pricing: None,
+                score: None,
                 id: "model".to_string(),
                 context_length: Some(context_length),
                 max_output_tokens: None,
@@ -178,4 +180,30 @@ fn draft_window_matching_explicit_compaction_engine_clears_mismatch_highlight() 
     let (text, matching_color) = detail_text_and_color(&matching, &display);
     assert_eq!(text, "Compaction uses other/small, context: 131.1K");
     assert_eq!(matching_color, Some(muted_text_color()));
+}
+
+#[test]
+fn model_name_after_the_last_slash_is_bold_in_the_identity() {
+    let mut choice = model_choice(8 * KB);
+    choice.selection.model.id = "anthropic/claude-haiku-5.5".to_string();
+    let text = "conn/anthropic/claude-haiku-5.5 *  context: claude-haiku-5.5";
+    choice.label.identity = "conn/anthropic/claude-haiku-5.5 *".to_string();
+
+    let line = model_name_emphasized_line("> ", text, &choice, Style::default()).expect("found");
+
+    let bold: Vec<&str> = line
+        .spans
+        .iter()
+        .filter(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert_eq!(bold, vec!["claude-haiku-5.5"]);
+    assert_eq!(line.spans[0].content, "> conn/anthropic/");
+    assert_eq!(
+        line.spans[2].content, " *  context: claude-haiku-5.5",
+        "details stay plain"
+    );
+
+    let elided = model_name_emphasized_line("> ", "conn/anth…", &choice, Style::default());
+    assert!(elided.is_none());
 }
