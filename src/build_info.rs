@@ -62,6 +62,15 @@ impl BuildInfo {
     /// `profile` / `features`. Field labels and alignment are stable for
     /// scripts to parse.
     pub fn render(&self) -> String {
+        self.render_with_hint(None)
+    }
+
+    /// [`render`](Self::render) with a newer release noted on the `Version:`
+    /// line, directly after the current version.
+    pub fn render_with_hint(&self, new_version_hint: Option<&crate::NewVersionHint>) -> String {
+        let version_suffix = new_version_hint
+            .map(|hint| format!(" ({})", hint.summary()))
+            .unwrap_or_default();
         let features = enabled_features();
         let features_line = if features.is_empty() {
             String::from("Features: (none)")
@@ -69,25 +78,32 @@ impl BuildInfo {
             format!("Features: {}", features.join(", "))
         };
         format!(
-            "Ylva - Agent-Harness\nVersion: v{}\nCommit:  {}\nBuilt:   {}\nProfile: {}\n{}",
-            self.version, self.git_commit, self.build_timestamp_utc, self.profile, features_line
+            "Ylva - Agent-Harness\nVersion: v{}{}\nCommit:  {}\nBuilt:   {}\nProfile: {}\n{}",
+            self.version,
+            version_suffix,
+            self.git_commit,
+            self.build_timestamp_utc,
+            self.profile,
+            features_line
         )
     }
 
     /// [`render`](Self::render) followed by the locations this run resolved:
     /// the Ylva home and the workspace root. Unresolved locations print the
-    /// same fallbacks as the TUI Help popup.
+    /// same fallbacks as the TUI Help popup. A known newer release is noted on
+    /// the `Version:` line.
     pub fn render_with_locations(
         &self,
         ylva_home: Option<&Path>,
         workspace_root: Option<&Path>,
+        new_version_hint: Option<&crate::NewVersionHint>,
     ) -> String {
         let ylva_home_text = ylva_home.map_or_else(|| String::from("not resolved"), display_path);
         let workspace_root_text =
             workspace_root.map_or_else(|| String::from("not discovered"), display_path);
         format!(
             "{}\nYlva home: {ylva_home_text}\nWorkspace root: {workspace_root_text}",
-            self.render()
+            self.render_with_hint(new_version_hint)
         )
     }
 }
@@ -126,6 +142,7 @@ mod tests {
         let rendered = fixture().render_with_locations(
             Some(Path::new("/tmp/ylva-home")),
             Some(Path::new("/workspace/example")),
+            None,
         );
         assert!(rendered.starts_with(&fixture().render()));
         assert!(
@@ -134,8 +151,20 @@ mod tests {
     }
 
     #[test]
+    fn render_notes_a_newer_version_right_after_the_current_one() {
+        let hint = crate::NewVersionHint {
+            version: "10.0.0".to_string(),
+            release_url: "https://example.test/v10".to_string(),
+        };
+        let rendered = fixture().render_with_locations(None, None, Some(&hint));
+        assert!(rendered.contains(
+            "\nVersion: v9.9.9 (v10.0.0 available: https://example.test/v10)\nCommit:  "
+        ));
+    }
+
+    #[test]
     fn render_with_locations_prints_fallbacks_for_unresolved_locations() {
-        let rendered = fixture().render_with_locations(None, None);
+        let rendered = fixture().render_with_locations(None, None, None);
         assert!(rendered.ends_with("\nYlva home: not resolved\nWorkspace root: not discovered"));
     }
 

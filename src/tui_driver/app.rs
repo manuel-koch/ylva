@@ -48,6 +48,7 @@ pub struct TuiApp {
     display_metadata: TuiDisplayMetadata,
     exit_snapshot: Option<crate::app::SessionExitHandle>,
     favorite_save_setup: FavoriteSaveSetup,
+    version_hint_receiver: Option<mpsc::UnboundedReceiver<crate::NewVersionHint>>,
 }
 
 impl TuiApp {
@@ -65,6 +66,7 @@ impl TuiApp {
             display_metadata: TuiDisplayMetadata::default(),
             exit_snapshot: None,
             favorite_save_setup: FavoriteSaveSetup::default(),
+            version_hint_receiver: None,
         }
     }
 
@@ -78,6 +80,15 @@ impl TuiApp {
     /// the loaded profile document. Without it, saving favorites is disabled.
     pub fn with_favorite_save_setup(mut self, favorite_save_setup: FavoriteSaveSetup) -> Self {
         self.favorite_save_setup = favorite_save_setup;
+        self
+    }
+
+    /// Deliver a new-version hint found after startup to the logo and help.
+    pub fn with_version_hint_receiver(
+        mut self,
+        receiver: Option<mpsc::UnboundedReceiver<crate::NewVersionHint>>,
+    ) -> Self {
+        self.version_hint_receiver = receiver;
         self
     }
 
@@ -124,6 +135,7 @@ impl App for TuiApp {
                 driver: title_driver,
                 update_rx: title_update_rx,
                 display_metadata: self.display_metadata,
+                version_hint_receiver: self.version_hint_receiver,
                 input_history_limit: self.profile.input_history_limit,
                 tui_config: self.profile.tui.clone(),
                 exit_snapshot: self.exit_snapshot,

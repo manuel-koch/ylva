@@ -350,13 +350,16 @@ pub(in crate::tui_widgets) fn draw_cached_chat(
                 width,
                 false,
             );
-            key.title = Some(state.display_metadata.profile_name.clone());
+            key.title = Some(format!(
+                "{}/{:?}",
+                state.display_metadata.profile_name, state.display_metadata.new_version_hint
+            ));
             key
         },
         || {
             let mut layout = EntryLayout::default();
             if source.entries.is_empty() && source.header.is_none() {
-                append_logo(&mut layout.rows, &state.display_metadata.profile_name);
+                append_logo(&mut layout.rows, &state.display_metadata);
             } else {
                 layout.rows.push(Line::default());
             }

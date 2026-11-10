@@ -76,6 +76,7 @@ pub struct TuiDisplayMetadata {
     pub profile_path: Option<PathBuf>,
     pub ylva_home: Option<PathBuf>,
     pub workspace_root: Option<PathBuf>,
+    pub new_version_hint: Option<crate::NewVersionHint>,
 }
 
 impl Default for TuiDisplayMetadata {
@@ -85,6 +86,7 @@ impl Default for TuiDisplayMetadata {
             profile_path: None,
             ylva_home: None,
             workspace_root: None,
+            new_version_hint: None,
         }
     }
 }

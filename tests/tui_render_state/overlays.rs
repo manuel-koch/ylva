@@ -1990,6 +1990,7 @@ fn help_popup_shows_profile_paths() {
             profile_path: Some(PathBuf::from("/tmp/ylva-home/profiles/work/config.toml")),
             ylva_home: Some(PathBuf::from("/tmp/ylva-home")),
             workspace_root: Some(PathBuf::from("/workspace/example")),
+            new_version_hint: None,
         },
         ..TuiState::new()
     };
@@ -2062,6 +2063,53 @@ fn help_popup_shows_profile_paths() {
         !rendered.contains("Ylva - Agent-Harness"),
         "help popup should not repeat the build product name: {rendered:?}"
     );
+}
+
+#[test]
+fn help_popup_notes_new_version_after_current_version() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+
+    let mut terminal = Terminal::new(TestBackend::new(160, 100)).expect("terminal");
+    let mut state = ylva::TuiState::new();
+    state.display_metadata.new_version_hint = Some(ylva::NewVersionHint {
+        version: "99.0.0".to_string(),
+        release_url: "https://example.test/v99".to_string(),
+    });
+    state.help_popup.show_help = true;
+    let mut textarea = TextArea::default();
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..100u16)
+        .map(|row| {
+            (0..160u16)
+                .map(|column| buffer.cell((column, row)).unwrap().symbol().to_string())
+                .collect::<String>()
+                + "\n"
+        })
+        .collect();
+
+    assert!(
+        rendered.contains(&format!(
+            "Version:  v{} (v99.0.0 available: https://example.test/v99)",
+            ylva::BUILD_INFO.version
+        )),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("New version:"), "{rendered}");
 }
 
 /// Two `/models` rows with details long enough to be clipped on narrow terminals.

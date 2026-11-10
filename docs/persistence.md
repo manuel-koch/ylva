@@ -47,6 +47,22 @@ with `ylva trust`. For each workspace path it maps every approved profile name t
 a fingerprint of the workspace files the approval covers. See
 [workspace trust](configuration.md#workspace-trust).
 
+### Version check cache
+
+`~/.ylva/version-check.toml` (mode `0600`, written atomically) caches the
+daily [release check](features.md#new-release-hint):
+
+```toml
+enabled = true
+last_checked_unix = 1767225600
+latest_version = "0.36.0"
+```
+
+`last_checked_unix` advances on every check, also when the request failed, and
+`latest_version` is then kept. Ylva edits the file in place, so `enabled` and
+unknown keys survive. A missing or corrupt file counts as enabled with no
+cache.
+
 ### Relocating the Ylva home with `YLVA_HOME`
 
 `YLVA_HOME=/some/dir` makes Ylva read and write `/some/dir` directly, for chats

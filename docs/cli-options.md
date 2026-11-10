@@ -8,7 +8,7 @@ surface.
 
 | Flag | Type | Accepted values | Default | Description |
 | --- | --- | --- | --- | --- |
-| `--version` | none | — | — | Print build provenance (`Version`, `Commit`, `Built`, `Profile`, `Features`), the Ylva home (`Ylva home:`), and the workspace root (`Workspace root:`) for the current directory, then exit. Paths under `$HOME` are shown with a leading `~`. Takes precedence over all other arguments. |
+| `--version` | none | — | — | Print build provenance (`Version`, `Commit`, `Built`, `Profile`, `Features`), the Ylva home (`Ylva home:`), and the workspace root (`Workspace root:`) for the current directory, then exit. Paths under `$HOME` are shown with a leading `~`. When a newer release is cached by the daily check, the `Version:` line is followed by `(vX.Y.Z available: <url>)` (no network request). Takes precedence over all other arguments. |
 | `--help` | none | — | — | Print usage (all flags and subcommands) to stdout and exit with code `0`. |
 | `init [--workspace] [--force]` | subcommand | `--workspace`, `--force` | — | Write configuration starters and exit before provider/session startup. Without `--workspace`, writes `SOUL.md`, `profiles/default/config.toml`, and an annotated `profiles/default/.env` under `YLVA_HOME` (or `${HOME}/.ylva`); `--workspace` writes the default profile config and `.env` starters plus `.gitignore` under the discovered workspace root's `.ylva/`; both modes write-if-missing unless `--force` is supplied. The workspace `.gitignore` lists `.env`, `.envrc`, and `chats/`; an existing one keeps its lines and only the missing entries are appended. Agent-type files are not seeded. |
 | `--no-tui` | none | — | — | Force headless (CLI) mode even when stdout is a terminal. Useful for scripting or debugging without the TUI. |
@@ -476,6 +476,10 @@ The initial user turn (`--prompt`) is resolved by precedence:
    is piped in)
 
 ## Environment variables
+
+`YLVA_NO_VERSION_CHECK=1` (any non-empty value except `0`) disables the daily
+[release check](features.md#new-release-hint) and its hint in the TUI and in
+`--version`. It wins over `enabled` in `~/.ylva/version-check.toml`.
 
 Provider environments are loaded from the selected profile's optional
 `.env` file (`~/.ylva/profiles/<profile>/.env`) and from the process

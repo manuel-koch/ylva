@@ -197,7 +197,7 @@ pub(super) fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
             }
             "Build" => {
                 let build_entries = BUILD_INFO
-                    .render()
+                    .render_with_hint(state.display_metadata.new_version_hint.as_ref())
                     .lines()
                     .skip(1)
                     .filter_map(|line| line.split_once(':'))

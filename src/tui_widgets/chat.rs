@@ -32,7 +32,8 @@ use ratatui::Frame;
 use crate::agent::tools::ToolRegistry;
 use crate::build_info::BUILD_INFO;
 use crate::theme::{
-    build_info_color, chat_scrollbar_color, logo_color, subagent_view_separator_color,
+    build_info_color, chat_scrollbar_color, logo_color, new_version_color,
+    subagent_view_separator_color,
 };
 use crate::tui_reducer_state::{ChatEntry, ToolCallState, UserMessageState};
 use crate::tui_render_state::TuiState;
@@ -103,7 +104,7 @@ pub(super) fn draw_chat(
     // with no tokens yet is not "a fresh session", it's mid-flight work, so
     // the empty-state wordmark would be misleading there.
     if state.chat_entries.is_empty() && state.subagent_view.subagent_view_bubble.is_none() {
-        append_logo(&mut lines, &state.display_metadata.profile_name);
+        append_logo(&mut lines, &state.display_metadata);
     } else {
         lines.push(Line::default());
     }
@@ -429,7 +430,7 @@ pub(super) fn render_chat_scrollbar(
 
 /// Render the Ylva wordmark, horizontally centered. Only shown when the
 /// conversation is still empty (no messages submitted yet).
-fn append_logo(lines: &mut Vec<Line>, profile_name: &str) {
+fn append_logo(lines: &mut Vec<Line>, display_metadata: &crate::TuiDisplayMetadata) {
     lines.push(Line::default());
     lines.push(Line::default());
     let style = Style::default()
@@ -445,11 +446,17 @@ fn append_logo(lines: &mut Vec<Line>, profile_name: &str) {
         Line::styled(build_info_text, Style::default().fg(build_info_color()))
             .alignment(Alignment::Center),
     );
-    let profile_text = format!("profile: {profile_name}");
+    let profile_text = format!("profile: {}", display_metadata.profile_name);
     lines.push(
         Line::styled(profile_text, Style::default().fg(build_info_color()))
             .alignment(Alignment::Center),
     );
+    if let Some(hint) = &display_metadata.new_version_hint {
+        lines.push(
+            Line::styled(hint.summary(), Style::default().fg(new_version_color()))
+                .alignment(Alignment::Center),
+        );
+    }
     // A blank spacer separates the wordmark block from the conversation.
     lines.push(Line::default());
 }

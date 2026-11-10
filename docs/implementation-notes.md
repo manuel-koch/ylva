@@ -1069,3 +1069,14 @@ saw. If the round is cancelled first, the steer is not sent.
   before writing. The EdenAI/Ollama/OpenRouter key is
   read with crossterm raw mode to avoid echo; piped stdin falls back to one
   line per answer.
+
+## Release check
+
+- The GitHub request sits behind the `ReleaseFetcher` trait in
+  `src/version_check.rs`: integration tests cannot rely on `cfg(test)` guards
+  in library code, so tests inject a stub instead of reaching the network.
+- The last-check timestamp is also written when the request fails, so an
+  offline machine retries once per interval rather than on every start; the
+  previously cached version is kept.
+- The late result reaches the TUI through `TuiDisplayMetadata`, which survives
+  session switches, and is part of the intro render-cache key.

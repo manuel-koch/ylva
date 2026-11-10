@@ -170,6 +170,9 @@ pub(crate) fn chat_scrollbar_color() -> Color {
 pub(crate) fn build_info_color() -> Color {
     muted_text_color()
 }
+pub(crate) fn new_version_color() -> Color {
+    Color::Yellow
+}
 pub(crate) fn diff_context_color() -> Color {
     muted_text_color()
 }

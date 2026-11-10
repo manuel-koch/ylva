@@ -36,73 +36,77 @@ be injectable (known-test-issues).
 Implementing agent: flip `[ ]` to `[x]` immediately after completing each step and rewrite this file
 in place so progress is resumable across sessions.
 
-1. [ ] Read `docs/known-test-issues.md`, `docs/development-workflow.md` (testing, license headers),
+1. [x] Read `docs/known-test-issues.md`, `docs/development-workflow.md` (testing, license headers),
    `docs/implementation-notes.md` header guideline and `docs/architecture-design-records/` for
    conflicts; record any ADR needed.
-2. [ ] Add `src/version_check.rs` (re-export from `src/lib.rs` as needed) with pure core:
+2. [x] Add `src/version_check.rs` (re-export from `src/lib.rs` as needed) with pure core:
        `is_newer_version(current, latest)` (strip leading `v`, numeric `major.minor.patch` compare
        via parsing; pre-releases ignored: non-numeric suffix means not newer), cache struct
        `VersionCheckCache { last_checked_unix: i64, latest_version: Option<String> }`
        (`enabled: bool` default true; read via `toml`, tolerant of unknown/missing fields), and
        `should_check(now, cache) -> bool` (24 h interval, also true when the timestamp is in the
        future or the cache is absent).
-3. [ ] Add cache persistence in the same module: path `<ylva_home>/version-check.toml` via
+3. [x] Add cache persistence in the same module: path `<ylva_home>/version-check.toml` via
        `crate::ylva_home::ylva_home()`; read returns `None` on missing/corrupt; write uses
        `private_fs::replace_file` (mode `0600`) (content produced by `toml_edit` edit-in-place) so
        the write is atomic; write failures only logged.
-4. [ ] Add the fetch behind an injectable trait/closure (e.g. `ReleaseFetcher`) with a production
+4. [x] Add the fetch behind an injectable trait/closure (e.g. `ReleaseFetcher`) with a production
    `reqwest` implementation: GET `https://api.github.com/repos/manuel-koch/ylva/releases/latest`
    (derive owner/repo from `env!("CARGO_PKG_REPOSITORY")`), headers `Accept:
    application/vnd.github+json`, user agent `crate::http::OUTBOUND_USER_AGENT`, short timeouts (e.g.
    5 s connect/10 s total), parse `tag_name`. Use `html_url` or `<repository>/releases/tag/<tag>` as
    the link.
-5. [ ] Add orchestrator
+5. [x] Add orchestrator
        `check_for_new_version(fetcher, now, current_version) -> Option<NewVersionHint>`
        (`NewVersionHint { version, release_url }`): load cache; if due, fetch, then write cache
        (also update the timestamp on failure to avoid retry storms); return a hint when the
        resulting latest version is newer than `BUILD_INFO.version`.
-6. [ ] Wire into startup (`src/startup.rs`, TUI branch near
+6. [x] Wire into startup (`src/startup.rs`, TUI branch near
        `TuiApp::new(...).with_display_metadata`): read the cached hint synchronously (cheap file
        read) for instant display, and spawn a background tokio task for the network refresh when
        due; deliver the result to the TUI as an event (see `src/events.rs`) so the logo updates when
        the check finishes. Skip entirely for the headless console path and when disabled
        (`enabled = false` or `YLVA_NO_VERSION_CHECK`).
-7. [ ] Add `new_version_hint: Option<NewVersionHint>` to the TUI state: `TuiState` in
+7. [x] Add `new_version_hint: Option<NewVersionHint>` to the TUI state: `TuiState` in
        `src/tui_render_state.rs`, its source in `src/tui_reducer_state/app_state.rs`, and the
        projection in `src/render.rs` (`project_for_draw`).
-8. [ ] Render in `append_logo` (`src/tui_widgets/chat.rs`): extra centered line under the `profile:`
-       line, e.g. `new version vX.Y.Z available: <url>`, in a highlight theme color added in
+8. [x] Render in `append_logo` (`src/tui_widgets/chat.rs`): extra centered line under the `profile:`
+       line, e.g. `vX.Y.Z available: <url>`, in a highlight theme color added in
        `src/theme.rs` (alongside `build_info_color`). `append_logo` is also called from
        `src/tui_widgets/chat/cache.rs` (~line 359): the hint must be part of that render-cache key
        so a late-arriving result redraws the logo. Also add a `New version:` row to the help dialog
        (`src/tui_widgets/help.rs`, next to the `Profile:` row, ~line 171). Logo-height/layout tests
        must still pass.
-9. [ ] Add the hint to `--version`: in `version_report()` (`src/main.rs`, `--version` is handled
-       before clap parsing and logging) append a `new version vX.Y.Z available: <url>` line using
+9. [x] Add the hint to `--version`: in `version_report()` (`src/main.rs`, `--version` is handled
+       before clap parsing and logging) append a `vX.Y.Z available: <url>` line using
        the cache only, with no network call and no tokio runtime; absent when disabled, no cache, or
        not newer. Keep the cache read/compare in `src/version_check.rs` so `main.rs` stays thin. Do
        not add the hint to the `/status` dialog. Add a unit test for the report text with a temp
        `YLVA_HOME`-independent injected cache path (avoid mutating process env, see
        `docs/known-test-issues.md`).
-10. [ ] Unit tests (`src/version_check/tests.rs` or `src/version_check.rs` tests, per repo layout):
+10. [x] Unit tests (`src/version_check/tests.rs` or `src/version_check.rs` tests, per repo layout):
         version comparison table (v-prefix, longer/shorter, equal, older, garbage), `should_check`
         boundaries, cache roundtrip/corrupt/missing, orchestrator with a stub fetcher (skips fetch
         within 24 h, fetches when stale, failure keeps cached version, writes cache). Use temp dirs,
         not the real home. Add a render test in `src/tui_widgets/chat/tests.rs` for the logo hint
         present/absent.
-11. [ ] Documentation: `docs/features.md` (new feature), `docs/persistence.md` (new
+11. [x] Documentation: `docs/features.md` (new feature), `docs/persistence.md` (new
         `~/.ylva/version-check.toml` file, format, mode `0600`, corrupt-tolerance),
         `docs/configuration.md` and/or `docs/cli-options.md` (`--version` hint, `enabled` flag and
         `YLVA_NO_VERSION_CHECK`), `docs/implementation-notes.md` (only the non-obvious: injectable
         fetcher, why the timestamp is also written on failure), `CONTEXT.md` if a new domain term is
         introduced. `CHANGELOG.md` is generated by release-plz; do not edit.
-12. [ ] Resolve doc inconsistency: `docs/features.md` (~line 530) lists every outbound HTTP request
+12. [x] Resolve doc inconsistency: `docs/features.md` (~line 530) lists every outbound HTTP request
         as model listing, chat/SSE and Ollama metadata and claims the shared `User-Agent`; add the
         GitHub release check to that list and state it is opt-out. Grep `README.md` and `docs/` for
         any statement that Ylva contacts only model providers or makes no other network calls, and
         amend.
-13. [ ] Run `rumdl fmt` on changed markdown, then `make format lint` and `make test-coverage`; no
+13. [x] Run `rumdl fmt` on changed markdown, then `make format lint` and `make test-coverage`; no
         new dependencies expected, so `make audit` is not needed unless `Cargo.toml` changes.
+
+Execution notes: the hint lives in `TuiDisplayMetadata` (not a separate `TuiState` field) so it
+survives session switches; `version_report()` is in `src/startup.rs`; the logo render test is in
+`tests/tui_render_state/bubbles.rs`.
 
 ## Implementation Hints
 

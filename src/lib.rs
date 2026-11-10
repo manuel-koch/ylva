@@ -56,6 +56,7 @@ pub mod tui_reducer_state;
 pub mod tui_render_state;
 pub mod tui_widgets;
 pub(crate) mod unix_time;
+pub(crate) mod version_check;
 pub(crate) mod ylva_home;
 
 /// Git metadata entry, which may be a directory or a worktree marker file.
@@ -78,6 +79,7 @@ mod test_support;
 
 pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 pub use run_outcome::RunOutcome;
+pub use version_check::NewVersionHint;
 
 pub use agent::subagent_manager;
 pub use agent::tools::{

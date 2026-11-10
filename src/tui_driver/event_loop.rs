@@ -74,6 +74,7 @@ where
         driver: title_driver,
         update_rx: mut title_update_rx,
         display_metadata,
+        mut version_hint_receiver,
         input_history_limit,
         tui_config,
         exit_snapshot,
@@ -196,6 +197,7 @@ where
     };
     let mut session_tasks = SessionTasks::new();
     let mut title_updates_open = true;
+    let mut version_hints_open = version_hint_receiver.is_some();
     let mut active_title_session_id = replay_store.as_ref().map(|store| store.session_id());
 
     let mut handle = Some(agent.run());
@@ -387,6 +389,18 @@ where
                     None => {
                         title_updates_open = false;
                     }
+                }
+            }
+
+            version_hint = async {
+                match version_hint_receiver.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if version_hints_open => {
+                match version_hint {
+                    Some(hint) => state.display_metadata.new_version_hint = Some(hint),
+                    None => version_hints_open = false,
                 }
             }
 
