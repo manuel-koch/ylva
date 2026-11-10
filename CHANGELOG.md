@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0](https://github.com/manuel-koch/ylva/compare/v0.35.0...v0.36.0) - 2026-11-10
+
+### Added
+
+- Add more bash grammer
+- Check for latest released version
+
 ## [0.35.0](https://github.com/manuel-koch/ylva/compare/v0.34.0...v0.35.0) - 2026-11-10
 
 ### Added
