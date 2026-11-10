@@ -5,6 +5,18 @@ delegated work. This glossary defines the canonical terms for that domain.
 
 ## Workspace and configuration
 
+**Launch directory**:
+The directory Ylva was started from, canonicalized (symlinks resolved).
+It is the sandbox root and the default workspace root.
+_Avoid_: cwd, working directory, git root
+
+**Project key**:
+The hash grouping persisted sessions into one project. It derives from the
+launch directory, except inside a linked git worktree, where it derives from
+the equivalent path in the main worktree so worktrees of one repository share
+sessions. Workspace trust and the sandbox stay per launch directory.
+_Avoid_: session group, repository id
+
 **Workspace root**:
 The top-level directory that defines the active workspace for a Ylva run.
 It is identified by the nearest workspace marker, or defaults to the launch

@@ -57,10 +57,10 @@ filtering `session list` by worktree, migrating existing sessions.
 Implementing agent: flip `[ ]` to `[x]` immediately after finishing each step and
 rewrite this file in place so progress is resumable across sessions.
 
-1. [ ] Read `docs/known-test-issues.md` (cwd and `tracing` entries),
+1. [x] Read `docs/known-test-issues.md` (cwd and `tracing` entries),
    `docs/development-workflow.md` (Testing strategy, License headers, Logging) and
    `docs/architecture-design-records/0003-*.md` for the ADR format.
-2. [ ] Write failing unit tests first (TDD) in the existing store test layout
+2. [x] Write failing unit tests first (TDD) in the existing store test layout
    (`src/store/tests/`), using temporary directories with hand-built git metadata
    (no real `git` binary): main checkout (`.git` directory) keeps the plain key;
    linked worktree root equals main root key; linked worktree subdirectory equals the
@@ -73,7 +73,7 @@ rewrite this file in place so progress is resumable across sessions.
    repository and asserts the key equals the main checkout's; skip it when `git` is
    unavailable (first check `docs/known-test-issues.md` for subprocess/cwd rules and
    isolate git config via `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` if needed).
-3. [ ] Add a git identity resolver (new file-per-module, e.g.
+3. [x] Add a git identity resolver (new file-per-module, e.g.
    `src/store/project_identity.rs`, declared from `src/store.rs`; include the license
    header) with a function like `equivalent_main_worktree_path(canonical_cwd: &Path)
    -> Option<PathBuf>`. Algorithm: walk `canonical_cwd.ancestors()` to the nearest
@@ -85,22 +85,22 @@ rewrite this file in place so progress is resumable across sessions.
    itself), and return `anchor.join(canonical_cwd.strip_prefix(linked_root))`.
    Return `None` only when metadata is absent or malformed (no `commondir`, missing
    `gitdir:` line, unreadable files). Log fallbacks at `debug` via `tracing`.
-4. [ ] Change `project_key` in `src/store.rs` to hash the resolver's path when
+4. [x] Change `project_key` in `src/store.rs` to hash the resolver's path when
    `Some`, else the canonical cwd. Keep the signature so all callers
    (`src/store.rs` `create`/`resume`, `src/session_command.rs`,
    `src/startup/session.rs`, `src/tui_driver/sessions.rs`) need no change. Update the
    doc comment; remove "Deliberately not the git root" in favor of the new rule.
-5. [ ] Run the tests from step 2 until green; add one integration-level check only
+5. [x] Run the tests from step 2 until green; add one integration-level check only
    if a `tests/` boundary exercises `ylva session list` from a worktree directory
    cheaply (otherwise skip; the unit tests cover the contract).
-6. [ ] Add ADR `docs/architecture-design-records/0004-group-sessions-by-main-worktree-path.md`
+6. [x] Add ADR `docs/architecture-design-records/0004-group-sessions-by-main-worktree-path.md`
    following the format of the existing ADRs (context, options considered:
    cwd-only, git root, main-worktree-equivalent path; decision; consequences:
    sessions shared across worktrees and branches, subdirectory scoping kept, safety
    boundaries still launch-directory based, no migration). State explicitly that
    workspace trust (ADR-0003) stays per worktree path while sessions are shared:
    trust is a safety boundary, sessions are not; the asymmetry is deliberate.
-7. [ ] Update docs in the same change: `docs/persistence.md` ("`project_key`
+7. [x] Update docs in the same change: `docs/persistence.md` ("`project_key`
    derivation", remove "does not use the git root", describe worktree mapping and
    fallbacks); `docs/features.md` (Sessions bullet around line 186 mentions the
    canonicalized launch directory); `docs/implementation-notes.md` only if a
@@ -108,10 +108,10 @@ rewrite this file in place so progress is resumable across sessions.
    first); `CONTEXT.md` only if a new term such as "Project key" is needed (ask the
    user before creating any new doc file; editing existing ones is fine). Run
    `rumdl fmt` then `rumdl check` on the changed Markdown.
-8. [ ] Run `make format lint` then `make test-coverage` (coverage threshold in
+8. [x] Run `make format lint` then `make test-coverage` (coverage threshold in
    `docs/development-workflow.md`). `make audit` is not needed (no dependency
    change).
-9. [ ] Report done only when all steps above are checked and docs are updated.
+9. [x] Report done only when all steps above are checked and docs are updated.
    Do not commit or stage without explicit user consent.
 
 ## Consistency Issues

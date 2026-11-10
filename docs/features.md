@@ -184,7 +184,9 @@ for TUI and CLI alike. A killed `ylva` process leaves everything already committ
 intact.
 
 - Sessions are grouped per project by a hash of the canonicalized launch
-  directory, so the same checkout always lands in the same folder.
+  directory, so the same checkout always lands in the same folder. Linked git
+  worktrees map to the equivalent path of the main checkout and share its
+  sessions.
 - `ylva session list` discovers raw and archived sessions, least recently used first.
   `--include-subagents` groups subagents beneath their parents with nested `+`
   markers; timestamps show the latest persisted activity, not creation time.

@@ -65,6 +65,19 @@ for example a symlink and its target, or macOS's `/var` and `/private/var`. Two
 different directories never share one.
 
 The key does not use the git root. A plain, non-git directory is a project too.
+Inside a linked git worktree the key is derived from the equivalent path in the
+main worktree, so worktrees of one repository share sessions
+([ADR-0004](architecture-design-records/0004-group-sessions-by-main-worktree-path.md)):
+
+- Main checkout, non-git directory: the launch directory (unchanged keys).
+- Linked worktree: the main checkout root joined with the launch directory's
+  path relative to the linked worktree root. For a bare repository the bare
+  directory is the anchor. The anchor need not exist on disk.
+- Submodules and unreadable or malformed git metadata fall back to the launch
+  directory. Ylva reads `.git` metadata directly and spawns no `git` process.
+
+A session resumed from another worktree may reference files of a different
+branch, as after a branch switch. Workspace trust stays per worktree path.
 
 ## File format
 

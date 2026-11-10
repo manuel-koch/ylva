@@ -19,6 +19,7 @@ use crate::subagent_manager::FinishResultOrigin;
 mod archive;
 mod event;
 mod maintenance;
+mod project_identity;
 mod replay;
 mod session_file;
 mod writer;

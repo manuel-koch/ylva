@@ -23,7 +23,8 @@
 //!
 //! where `<chats_root>` is `~/.ylva/chats` in production
 //! ([`default_chats_root`]) and `<project_key>` is the SHA-256 hex digest of
-//! the canonicalized working directory the session was launched from
+//! the canonicalized working directory the session was launched from, mapped
+//! to the main worktree when launched inside a linked git worktree
 //! ([`project_key`]).
 //!
 //! Every line is one [`StoreEvent`]; the **first** line of a session file is
@@ -51,6 +52,7 @@ mod clone;
 mod error;
 mod event;
 mod maintenance;
+mod project_identity;
 mod replay;
 mod session_file;
 mod subagent;
@@ -91,12 +93,16 @@ pub fn default_chats_root() -> Result<PathBuf, StoreError> {
 /// The path is canonicalized first (symlinks resolved, `..` collapsed) with
 /// the very same helper the sandbox uses for its workspace root, so two paths
 /// that resolve to one directory — a symlink and its target, or macOS's
-/// `/var` and `/private/var` — always produce the same key. Deliberately not
-/// the git root: a plain, non-git directory is a first-class project.
+/// `/var` and `/private/var` — always produce the same key. Inside a linked
+/// git worktree the key is derived from the equivalent path in the main
+/// worktree, so worktrees of one repository share sessions; non-git
+/// directories, main checkouts and unresolvable git metadata use the
+/// canonical launch directory.
 pub fn project_key(cwd: &Path) -> String {
     let canonical = SandboxContext::canonicalize_best_effort(cwd);
+    let key_path = project_identity::equivalent_main_worktree_path(&canonical).unwrap_or(canonical);
     let mut hasher = Sha256::new();
-    hasher.update(canonical.as_os_str().as_encoded_bytes());
+    hasher.update(key_path.as_os_str().as_encoded_bytes());
     hasher
         .finalize()
         .iter()

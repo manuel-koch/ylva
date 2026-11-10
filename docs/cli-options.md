@@ -189,7 +189,8 @@ or start a conversation.
 
 `ylva session delete`, `ylva session compress`, and `ylva session decompress`
 require exactly one selector: one or more positional UUIDs, `--before <date>`,
-or `--all`. Examples:
+or `--all`. Selectors act on the current project's sessions, which includes
+those launched from other git worktrees of the same repository. Examples:
 
 ```shell
 ylva session delete <uuid> <uuid> --dry-run
