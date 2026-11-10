@@ -23,6 +23,12 @@ The per-user Ylva home that contains user-level configuration and persisted
 history.
 _Avoid_: home root
 
+**Model score**:
+A user-supplied rating of a model, read from `model-scores.toml` in the Ylva home and
+shown in the `/models` picker. It is a unitless, higher-is-better number chosen by the
+user, not a measurement.
+_Avoid_: benchmark, rank, rating source
+
 **Configuration layer**:
 A scope at which Ylva provides a configuration resource: workspace, Ylva home,
 or built-in.

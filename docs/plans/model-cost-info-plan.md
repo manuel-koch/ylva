@@ -73,57 +73,57 @@ Implementing agent: flip `[ ]` to `[x]` immediately after completing each step a
 rewrite this file in place so progress is resumable across sessions. Phase 2
 (steps 11–16) starts only after the open questions are answered.
 
-1. [ ] Read `AGENTS.md`, `docs/development-workflow.md`, `docs/known-test-issues.md`,
+1. [x] Read `AGENTS.md`, `docs/development-workflow.md`, `docs/known-test-issues.md`,
    `docs/provider-notes.md` (usage and cost section) and `CONTEXT.md`; check
    `docs/architecture-design-records/` for decisions touching network access or
    persisted state.
-2. [ ] Add a price type to the model info struct (`ModelInfo`, reachable via
+2. [x] Add a price type to the model info struct (`ModelInfo`, reachable via
    `ProviderModelOption.model` in `src/llm/engine/selection.rs`): e.g.
    `pricing: Option<ModelPricing>` with `input_per_million_tokens`,
    `output_per_million_tokens`, `cache_read_per_million_tokens` and
    `cache_write_per_million_tokens` as `Option<f64>` (USD). Use TDD with a unit test
    on construction/defaults; update every `ModelInfo { … }` literal (providers,
    mock provider, tests).
-3. [ ] Parse OpenRouter prices in `OpenRouterModelCatalog::parse`
+3. [x] Parse OpenRouter prices in `OpenRouterModelCatalog::parse`
    (`src/llm/openrouter_provider.rs`): `pricing.prompt` / `pricing.completion` are
    decimal strings in USD per token; parse, reject negative/non-finite values (a
    negative value is used by OpenRouter for variable-priced routers such as
    `openrouter/auto`; treat as unknown), multiply by 1,000,000. Tests: free (`"0"`),
    normal, missing, malformed, negative.
-4. [ ] Parse EdenAI prices in its model catalog (`src/llm/edenai_provider.rs`):
+4. [x] Parse EdenAI prices in its model catalog (`src/llm/edenai_provider.rs`):
    `pricing.input_cost_per_token`, `pricing.output_cost_per_token`,
    `pricing.cache_read_input_token_cost`, `pricing.cache_creation_input_token_cost`
    (USD per token). Ignore all other keys (tiers, flex/priority/batch variants).
    Prefer `pricing` (effective price) over `list_pricing`; the two differ when
    `discount` is set. Document the 5.5 % platform fee caveat.
-5. [ ] Copilot (`src/llm/copilot_provider.rs`): capture a real authenticated
+5. [x] Copilot (`src/llm/copilot_provider.rs`): capture a real authenticated
    `GET /models` response and check for a `billing` object; map a price only if it
    carries per-token rates. If it only has a multiplier or nothing, show no price
    (published rates exist only as an HTML table at
    <https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing>,
    in AI credits at 1 AIC = $0.01, which the "never use a price table" rule excludes).
    Record the outcome in `docs/provider-notes.md`.
-6. [ ] Ollama, Ollama-Cloud and plain OpenAI-compatible: no catalog prices
+6. [x] Ollama, Ollama-Cloud and plain OpenAI-compatible: no catalog prices
    (see `docs/provider-notes.md`); keep `pricing: None`. No work beyond a test
    that rows stay unchanged.
-7. [ ] Render price in `format_model_choice_label`
+7. [x] Render price in `format_model_choice_label`
    (`src/tui_reducer_state/model_picker.rs`) as a detail segment, e.g.
-   `price: $3/$15 per 1M` (input/output; cache prices appear only in the selected
+   `price: 3/15 $ per 1M` (input/output; cache prices appear only in the selected
    row's detail/preview area, not in the list row), `price: free` for zeros, nothing when
    unknown. Add a compact number formatter (no trailing zeros, sub-cent precision).
    Update snapshot/label tests in `src/tui_reducer_state/tests/model_picker.rs`,
    `src/tui_driver/tests/models.rs` and `src/tui_widgets/overlays.rs` tests.
-8. [ ] Verify the row still fits narrow terminals: check how `overlays.rs` wraps or
+8. [x] Verify the row still fits narrow terminals: check how `overlays.rs` wraps or
    truncates detail segments and keep price ahead of low-value segments if
    truncation drops trailing ones.
-9. [ ] Ensure named-engine shortcut rows (`engine_choice_parts`) and the preview
+9. [x] Ensure named-engine shortcut rows (`engine_choice_parts`) and the preview
    area show the price of the resolved target model.
-10. [ ] Docs for phase 1: `docs/features.md` (picker section, near "`/models` queries
+10. [x] Docs for phase 1: `docs/features.md` (picker section, near "`/models` queries
    each connection once"), `docs/provider-notes.md` (new "Catalog prices" subsection
    per provider; state explicitly they are display-only and never enter the cost
    total). Run `rumdl fmt` on changed files, then `make format lint` and
    `make test-coverage`.
-11. [ ] (Phase 2) Add `src/llm/model_scores.rs` (license header; re-export via
+11. [x] (Phase 2) Add `src/llm/model_scores.rs` (license header; re-export via
     `src/lib.rs`): `ModelScore` (unitless finite `f64`, higher is better, scale chosen
     by the user and neither validated nor converted; TOML integer or float; a plain
     value or a map effort → number with optional `default` key; strings, booleans
@@ -138,33 +138,41 @@ rewrite this file in place so progress is resumable across sessions. Phase 2
     never inherits `gpt-5`). User-file keys are normalized the same way. Duplicate
     normalized keys: warn, later entry wins. TDD with table-driven tests for the
     normalizer, loader and lookup.
-12. [ ] (Phase 2) Load the file when the picker catalog is populated and cache the
+12. [x] (Phase 2) Load the file when the picker catalog is populated and cache the
     parsed result with the same lifetime and mechanism as the `/models` catalog
     cache (30 minutes within a run; locate it via `docs/features.md` and the
     `/models` population code). A missing file is silent.
-13. [ ] (Phase 2) Error handling: an unparsable file or invalid entry logs once
+13. [x] (Phase 2) Error handling: an unparsable file or invalid entry logs once
     (see `docs/development-workflow.md#logging`), yields no scores and never blocks
     the picker. With `--strict-config` (`src/cli.rs`, handled in `src/startup.rs`
     ~line 217 as config warnings) any such error is fatal at startup, so the file
     is also validated at startup. Log at debug level when a picker model has no
     score entry or a model's name cannot be mapped to any score entry.
-14. [ ] (Phase 2) Render `score: <value>` as its own detail segment after
+14. [x] (Phase 2) Render `score: <value>` as its own detail segment after
     `price:` in `format_model_choice_label`. A plain value shows as is
     (`score: 85`, trailing zeros trimmed); a map shows its minimum–maximum over all
     values including `default` as an en-dash range (`score: 60–90`, a single value
     when all are equal). The list row therefore does not depend on the selected
     effort and `refresh_label` needs no score recompute. Check the picker renders
     the en dash.
-15. [ ] (Phase 2) Show each effort's score next to the effort values in the
+15. [x] (Phase 2) Show each effort's score next to the effort values in the
     parameter popup and the full map plus the active effort's score (e.g.
     `score: low 60 · medium 75 · high 90 (active: high)`) in the selected row's
     detail/preview area.
-16. [ ] (Phase 2) Docs: `CONTEXT.md` (glossary), `docs/configuration.md` (file location, format,
+16. [x] (Phase 2) Docs: `CONTEXT.md` (glossary), `docs/configuration.md` (file location, format,
         plain vs map values, unitless higher-is-better scale, normalization rules, example),
         `docs/cli-options.md` (`--strict-config` also covers the scores file), `docs/features.md`,
         `docs/implementation-notes.md` (only the cache/normalization constraint),
         `docs/keybindings.md` if popup behavior changes; `rumdl fmt`; `make format lint`,
         `make test-coverage`.
+
+Execution notes: the scores file lives in the Ylva home
+(`~/.ylva/model-scores.toml`, `$YLVA_HOME`) rather than `dirs::config_dir`, to
+match other per-user state. Copilot (step 5) shows AI credit prices
+(`AIC per 1M`, never converted to USD) from `billing.token_prices`, which
+`/models` returns only for `x-github-api-version` 2026-06-01 or newer. Cache
+prices and the effort score map appear as extra lines under the picker's
+compaction preview line.
 
 ## Proposed Improvements
 
@@ -211,13 +219,12 @@ rewrite this file in place so progress is resumable across sessions. Phase 2
   `artificial_analysis_intelligence_index`; coding/agentic indices are always null;
   nulls mean not measured. Verify exact free-tier field names against the OpenAPI
   spec before coding.
-- Catalog pricing survey (live responses): OpenRouter `pricing` keys are `prompt`,
-  `completion`, `input_cache_read`, `input_cache_write`, `input_cache_write_1h`,
-  `internal_reasoning`, `web_search`, `image`, audio keys and `overrides`; values are
-  USD per token strings. EdenAI `GET /v3/models` (public, no key) returns `pricing`
-  and `list_pricing` objects for every model (floats, USD per token) with
-  `input_cost_per_token`, `output_cost_per_token`, optionally
-  `cache_read_input_token_cost` and `cache_creation_input_token_cost`, plus many
-  tier/variant keys (`*_above_200k_tokens`, `*_flex`, `*_priority`, `*_batches`);
-  ~85 models carry a `discount`. Copilot: no price field is known; unverified.
-  Ollama(-Cloud) and generic OpenAI-compatible: none.
+- Catalog pricing survey (live responses): OpenRouter `pricing` keys are `prompt`, `completion`,
+  `input_cache_read`, `input_cache_write`, `input_cache_write_1h`, `internal_reasoning`,
+  `web_search`, `image`, audio keys and `overrides`; values are USD per token strings. EdenAI
+  `GET /v3/models` (public, no key) returns `pricing` and `list_pricing` objects for every model
+  (floats, USD per token) with `input_cost_per_token`, `output_cost_per_token`, optionally
+  `cache_read_input_token_cost` and `cache_creation_input_token_cost`, plus many tier/variant keys
+  (`*_above_200k_tokens`, `*_flex`, `*_priority`, `*_batches`); ~85 models carry a `discount`.
+  Copilot: `billing.token_prices` (AI credits) with API version 2026-06-01+. Ollama(-Cloud) and
+  generic OpenAI-compatible: none.

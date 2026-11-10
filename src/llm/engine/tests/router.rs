@@ -193,6 +193,8 @@ fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection()
         max_output_tokens_override: None,
         provider_connection: connection.to_string(),
         model: ModelInfo {
+            pricing: None,
+            score: None,
             reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
             id: model.to_string(),
             context_length: Some(64_000),
@@ -298,6 +300,8 @@ fn named_engine_selection_rejects_invalid_targets_without_switching() {
             max_output_tokens_override: None,
             provider_connection: provider_connection.to_string(),
             model: ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: id.to_string(),
                 context_length: None,

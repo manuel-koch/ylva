@@ -69,6 +69,8 @@ impl CatalogEngine {
             models: models
                 .iter()
                 .map(|id| ModelInfo {
+                    pricing: None,
+                    score: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: (*id).to_string(),
                     context_length: None,
@@ -193,6 +195,8 @@ impl Provider for CatalogProvider {
 
 fn model_info_with_modalities(id: &str, input_modalities: Option<Vec<InputModality>>) -> ModelInfo {
     ModelInfo {
+        pricing: None,
+        score: None,
         reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
         id: id.to_string(),
         context_length: None,
@@ -208,6 +212,8 @@ fn model_info_with_reasoning_efforts(
     reasoning_efforts: Option<Vec<String>>,
 ) -> ModelInfo {
     ModelInfo {
+        pricing: None,
+        score: None,
         reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
         id: id.to_string(),
         context_length: None,
@@ -258,6 +264,8 @@ fn the_compaction_budget_is_read_off_the_active_engine() {
 #[test]
 fn a_models_switch_scopes_the_context_override_to_the_configured_model() {
     let catalog_model = ModelInfo {
+        pricing: None,
+        score: None,
         reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
         id: "catalog-model".to_string(),
         context_length: Some(8_192),
@@ -388,6 +396,8 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
             max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "vision-model".to_string(),
                 context_length: None,
@@ -407,6 +417,8 @@ fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
             max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "text-model".to_string(),
                 context_length: None,

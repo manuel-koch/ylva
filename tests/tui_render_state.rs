@@ -345,6 +345,8 @@ fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::Mod
                 max_output_tokens_override: None,
                 provider_connection: "stub".to_string(),
                 model: ylva::ModelInfo {
+                    pricing: None,
+                    score: None,
                     max_output_tokens: None,
                     reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                     id: format!("model-{index}"),
@@ -497,6 +499,8 @@ impl Engine for DelayedCatalogEngine {
             catalog_started.notify_one();
             release_catalog.notified().await;
             Ok(vec![ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: ylva::llm::ReasoningEvidence::Unknown,
                 id: "delayed-model".to_string(),
                 max_output_tokens: None,

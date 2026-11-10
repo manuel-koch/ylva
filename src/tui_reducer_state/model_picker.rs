@@ -314,12 +314,134 @@ fn format_model_choice_label(identity: String, option: &ProviderModelOption) -> 
             ),
         },
     });
+    if let Some(price) = option.model.pricing.as_ref().and_then(format_price_segment) {
+        details.push(price);
+    }
+    if let Some(score) = &option.model.score {
+        details.push(format!("score: {}", score.summary()));
+    }
     if let Some(modality_markers) =
         format_input_modality_markers(option.model.input_modalities.as_deref())
     {
         details.push(modality_markers);
     }
     ChoiceLabel { identity, details }
+}
+
+/// Extra detail lines for the selected row: cache prices and the full score
+/// map with the active effort's score. Rows without such data add nothing.
+pub(crate) fn selected_choice_detail_texts(
+    choice: &ModelChoice,
+    draft_reasoning_effort: Option<&str>,
+) -> Vec<String> {
+    let model = &choice.selection.model;
+    let mut lines = Vec::new();
+    if let Some(pricing) = &model.pricing {
+        let unit = price_unit(pricing.currency);
+        let cache_line = |label: &str, read: Option<f64>, write: Option<f64>| {
+            let cache_prices: Vec<String> = [("read", read), ("write", write)]
+                .into_iter()
+                .filter_map(|(name, price)| Some(format!("{name} {}", format_price_amount(price?))))
+                .collect();
+            (!cache_prices.is_empty())
+                .then(|| format!("{label}cache price: {} {unit}", cache_prices.join(", ")))
+        };
+        lines.extend(cache_line(
+            "",
+            pricing.cache_read_per_million_tokens,
+            pricing.cache_write_per_million_tokens,
+        ));
+        if let Some(long_context) = &pricing.long_context {
+            let long_pricing = crate::llm::ModelPricing {
+                currency: pricing.currency,
+                input_per_million_tokens: long_context.input_per_million_tokens,
+                output_per_million_tokens: long_context.output_per_million_tokens,
+                ..Default::default()
+            };
+            lines.extend(
+                format_price_segment(&long_pricing)
+                    .map(|segment| segment.replacen("price:", "long-context price:", 1)),
+            );
+            lines.extend(cache_line(
+                "long-context ",
+                long_context.cache_read_per_million_tokens,
+                long_context.cache_write_per_million_tokens,
+            ));
+        }
+    }
+    if let Some(crate::llm::ModelScore::PerEffort { default, efforts }) = &model.score {
+        let mut parts: Vec<String> = default
+            .iter()
+            .map(|value| {
+                format!(
+                    "default {}",
+                    crate::llm::model_scores::format_score_value(*value)
+                )
+            })
+            .collect();
+        parts.extend(efforts.iter().map(|(effort, value)| {
+            format!(
+                "{effort} {}",
+                crate::llm::model_scores::format_score_value(*value)
+            )
+        }));
+        let effort = draft_reasoning_effort
+            .or(choice.selection.reasoning_effort.as_deref())
+            .or(model.reasoning_default.as_deref());
+        let mut line = format!("score: {}", parts.join(" · "));
+        if let Some(active) = model
+            .score
+            .as_ref()
+            .and_then(|score| score.for_effort(effort))
+        {
+            line.push_str(&format!(
+                " (active: {})",
+                crate::llm::model_scores::format_score_value(active)
+            ));
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// Render the `price:` segment: `in/out $ per 1M` (`in/out AIC per 1M` for AI
+/// credits), or `free` when both known prices are zero. `None` when no input
+/// or output price is known.
+fn format_price_segment(pricing: &crate::llm::ModelPricing) -> Option<String> {
+    let amount = format_price_amount;
+    let unit = price_unit(pricing.currency);
+    match (
+        pricing.input_per_million_tokens,
+        pricing.output_per_million_tokens,
+    ) {
+        (Some(input), Some(output)) if input == 0.0 && output == 0.0 => {
+            Some("price: free".to_string())
+        }
+        (Some(input), Some(output)) => Some(format!(
+            "price: {}/{} {unit}",
+            amount(input),
+            amount(output)
+        )),
+        (Some(input), None) => Some(format!("price: {} in {unit}", amount(input))),
+        (None, Some(output)) => Some(format!("price: {} out {unit}", amount(output))),
+        (None, None) => None,
+    }
+}
+
+/// Unit suffix of a per-million-token price.
+fn price_unit(currency: crate::llm::PriceCurrency) -> &'static str {
+    match currency {
+        crate::llm::PriceCurrency::Usd => "$ per 1M",
+        crate::llm::PriceCurrency::AiCredits => "AIC per 1M",
+    }
+}
+
+/// Format an amount without trailing zeros, keeping sub-cent precision; the
+/// currency is named once by [`price_unit`].
+fn format_price_amount(amount: f64) -> String {
+    let text = format!("{amount:.4}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    text.to_string()
 }
 
 /// Render the bracketed input-modality markers of a `/models` picker row.
@@ -960,8 +1082,29 @@ pub(crate) fn model_parameter_rows(edit: &ModelParameterEdit, choice: &ModelChoi
                     edit.reasoning_effort.as_deref(),
                 );
                 let value = source.reasoning_value_label(edit.reasoning_effort.as_deref());
+                let score = choice
+                    .selection
+                    .model
+                    .score
+                    .as_ref()
+                    .and_then(|score| {
+                        score.for_effort(
+                            edit.reasoning_effort.as_deref().or(choice
+                                .selection
+                                .model
+                                .reasoning_default
+                                .as_deref()),
+                        )
+                    })
+                    .map(|value| {
+                        format!(
+                            "  (score: {})",
+                            crate::llm::model_scores::format_score_value(value)
+                        )
+                    })
+                    .unwrap_or_default();
                 format!(
-                    "Reasoning effort:  {}",
+                    "Reasoning effort:  {}{score}",
                     format_parameter_value(&value, directions)
                 )
             }

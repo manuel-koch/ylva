@@ -85,6 +85,8 @@ fn configured_copies_keep_provider_runtimes_independent_and_restore_original_set
                 max_output_tokens_override: None,
                 provider_connection: "mock".to_string(),
                 model: ModelInfo {
+                    pricing: None,
+                    score: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: "larger-model".to_string(),
                     context_length: Some(262_144),

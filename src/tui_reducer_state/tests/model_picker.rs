@@ -22,6 +22,7 @@ use crate::tui_reducer_state::model_picker::{
     engine_choice_parts, model_choice_parts, model_picker_row_layout, visible_model_choices,
     ChoiceLabel,
 };
+use crate::tui_reducer_state::selected_choice_detail_texts;
 
 #[test]
 fn matching_model_indices_requires_every_filter_word_in_any_order() {
@@ -40,6 +41,8 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
                 max_output_tokens_override: None,
                 provider_connection: provider_connection.to_string(),
                 model: crate::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     id: model_id.to_string(),
                     context_length: None,
                     max_output_tokens: None,
@@ -263,6 +266,8 @@ fn slash_overlay_text_rows_preserves_filtered_model_labels_and_headers() {
             max_output_tokens_override: None,
             provider_connection: provider_connection.to_string(),
             model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 id: label.to_string(),
                 context_length: None,
                 max_output_tokens: None,
@@ -321,6 +326,8 @@ fn model_choice_label_explains_reasoning_effort_availability() {
         max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "model".to_string(),
             context_length: None,
             max_output_tokens: None,
@@ -360,6 +367,8 @@ fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
             max_output_tokens_override: None,
             provider_connection: "stub".to_string(),
             model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 id: "model".to_string(),
                 context_length: None,
                 max_output_tokens: None,
@@ -410,6 +419,8 @@ fn model_choice_label_shows_the_provider_advertised_default_effort() {
         max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "model".to_string(),
             context_length: None,
             max_output_tokens: None,
@@ -478,6 +489,8 @@ fn two_row_fixture_choices() -> Vec<ModelChoice> {
             max_output_tokens_override: None,
             provider_connection: provider_connection.to_string(),
             model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 id: "model".to_string(),
                 context_length: None,
                 max_output_tokens: None,
@@ -648,6 +661,8 @@ fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
         max_output_tokens_override: None,
         provider_connection: "openrouter".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "openai/gpt-oss-120b".to_string(),
             max_output_tokens: None,
             context_length: Some(131_072),
@@ -672,6 +687,8 @@ fn model_choice_label_formats_context_length_as_compact_decimal_tokens() {
         max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "model".to_string(),
             max_output_tokens: None,
             context_length: Some(context_length),
@@ -707,6 +724,8 @@ fn model_choice_label_marks_advertised_non_text_input_modalities() {
         max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "model".to_string(),
             max_output_tokens: None,
             context_length: None,
@@ -880,6 +899,8 @@ fn parameter_fixture(
         max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "model".to_string(),
             max_output_tokens: None,
             context_length,
@@ -928,6 +949,8 @@ fn engine_parameter_fixture(
         max_output_tokens_override: None,
         provider_connection: "stub".to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: "model".to_string(),
             max_output_tokens: None,
             context_length: Some(configured_context_length),
@@ -1283,6 +1306,8 @@ fn plain_choice(provider_connection: &str, model_id: &str) -> ModelChoice {
         max_output_tokens_override: None,
         provider_connection: provider_connection.to_string(),
         model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
             id: model_id.to_string(),
             max_output_tokens: None,
             context_length: None,
@@ -1441,6 +1466,8 @@ fn model_choice_label_preserves_explicit_effort_without_selectable_capability() 
             max_output_tokens_override: None,
             provider_connection: "arbitrary-connection".to_string(),
             model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 id: "model".to_string(),
                 max_output_tokens: None,
                 context_length: None,
@@ -1708,4 +1735,134 @@ fn tab_cycles_value_rows_reset_and_apply_and_up_returns_to_the_values() {
     );
     state.cycle_model_parameter_focus(false);
     assert_eq!(cursor(&mut state), 0, "tab wraps to the values");
+}
+
+fn priced_option(pricing: Option<crate::llm::ModelPricing>) -> ProviderModelOption {
+    ProviderModelOption {
+        context_length_override: None,
+        max_output_tokens_override: None,
+        provider_connection: "connection".to_string(),
+        model: crate::llm::ModelInfo {
+            pricing,
+            score: None,
+            id: "model".to_string(),
+            context_length: None,
+            max_output_tokens: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+    }
+}
+
+#[test]
+fn price_segment_formats_known_free_and_unknown_prices() {
+    let price_detail = |pricing| {
+        model_choice_parts(&priced_option(pricing))
+            .details
+            .into_iter()
+            .find(|detail| detail.starts_with("price: "))
+    };
+    let pricing = |input, output| {
+        Some(crate::llm::ModelPricing {
+            input_per_million_tokens: input,
+            output_per_million_tokens: output,
+            ..Default::default()
+        })
+    };
+    let credits = Some(crate::llm::ModelPricing {
+        currency: crate::llm::PriceCurrency::AiCredits,
+        input_per_million_tokens: Some(10.0),
+        output_per_million_tokens: Some(50.0),
+        ..Default::default()
+    });
+    assert_eq!(
+        price_detail(credits).as_deref(),
+        Some("price: 10/50 AIC per 1M")
+    );
+    assert_eq!(
+        price_detail(pricing(Some(3.0), Some(15.0))).as_deref(),
+        Some("price: 3/15 $ per 1M")
+    );
+    assert_eq!(
+        price_detail(pricing(Some(0.075), Some(0.3))).as_deref(),
+        Some("price: 0.075/0.3 $ per 1M")
+    );
+    assert_eq!(
+        price_detail(pricing(Some(0.0), Some(0.0))).as_deref(),
+        Some("price: free")
+    );
+    assert_eq!(
+        price_detail(pricing(Some(1.25), None)).as_deref(),
+        Some("price: 1.25 in $ per 1M")
+    );
+    assert_eq!(price_detail(None), None);
+}
+
+#[test]
+fn long_context_prices_appear_as_detail_lines_only() {
+    let option = priced_option(Some(crate::llm::ModelPricing {
+        currency: crate::llm::PriceCurrency::AiCredits,
+        input_per_million_tokens: Some(10.0),
+        output_per_million_tokens: Some(50.0),
+        long_context: Some(crate::llm::LongContextPricing {
+            input_per_million_tokens: Some(50.0),
+            output_per_million_tokens: Some(250.0),
+            cache_read_per_million_tokens: Some(5.0),
+            cache_write_per_million_tokens: None,
+        }),
+        ..Default::default()
+    }));
+    let details = model_choice_parts(&option).details;
+    assert!(details.contains(&"price: 10/50 AIC per 1M".to_string()));
+    assert!(!details.iter().any(|detail| detail.contains("long-context")));
+
+    let mut choice = plain_choice("connection", "model");
+    choice.selection = option;
+    assert_eq!(
+        selected_choice_detail_texts(&choice, None),
+        vec![
+            "long-context price: 50/250 AIC per 1M".to_string(),
+            "long-context cache price: read 5 AIC per 1M".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn score_segment_follows_price_and_detail_lines_show_the_effort_map() {
+    let mut option = priced_option(Some(crate::llm::ModelPricing {
+        input_per_million_tokens: Some(3.0),
+        output_per_million_tokens: Some(15.0),
+        cache_read_per_million_tokens: Some(0.3),
+        cache_write_per_million_tokens: None,
+        ..Default::default()
+    }));
+    option.model.score = crate::llm::model_scores::parse_model_scores(
+        "model = { low = 60, medium = 75, high = 90 }\n",
+    )
+    .scores
+    .lookup("model")
+    .cloned();
+    option.reasoning_effort = Some("high".to_string());
+    let details = model_choice_parts(&option).details;
+    let price_position = details
+        .iter()
+        .position(|detail| detail.starts_with("price: "))
+        .expect("price");
+    assert_eq!(details[price_position + 1], "score: 60–90");
+
+    let mut choice = plain_choice("connection", "model");
+    choice.selection = option;
+    assert_eq!(
+        selected_choice_detail_texts(&choice, None),
+        vec![
+            "cache price: read 0.3 $ per 1M".to_string(),
+            "score: high 90 · low 60 · medium 75 (active: 90)".to_string(),
+        ]
+    );
+    choice.selection.model.score = None;
+    choice.selection.model.pricing = None;
+    assert!(selected_choice_detail_texts(&choice, None).is_empty());
 }

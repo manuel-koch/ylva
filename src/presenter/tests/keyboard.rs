@@ -31,6 +31,8 @@ fn picker_choice(connection: &str, model: &str, favorite_rank: Option<usize>) ->
             max_output_tokens_override: None,
             provider_connection: connection.to_string(),
             model: ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: model.to_string(),
                 context_length: Some(65_536),
@@ -270,6 +272,23 @@ fn session_picker_tab_moves_button_focus_and_enter_deletes_with_delete_focused()
 }
 
 #[test]
+fn model_picker_list_forwards_left_and_right_to_the_filter_draft() {
+    for code in [KeyCode::Left, KeyCode::Right] {
+        let mut state = model_picker_state(false);
+        let key_event = key_event_with_modifiers(code, KeyModifiers::NONE);
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event)),
+            &textarea_with("/models connection"),
+        );
+        assert!(
+            effects.contains(&Effect::TextareaKey(key_event)),
+            "{code:?}"
+        );
+    }
+}
+
+#[test]
 fn toggle_favorite_chord_toggles_the_filtered_model_pair_and_preserves_input_state() {
     let mut state = model_picker_state(false);
     let textarea = textarea_with("/models connection");
@@ -453,6 +472,8 @@ fn model_picker_pages_selection_with_page_keys() {
                     max_output_tokens_override: None,
                     provider_connection: "stub".to_string(),
                     model: crate::llm::ModelInfo {
+                        pricing: None,
+                        score: None,
                         reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                         id: format!("model-{index}"),
                         context_length: None,

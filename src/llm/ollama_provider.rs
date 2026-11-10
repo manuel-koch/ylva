@@ -248,6 +248,8 @@ fn parse_tags(body: &serde_json::Value) -> Vec<ModelInfo> {
                         .and_then(json_usize)
                 });
             Some(ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: id.to_string(),
                 context_length,
@@ -392,6 +394,8 @@ mod tests {
         assert_eq!(
             parse_tags(&body),
             vec![ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "gemma4:latest".to_string(),
                 context_length: Some(32768),

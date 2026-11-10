@@ -147,6 +147,8 @@ fn implicit_summarizer_follows_root_named_engine_activation() {
                 max_output_tokens_override: None,
                 provider_connection: named_engine.config.provider_connection,
                 model: crate::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: named_engine.config.model,
                     context_length: None,
@@ -194,6 +196,8 @@ fn implicit_summarizer_follows_root_named_engine_activation() {
             max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "fast-catalog-model".to_string(),
                 context_length: Some(24_000),
@@ -249,6 +253,8 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
                 max_output_tokens_override: None,
                 provider_connection: named_engine.config.provider_connection,
                 model: crate::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: named_engine.config.model,
                     context_length: None,
@@ -292,6 +298,8 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
                 max_output_tokens_override: None,
                 provider_connection: main_engine.config.provider_connection,
                 model: crate::llm::ModelInfo {
+                    pricing: None,
+                    score: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: main_engine.config.model,
                     context_length: None,
@@ -311,6 +319,8 @@ fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
             max_output_tokens_override: None,
             provider_connection: "mock".to_string(),
             model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
                 reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                 id: "main-catalog-model".to_string(),
                 context_length: Some(32_000),

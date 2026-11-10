@@ -66,8 +66,8 @@ pub use layout::{
 pub(crate) use model_picker::{
     engine_choice_parts, extract_models_filter, matching_model_indices, model_choice_parts,
     model_picker_row_entries, model_picker_row_is_details, model_picker_row_layout,
-    slash_overlay_text_rows, visible_model_choices, PickerRow, GREATER_VALUE_GLYPH,
-    SMALLER_VALUE_GLYPH,
+    selected_choice_detail_texts, slash_overlay_text_rows, visible_model_choices, PickerRow,
+    GREATER_VALUE_GLYPH, SMALLER_VALUE_GLYPH,
 };
 pub use model_picker::{
     ChoiceLabel, ConfiguredBaseline, ModelChoice, ModelParameterEdit, ParameterField,

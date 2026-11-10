@@ -41,6 +41,8 @@ impl ModelCatalog for CopilotModelCatalog {
             .filter(|entry| serves_a_chat_endpoint(entry))
             .filter_map(|entry| {
                 Some(ModelInfo {
+                    pricing: parse_pricing(entry),
+                    score: None,
                     reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
                     id: entry.get("id")?.as_str()?.to_string(),
                     context_length: parse_context_length(entry),
@@ -134,6 +136,49 @@ fn parse_input_modalities(entry: &serde_json::Value) -> Option<Vec<InputModality
     Some(modalities)
 }
 
+/// Read `billing.token_prices`, available from API version `2026-06-01`.
+/// Prices are AI credits per `batch_size` tokens, normalized to AI credits per
+/// million tokens. The `default` tier fills the main prices and a
+/// `long_context` tier that differs from it becomes
+/// [`crate::llm::LongContextPricing`]; the token thresholds are ignored. Models
+/// without a usable price (`batch_size` 0, as for models included in the
+/// plan) yield `None`.
+fn parse_pricing(entry: &serde_json::Value) -> Option<crate::llm::ModelPricing> {
+    let token_prices = entry.pointer("/billing/token_prices")?;
+    let batch_size = token_prices.get("batch_size")?.as_f64()?;
+    if batch_size <= 0.0 {
+        return None;
+    }
+    let tier = |name: &str| {
+        let tier = token_prices.get(name)?;
+        let price_per_million = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|key| tier.get(*key)?.as_f64())
+                .and_then(|credits| {
+                    crate::llm::ModelPricing::per_million_from_per_token(credits / batch_size)
+                })
+        };
+        Some(crate::llm::LongContextPricing {
+            input_per_million_tokens: price_per_million(&["input_price"]),
+            output_per_million_tokens: price_per_million(&["output_price"]),
+            cache_read_per_million_tokens: price_per_million(&["cache_read_price", "cache_price"]),
+            cache_write_per_million_tokens: price_per_million(&["cache_write_price"]),
+        })
+    };
+    let default = tier("default")?;
+    let long_context = tier("long_context").filter(|long_context| *long_context != default);
+    let pricing = crate::llm::ModelPricing {
+        currency: crate::llm::PriceCurrency::AiCredits,
+        input_per_million_tokens: default.input_per_million_tokens,
+        output_per_million_tokens: default.output_per_million_tokens,
+        cache_read_per_million_tokens: default.cache_read_per_million_tokens,
+        cache_write_per_million_tokens: default.cache_write_per_million_tokens,
+        long_context,
+    };
+    (pricing.input_per_million_tokens > Some(0.0) || pricing.output_per_million_tokens > Some(0.0))
+        .then_some(pricing)
+}
+
 /// Read the selectable efforts from `capabilities.supports.reasoning_effort`.
 fn parse_reasoning_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
     let efforts = entry.pointer("/capabilities/supports/reasoning_effort")?;
@@ -155,6 +200,45 @@ fn parse_reasoning_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_default_tier_token_prices_as_ai_credits_per_million_tokens() {
+        let body = serde_json::json!({
+            "data": [
+                {"id": "priced", "billing": {"token_prices": {
+                    "batch_size": 1000000,
+                    "default": {"input_price": 10, "output_price": 50,
+                                "cache_read_price": 1, "cache_write_price": 12.5},
+                    "long_context": {"input_price": 50, "output_price": 250}}}},
+                {"id": "same-tiers", "billing": {"token_prices": {
+                    "batch_size": 1000000,
+                    "default": {"input_price": 500, "output_price": 2500},
+                    "long_context": {"input_price": 500, "output_price": 2500}}}},
+                {"id": "included", "billing": {"token_prices": {
+                    "batch_size": 0,
+                    "default": {"input_price": 0, "output_price": 0}}}},
+                {"id": "no-billing"}
+            ]
+        });
+
+        let models = CopilotModelCatalog::default().parse(&body);
+
+        let pricing = models[0].pricing.as_ref().expect("priced model");
+        assert_eq!(pricing.currency, crate::llm::PriceCurrency::AiCredits);
+        assert_eq!(pricing.input_per_million_tokens, Some(10.0));
+        assert_eq!(pricing.output_per_million_tokens, Some(50.0));
+        assert_eq!(pricing.cache_read_per_million_tokens, Some(1.0));
+        assert_eq!(pricing.cache_write_per_million_tokens, Some(12.5));
+        let long_context = pricing.long_context.expect("differing long-context tier");
+        assert_eq!(long_context.input_per_million_tokens, Some(50.0));
+        assert_eq!(long_context.output_per_million_tokens, Some(250.0));
+        assert_eq!(
+            models[1].pricing.as_ref().expect("same tiers").long_context,
+            None
+        );
+        assert_eq!(models[2].pricing, None);
+        assert_eq!(models[3].pricing, None);
+    }
 
     #[test]
     fn reads_capability_reasoning_efforts() {

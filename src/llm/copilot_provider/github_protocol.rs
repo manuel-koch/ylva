@@ -31,4 +31,4 @@ pub const EDITOR_VERSION: &str = "vscode/1.99.3";
 pub const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.26.7";
 pub const USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
 pub const OPENAI_INTENT: &str = "conversation-panel";
-pub const GITHUB_API_VERSION: &str = "2025-04-01";
+pub const GITHUB_API_VERSION: &str = "2026-08-01";
