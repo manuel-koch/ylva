@@ -24,8 +24,10 @@ use tempfile::TempDir;
 /// short-circuiting before any provider wiring, Tokio runtime, or agent loop.
 #[test]
 fn version_flag_prints_build_info_and_exits_zero() {
+    let ylva_home = TempDir::new().expect("temporary Ylva home");
     let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
         .arg("--version")
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
         .output()
         .expect("spawn the ylva binary");
     assert!(output.status.success());
@@ -154,5 +156,32 @@ fn version_flag_wins_over_prompt_arg() {
         output.stderr.is_empty(),
         "version path must not emit provider wiring: {:?}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A newer cached release is noted right after the current version, without
+/// any network access.
+#[test]
+fn version_flag_notes_cached_newer_release_after_current_version() {
+    let ylva_home = TempDir::new().expect("temporary Ylva home");
+    fs::write(
+        ylva_home.path().join("version-check.toml"),
+        "last_checked_unix = 1\nlatest_version = \"999.0.0\"\n",
+    )
+    .expect("seed cache");
+    let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .arg("--version")
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
+        .env_remove("YLVA_NO_VERSION_CHECK")
+        .output()
+        .expect("spawn the ylva binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "\nVersion: v{} (v999.0.0 available: ",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{stdout}"
     );
 }

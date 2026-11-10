@@ -1967,6 +1967,24 @@ fn startup_logo_shows_selected_profile() {
     );
 }
 
+#[test]
+fn startup_logo_shows_new_version_hint_once_it_arrives() {
+    let mut state = ylva::TuiState::new();
+    let before = render_tui_rows(&mut state, 100, 30).join("\n");
+    assert!(!before.contains("available:"), "{before}");
+
+    state.display_metadata.new_version_hint = Some(ylva::NewVersionHint {
+        version: "99.0.0".to_string(),
+        release_url: "https://example.test/releases/tag/v99.0.0".to_string(),
+    });
+    let after = render_tui_rows(&mut state, 100, 30).join("\n");
+
+    assert!(
+        after.contains("v99.0.0 available: https://example.test/releases/tag/v99.0.0"),
+        "{after}"
+    );
+}
+
 /// Render the TUI at `width` x `height` and return every buffer row as text.
 fn render_tui_rows(state: &mut ylva::TuiState, width: u16, height: u16) -> Vec<String> {
     use ratatui::backend::TestBackend;

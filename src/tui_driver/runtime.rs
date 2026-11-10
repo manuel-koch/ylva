@@ -28,6 +28,8 @@ pub(super) struct TuiRuntime {
     pub(super) driver: Option<TitleDriver>,
     pub(super) update_rx: mpsc::UnboundedReceiver<SessionTitleUpdate>,
     pub(super) display_metadata: TuiDisplayMetadata,
+    /// Late result of the background release check.
+    pub(super) version_hint_receiver: Option<mpsc::UnboundedReceiver<crate::NewVersionHint>>,
     pub(super) input_history_limit: usize,
     /// Profile `[tui]` settings copied into every reducer state.
     pub(super) tui_config: crate::config::TuiConfig,
@@ -50,6 +52,7 @@ impl TuiRuntime {
             driver: None,
             update_rx,
             display_metadata: TuiDisplayMetadata::default(),
+            version_hint_receiver: None,
             input_history_limit: ProfileConfig::default().input_history_limit,
             tui_config: crate::config::TuiConfig::default(),
             exit_snapshot: None,

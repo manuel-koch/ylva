@@ -52,8 +52,13 @@ pub fn version_report() -> String {
     let workspace_root = std::env::current_dir()
         .ok()
         .and_then(|current_directory| crate::discover_workspace_root(&current_directory));
-    crate::BUILD_INFO
-        .render_with_locations(crate::ylva_home().as_deref(), workspace_root.as_deref())
+    let ylva_home = crate::ylva_home();
+    let new_version_hint = crate::version_check::cached_hint_for_home(ylva_home.as_deref());
+    crate::BUILD_INFO.render_with_locations(
+        ylva_home.as_deref(),
+        workspace_root.as_deref(),
+        new_version_hint.as_ref(),
+    )
 }
 
 /// `ylva trust [--revoke]`: approve (or withdraw approval of) the current
@@ -365,6 +370,7 @@ pub fn run(
             // for the headless path — it must not pre-populate the interactive UI.
             let explicit_prompt = explicit_prompt(prompt_from_flag.clone());
             let favorite_save_setup = FavoriteSaveSetup::from_profile(favorite_writer, &profile);
+            let version_check = crate::version_check::start_version_check(ylva_home.as_deref());
             TuiApp::new(
                 factory,
                 profile,
@@ -378,7 +384,9 @@ pub fn run(
                 profile_path: profile_path.clone(),
                 ylva_home: ylva_home.clone(),
                 workspace_root: workspace_root.clone(),
+                new_version_hint: version_check.initial_hint,
             })
+            .with_version_hint_receiver(version_check.refresh)
             .run()
             .await
         } else {

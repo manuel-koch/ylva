@@ -34,6 +34,21 @@ under the operating-system home directory print with a leading `~`; other paths
 print in full. An unresolved home or undiscovered workspace prints
 `not resolved` or `not discovered`.
 
+## New-release hint
+
+At TUI startup Ylva checks the GitHub Releases API for a newer release, at most once per 24 hours
+and without blocking startup. When a newer version is known, the startup logo shows
+`vX.Y.Z available: <release URL>` under the `profile:` line, and the F1 help dialog shows it on its
+`Version:` line. `ylva --version` notes it on the `Version:` line, right after the current
+version, from the cached result only; it never touches the network. A failed request is silent
+(logged only), pre-releases are ignored, and the headless CLI never checks.
+
+The last check time and the latest version found are cached in
+`~/.ylva/version-check.toml` (see [persistence](./persistence.md#version-check-cache)),
+so starts within the interval show the hint without a request. Opt out with
+`enabled = false` in that file or `YLVA_NO_VERSION_CHECK=1`; see
+[CLI options](./cli-options.md#environment-variables).
+
 ## Logging
 
 Logging is opt-in and controlled entirely by CLI flags (there is no logging
@@ -527,9 +542,10 @@ returning to an unverified effort warns again. Agents sharing the same live engi
 this warning behavior; independently configured engines do not. Higher effort does not
 guarantee readable thinking.
 
-- Every outbound HTTP request (model listing, chat/SSE, and Ollama metadata
-  calls) carries a dedicated `User-Agent: ylva/<version>` header so remote
-  servers can identify the client.
+- Every outbound HTTP request (model listing, chat/SSE, Ollama metadata
+  calls, and the opt-out [GitHub release check](#new-release-hint)) carries a
+  dedicated `User-Agent: ylva/<version>` header so remote servers can identify
+  the client.
 - Outbound requests are capped at
   `MAX_CONCURRENT_PROVIDER_REQUESTS` concurrent requests per provider
   connection, shared across model discovery, metadata lookups, and chat. JSON
