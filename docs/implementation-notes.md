@@ -781,8 +781,8 @@ SVGs from one or all sources; generated SVGs are ignored by Git.
 
 ## TUI internals
 
-The TUI uses a fixed key map; configurable keybindings are only a proposal in
-[the TUI enhancements idea](ideas/tui-enhancements.md#configurable-keybindings).
+The TUI uses a fixed key map, not configurable; see
+[keybindings](keybindings.md).
 
 The TUI renders the same headless `AgentLoop`; it does not own agent state.
 The presenter is a pure reducer emitting ordered effects without terminal or
