@@ -576,6 +576,10 @@ The initial user turn (`--prompt`) is resolved by precedence:
 2. piped stdin read to EOF — only when stdin is **not** a terminal (something
    is piped in)
 
+In the TUI, an initial turn that is a [slash command](features.md) (e.g.
+`--prompt '/models'`) runs the command instead of being sent to the model.
+The CLI has no slash commands, so there the text always goes to the model.
+
 ## Environment variables
 
 `YLVA_NO_VERSION_CHECK=1` (any non-empty value except `0`) disables the daily

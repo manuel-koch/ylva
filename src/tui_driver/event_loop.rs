@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use crossterm::event::MouseEventKind;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 use ratatui_textarea::TextArea;
@@ -57,6 +57,29 @@ use crate::tui_reducer_state::{
     AppState, DomainEvent, Effect, SlashOverlay, TuiMode, UserMessageState,
 };
 use crate::tui_render_state::TuiState;
+
+/// Key presses that type `text` on one line and submit it with Enter.
+fn slash_command_key_actions(text: &str) -> impl Iterator<Item = AppAction> + '_ {
+    text.chars()
+        .map(|character| {
+            AppAction::KeyInput(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        })
+        .chain(std::iter::once(AppAction::KeyInput(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))))
+}
+
+/// Next queued startup action, else the next action from the terminal bridge.
+async fn next_action(
+    startup_actions: &mut std::collections::VecDeque<AppAction>,
+    action_rx: &mut mpsc::Receiver<AppAction>,
+) -> Option<AppAction> {
+    match startup_actions.pop_front() {
+        Some(action) => Some(action),
+        None => action_rx.recv().await,
+    }
+}
 
 pub(super) async fn run_tui_with_title<B>(
     terminal: &mut Terminal<B>,
@@ -225,8 +248,14 @@ where
     spinner_tick.tick().await;
 
     let event_loop_result: anyhow::Result<()> = async {
+    // Slash commands from `--prompt` replay as typed keys so they take the
+    // exact path of an interactive submit instead of reaching the model.
+    let mut startup_actions: std::collections::VecDeque<AppAction> =
+        std::collections::VecDeque::new();
     if let Some(prompt) = initial_prompt {
-        if !prompt.is_empty() {
+        if crate::slash_command::parse_slash_command_invocation(&prompt).is_some() {
+            startup_actions.extend(slash_command_key_actions(&prompt));
+        } else if !prompt.is_empty() {
             state.push_user_bubble(prompt.clone(), UserMessageState::Sent);
             state.mode = TuiMode::Pending;
             cmd_tx.send(AgentCommand::Prompt(prompt)).await?;
@@ -473,7 +502,7 @@ where
                 }
             }
 
-            action = action_rx.recv() => {
+            action = next_action(&mut startup_actions, &mut action_rx) => {
                 let Some(mut action) = action else { break };
 
                 // Track mouse position for hover highlight on buttons. Hover

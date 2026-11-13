@@ -860,6 +860,56 @@ async fn models_command_renders_loading_feedback_before_catalog_finishes() {
 }
 
 #[tokio::test]
+async fn initial_slash_command_prompt_runs_command_instead_of_reaching_provider() {
+    let catalog_started = Arc::new(Notify::new());
+    let release_catalog = Arc::new(Notify::new());
+    let engine = Arc::new(DelayedCatalogEngine::new(
+        Arc::clone(&catalog_started),
+        Arc::clone(&release_catalog),
+    ));
+    let registry = Arc::new(ToolRegistry::new());
+    let (backend, last_buffer, _) = InspectableTestBackend::new(80, 24);
+    let terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+
+    let run_handle = tokio::spawn({
+        let mut terminal = terminal;
+        let engine = Arc::clone(&engine);
+        async move {
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                ui_rx,
+                Some("/models".to_string()),
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), catalog_started.notified())
+        .await
+        .expect("the initial /models prompt should start the catalog request");
+    let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock").clone());
+    assert!(
+        rendered.contains("Loading models"),
+        "initial /models must show loading feedback:\n{rendered}"
+    );
+
+    release_catalog.notify_one();
+    drop(action_tx);
+    run_handle.await.expect("run task joined");
+    assert_eq!(
+        engine.chat_calls.load(Ordering::SeqCst),
+        0,
+        "a slash command must never be sent to the provider",
+    );
+}
+
+#[tokio::test]
 async fn model_catalog_does_not_block_conversation_updates() {
     let catalog_started = Arc::new(Notify::new());
     let release_catalog = Arc::new(Notify::new());

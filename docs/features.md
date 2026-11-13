@@ -119,7 +119,9 @@ blank line, while each call's completion status remains adjacent to its
 invocation.
 
 Initial user turn resolution: `--prompt <text>`, else piped stdin read to EOF
-(only when stdin is not a terminal) — e.g. `echo '…' | ylva`.
+(only when stdin is not a terminal) — e.g. `echo '…' | ylva`. In the TUI, an
+initial turn that is a slash command (e.g. `--prompt '/models'`) runs the
+command rather than being sent to the model.
 
 Tool approval is host-driven: `read`/`glob` are auto-approved when the
 sandbox abstains; `write` and `edit` require explicit user approval by
