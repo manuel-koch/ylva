@@ -19,8 +19,8 @@
 //! lives here and reports failures as `Err(String)` (the text printed after
 //! `error: `) instead of terminating the process.
 
-mod engines;
-mod profile;
+pub(crate) mod engines;
+pub(crate) mod profile;
 mod prompt;
 mod session;
 
@@ -31,8 +31,9 @@ use crate::tui_driver::FavoriteSaveSetup;
 use crate::{AgentFactory, App, Cli, CliColorMode, ConsoleApp, TuiApp, DEFAULT_TUI_TOOLS};
 use engines::{apply_provider_env_to_profile, engines_from_environment, load_provider_env};
 use profile::{
-    apply_cli_profile_overrides, load_profile, load_selected_profile_environment,
-    selected_profile_context, selected_profile_path, trusted_profile_workspace_root,
+    apply_cli_engine_selection, apply_cli_profile_overrides, load_profile,
+    load_selected_profile_environment, selected_profile_context, selected_profile_path,
+    trusted_profile_workspace_root,
 };
 use prompt::{explicit_prompt, initial_prompt};
 use session::{open_store, print_resume_hint, resolve_root_agent_type};
@@ -263,6 +264,12 @@ pub fn run(
         "root agent type resolved"
     );
 
+    apply_cli_engine_selection(
+        &mut profile,
+        cli.engine.as_deref(),
+        &root_agent_type.agent_type,
+    )?;
+
     let factory_without_store = {
         // Engines come from the profile's `[engines.*]` tables when it defines
         // any; a profile that defines none (including the in-code default used
@@ -288,7 +295,9 @@ pub fn run(
             })?
         };
         if use_tui {
-            factory = factory.with_allowed_tools(DEFAULT_TUI_TOOLS);
+            factory = factory
+                .with_allowed_tools(DEFAULT_TUI_TOOLS)
+                .with_routed_roots();
         }
         for tool in cli.auto_approve_tools() {
             factory = factory.with_auto_approve(tool);
@@ -337,10 +346,11 @@ pub fn run(
         // different provider/model than the session's history last showed,
         // and that must be visible without re-deriving it from config.
         if let Some(config) = &initial_engine_config {
-            let parameters = factory_without_store
+            let mut parameters = factory_without_store
                 .engine(initial_engine_name)
                 .map(|engine| crate::store::ModelParameters::from_engine(engine.as_ref()))
                 .unwrap_or_default();
+            parameters.engine_name = Some(initial_engine_name.to_string());
             store.record_model_changed(&config.provider_connection, &config.model, &parameters);
         }
         // An explicit `--agent` that changed the type a *resumed* session was
@@ -411,7 +421,11 @@ pub fn run(
     // restored the terminal by this point; the hint goes to stderr alongside
     // every other status line).
     if let Some(snapshot) = &session_hint {
-        print_resume_hint(snapshot, explicit_profile_name.as_deref());
+        print_resume_hint(
+            snapshot,
+            explicit_profile_name.as_deref(),
+            cli.engine.as_deref(),
+        );
     }
     Ok(StartupRun {
         session_id: session_hint.as_ref().map(|snapshot| snapshot.session_id),

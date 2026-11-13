@@ -649,7 +649,7 @@ fn wrapped_document_bottom_scroll_does_not_narrow_absolute_offsets() {
     let builds = state.render_cache.body_layout_builds;
     state.conversation.chat_selection = Some(crate::ChatSelection {
         anchor_line: 1,
-        anchor_col: 5,
+        anchor_col: 3,
         cursor_line: state.render_cache.conversation.height - 1,
         cursor_col: 10,
     });

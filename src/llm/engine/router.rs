@@ -17,7 +17,7 @@
 use super::selection::validate_named_engine_option;
 use super::{
     Engine, EngineConfig, ModelSelection, ModelSelectionTarget, NamedEngineInfo,
-    ProviderModelOption,
+    NamedEnginePublication, ProviderModelOption,
 };
 use crate::agent::{Message, StreamEvent};
 use crate::llm::{InputModality, ModelInfo, ToolSchema};
@@ -37,7 +37,12 @@ use tracing::Instrument;
 /// future requests, while model changes continue to use each connection's existing
 /// Engine runtime configuration handle.
 pub struct EngineRouter {
-    engines: HashMap<String, Arc<dyn Engine>>,
+    engines: RwLock<HashMap<String, Arc<dyn Engine>>>,
+    /// While set and only one engine exists, the router presents itself like
+    /// that bare engine: no named engines and no active engine name. This keeps
+    /// the picker of a single-engine profile showing catalog rows only until
+    /// a second engine is registered.
+    transparent_single_engine: bool,
     active_engine: RwLock<String>,
     catalog_cache: CatalogCache,
     catalog_cache_lifetime: Duration,
@@ -63,11 +68,37 @@ impl EngineRouter {
             "active engine '{active_engine}' is not configured"
         );
         Ok(Self {
-            engines,
+            engines: RwLock::new(engines),
+            transparent_single_engine: false,
             active_engine: RwLock::new(active_engine.to_string()),
             catalog_cache: Arc::new(Mutex::new(HashMap::new())),
             catalog_cache_lifetime: CATALOG_CACHE_LIFETIME,
         })
+    }
+
+    /// Hide a sole engine's identity until a second engine is registered.
+    pub fn with_transparent_single_engine(mut self) -> Self {
+        self.transparent_single_engine = true;
+        self
+    }
+
+    fn engine_snapshot(&self) -> HashMap<String, Arc<dyn Engine>> {
+        self.engines
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn engine_named(&self, name: &str) -> Option<Arc<dyn Engine>> {
+        self.engines
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .cloned()
+    }
+
+    fn hides_engine_identity(&self) -> bool {
+        self.transparent_single_engine && self.engine_snapshot().len() <= 1
     }
 
     #[cfg(test)]
@@ -83,10 +114,8 @@ impl EngineRouter {
             .expect("the active engine lock is poisoned");
         let engine_name = active_engine.clone();
         let engine = self
-            .engines
-            .get(active_engine.as_str())
-            .expect("the active engine must remain configured")
-            .clone();
+            .engine_named(active_engine.as_str())
+            .expect("the active engine must remain configured");
         (engine_name, engine)
     }
 
@@ -106,11 +135,7 @@ impl EngineRouter {
             .read()
             .expect("the active engine lock is poisoned")
             .clone();
-        let mut engines: Vec<_> = self
-            .engines
-            .iter()
-            .map(|(name, engine)| (name.clone(), engine.clone()))
-            .collect();
+        let mut engines: Vec<_> = self.engine_snapshot().into_iter().collect();
         engines.sort_by(|left, right| left.0.cmp(&right.0));
 
         let mut provider_connections: HashMap<String, (String, Arc<dyn Engine>)> = HashMap::new();
@@ -120,7 +145,7 @@ impl EngineRouter {
                 .entry(provider_connection)
                 .or_insert((engine_name, engine));
         }
-        if let Some(active_engine) = self.engines.get(&active_engine_name).cloned() {
+        if let Some(active_engine) = self.engine_named(&active_engine_name) {
             let provider_connection = active_engine.config().provider_connection;
             provider_connections.insert(provider_connection, (active_engine_name, active_engine));
         }
@@ -141,17 +166,15 @@ impl EngineRouter {
         active: &str,
     ) -> anyhow::Result<(String, Arc<dyn Engine>)> {
         if let Some(engine) = self
-            .engines
-            .get(active)
+            .engine_named(active)
             .filter(|engine| engine.config().provider_connection == connection)
         {
-            return Ok((active.to_string(), engine.clone()));
+            return Ok((active.to_string(), engine));
         }
-        self.engines
-            .iter()
+        self.engine_snapshot()
+            .into_iter()
             .filter(|(_, engine)| engine.config().provider_connection == connection)
-            .min_by_key(|(name, _)| *name)
-            .map(|(name, engine)| (name.clone(), engine.clone()))
+            .min_by(|left, right| left.0.cmp(&right.0))
             .ok_or_else(|| anyhow::anyhow!("provider connection '{connection}' is not configured"))
     }
 
@@ -199,11 +222,9 @@ impl Engine for EngineRouter {
         selection: &super::ModelSelection,
     ) -> anyhow::Result<crate::llm::ReasoningEffortOptions> {
         let engine = match selection {
-            ModelSelection::NamedEngine { engine_name, .. } => {
-                self.engines.get(engine_name).cloned().ok_or_else(|| {
-                    anyhow::anyhow!("named engine '{engine_name}' is not configured")
-                })?
-            }
+            ModelSelection::NamedEngine { engine_name, .. } => self
+                .engine_named(engine_name)
+                .ok_or_else(|| anyhow::anyhow!("named engine '{engine_name}' is not configured"))?,
             ModelSelection::ProviderModel(option) => {
                 self.provider_engine_for(&option.provider_connection)?.1
             }
@@ -216,11 +237,9 @@ impl Engine for EngineRouter {
         selection: &ModelSelection,
     ) -> anyhow::Result<crate::llm::ReasoningEffortProvenance> {
         let engine = match selection {
-            ModelSelection::NamedEngine { engine_name, .. } => {
-                self.engines.get(engine_name).cloned().ok_or_else(|| {
-                    anyhow::anyhow!("named engine '{engine_name}' is not configured")
-                })?
-            }
+            ModelSelection::NamedEngine { engine_name, .. } => self
+                .engine_named(engine_name)
+                .ok_or_else(|| anyhow::anyhow!("named engine '{engine_name}' is not configured"))?,
             ModelSelection::ProviderModel(option) => {
                 self.provider_engine_for(&option.provider_connection)?.1
             }
@@ -366,7 +385,7 @@ impl Engine for EngineRouter {
         favorite: bool,
     ) {
         // Every named engine on the connection keeps its own copy.
-        for engine in self.engines.values() {
+        for engine in self.engine_snapshot().values() {
             engine.record_favorite_membership(provider_connection, model_id, favorite);
         }
     }
@@ -405,6 +424,9 @@ impl Engine for EngineRouter {
     }
 
     fn active_engine_name(&self) -> Option<String> {
+        if self.hides_engine_identity() {
+            return None;
+        }
         Some(self.active_engine_entry().0)
     }
 
@@ -425,7 +447,7 @@ impl Engine for EngineRouter {
     /// active one: a chat may have hydrated one connection while a `/models`
     /// switch made another connection active before the notice was taken.
     fn take_pending_notices(&self) -> Vec<String> {
-        self.engines
+        self.engine_snapshot()
             .values()
             .flat_map(|engine| engine.take_pending_notices())
             .collect()
@@ -533,9 +555,36 @@ impl Engine for EngineRouter {
         self.active_engine().switch_model(model)
     }
 
-    fn named_engines(&self) -> Vec<(String, EngineConfig)> {
-        let mut engines: Vec<(String, EngineConfig)> = self
+    fn publish_named_engine(
+        &self,
+        name: &str,
+        engine: Arc<dyn Engine>,
+        publication: NamedEnginePublication,
+    ) -> anyhow::Result<()> {
+        let mut engines = self
             .engines
+            .write()
+            .map_err(|_| anyhow::anyhow!("the engine map lock is poisoned"))?;
+        let exists = engines.contains_key(name);
+        match (exists, publication) {
+            (true, NamedEnginePublication::Add) => {
+                anyhow::bail!("engine '{name}' is already registered")
+            }
+            (false, NamedEnginePublication::Replace) => {
+                anyhow::bail!("engine '{name}' is not registered")
+            }
+            _ => {}
+        }
+        engines.insert(name.to_string(), engine);
+        Ok(())
+    }
+
+    fn named_engines(&self) -> Vec<(String, EngineConfig)> {
+        if self.hides_engine_identity() {
+            return Vec::new();
+        }
+        let mut engines: Vec<(String, EngineConfig)> = self
+            .engine_snapshot()
             .iter()
             .map(|(name, engine)| (name.clone(), engine.config()))
             .collect();
@@ -544,8 +593,11 @@ impl Engine for EngineRouter {
     }
 
     fn named_engine_info(&self) -> Vec<NamedEngineInfo> {
+        if self.hides_engine_identity() {
+            return Vec::new();
+        }
         let mut engines: Vec<NamedEngineInfo> = self
-            .engines
+            .engine_snapshot()
             .iter()
             .map(|(name, engine)| {
                 let runtime = engine.runtime_snapshot();
@@ -588,12 +640,12 @@ impl Engine for EngineRouter {
                 option,
                 reasoning_effort,
             } => {
-                let target_engine = self.engines.get(engine_name).ok_or_else(|| {
+                let target_engine = self.engine_named(engine_name).ok_or_else(|| {
                     anyhow::anyhow!("named engine '{engine_name}' is not configured")
                 })?;
                 validate_named_engine_option(target_engine.as_ref(), option, reasoning_effort)?;
                 target_engine.ensure_model_allowed(&option.model.id)?;
-                (engine_name.clone(), target_engine.clone())
+                (engine_name.clone(), target_engine)
             }
             ModelSelection::ProviderModel(option) => {
                 let target = self.provider_engine_for(&option.provider_connection)?;
@@ -648,7 +700,7 @@ impl Engine for EngineRouter {
                 option,
                 reasoning_effort,
             } => {
-                let engine = self.engines.get(engine_name).ok_or_else(|| {
+                let engine = self.engine_named(engine_name).ok_or_else(|| {
                     anyhow::anyhow!("named engine '{engine_name}' is not configured")
                 })?;
                 validate_named_engine_option(engine.as_ref(), option, reasoning_effort)?;

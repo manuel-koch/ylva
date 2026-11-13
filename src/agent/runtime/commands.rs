@@ -693,8 +693,13 @@ impl RunState {
             } => {
                 // The common local baseline does not change
                 // across provider/model switches.
-                if let Some(store) = self.context.store() {
-                    store.record_model_changed(&provider_connection, &model, &parameters);
+                self.pending_model_changes.push_back(PendingModelChange {
+                    provider_connection,
+                    model,
+                    parameters,
+                });
+                if self.mode == AgentMode::Idle && self.current_cancel.is_none() {
+                    self.apply_pending_model_changes().await;
                 }
                 self.model_change_capacity_check = Some(Box::pin(
                     self.compaction.capacity_warning(self.engine.clone()),

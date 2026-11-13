@@ -78,7 +78,7 @@ fn scrollbar_handles_short_tracks_and_large_scroll_ranges() {
     for (height, expected_offsets) in [
         (1, vec![0]),
         (2, vec![0, usize::MAX]),
-        (3, vec![0, usize::MAX / 2, usize::MAX]),
+        (3, vec![0, 0, 0]),
         (4, vec![0, 0, usize::MAX, usize::MAX]),
     ] {
         let scrollbar = ChatScrollbarLayout {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::runtime::compaction_updates::sweep_compaction_and_report;
+use super::runtime::{apply_model_changes, PendingModelChange};
 use super::*;
 pub(super) mod spawn;
 use spawn::resolve_spawn_subagent;
@@ -241,6 +242,7 @@ pub(super) async fn advance_tool_queue(
     generation: u64,
     clarify_started_at: &mut Option<std::time::Instant>,
     pending_steers: &mut VecDeque<String>,
+    pending_model_changes: &mut VecDeque<PendingModelChange>,
     subagent_manager: &mut Option<crate::subagent_manager::SubagentManager>,
     spawn_content_sections: &mut HashMap<Uuid, Vec<crate::agent::tools::Section>>,
     own_run_id: Option<Uuid>,
@@ -285,6 +287,9 @@ pub(super) async fn advance_tool_queue(
                 // messages typed while tools were running), so they reach the
                 // model on the very next request rather than waiting for a full
                 // tool-free turn to complete via StreamDone.
+                // The re-prompt below is the first request served by a model
+                // switched while tools ran, so it lands before any steer.
+                apply_model_changes(context, pending_model_changes, &ui_tx).await;
                 if inject_pending_steers(pending_steers, context) {
                     let _ = ui_tx
                         .send(UiUpdate::SteerApplied { run_id: own_run_id })

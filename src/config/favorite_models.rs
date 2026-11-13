@@ -54,6 +54,9 @@ use super::ConfigError;
 use crate::home_relative_path::display_path;
 use crate::private_fs::replace_file;
 
+mod engine_save;
+pub use engine_save::{validate_engine_name, EngineSaveChange, EngineSaveMode, EngineSaveRequest};
+
 #[cfg(test)]
 mod tests;
 
@@ -106,18 +109,18 @@ pub struct FavoriteSaveOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum FavoriteSaveError {
     /// The source cannot hold favorites (for example an unsupported TOML shape).
-    #[error("favorites cannot be saved: {reason}")]
+    #[error("the change cannot be saved: {reason}")]
     Unsupported { reason: String },
     /// The profile file differs from what Ylva loaded or last saved.
     #[error(
         "the profile file {} changed outside Ylva ({detail}); restart Ylva to load it, \
-         the favorite was not saved",
+         nothing was saved",
         display_path(path)
     )]
     SourceChanged { path: PathBuf, detail: String },
     /// A failure before publication left the source untouched; trying again is safe.
     #[error(
-        "the favorite could not be saved to {}: {detail}; the file is unchanged, try again",
+        "the change could not be saved to {}: {detail}; the file is unchanged, try again",
         display_path(path)
     )]
     Retryable { path: PathBuf, detail: String },
@@ -140,9 +143,15 @@ pub enum FavoriteSaveError {
         display_path(path)
     )]
     MissingConnectionTable { connection: String, path: PathBuf },
+    /// A new engine name is already defined in the profile file.
+    #[error("engine '{name}' already exists in {}", display_path(path))]
+    EngineExists { name: String, path: PathBuf },
+    /// The engine to update or copy has no table in the profile file.
+    #[error("engine '{name}' has no table in {}", display_path(path))]
+    EngineMissing { name: String, path: PathBuf },
     /// An error occurred after the replacement may have been published.
     #[error(
-        "it is unclear whether the favorite was saved to {} ({detail}); restart Ylva and \
+        "it is unclear whether the change was saved to {} ({detail}); restart Ylva and \
          check the file",
         display_path(path)
     )]
@@ -255,6 +264,11 @@ impl FavoriteModelsWriter {
             .map(|layer| Self::from_loaded_source(resolved.path, resolved.contents, layer)))
     }
 
+    /// The profile file saves are written to and the layer it belongs to.
+    pub fn destination(&self) -> (&Path, FavoriteSourceLayer) {
+        (&self.path, self.layer)
+    }
+
     /// Set the exact membership of `model_id` in the favorites of `connection`.
     ///
     /// This is a desired-state operation, not a toggle: adding an existing
@@ -277,6 +291,18 @@ impl FavoriteModelsWriter {
         favorite: bool,
         publish: impl FnOnce(&Path, &[u8], u32) -> io::Result<()>,
     ) -> Result<FavoriteSaveOutcome, FavoriteSaveError> {
+        self.edit_with_publisher(publish, |writer, document| {
+            writer.apply_membership(document, connection, model_id, favorite)
+        })
+    }
+
+    /// Verify the source, apply `edit` to its parsed document and publish the
+    /// result when `edit` reports a change. Shared by every raw-TOML edit.
+    fn edit_with_publisher(
+        &mut self,
+        publish: impl FnOnce(&Path, &[u8], u32) -> io::Result<()>,
+        edit: impl FnOnce(&Self, &mut DocumentMut) -> Result<bool, FavoriteSaveError>,
+    ) -> Result<FavoriteSaveOutcome, FavoriteSaveError> {
         let current = self.read_current_source()?;
         self.verify_unchanged(&current)?;
         if current.read_only {
@@ -298,7 +324,7 @@ impl FavoriteModelsWriter {
                         ),
                     },
                 )?;
-        let changed = self.apply_membership(&mut document, connection, model_id, favorite)?;
+        let changed = edit(self, &mut document)?;
         if !changed {
             return Ok(self.outcome(false, false));
         }

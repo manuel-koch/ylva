@@ -60,7 +60,7 @@ fn resumed_tool_paths_use_home_labels_in_cached_and_uncached_rendering() {
             if cached {
                 state.enable_render_cache();
             }
-            state.replay_messages(&messages, &[], None);
+            state.replay_messages(&messages, &[], None, &[]);
             let ChatEntry::ToolBubble {
                 collapsed: bubble_collapsed,
                 ..

@@ -34,7 +34,7 @@ pub enum ModelScore {
     Plain(f64),
     PerEffort {
         default: Option<f64>,
-        /// Lowercased effort name to value, ordered by name.
+        /// Lowercased effort name to value; use `efforts_by_strength` for display order.
         efforts: BTreeMap<String, f64>,
     },
 }
@@ -54,6 +54,20 @@ impl ModelScore {
         let minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
         let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         (minimum, maximum)
+    }
+
+    /// Per-effort values ordered weakest to strongest effort; names outside
+    /// the effort ladder follow in name order. Empty for a plain score.
+    pub fn efforts_by_strength(&self) -> Vec<(&str, f64)> {
+        let Self::PerEffort { efforts, .. } = self else {
+            return Vec::new();
+        };
+        let mut ordered: Vec<(&str, f64)> = efforts
+            .iter()
+            .map(|(effort, value)| (effort.as_str(), *value))
+            .collect();
+        ordered.sort_by_key(|(effort, _)| super::reasoning_effort_rank(effort));
+        ordered
     }
 
     /// The value for `effort`, falling back to `default`; `None` when neither exists.
@@ -257,6 +271,28 @@ fn cached_model_scores_at(path: &Path) -> Arc<ModelScoreLoad> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn efforts_are_ordered_weakest_to_strongest() {
+        let score = ModelScore::PerEffort {
+            default: None,
+            efforts: [
+                ("max", 55.0),
+                ("xhigh", 52.0),
+                ("low", 35.0),
+                ("high", 50.0),
+            ]
+            .into_iter()
+            .map(|(effort, value)| (effort.to_string(), value))
+            .collect(),
+        };
+        let order: Vec<&str> = score
+            .efforts_by_strength()
+            .into_iter()
+            .map(|(effort, _)| effort)
+            .collect();
+        assert_eq!(order, ["low", "high", "xhigh", "max"]);
+    }
 
     #[test]
     fn normalization_follows_the_documented_rules() {

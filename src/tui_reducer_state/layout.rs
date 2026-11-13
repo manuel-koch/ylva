@@ -147,11 +147,20 @@ pub struct SlashOverlayLayout {
     /// Plain text of each footer line, as displayed, one entry per row of
     /// `detail_area` starting at its top.
     pub detail_rows: Vec<String>,
+    /// Index of the first detail line shown when the details scroll, and the
+    /// number of detail lines in total.
+    pub detail_first_visible_row: usize,
+    pub detail_total_rows: usize,
     /// Clickable `◂` / `▸` glyphs of the `/models` parameter popup.
     pub parameter_glyphs: Vec<ParameterGlyphHit>,
     /// Clickable Reset / Apply buttons of the `/models` parameter popup, each
     /// with the index of its field.
     pub parameter_buttons: Vec<(Rect, usize)>,
+    /// Entry index shown by each rendered row of the parameters popup; wrapped
+    /// button rows make rows and entries differ.
+    pub parameter_row_entries: Vec<usize>,
+    /// Clickable controls of the engine save page.
+    pub engine_save_controls: Vec<(Rect, crate::tui_reducer_state::EngineSaveFocus)>,
 }
 
 /// One clickable direction glyph of a parameter-popup row.
@@ -183,6 +192,18 @@ impl SlashOverlayLayout {
             .iter()
             .find(|(area, _)| area.contains((col, row).into()))
             .map(|(_, field)| *field)
+    }
+
+    /// The engine save control under a terminal cell.
+    pub fn engine_save_control_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::tui_reducer_state::EngineSaveFocus> {
+        self.engine_save_controls
+            .iter()
+            .find(|(area, _)| area.contains((col, row).into()))
+            .map(|(_, focus)| *focus)
     }
 
     /// The parameter row and direction of the glyph under a terminal cell.
@@ -220,7 +241,7 @@ impl ChatScrollbarLayout {
         }
         let height = usize::from(self.rect.height);
         let relative_row = usize::from(row - self.rect.y);
-        let (track_row, track_height) = if height >= 4 {
+        let (track_row, track_height) = if height >= 3 {
             (relative_row.saturating_sub(1).min(height - 3), height - 2)
         } else {
             (relative_row, height)

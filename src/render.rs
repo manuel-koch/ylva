@@ -411,6 +411,11 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         partial_thinking_text,
         thinking_started_at,
         partial_thinking_collapsed,
+        pending_model_notices: if include_content && showing_subagent_run_id.is_none() {
+            state.pending_model_notices.clone()
+        } else {
+            Vec::new()
+        },
         queued_steer_texts: if include_content && showing_subagent_run_id.is_none() {
             state.queued_steer_texts.clone()
         } else {

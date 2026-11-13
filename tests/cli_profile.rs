@@ -75,7 +75,7 @@ fn a_profile_validation_error_names_the_profile_config_file() {
 default_engine = "missing"
 
 [engines.available]
-provider = "mock"
+provider_connection = "mock"
 model = "test-model"
 "#,
     )
@@ -131,7 +131,7 @@ fn an_invalid_agent_type_engine_is_a_startup_validation_error() {
 default_engine = "available"
 
 [engines.available]
-provider = "mock"
+provider_connection = "mock"
 model = "test-model"
 "#,
     )
@@ -448,7 +448,8 @@ fn profile_list_abbreviates_the_home_directory_to_tilde() {
 }
 
 /// Explicit mock engine: ordinary conversations need a configured provider.
-const MOCK_ENGINE_CONFIG: &str = "[engines.default]\nprovider = \"mock\"\nmodel = \"test-model\"\n";
+const MOCK_ENGINE_CONFIG: &str =
+    "[engines.default]\nprovider_connection = \"mock\"\nmodel = \"test-model\"\n";
 
 /// Write a profile config for the implicit `default` profile, on top of a mock
 /// engine.

@@ -122,6 +122,11 @@ pub struct Cli {
     #[arg(long, value_name = "type")]
     pub agent: Option<String>,
 
+    /// Select a configured named engine for this run's root agent, without changing
+    /// its persona or permissions. Uses the engine's complete configured settings.
+    #[arg(long, value_name = "name")]
+    pub engine: Option<String>,
+
     /// Auto-approve read tool calls
     #[arg(long)]
     pub auto_approve_read: bool,
@@ -188,6 +193,22 @@ pub enum CliCommand {
     Session {
         #[command(subcommand)]
         command: SessionCommand,
+    },
+    /// List the models the selected profile's provider connections offer
+    ///
+    /// Loads the selected profile (top-level `--profile`) and queries each
+    /// configured provider connection's model catalog without starting a
+    /// session or consuming stdin.
+    Models {
+        /// Show every model the provider advertises, ignoring `allowed_models`
+        #[arg(long)]
+        all: bool,
+        /// Show only models marked as favorites
+        #[arg(long)]
+        only_favorites: bool,
+        /// Show only the profile's configured engines, without querying catalogs
+        #[arg(long)]
+        only_engines: bool,
     },
     /// Seed Ylva's home or workspace starter files
     Init {

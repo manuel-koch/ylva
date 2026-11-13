@@ -1067,7 +1067,7 @@ async fn clear_resets_the_transcript_and_tells_the_agent_to_start_a_new_session(
             state
                 .active_context_usage()
                 .map(crate::tui_reducer_state::format_context_usage_readout),
-            Some("38.0K (39%)".to_string())
+            Some("38K (39%)".to_string())
         );
         let (slash_effects, _) = split_slash_effects(submit(&mut state, &mut textarea, command));
 
@@ -1102,7 +1102,7 @@ async fn clear_resets_the_transcript_and_tells_the_agent_to_start_a_new_session(
             state
                 .active_context_usage()
                 .map(crate::tui_reducer_state::format_context_usage_readout),
-            Some("1.0K (1%)".to_string()),
+            Some("1K (1%)".to_string()),
             "the new session must still show its own estimate"
         );
     }

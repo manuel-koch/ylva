@@ -732,3 +732,58 @@ fn edenai_router_raw_and_named_preview_match_transactional_confirmation() {
     assert_eq!(router.config().model, "new-model");
     assert_eq!(router.reasoning_effort().as_deref(), Some("low"));
 }
+
+fn publication_router() -> EngineRouter {
+    let engine: Arc<dyn Engine> = Arc::new(CatalogEngine::new("conn", "first-model", &[]));
+    EngineRouter::new(HashMap::from([("first".to_string(), engine)]), "first")
+        .expect("router construction")
+}
+
+fn published_engine(model: &str) -> Arc<dyn Engine> {
+    Arc::new(CatalogEngine::new("conn", model, &[]))
+}
+
+#[test]
+fn publishing_a_named_engine_adds_new_names_and_rejects_existing_ones() {
+    let router = publication_router();
+
+    router
+        .publish_named_engine(
+            "second",
+            published_engine("m2"),
+            NamedEnginePublication::Add,
+        )
+        .unwrap();
+    let names: Vec<String> = router.named_engines().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["first", "second"]);
+
+    assert!(router
+        .publish_named_engine(
+            "second",
+            published_engine("m3"),
+            NamedEnginePublication::Add
+        )
+        .is_err());
+}
+
+#[test]
+fn replacing_the_active_engine_takes_effect_and_requires_an_existing_name() {
+    let router = publication_router();
+
+    router
+        .publish_named_engine(
+            "first",
+            published_engine("replaced"),
+            NamedEnginePublication::Replace,
+        )
+        .unwrap();
+    assert_eq!(router.config().model, "replaced");
+
+    assert!(router
+        .publish_named_engine(
+            "missing",
+            published_engine("x"),
+            NamedEnginePublication::Replace,
+        )
+        .is_err());
+}

@@ -200,7 +200,8 @@ pub(super) async fn execute_effects(
             | Effect::LoadSubagentTranscript { .. }
             | Effect::ListModels { .. }
             | Effect::SwitchModel(_)
-            | Effect::SetFavoriteModel { .. } => {}
+            | Effect::SetFavoriteModel { .. }
+            | Effect::SaveEngine(_) => {}
         }
     }
     ActionOutcome::Continue
@@ -247,6 +248,7 @@ pub(super) fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Eff
                 | Effect::ListModels { .. }
                 | Effect::SwitchModel(_)
                 | Effect::SetFavoriteModel { .. }
+                | Effect::SaveEngine(_)
         )
     })
 }

@@ -66,6 +66,7 @@ pub(crate) struct ConversationSource<'a> {
     entries: &'a [ChatEntry],
     turn: &'a crate::tui_reducer_state::TurnBuffer,
     queued: &'a [String],
+    pending_notices: &'a [String],
     header: Option<(usize, &'a ChatEntry)>,
     revisions: &'a std::collections::HashMap<(Option<uuid::Uuid>, usize), u64>,
     title_revisions: &'a std::collections::HashMap<uuid::Uuid, u64>,
@@ -86,6 +87,7 @@ impl<'a> ConversationSource<'a> {
             entries: subagent.map_or(state.chat_entries.as_slice(), |subagent| subagent.messages.as_slice()),
             turn: subagent.map_or(&state.turn_buffer, |subagent| &subagent.turn_buffer),
             queued: if run_id.is_none() { &state.queued_steer_texts } else { &[] },
+            pending_notices: if run_id.is_none() { &state.pending_model_notices } else { &[] },
             header: state.header_bubble_id().and_then(|bubble_id| {
                 state.chat_entries.iter().enumerate().find(
                     |(_, entry)| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == bubble_id),

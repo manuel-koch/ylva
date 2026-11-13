@@ -21,7 +21,7 @@ fn compaction_thresholds_default_and_parse_per_engine() {
     write_profile_config(
         &profiles_root,
         "work",
-        "\n[engines.fast]\nprovider = \"mock\"\nmodel = \"test-model\"\n",
+        "\n[engines.fast]\nprovider_connection = \"mock\"\nmodel = \"test-model\"\n",
     );
 
     let profile = ProfileConfig::load(&profiles_root, "work").expect("the fixture loads");
@@ -43,7 +43,7 @@ fn compaction_thresholds_default_and_parse_per_engine() {
     write_profile_config(
         &profiles_root,
         "work",
-        "\n[engines.fast]\nprovider = \"mock\"\nmodel = \"test-model\"\n\
+        "\n[engines.fast]\nprovider_connection = \"mock\"\nmodel = \"test-model\"\n\
              compact_target_ratio = 0.4\n\
              soft_compaction_threshold = 0.8\n\
              hard_compaction_threshold = 0.95\n",
@@ -85,7 +85,9 @@ fn compaction_thresholds_must_be_ordered_target_below_soft_below_hard() {
         write_profile_config(
             &profiles_root,
             "work",
-            &format!("\n[engines.fast]\nprovider = \"mock\"\nmodel = \"test-model\"\n{knobs}"),
+            &format!(
+                "\n[engines.fast]\nprovider_connection = \"mock\"\nmodel = \"test-model\"\n{knobs}"
+            ),
         );
 
         let error = ProfileConfig::load(&profiles_root, "work")

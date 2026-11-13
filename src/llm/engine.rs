@@ -17,6 +17,15 @@ mod router;
 mod runtime;
 mod selection;
 
+/// How [`Engine::publish_named_engine`] treats an existing entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamedEnginePublication {
+    /// The name must be new.
+    Add,
+    /// Replace an existing entry, including the active engine.
+    Replace,
+}
+
 pub use config::{
     EngineConfig, EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_COMPACT_TARGET_RATIO,
     DEFAULT_CONTEXT_LENGTH,
@@ -355,6 +364,20 @@ pub trait Engine: Send + Sync {
     /// one-per-connection equivalent) names. A bare, non-routed engine has no
     /// named siblings to offer, so the default returns an empty list;
     /// [`EngineRouter`] overrides this with its full configured set.
+    /// Make a saved named-engine definition known to this engine collection.
+    ///
+    /// A replacement of the active engine takes effect for the next request;
+    /// in-flight requests keep the instance they started with. Engines that
+    /// do not route between named engines fail.
+    fn publish_named_engine(
+        &self,
+        name: &str,
+        _engine: Arc<dyn Engine>,
+        _publication: NamedEnginePublication,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("this engine cannot publish named engine '{name}' at runtime")
+    }
+
     fn named_engines(&self) -> Vec<(String, EngineConfig)> {
         Vec::new()
     }

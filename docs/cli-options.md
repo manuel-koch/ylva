@@ -2,7 +2,8 @@
 
 Reference for Ylva's command-line interface. Parsing is backed by `clap`
 (derive model in `src/cli.rs`); the tables below describe the resulting
-surface.
+surface. `--engine` selects a configured engine for one chat run; `models`
+provides read-only catalog discovery.
 
 ## Flags
 
@@ -19,6 +20,7 @@ surface.
 | `--log-level <level>` | enum | `trace`, `debug`, `info`, `warn`, `error` | `info` | Minimum severity written. Selecting a level includes it and all higher-severity levels (`trace < debug < info < warn < error`). |
 | `--log-format <format>` | enum | `text`, `json` | `text` | Output format. `text` is human-readable; `json` produces JSONL (one JSON object per line). |
 | `--agent <type>` | string | any agent type available in the selected profile | see below | Root agent type to run as. On a fresh session it defaults to `default`; on a resume it defaults to the type the session last stored. An explicit value always wins and becomes the latest stored selection, so later resumes without the flag continue under it. A type that is absent from the selected profile is a startup error (exit code `2`), unless the flag explicitly names an available type that resolves a stale stored name. See [Resuming a session](#resuming-a-session). |
+| `--engine <name>` | string | an explicit `[engines.<name>]` key in the selected profile | root agent's configured engine | Select that engine's complete resolved configuration for this run's root agent by changing only its in-memory engine mapping. Unknown, empty or whitespace-only names exit `2` before provider requests or session writes. Chat-only; rejected with every subcommand. No profile writes or CLI-specific catalog check. See [Engine selection](#engine-selection). |
 | `--conversation-id <uuid>` | uuid | any persisted session id | *none* | Resume the named session: its `.jsonl` file is re-attached for append instead of a fresh session being started. An unknown id is a hard error (exit code `2`) — never a silent fresh session. With `--clone` it names the session to copy instead. See `docs/persistence.md`. |
 | `--clone` | none | — | — | Copy the session named by `--conversation-id` into a **brand-new** session instead of resuming it: the source's full logical event stream is replayed into the new file, the source file stays byte-for-byte unchanged, and all new writes go to the clone. Requires `--conversation-id <uuid>` (exit code `2` without it), and the source must be a root session that no other Ylva process holds open — a subagent transcript or a locked source is a hard error (exit code `2`) that creates nothing. See [Clone contract](persistence.md#clone-contract). |
 | `--auto-approve-read` | none | — | — | Skip the human-approval prompt for `read` tool calls. |
@@ -46,8 +48,12 @@ value-taking flags may not be repeated.
 before or after a subcommand. Every other top-level flag, including `--profile`
 and `--no-tui`, must come before the subcommand (`ylva --no-tui init --workspace`).
 The `init`, `session`, `profile`, and `skill` subcommands ignore `--profile` and never
-load a profile. The `init` subcommand also exits with code `2` when its target
-root cannot be resolved or a seeded file cannot be written.
+load a profile. `--engine` is rejected with **every**
+subcommand, including `models`, `connect`, and `trust`, with exit `2` before
+command dispatch or side effects, even when placed before the subcommand.
+`ylva --profile work models` lists all connections in that profile.
+The `init` subcommand also exits with code `2` when its target root cannot be
+resolved or a seeded file cannot be written.
 
 When the CLI writes to a terminal, its section headers and tool status lines
 use the same semantic colors as the TUI. Colors are disabled automatically for
@@ -156,6 +162,97 @@ records. Empty discovery prints `No skills discovered.`. Empty/partial listings
 still exit `0` when warnings occur; fatal initialization/output failures exit
 `2`. This is the unfiltered discovery view, not an agent's callable catalog.
 See [skill configuration](configuration.md#agent-skills).
+
+## Engine selection
+
+`ylva --profile work --engine fast --prompt 'Explain this code'` selects the explicit
+`[engines.fast]` entry for a headless or TUI chat run. It uses the engine's complete resolved
+connection, model, reasoning, context window, output limit and other settings, including ordinary
+profile defaults. It does not construct an engine from a provider/model pair or accept implicit
+connection or environment-discovered engines.
+
+Engines saved from the TUI (`/models` → `[ Save… ]`, see
+[features](./features.md#slash-commands)) are ordinary explicit `[engines.<name>]`
+entries: a later launch can select them with `--engine`, once a changed workspace
+profile has been re-trusted.
+
+Selection happens after resolving the fresh, restored or explicitly requested
+root agent type. Only that type's in-memory `engine` mapping changes; its
+persona, tools and permissions, other types' mappings, engine definitions and
+`default_engine` stay unchanged. No profile file is written. Existing subagent
+sharing still applies, including subagents using the same agent-type mapping;
+there is no new per-instance isolation. Explicit compaction and utility
+engines stay fixed even if their name matches the chosen engine. Unset roles
+retain their usual following/fallback rules.
+
+The flag is value-taking and non-repeatable. Unknown, empty or whitespace-only
+names exit `2` before provider requests or fresh/resumed/cloned session writes.
+Normal named-engine validation, hydration and catalog advisories apply; no
+extra blocking catalog fetch/check, model-absence gate or reasoning-reset
+policy is introduced. An explicit `--engine` is retained in the shell-safe
+resume hint; an unset flag is omitted.
+
+## Models command
+
+`ylva models` lists the model catalogs of the selected profile's provider
+connections without starting a session, initializing a chat, or consuming
+stdin. It loads the profile using normal workspace trust, `.env`, interpolation,
+process-environment precedence, warning/strict-config and credential-supplementation
+rules. Untrusted or changed workspace configuration is refused before provider
+access, with no silent home fallback. With neither explicit engines nor
+connections, normal environment discovery applies.
+
+The command covers every connection, including those unused by explicit engines, independently of
+chat engine selection. It queries each connection's catalog once with a 15-second total
+catalog/enrichment budget per connection, applies allowlists (unless `--all`) and local model
+scores, and prints, per connection, one line per model followed by an indented line of its details
+
+Example output of `ylva models`:
+
+```text
+openrouter:
+  ⚑ anthropic/claude-sonnet-4.5
+      context: 1M  output: 64K  reasoning: low/*medium/high  score: 8.0
+    openai/gpt-5-mini
+      context: 400K  output: 128K  reasoning: low/*medium/high
+
+local-ollama:
+    qwen3:8b
+      context: 128K  reasoning: unavailable
+```
+
+Each model line shows the `<model-id>` under its `<provider-connection>:` header; a `⚑` prefix marks
+models in the connection's `favorite_models` list. Favorites come first in configured order;
+unavailable favorites are hidden without changing preferences. Remaining rows and connection groups
+sort deterministically without duplicates. `ylva models --all` skips each connection's
+`allowed_models` filter and lists every model the provider advertises. `--only-favorites` lists only
+models in a connection's `favorite_models` (connections without favorites are omitted).
+`--only-engines` instead lists the profile's explicit `[engines.*]` entries by name, each followed
+by an indented line with its connection, model and configured parameters (`context`, `output`,
+`reasoning`, `temperature`), without querying any catalog; a `⚑` marks engines whose model is a
+favorite, and with `--only-favorites` only those are listed. `--all` has no effect on
+`--only-engines`. Plain model lines are indented to match, detail segments are separated by two
+spaces, and groups have a blank separator. The detail segments mirror the `/models` picker: context
+length, selectable reasoning efforts (the provider's default prefixed with `*`) (`unavailable` when
+the catalog reports none), the model's `model-scores.toml` summary when one exists, and a capability
+marker when the catalog evidence is unsupported, invalid, or conflicting. A connection whose catalog
+reports no models prints a connection header followed by `no models reported`.
+
+There is no provider filter. `--engine` is rejected, including before `models`;
+selection flags cannot silently restrict a listing.
+All external/configured text and diagnostics are terminal-safe single-line text
+before intentional styling; sensitive credentials/endpoint details are not exposed.
+Model names render in bold when colors are enabled.
+
+Exit codes: `0` when at least one queried connection answered, including an
+empty catalog; partial failures produce stderr warnings naming failed connections.
+`1` means every connection failed or a runtime output/diagnostic write failed;
+`2` means a usage or startup error. The command makes no profile, favorite or
+selection writes and opens no session.
+
+See [configuration](configuration.md#top-level-profile-fields) for how provider
+connections and their model policies are configured, and
+[`/models`](features.md#slash-commands) for the in-session picker.
 
 ## Session commands
 
@@ -460,7 +557,11 @@ existed continue as `default`.
 
 When the run used an explicit `--profile <name>`, the hint includes it too
 (`--profile <name>` is otherwise omitted, since the implicit default profile
-needs no flag to resume with the same configuration). See
+needs no flag to resume with the same configuration). Under the approved
+engine-selection target, an explicit `--engine <name>` is also retained with
+shell-safe quoting; it selects that engine's current profile configuration on
+resume, not a frozen copy of its settings. An unset flag is omitted, not inferred
+from session history or later `/models` choices. See
 `docs/persistence.md` for how `--conversation-id` re-attaches the session
 file, and `--clone` starts a copy of it instead.
 
@@ -474,6 +575,10 @@ The initial user turn (`--prompt`) is resolved by precedence:
 1. `--prompt <text>`
 2. piped stdin read to EOF — only when stdin is **not** a terminal (something
    is piped in)
+
+In the TUI, an initial turn that is a [slash command](features.md) (e.g.
+`--prompt '/models'`) runs the command instead of being sent to the model.
+The CLI has no slash commands, so there the text always goes to the model.
 
 ## Environment variables
 

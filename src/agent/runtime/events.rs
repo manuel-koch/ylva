@@ -77,6 +77,11 @@ impl RunState {
                 // out-of-band consumers safely inspect the
                 // committed turn.
                 let _ = self.ui_tx.send(UiUpdate::StreamDone).await;
+                // A model switch staged before a queued steer takes effect
+                // before that steer reaches the transcript.
+                if !self.pending_steers.is_empty() {
+                    self.apply_pending_model_changes().await;
+                }
                 let steers_injected =
                     inject_pending_steers(&mut self.pending_steers, &mut self.context);
                 if steers_injected {

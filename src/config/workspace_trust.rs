@@ -428,21 +428,21 @@ mod tests {
         let environment = fixture.workspace.join(".ylva/profiles/work/.env");
         write(
             &config,
-            "default_engine = \"a\"\n[engines.a]\nmodel = \"m\"\nprovider = 'p'\n",
+            "default_engine = \"a\"\n[engines.a]\nmodel = \"m\"\nprovider_connection = 'p'\n",
         );
         write(&environment, "FIRST=1\nSECOND=\"two\"\n");
         trust_workspace(&fixture.home, &fixture.workspace, "work").expect("trust");
 
         write(
             &config,
-            "# comment\ndefault_engine = \"a\"\n\n[engines.a]\n  provider = \"p\"   # inline\n  model = \"m\"\n",
+            "# comment\ndefault_engine = \"a\"\n\n[engines.a]\n  provider_connection = \"p\"   # inline\n  model = \"m\"\n",
         );
         write(&environment, "# note\nSECOND=two\nFIRST=1\n");
         assert_eq!(status(&fixture), WorkspaceTrust::Trusted);
 
         write(
             &config,
-            "default_engine = \"a\"\n[engines.a]\nmodel = \"other\"\nprovider = \"p\"\n",
+            "default_engine = \"a\"\n[engines.a]\nmodel = \"other\"\nprovider_connection = \"p\"\n",
         );
         assert_eq!(status(&fixture), WorkspaceTrust::Changed);
     }

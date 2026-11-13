@@ -553,7 +553,7 @@ fn mouse_click_in_model_parameter_popup_selects_rows_and_steps_values_by_glyph()
     );
     assert_eq!(
         state.model_parameters_mut().unwrap().max_output_tokens,
-        Some(1024)
+        Some(1000)
     );
 }
 
@@ -567,7 +567,13 @@ fn mouse_click_on_model_parameter_apply_button_confirms_the_switch() {
         selected: 0,
     };
     state.open_model_parameters();
-    let apply_row = state.model_parameters_mut().unwrap().fields.len() - 1;
+    let apply_row = state
+        .model_parameters_mut()
+        .unwrap()
+        .fields
+        .iter()
+        .position(|field| *field == crate::tui_reducer_state::ParameterField::Apply)
+        .unwrap();
     state.layout.input_area.rect = ratatui::layout::Rect::new(0, 10, 40, 2);
     state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 5, 37, 4);
     state.layout.slash_overlay.parameter_buttons = vec![(
@@ -594,6 +600,32 @@ fn mouse_click_on_model_parameter_apply_button_confirms_the_switch() {
         ),
         "the parameter popup must close"
     );
+}
+
+#[test]
+fn mouse_click_beside_a_wrapped_button_focuses_the_entry_of_that_row() {
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: vec![model_choice("model-0")],
+        filter: String::new(),
+        selected: 0,
+    };
+    state.open_model_parameters();
+    state.layout.input_area.rect = ratatui::layout::Rect::new(0, 10, 40, 2);
+    state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 5, 37, 4);
+    // Rendered row 1 shows entry 0, as when an earlier row is a wrapped group.
+    state.layout.slash_overlay.parameter_row_entries = vec![1, 0];
+    let mouse = crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: 30,
+        row: 6,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+    assert_eq!(state.model_parameters_mut().unwrap().cursor, 0);
 }
 
 #[test]
@@ -1672,4 +1704,46 @@ fn clicking_go_to_agent_switches_to_the_prompt_owner() {
         state.active_view,
         ConversationView::Subagent { run_id: viewed, .. } if viewed == run_id
     ));
+}
+
+#[test]
+fn engine_save_page_footer_drag_copies_the_displayed_text() {
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        parameters: None,
+        choices: vec![super::keyboard::picker_choice("connection", "first", None)],
+        filter: String::new(),
+        selected: 0,
+    };
+    state.open_model_parameters();
+    state.open_engine_save_form();
+    state.layout.slash_overlay = crate::tui_reducer_state::SlashOverlayLayout {
+        content_area: ratatui::layout::Rect::new(1, 5, 37, 2),
+        detail_area: ratatui::layout::Rect::new(1, 10, 37, 2),
+        detail_rows: vec!["Saved to profile".to_string(), "second line".to_string()],
+        ..Default::default()
+    };
+
+    update(
+        &mut state,
+        overlay_mouse(MouseEventKind::Down(MouseButton::Left), 1, 10),
+        &empty_textarea(),
+    );
+    update(
+        &mut state,
+        overlay_mouse(MouseEventKind::Drag(MouseButton::Left), 5, 10),
+        &empty_textarea(),
+    );
+    let effects = update(
+        &mut state,
+        overlay_mouse(MouseEventKind::Up(MouseButton::Left), 5, 10),
+        &empty_textarea(),
+    );
+
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CopyToClipboard(text) if text == "Save")),
+        "save-page footer drag must copy the displayed text: {effects:?}"
+    );
 }

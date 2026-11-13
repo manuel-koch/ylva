@@ -618,3 +618,33 @@ fn rewrite_meta_created_at(path: &Path, created_at: &str) {
     lines[0] = serde_json::to_string(&event).expect("serialize");
     std::fs::write(path, format!("{}\n", lines.join("\n"))).expect("write");
 }
+
+#[tokio::test]
+async fn model_changes_are_placed_by_transcript_position_and_skip_repeated_starts() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let chats_root = temp.path().join("chats");
+    let store = Store::create(
+        &chats_root,
+        temp.path(),
+        Uuid::new_v4(),
+        "ollama",
+        "llama3",
+        None,
+    )
+    .expect("store created");
+    let parameters = crate::store::ModelParameters::default();
+    store.record_model_changed("ollama", "llama3", &parameters);
+    store.record_message(&user_message("first turn"));
+    store.record_model_changed("ollama", "llama3", &parameters);
+    store.record_message(&user_message("second turn"));
+    store.record_model_changed("openai", "gpt", &parameters);
+    store.flush().await;
+
+    let state = Store::read_session_state(store.path()).expect("state readable");
+    assert_eq!(state.model_changes.len(), 1);
+    assert_eq!(state.model_changes[0].transcript_index, 2);
+    assert_eq!(
+        state.model_changes[0].notice_text(),
+        "Switched to openai/gpt."
+    );
+}

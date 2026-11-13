@@ -480,4 +480,7 @@ pub enum Effect {
         model_id: String,
         favorite: bool,
     },
+    /// Persist the parameters draft as a named engine through the driver's
+    /// save owner; the parameter draft stays untouched until it completes.
+    SaveEngine(Box<super::EngineSaveJob>),
 }

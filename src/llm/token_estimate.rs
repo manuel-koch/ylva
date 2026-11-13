@@ -52,18 +52,21 @@ impl TokenEstimator {
     }
 }
 
-/// Abbreviate a token estimate using decimal units: `950`, `64.2K`, `1.2M`.
+/// Abbreviate a token estimate using decimal units, dropping a redundant
+/// `.0`: `950`, `64K`, `64.2K`, `1M`, `1.2M`.
 pub fn format_token_estimate(estimated_tokens: usize) -> String {
     const THOUSAND: f64 = 1_000.0;
     const MILLION: f64 = 1_000_000.0;
     let tokens = estimated_tokens as f64;
-    if tokens >= MILLION {
-        format!("{:.1}M", tokens / MILLION)
+    let (scaled, suffix) = if tokens >= MILLION {
+        (tokens / MILLION, "M")
     } else if tokens >= THOUSAND {
-        format!("{:.1}K", tokens / THOUSAND)
+        (tokens / THOUSAND, "K")
     } else {
-        estimated_tokens.to_string()
-    }
+        return estimated_tokens.to_string();
+    };
+    let number = format!("{scaled:.1}");
+    format!("{}{suffix}", number.strip_suffix(".0").unwrap_or(&number))
 }
 
 /// Keep the longest UTF-8 prefix of `text` whose local estimate does not
@@ -106,11 +109,11 @@ mod tests {
             (0, "0"),
             (950, "950"),
             (999, "999"),
-            (1_000, "1.0K"),
+            (1_000, "1K"),
             (1_234, "1.2K"),
             (64_200, "64.2K"),
-            (999_000, "999.0K"),
-            (1_000_000, "1.0M"),
+            (999_000, "999K"),
+            (1_000_000, "1M"),
             (1_234_567, "1.2M"),
         ] {
             assert_eq!(format_token_estimate(tokens), expected);

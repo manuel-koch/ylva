@@ -247,3 +247,49 @@ allowed_models = []
         assert!(stderr.contains(expected), "{name}: {stderr}");
     }
 }
+
+#[test]
+fn a_saved_engine_keeps_the_profile_intact_and_launches_by_name() {
+    use ylva::config::{EngineSaveChange, EngineSaveMode, EngineSaveRequest};
+
+    let fixture = Fixture::with_workspace_profile(&format!(
+        "default_engine = \"main\"\nutility_engine = \"main\"\n{TWO_CONNECTIONS}"
+    ));
+    let (_, writer) = fixture.load();
+    let mut writer = writer.expect("a workspace profile is writable");
+    let request = |name: &str, model: &str| EngineSaveRequest {
+        mode: EngineSaveMode::Create {
+            name: name.to_string(),
+            copy_from: None,
+        },
+        provider_connection: "alpha".to_string(),
+        model: EngineSaveChange::Set(model.to_string()),
+        reasoning: EngineSaveChange::Keep,
+        context_length: EngineSaveChange::Set(32000),
+        max_output_tokens: EngineSaveChange::Keep,
+    };
+
+    let outcome = writer
+        .save_engine(&request("fast", "a/two"))
+        .expect("save the engine");
+    assert_eq!(outcome.layer, FavoriteSourceLayer::Workspace);
+    assert!(
+        writer.save_engine(&request("fast", "a/two")).is_err(),
+        "creating over an existing name must be refused"
+    );
+
+    let written = fs::read_to_string(fixture.workspace_profile()).expect("read profile");
+    assert!(written.contains("# kept comment"), "{written}");
+    let (reloaded, _) = fixture.load();
+    let fast = &reloaded.engines["fast"];
+    assert_eq!(fast.model, "a/two");
+    assert_eq!(fast.context_length, Some(32000));
+    assert_eq!(reloaded.engines["main"].model, "a/one");
+    assert_eq!(favorites_of(&reloaded, "alpha"), vec!["a/one"]);
+
+    let trusted = fixture.run(&["trust"]);
+    assert!(trusted.status.success(), "{}", stderr_of(&trusted));
+    let launched = fixture.run(&["--no-tui", "--prompt", "hi", "--engine", "fast"]);
+    assert!(launched.status.success(), "{}", stderr_of(&launched));
+    assert!(stderr_of(&launched).contains("--engine 'fast'"));
+}

@@ -32,6 +32,7 @@ pub(crate) mod init_command;
 pub mod llm;
 pub mod logging;
 pub(crate) mod markdown;
+pub mod models_command;
 pub mod presenter;
 pub(crate) mod private_fs;
 pub mod profile_command;
@@ -131,6 +132,7 @@ pub use llm::{
     MockProvider, ModelInfo, ModelPricing, OllamaProvider, OpenAiCompatibleProvider,
     OpenRouterProvider, PriceCurrency, Provider, RequestCost, ToolSchema,
 };
+pub use models_command::{load_profile_for_listing, run_with_options, ModelsListOptions};
 pub use presenter::{TextareaContext, TuiEvent};
 pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext, SandboxRuleError};
 pub use slash_command::{

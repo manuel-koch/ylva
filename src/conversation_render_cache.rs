@@ -34,6 +34,7 @@ pub enum EntrySlot {
     ThinkingChrome,
     Response,
     Queued(usize),
+    PendingNotice(usize),
     Intro,
 }
 

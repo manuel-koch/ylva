@@ -114,6 +114,25 @@ const MODEL_PARAMETER_APPLY_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("esc", "back"),
     FooterHint::key("F1", "help"),
 ];
+const MODEL_PARAMETER_SAVE_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("ctrl-x f", "favorite"),
+    FooterHint::key("tab", "buttons"),
+    FooterHint::key("enter", "save…"),
+    FooterHint::key("esc", "back"),
+    FooterHint::key("F1", "help"),
+];
+const ENGINE_SAVE_FIELD_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("tab", "next"),
+    FooterHint::key("←/→", "mode"),
+    FooterHint::key("esc", "back"),
+    FooterHint::key("F1", "help"),
+];
+const ENGINE_SAVE_BUTTON_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("tab", "next"),
+    FooterHint::key("enter", "save"),
+    FooterHint::key("esc", "back"),
+    FooterHint::key("F1", "help"),
+];
 const HELP_POPUP_IDLE_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("esc", "close"),
     FooterHint::key("ctrl-c", "quit"),
@@ -208,6 +227,15 @@ fn base_footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'sta
             parameters: Some(edit),
             ..
         } => match edit.fields.get(edit.cursor) {
+            _ if edit
+                .save_form
+                .as_ref()
+                .is_some_and(|form| form.focus.is_button()) =>
+            {
+                ENGINE_SAVE_BUTTON_FOOTER_HINTS
+            }
+            _ if edit.save_form.is_some() => ENGINE_SAVE_FIELD_FOOTER_HINTS,
+            Some(ParameterField::Save) => MODEL_PARAMETER_SAVE_FOOTER_HINTS,
             Some(ParameterField::ResetToConfigured) => MODEL_PARAMETER_RESET_FOOTER_HINTS,
             Some(ParameterField::Apply) => MODEL_PARAMETER_APPLY_FOOTER_HINTS,
             _ => MODEL_PARAMETER_FOOTER_HINTS,

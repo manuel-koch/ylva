@@ -20,7 +20,7 @@ use super::{
 };
 use crate::agent::subagent_manager::STATUS_FAILURE;
 use crate::agent::{AssistantStatus, Message, UserMessageKind};
-use crate::store::SubagentRunRecord;
+use crate::store::{ModelChangeRecord, SubagentRunRecord};
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
@@ -28,16 +28,19 @@ use uuid::Uuid;
 /// Project persisted domain messages into the same terminal-free chat model
 /// used by live presenter updates.
 pub fn project_messages(messages: &[Message]) -> Vec<ChatEntry> {
-    project_messages_with_subagent_runs(messages, &[], None)
+    project_messages_with_subagent_runs(messages, &[], None, &[])
 }
 
 /// Project persisted messages into chat entries, inserting the compaction
 /// marker at `compaction_boundary` — the transcript index where the verbatim
-/// tail begins. `None` keeps the plain transcript view.
+/// tail begins. `None` keeps the plain transcript view. Each of
+/// `model_changes` becomes a notice before the message it preceded, so a
+/// resumed transcript orders model switches like the live one.
 pub(in crate::tui_reducer_state) fn project_messages_with_subagent_runs(
     messages: &[Message],
     subagent_runs: &[SubagentRunRecord],
     compaction_boundary: Option<usize>,
+    model_changes: &[ModelChangeRecord],
 ) -> Vec<ChatEntry> {
     let tool_calls = messages
         .iter()
@@ -58,6 +61,16 @@ pub(in crate::tui_reducer_state) fn project_messages_with_subagent_runs(
         })
         .collect::<HashMap<_, _>>();
     let mut entries = Vec::new();
+    let mut pending_model_changes = model_changes.iter().peekable();
+    let mut push_model_changes_through = |entries: &mut Vec<ChatEntry>, message_index: usize| {
+        while let Some(change) =
+            pending_model_changes.next_if(|change| change.transcript_index <= message_index)
+        {
+            entries.push(ChatEntry::Notice {
+                text: change.notice_text(),
+            });
+        }
+    };
 
     for (message_index, message) in messages.iter().enumerate() {
         if Some(message_index) == compaction_boundary {
@@ -65,6 +78,7 @@ pub(in crate::tui_reducer_state) fn project_messages_with_subagent_runs(
                 summarized_messages: message_index,
             });
         }
+        push_model_changes_through(&mut entries, message_index);
         match message {
             Message::User {
                 content,
@@ -298,6 +312,7 @@ pub(in crate::tui_reducer_state) fn project_messages_with_subagent_runs(
         replace_or_append_tool_bubble(&mut entries, subagent_run.call_id, &name, subagent_state);
     }
 
+    push_model_changes_through(&mut entries, usize::MAX);
     entries
 }
 
@@ -351,10 +366,15 @@ impl AppState {
         messages: &[Message],
         subagent_runs: &[SubagentRunRecord],
         compaction_boundary: Option<usize>,
+        model_changes: &[ModelChangeRecord],
     ) {
         self.invalidate_render_cache();
-        self.chat_entries =
-            project_messages_with_subagent_runs(messages, subagent_runs, compaction_boundary);
+        self.chat_entries = project_messages_with_subagent_runs(
+            messages,
+            subagent_runs,
+            compaction_boundary,
+            model_changes,
+        );
         self.input_history = messages
             .iter()
             .filter_map(|message| match message {
@@ -399,12 +419,17 @@ impl AppState {
         run_id: Uuid,
         messages: &[Message],
         compaction_boundary: Option<usize>,
+        model_changes: &[ModelChangeRecord],
     ) {
         self.invalidate_transcript_layout(Some(run_id));
         if let Some(conversation) = self.subagent_conversations.get_mut(&run_id) {
             if conversation.needs_lazy_load {
-                conversation.messages =
-                    project_messages_with_subagent_runs(messages, &[], compaction_boundary);
+                conversation.messages = project_messages_with_subagent_runs(
+                    messages,
+                    &[],
+                    compaction_boundary,
+                    model_changes,
+                );
                 conversation.needs_lazy_load = false;
             }
         }

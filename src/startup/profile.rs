@@ -29,7 +29,7 @@ use crate::{Cli, ProfileConfig};
 /// substituting the in-code default would hide a real typo/misconfiguration.
 /// Only the implicit default profile (no `--profile` flag at all) tolerates a
 /// missing file, so Ylva still runs out of the box without ever writing one.
-pub(super) fn load_profile(
+pub(crate) fn load_profile(
     explicit_profile_name: Option<&str>,
     environment: &HashMap<String, String>,
     workspace_root: Option<&Path>,
@@ -72,7 +72,7 @@ pub(super) fn load_profile(
 /// Startup refuses to continue when the workspace ships configuration that was
 /// never approved with `ylva trust`, or changed since, rather than silently
 /// running with different settings than the workspace intends.
-pub(super) fn trusted_profile_workspace_root(
+pub(crate) fn trusted_profile_workspace_root(
     explicit_profile_name: Option<&str>,
     workspace_root: Option<&Path>,
 ) -> Result<Option<PathBuf>, String> {
@@ -141,7 +141,7 @@ pub(super) fn selected_profile_path(
 /// Missing `.env` files are normal; malformed or unusable files are startup
 /// errors. Process environment values take precedence over profile-file
 /// values.
-pub(super) fn load_selected_profile_environment(
+pub(crate) fn load_selected_profile_environment(
     explicit_profile_name: Option<&str>,
     workspace_root: Option<&Path>,
 ) -> Result<HashMap<String, String>, String> {
@@ -170,10 +170,53 @@ pub(super) fn apply_cli_profile_overrides(cli: &Cli, profile: &mut ProfileConfig
     }
 }
 
+/// Select an explicit named engine for the root agent in memory only.
+/// Other agent types and fixed utility/compaction configuration remain unchanged.
+pub(super) fn apply_cli_engine_selection(
+    profile: &mut ProfileConfig,
+    engine_name: Option<&str>,
+    root_agent_type: &str,
+) -> Result<(), String> {
+    let Some(engine_name) = engine_name else {
+        return Ok(());
+    };
+    if engine_name.trim().is_empty() || !profile.engines.contains_key(engine_name) {
+        return Err(format!("unknown engine '{engine_name}' selected by --engine; no [engines.{engine_name}] table exists in the selected profile"));
+    }
+    let agent = profile
+        .agents
+        .get_mut(root_agent_type)
+        .ok_or_else(|| format!("unknown root agent type '{root_agent_type}'"))?;
+    agent.engine = Some(engine_name.to_string());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn engine_selection_changes_only_the_selected_agent_mapping() {
+        let mut profile = ProfileConfig::default();
+        let mut selected: crate::EngineConfig =
+            toml::from_str("provider_connection = 'mock'").unwrap();
+        selected.model = "new-model".to_string();
+        selected.context_length = Some(32000);
+        profile.engines.insert("fast".to_string(), selected.clone());
+        let agent = profile.agents["default"].clone();
+        profile.agents.insert("specialist".to_string(), agent);
+        profile.utility_engine = Some("fixed".to_string());
+        apply_cli_engine_selection(&mut profile, Some("fast"), "specialist").unwrap();
+        assert_eq!(profile.engine_name_for("specialist"), "fast");
+        assert_eq!(profile.engine_name_for("default"), "default");
+        assert_eq!(profile.utility_engine_name(), "fixed");
+        assert_eq!(profile.engines["fast"].model, selected.model);
+        assert_eq!(profile.engines["fast"].context_length, Some(32000));
+        assert_eq!(profile.default_engine, "default");
+        assert!(apply_cli_engine_selection(&mut profile, Some("missing"), "specialist").is_err());
+        assert!(apply_cli_engine_selection(&mut profile, None, "specialist").is_ok());
+    }
 
     #[test]
     fn cli_max_concurrent_subagents_overrides_profile_and_zero_means_unlimited() {
@@ -181,16 +224,11 @@ mod tests {
             max_concurrent_subagents: Some(2),
             ..ProfileConfig::default()
         };
-        let cli = Cli::try_parse_from(["ylva", "--max-concurrent-subagents", "7"])
-            .expect("positive override parses");
-
+        let cli = Cli::try_parse_from(["ylva", "--max-concurrent-subagents", "7"]).unwrap();
         apply_cli_profile_overrides(&cli, &mut profile);
-
         assert_eq!(profile.max_concurrent_subagents_limit(), Some(7));
-
-        let unlimited_cli = Cli::try_parse_from(["ylva", "--max-concurrent-subagents", "0"])
-            .expect("zero override parses");
-        apply_cli_profile_overrides(&unlimited_cli, &mut profile);
+        let cli = Cli::try_parse_from(["ylva", "--max-concurrent-subagents", "0"]).unwrap();
+        apply_cli_profile_overrides(&cli, &mut profile);
         assert_eq!(profile.max_concurrent_subagents_limit(), None);
     }
 }

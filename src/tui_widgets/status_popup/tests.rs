@@ -308,7 +308,7 @@ fn history_lists_model_changes_and_compactions_in_order() {
         .find(|line| line.contains("mock/b"))
         .expect("second model row");
     assert!(
-        second_model.contains("32.0K window") || second_model.contains("32K window"),
+        second_model.contains("32K window") || second_model.contains("32K window"),
         "{second_model}"
     );
     assert!(

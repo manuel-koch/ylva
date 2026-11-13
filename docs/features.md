@@ -119,7 +119,9 @@ blank line, while each call's completion status remains adjacent to its
 invocation.
 
 Initial user turn resolution: `--prompt <text>`, else piped stdin read to EOF
-(only when stdin is not a terminal) — e.g. `echo '…' | ylva`.
+(only when stdin is not a terminal) — e.g. `echo '…' | ylva`. In the TUI, an
+initial turn that is a slash command (e.g. `--prompt '/models'`) runs the
+command rather than being sent to the model.
 
 Tool approval is host-driven: `read`/`glob` are auto-approved when the
 sandbox abstains; `write` and `edit` require explicit user approval by
@@ -507,6 +509,14 @@ model accepts or honors the effort. Explicitly unsupported or invalid model info
 prevents applying an explicit effort. Named-engine shortcuts remain available during a
 catalog outage. See [provider notes](./provider-notes.md#edenai) for provider limitations.
 
+**CLI engine selection and model listing.**
+
+`--engine <name>` selects an explicit engine for one chat run; see
+[engine selection](cli-options.md#engine-selection).
+
+The `ylva models` command lists provider catalogs without starting a session; see the
+[listing contract](cli-options.md#models-command).
+
 When the provider identifies a default among its choices, the picker marks that choice,
 for example `medium (default)`. Selecting it uses the provider default rather than an
 explicit override. Otherwise the picker has a separate `default` entry, with the known
@@ -518,18 +528,49 @@ EdenAI's unverified choices remain separately labelled. Each picker row shows th
 effort or default, independently of reasoning capability. `◂`/`▸` mark the directions that
 can still move. The footer shows the controls for the open overlay.
 
-The popup ends with an `[ ✓ Apply ]` button; `enter` on it applies the selected model and
-parameter edits, while `enter` on a value row does nothing. A named-engine shortcut applies
-exactly the settings shown in its row: model, effort and overrides; it restores the
-configured model if a raw pick moved the engine away. Named rows of an engine that
-deviates from its configuration are labelled `(modified)`. The popup of a named row has an
-additional `[ Reset ]` button before Apply: `enter` on it reloads the draft from the
-engine's configured baseline (without confirming); `esc` discards the edits. `tab` /
-`shift-tab` cycle value rows → Reset → Apply; `↑`/`↓` move only between the value rows
-(`↑` from a button returns to them). Reset is shown disabled and skipped while the draft
-already equals the configured baseline. Raw catalog rows have no Reset button.
-Previewing or cancelling does not change settings. Effort edits are session-only,
-are not saved to the profile, and are not restored when resuming a session.
+The popup ends with an `[ ✓ Apply ]` button; `enter` on it applies the selected model and parameter
+edits, while `enter` on a value row does nothing. A named-engine shortcut applies exactly the
+settings shown in its row: model, effort and overrides; it restores the configured model if a raw
+pick moved the engine away. Named rows of an engine that deviates from its configuration are
+labelled `(modified)`. The popup of a named row has an additional `[ Reset ]` button after
+`[ Save… ]`: `enter` on it reloads the draft from the engine's configured baseline (without
+confirming); `esc` discards the edits. `tab` / `shift-tab` cycle value rows → `[ ✓ Apply ]` →
+`[ Save… ]` → `[ Reset ]`; `↑`/`↓` move only between the value rows (`↑` from a button returns to
+them). `[ Reset ]` is shown disabled and skipped while the draft already equals the configured
+baseline. Raw catalog rows have no `[ Reset ]` button. Previewing or cancelling does not change
+settings. Effort edits applied with `[ ✓ Apply ]` are session-only and are not restored when
+resuming a session.
+
+After `[ ✓ Apply ]`, `[ Save… ]` opens the *save page*, which persists the draft as a named engine
+(`[engines.<name>]`) in the profile file Ylva loaded at startup; there is no destination choice.
+Rows of an explicit engine offer *Create new engine* (copies the origin's table without credentials)
+or *Update engine*; raw catalog rows offer creation only, with the model as the suggested name. New
+names must be slugs (letters, digits, `-`, `_`, `.`, `/`) and may not collide with any engine in
+use, explicit or implicit. The page previews the engine table that will be written (an update shows
+the changed lines with their old values), the destination file, and any re-trust guidance, as
+read-only text in the info area below the controls (next to the compaction and model details). The
+controls always get their rows first; the info area takes the remaining height (at least three rows)
+and scrolls with the mouse wheel (with a scrollbar) when it is longer. In the model list the info
+area scrolls the same way. Only parameters you changed are written: untouched context/output limits
+stay unset and a provider-default effort stays default. The engine refers to a
+`[provider_connections.*]` table of the same file and never copies endpoints or credentials; without
+such a table, or without a profile file, the page shows setup guidance instead of saving. Focus
+starts on the name; `enter` only commits on a focused `[ Save ]` or `[ Save & apply ]` button,
+`←`/`→` switch the mode (on the name field they move the caret). The save buttons are disabled,
+skipped by tab and explained by a `✗` line while the new name is empty, invalid, reserved
+(`default`) or already in use. `esc` returns to the parameters page with the draft intact (a second
+`esc` discards it). Saving a new engine keeps the active engine unchanged and makes it available in
+the picker and `/models` of the running session; `[ Save & apply ]` also activates it and closes the
+picker. A workspace profile that changed needs re-trusting before the next launch (the notice says
+how; trust is never modified). Updating the engine that is currently active takes effect in the
+running session right away (the next request uses the saved settings, like a `/models` switch);
+updating any other engine applies to new sessions and the next launch. Edits to the file made
+outside Ylva after startup stop further saves until Ylva is restarted. Action buttons share a row
+while they fit the popup width and wrap onto further rows when they do not.
+
+A "Switched to…" notice for a `/models` switch made while a turn is running waits below the live
+response and joins the transcript when the next request starts, where the switch took effect. A
+resumed session shows the same notices in the same order.
 
 An explicit EdenAI profile effort or a deliberately selected unverified override is enough
 to opt in. No extra switch or confirmation dialog is required. Invalid choices fail without
@@ -1393,62 +1434,51 @@ it (e.g. `/foo`) remains ordinary chat text when no suggestion is selected
 and is sent to the model unchanged, as is any `/` that is not the first
 character of the input.
 
-The `/models` picker displays provider-reported context lengths as
-`context: <count>` labels using compact decimal formatting (`2048` appears as
-`context: 2.0K`; `131_072` appears as `context: 131.1K`; `1_048_576` appears as
-`context: 1.0M`). These are provider-reported context lengths, not byte sizes. Rows of models that
-advertise a non-text input modality append a bracketed marker with one
-upper-case letter per modality — `[I]` for image, `[F]` for file, `[IF]` for
-both; known text-only models and models whose modalities the provider did
-not advertise get no marker.
-Submitting `/models` (with or without an initial argument, e.g.
-`/models deepseek`) fetches the full catalog once and does *not* clear the
-input — the draft stays as `/models <filter>` so the picker can be
-narrowed by continuing to type. Every keystroke re-derives the filter from
-the draft and re-applies it to the already-fetched engine names and
-`provider_connection/model` identities without another provider round-trip.
-A multi-word filter (e.g.
-`/models deepseek v3`) matches when every word appears somewhere in the
-engine name, provider connection, or model ID, case-insensitively and in any
-order — not the joined phrase as one substring. Engine names match only their
-named-engine shortcuts, not raw catalog rows for the same model. Display
-metadata such as reasoning effort and context length is not searched.
-A filter that matches nothing keeps the panel open with a
-"Nothing matched your model filter." message rather than vanishing, so the
-user can keep editing it. The detail area previews the compaction engine used
-by the highlighted choice without duplicating the conversation engine/model
-shown in the TUI footer. It shrinks away when the terminal cannot fit it,
-leaving the picker controls usable. The picker's list, including the detail
-area, is capped at two thirds of the space above the input; longer lists scroll.
-The picker chooses its row layout from the visible models. While every visible
-single-line label fits the panel, each model takes one row. As soon as one does
-not fit, every visible model takes two rows: an identity row
-(`engine → provider/model`, elided to fit) and an indented details row carrying
-the context, reasoning and modality markers. Clicking either row highlights that
-model.
-The model currently serving the conversation is shown by its identity text in
-bold green instead of a text suffix.
-`enter` on a highlighted model opens its parameter popup instead of switching.
-The popup lists one row per parameter, each a label followed by its value: the
-effective context length and, when selectable efforts or EdenAI unverified overrides
-are available, the reasoning effort. `↑`/`↓` move between the rows; `←`/`→` adjust
-the highlighted value. The context length moves by one eighth of the current window,
-rounded down to the fixed token-step multiple, and never exceeds the catalog's window
-when one is reported. A `◂` before a value means it can move smaller and a `▸`
-after it means it can move greater; a missing arrow marks a bound (for example
-the minimum token-step floor or the advertised window). With the mouse, a click selects a
-row, a click on `◂`/`▸` steps the value, and the buttons can be clicked; the item
-under the pointer is highlighted. The step unit and floor remain 32,768 tokens;
-decimal display formatting does not change the values.
-Reasoning effort moves through the
-advertised efforts in order, or separately labelled EdenAI gateway overrides, with
-a provider-default slot and without wrapping. When the advertised default is `medium`,
-that effort cannot be chosen on its own; its slot selects the provider default.
-Its edit is session-only and is not written to the profile. When a named engine
-keeps a profile effort but the provider catalog does not list its model, the
-popup offers only the provider default. In the popup, `enter` on the focused `✓ Apply`
-button confirms the model and parameters and switches; `esc` returns to the model
-list and discards the parameter edits. `esc` in the list cancels and clears the input.
+The `/models` picker displays provider-reported context lengths as `context: <count>` labels using
+compact decimal formatting: `K` is 1,000 and `M` is 1,000,000, rounded to one decimal without a
+trailing `.0` (`128000` appears as `context: 128K`; `131072` as `context: 131.1K`; `1000000` as
+`context: 1M`). These are provider-reported context lengths, not byte sizes.
+Rows of models that advertise a non-text input modality append a bracketed marker with one
+upper-case letter per modality — `[I]` for image, `[F]` for file, `[IF]` for both; known text-only
+models and models whose modalities the provider did not advertise get no marker. Submitting
+`/models` (with or without an initial argument, e.g. `/models deepseek`) fetches the full catalog
+once and does *not* clear the input — the draft stays as `/models <filter>` so the picker can be
+narrowed by continuing to type. Every keystroke re-derives the filter from the draft and re-applies
+it to the already-fetched engine names and `provider_connection/model` identities without another
+provider round-trip. A multi-word filter (e.g. `/models deepseek v3`) matches when every word
+appears somewhere in the engine name, provider connection, or model ID, case-insensitively and in
+any order — not the joined phrase as one substring. Engine names match only their named-engine
+shortcuts, not raw catalog rows for the same model. Display metadata such as reasoning effort and
+context length is not searched. A filter that matches nothing keeps the panel open with a "Nothing
+matched your model filter." message rather than vanishing, so the user can keep editing it. The info
+area below the list shows the highlighted choice in full (engine, provider connection, model and all
+its parameters), so it stays identifiable even when the list row is cut off on a narrow terminal. It
+also previews the compaction engine used by the highlighted choice. The picker uses the full space
+above the input; longer lists scroll. The picker chooses its row layout from the visible models.
+While every visible single-line label fits the panel, each model takes one row. As soon as one does
+not fit, every visible model takes two rows: an identity row (`engine → provider/model`, elided to
+fit) and an indented details row carrying the context, reasoning and modality markers. Clicking
+either row highlights that model. The model currently serving the conversation is shown by its
+identity text in bold green instead of a text suffix. `enter` on a highlighted model opens its
+parameter popup instead of switching. The popup lists one row per parameter, each a label followed
+by its value: the effective context length and, when selectable efforts or EdenAI unverified
+overrides are available, the reasoning effort. `↑`/`↓` move between the rows; `←`/`→` adjust the
+highlighted value. The context length and the output limit move along one base-10 token ladder: 1K,
+2K, 4K, 8K, 16K, 32K, then 32K steps up to 256K (64K, 96K, 128K, …) and 64K steps above that. An
+off-ladder value first lands on the next ladder value in that direction. Neither exceeds the
+catalog's limit when one is reported (that limit becomes the last step); without a catalog limit the
+output limit stops at 256K. Moving the output limit smaller from 1K returns to unlimited. A `◂`
+before a value means it can move smaller and a `▸` after it means it can move greater; a missing
+arrow marks a bound (for example the 1K floor or the advertised window). With the mouse, a click
+selects a row, a click on `◂`/`▸` steps the value, and the buttons can be clicked; the item under
+the pointer is highlighted. Reasoning effort moves through the advertised efforts in order, or
+separately labelled EdenAI gateway overrides, with a provider-default slot and without wrapping.
+When the advertised default is `medium`, that effort cannot be chosen on its own; its slot selects
+the provider default. Its edit is session-only and is not written to the profile. When a named
+engine keeps a profile effort but the provider catalog does not list its model, the popup offers
+only the provider default. In the popup, `enter` on the focused `[ ✓ Apply ]` button confirms the
+model and parameters and switches; `esc` returns to the model list and discards the parameter edits.
+`esc` in the list cancels and clears the input.
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |

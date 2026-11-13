@@ -230,6 +230,7 @@ fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
             current_cancel: None,
             current_tool_cancel: None,
             pending_steers: VecDeque::new(),
+            pending_model_changes: VecDeque::new(),
             pending_tools: VecDeque::new(),
             iterations: 0,
             clarify_started_at: None,
@@ -244,6 +245,42 @@ fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
         },
         ui_rx,
     )
+}
+
+#[test]
+fn a_model_change_is_applied_at_once_when_idle_and_deferred_while_busy() {
+    crate::test_support::run_locked(async {
+        let (mut state, mut updates) = run_state();
+        let command = || AgentCommand::RecordModelChanged {
+            parameters: Default::default(),
+            provider_connection: "local".to_string(),
+            model: "small".to_string(),
+        };
+        let applied_count = |updates: &mut mpsc::Receiver<UiUpdate>| {
+            let mut count = 0;
+            while let Ok(update) = updates.try_recv() {
+                count += usize::from(matches!(update, UiUpdate::ModelChangeApplied));
+            }
+            count
+        };
+        state.handle_command(Some(command())).await;
+        assert!(state.pending_model_changes.is_empty());
+        assert_eq!(applied_count(&mut updates), 1);
+
+        state.mode = AgentMode::Streaming;
+        state.handle_command(Some(command())).await;
+        assert_eq!(state.pending_model_changes.len(), 1);
+        assert_eq!(
+            applied_count(&mut updates),
+            0,
+            "a busy turn keeps it pending"
+        );
+
+        state.mode = AgentMode::Idle;
+        state.apply_pending_model_changes().await;
+        assert!(state.pending_model_changes.is_empty());
+        assert_eq!(applied_count(&mut updates), 1);
+    });
 }
 
 #[test]

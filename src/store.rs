@@ -65,7 +65,7 @@ pub use event::{
     SubagentRunRecord, EVENT_VERSION, SCHEMA_VERSION, TITLE_MAX_CHARS,
 };
 pub use maintenance::{MaintenanceAction, MaintenanceReport, SessionSelection};
-pub use replay::{SessionState, SessionSummary};
+pub use replay::{ModelChangeRecord, SessionState, SessionSummary};
 pub use subagent::SubagentSessionHeader;
 
 use session_file::{

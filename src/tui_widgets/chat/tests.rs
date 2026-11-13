@@ -55,3 +55,38 @@ fn scrollbar_thumb_never_overflows_track() {
         );
     }
 }
+
+#[test]
+fn scrollbar_keeps_arrows_at_two_rows() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut terminal = Terminal::new(TestBackend::new(1, 2)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            render_chat_scrollbar(frame, frame.area(), 0, 10, 12, 2, Color::Gray);
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(0, 0)].symbol(), "↑");
+    assert_eq!(buffer[(0, 1)].symbol(), "↓");
+}
+
+#[test]
+fn pending_model_notice_renders_before_queued_steer() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut state = TuiState::new();
+    state.queued_steer_texts = vec!["queued message".to_string()];
+    state.pending_model_notices = vec!["model changed notice".to_string()];
+    let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("terminal");
+    terminal
+        .draw(|frame| draw_chat(frame, frame.area(), &mut state, &ToolRegistry::new()))
+        .expect("draw");
+    let lines = &state.conversation.chat_rendered_lines;
+    let position = |needle: &str| lines.iter().position(|line| line.contains(needle));
+    let notice_row = position("model changed notice").expect("notice rendered");
+    let steer_row = position("queued message").expect("steer rendered");
+    assert!(notice_row < steer_row, "{lines:?}");
+}

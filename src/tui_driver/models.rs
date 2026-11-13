@@ -784,6 +784,37 @@ pub(super) async fn switch_model(
     engine: &Arc<dyn Engine>,
     cmd_tx: &mpsc::Sender<AgentCommand>,
 ) {
+    switch_model_recording(state, selection, engine, cmd_tx, None).await;
+}
+
+/// What model history compares to decide whether a switch changed anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ModelSnapshot {
+    provider_connection: String,
+    model: String,
+    parameters: crate::store::ModelParameters,
+}
+
+impl ModelSnapshot {
+    pub(super) fn of(engine: &dyn Engine) -> Self {
+        let config = engine.config();
+        Self {
+            provider_connection: config.provider_connection,
+            model: config.model,
+            parameters: crate::store::ModelParameters::from_engine(engine),
+        }
+    }
+}
+
+/// [`switch_model`] that, given the `unchanged_from` state, records model
+/// history only if the connection, model or parameters differ from it.
+pub(super) async fn switch_model_recording(
+    state: &mut AppState,
+    selection: &ModelSelection,
+    engine: &Arc<dyn Engine>,
+    cmd_tx: &mpsc::Sender<AgentCommand>,
+    unchanged_from: Option<ModelSnapshot>,
+) {
     let preview = engine.preview_model_selection(selection);
     match engine.select_model(selection) {
         Ok(()) => {
@@ -809,11 +840,25 @@ pub(super) async fn switch_model(
                 }
             };
             let mut confirmation_parts = vec![confirmation];
+            // Queue the engine's request-time uncertainty warning now, so it
+            // reads as part of the switch rather than landing below the first
+            // message sent with the new model. Delivery is deduplicated.
+            let request_notices = if engine.prepare_request_notices().is_ok() {
+                engine.take_pending_notices()
+            } else {
+                Vec::new()
+            };
+            let has_request_notices = !request_notices.is_empty();
+            confirmation_parts.extend(request_notices);
             if let Some(effort) = engine.reasoning_effort() {
                 if engine.effective_reasoning_provenance()
                     == crate::llm::ReasoningEffortProvenance::Unverified
                 {
-                    confirmation_parts.push(format!("Reasoning effort: {effort} (unverified)."));
+                    // The engine's own warning already states it in full.
+                    if !has_request_notices {
+                        confirmation_parts
+                            .push(format!("Reasoning effort: {effort} (unverified)."));
+                    }
                 } else if matches!(selection, ModelSelection::NamedEngine { .. })
                     || matches!(selection, ModelSelection::ProviderModel(option) if option.model.reasoning_efforts.is_none())
                 {
@@ -844,7 +889,17 @@ pub(super) async fn switch_model(
             // mid-conversation `role:"system"` message is rejected by
             // some providers/chat templates and the switch is already
             // durably recorded below via `RecordModelChanged`.
-            state.push_notice(confirmation_parts.join(" "));
+            let snapshot = ModelSnapshot::of(engine.as_ref());
+            let records_change = unchanged_from.as_ref() != Some(&snapshot);
+            let confirmation = confirmation_parts.join(" ");
+            // The agent applies a switch at its next request, so while a turn
+            // is running the notice waits for that echo instead of landing
+            // above the reply it did not affect.
+            if records_change && !matches!(state.mode, crate::tui_reducer_state::TuiMode::Idle) {
+                state.stage_model_notice(confirmation);
+            } else {
+                state.push_notice(confirmation);
+            }
             if let ModelSelection::NamedEngine { engine_name, .. } = selection {
                 let warnings = active_engine_warnings(engine).await;
                 if !warnings.is_empty() {
@@ -857,13 +912,15 @@ pub(super) async fn switch_model(
             // Read both values from the live engine because a
             // selection may have changed the active provider as well
             // as its model.
-            let _ = cmd_tx
-                .send(AgentCommand::RecordModelChanged {
-                    provider_connection: config.provider_connection,
-                    model: config.model,
-                    parameters: crate::store::ModelParameters::from_engine(engine.as_ref()),
-                })
-                .await;
+            if records_change {
+                let _ = cmd_tx
+                    .send(AgentCommand::RecordModelChanged {
+                        provider_connection: snapshot.provider_connection,
+                        model: snapshot.model,
+                        parameters: snapshot.parameters,
+                    })
+                    .await;
+            }
         }
         Err(error) => {
             state.push_notice(format!(

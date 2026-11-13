@@ -471,7 +471,7 @@ fn subagent_context_usage_update_projects_for_active_subagent_without_replacing_
     );
     assert_eq!(
         crate::tui_reducer_state::format_context_usage(4_000, 32_000),
-        "4.0K (13%)"
+        "4K (13%)"
     );
 }
 

@@ -45,6 +45,11 @@ fn main() {
         }
     };
 
+    if cli.engine.is_some() && cli.command.is_some() {
+        eprintln!("error: --engine is only valid for chat runs, not subcommands");
+        exit_with(ExitCode::UsageError);
+    }
+
     if let Some(CliCommand::Init { workspace, force }) = &cli.command {
         match run_init_command(*workspace, *force) {
             Ok(summary) => println!("{summary}"),
@@ -154,6 +159,43 @@ fn main() {
                 drop(log_guard.take());
                 exit_with(ExitCode::UsageError);
             }
+        }
+    }
+
+    if let Some(CliCommand::Models {
+        all,
+        only_favorites,
+        only_engines,
+    }) = &cli.command
+    {
+        let options = ylva::models_command::ModelsListOptions {
+            color: cli_color_enabled(cli_color_mode),
+            include_disallowed: *all,
+            only_favorites: *only_favorites,
+            only_engines: *only_engines,
+        };
+        // The profile load mirrors `startup::run`: explicit `--profile` is a
+        // hard error when missing, the implicit default falls back to the
+        // in-code default when no file exists.
+        let result = ylva::models_command::load_profile_for_listing(
+            cli.profile.as_deref(),
+            cli.strict_config,
+        )
+        .and_then(|profile| {
+            ylva::models_command::run_with_options(
+                &profile,
+                options,
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+            )
+        });
+        match result {
+            Ok(0) => return,
+            Ok(code) => {
+                drop(log_guard.take());
+                std::process::exit(i32::from(code));
+            }
+            Err(message) => exit_with_error(&mut log_guard, message),
         }
     }
 

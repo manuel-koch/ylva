@@ -37,6 +37,7 @@ pub(crate) mod workspace_trust;
 pub use agent::AgentConfig;
 pub use agent_type_file::AgentTypeDefinition;
 pub use favorite_models::{
+    validate_engine_name, EngineSaveChange, EngineSaveMode, EngineSaveRequest,
     FavoriteModelsWriter, FavoriteSaveError, FavoriteSaveOutcome, FavoriteSourceLayer,
 };
 pub use profile::{

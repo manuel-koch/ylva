@@ -818,6 +818,7 @@ fn run_subagent_sends_unstructured_finish_result_when_finish_never_called() {
         let (subagent_loop, subagent_ui_rx) = AgentFactory::build(
             &SkillRuntime::default(),
             &engines,
+            false,
             &[],
             &HashSet::new(),
             &profile,
@@ -912,6 +913,7 @@ fn run_subagent_reports_stream_error_as_failure_instead_of_unstructured_result()
         let (subagent_loop, subagent_ui_rx) = AgentFactory::build(
             &SkillRuntime::default(),
             &engines,
+            false,
             &[],
             &HashSet::new(),
             &profile,

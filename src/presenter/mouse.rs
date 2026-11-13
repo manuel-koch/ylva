@@ -179,6 +179,19 @@ fn slash_overlay_drag_region(state: &AppState, start: (u16, u16)) -> ratatui::la
     }
 }
 
+/// Begin a text drag when a press lands on selectable overlay text (list row
+/// or footer text); otherwise the press is ignored.
+fn start_slash_overlay_text_drag(state: &mut AppState, column: u16, row: u16) -> Vec<Effect> {
+    let layout = &state.layout.slash_overlay;
+    let on_text = layout.row_at(column, row).is_some()
+        || (is_in_overlay_detail_area(state, column, row) && !layout.detail_rows.is_empty());
+    if on_text {
+        state.slash_overlay_drag_start = Some((column, row));
+        state.slash_overlay_drag_end = Some((column, row));
+    }
+    vec![]
+}
+
 /// Clamp a drag position to the region the drag started in.
 fn clamp_to_region(area: ratatui::layout::Rect, (column, row): (u16, u16)) -> (u16, u16) {
     let last_row = area.y.saturating_add(area.height.saturating_sub(1));
@@ -245,6 +258,17 @@ pub(super) fn route_mouse(
                 state.agents_popup_scroll(if scroll_up { -1 } else { 1 });
             } else if matches!(state.focus, Focus::StatusPopup) {
                 state.status_popup_scroll(if scroll_up { -1 } else { 1 });
+            } else if matches!(state.slash_overlay, SlashOverlay::ModelPicker { .. })
+                && is_in_overlay_detail_area(state, column, row)
+                && state.layout.slash_overlay.detail_total_rows
+                    > state.layout.slash_overlay.detail_rows.len()
+            {
+                let layout = &mut state.layout.slash_overlay;
+                layout.detail_first_visible_row = if scroll_up {
+                    layout.detail_first_visible_row.saturating_sub(1)
+                } else {
+                    layout.detail_first_visible_row + 1
+                };
             } else if matches!(
                 state.slash_overlay,
                 SlashOverlay::ModelPicker { .. } | SlashOverlay::SessionPicker(_)
@@ -385,6 +409,24 @@ pub(super) fn route_mouse(
                         ..
                     }
                 ) {
+                    let save_page_open = state
+                        .model_parameters_mut()
+                        .is_some_and(|edit| edit.save_form.is_some());
+                    if save_page_open {
+                        if let Some(focus) = state
+                            .layout
+                            .slash_overlay
+                            .engine_save_control_at(column, row)
+                        {
+                            state.focus_engine_save_control(focus);
+                            if focus.is_button() {
+                                return state.activate_engine_save_focus();
+                            }
+                            return vec![];
+                        }
+                        // Not on a control: the text may be selected for copying.
+                        return start_slash_overlay_text_drag(state, column, row);
+                    }
                     if let Some((parameter_row, delta)) =
                         state.layout.slash_overlay.parameter_glyph_at(column, row)
                     {
@@ -406,6 +448,11 @@ pub(super) fn route_mouse(
                         return vec![];
                     }
                     if let Some(parameter_row) = state.layout.slash_overlay.row_at(column, row) {
+                        let row_entries = &state.layout.slash_overlay.parameter_row_entries;
+                        let parameter_row = row_entries
+                            .get(parameter_row)
+                            .copied()
+                            .unwrap_or(parameter_row);
                         if let Some(edit) = state.model_parameters_mut() {
                             if parameter_row < edit.fields.len() {
                                 edit.cursor = parameter_row;

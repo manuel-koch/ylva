@@ -219,7 +219,7 @@ impl crate::llm::ReasoningEffortPolicy for EdenAiReasoningEffortPolicy {
         }
     }
     fn unverified_notice(&self, model: &str, effort: &str) -> Option<String> {
-        Some(format!("EdenAI model '{model}' reasoning effort '{effort}' is unverified for this upstream model."))
+        Some(format!("EdenAI model '{model}' reasoning effort '{effort}' is unverified: EdenAI may not pass it on to the underlying provider."))
     }
 }
 

@@ -273,6 +273,8 @@ pub struct TuiState {
     /// bubbles near the bottom of the chat, not yet committed to
     /// `chat_entries`. See `AppState::queue_steer_message`.
     pub queued_steer_texts: Vec<String>,
+    /// Mirrors `AppState::pending_model_notices`.
+    pub pending_model_notices: Vec<String>,
     /// true while ≥1 steer is queued.
     pub steer_indicator: bool,
     /// Pre-formatted footer readout of the active estimate and context window
@@ -364,6 +366,7 @@ impl TuiState {
             thinking_started_at: None,
             partial_thinking_collapsed: false,
             queued_steer_texts: Vec::new(),
+            pending_model_notices: Vec::new(),
             steer_indicator: false,
             context_usage_text: None,
             cost_total_text: None,

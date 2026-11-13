@@ -43,7 +43,13 @@ use crate::system_prompt_origins::{PromptOrigin, SystemPromptOrigins};
 /// registry never contains `spawn_subagent`).
 pub struct AgentFactory {
     skills: SkillRuntime,
-    engines: HashMap<String, Arc<dyn Engine>>,
+    /// Shared with every copy made by [`Self::without_store`], so an engine
+    /// registered through [`Self::register_engine`] reaches future roots of
+    /// all copies.
+    engines: Arc<std::sync::RwLock<HashMap<String, Arc<dyn Engine>>>>,
+    /// Always wrap a root's engines in an [`EngineRouter`], even for a sole
+    /// engine, so definitions can be registered at runtime.
+    routed_roots: bool,
     /// The set of tools whose approval prompt is bypassed (auto-approved)
     /// without user confirmation. Intended for automated / e2e testing where
     /// no human is present to approve.
@@ -100,7 +106,8 @@ impl AgentFactory {
     pub fn new(engines: HashMap<String, Arc<dyn Engine>>) -> Self {
         AgentFactory {
             skills: SkillRuntime::default(),
-            engines,
+            engines: Arc::new(std::sync::RwLock::new(engines)),
+            routed_roots: false,
             auto_approve: HashSet::new(),
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             store: None,
@@ -204,7 +211,7 @@ impl AgentFactory {
     /// startup so an unused agent type cannot hide an invalid engine or tool
     /// name reference until a subagent is spawned.
     pub fn validate_profile_agent_engines(&self, profile: &ProfileConfig) -> anyhow::Result<()> {
-        validate_profile_agent_engines(&self.engines, profile)?;
+        validate_profile_agent_engines(&self.engine_map(), profile)?;
         validate_profile_agent_tool_names(profile)
     }
 
@@ -215,7 +222,7 @@ impl AgentFactory {
     /// the session's history is never missing its starting
     /// provider-connection/model.
     pub fn engine_config(&self, name: &str) -> Option<EngineConfig> {
-        self.engines.get(name).map(|engine| engine.config())
+        self.engine(name).map(|engine| engine.config())
     }
 
     /// Return the raw configured engine named by `name`.
@@ -224,7 +231,68 @@ impl AgentFactory {
     /// or provider-connection selection. Utility requests use this accessor
     /// so they cannot mutate the conversation engine's Engine runtime selection.
     pub fn engine(&self, name: &str) -> Option<Arc<dyn Engine>> {
-        self.engines.get(name).cloned()
+        self.engine_map().get(name).cloned()
+    }
+
+    /// Snapshot of every registered engine by name.
+    pub fn engine_map(&self) -> HashMap<String, Arc<dyn Engine>> {
+        self.engines
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Always route root engines through an [`EngineRouter`] so definitions
+    /// registered later become selectable in already running roots.
+    pub fn with_routed_roots(mut self) -> Self {
+        self.routed_roots = true;
+        self
+    }
+
+    /// Build the engine of a saved definition and store it for future roots.
+    /// `replace` allows overwriting an existing name (an update). Returns the
+    /// engine so the caller can publish it to the live root.
+    pub fn register_engine(
+        &self,
+        name: &str,
+        engine_config: &EngineConfig,
+        provider_connections: &HashMap<String, crate::config::ProviderConnectionConfig>,
+        replace: bool,
+    ) -> anyhow::Result<Arc<dyn Engine>> {
+        let engine = engine_from_profile_config(engine_config, provider_connections)?;
+        let mut engines = self
+            .engines
+            .write()
+            .map_err(|_| anyhow::anyhow!("the engine map lock is poisoned"))?;
+        anyhow::ensure!(
+            replace == engines.contains_key(name),
+            if replace {
+                format!("engine '{name}' is not registered")
+            } else {
+                format!("engine '{name}' is already registered")
+            }
+        );
+        engines.insert(name.to_string(), Arc::clone(&engine));
+        Ok(engine)
+    }
+
+    /// Whether `name` is currently a registered engine.
+    pub fn has_engine(&self, name: &str) -> bool {
+        self.engine(name).is_some()
+    }
+
+    /// One deterministic representative per provider connection, sorted by connection name.
+    pub fn connection_engines(&self) -> Vec<(String, Arc<dyn Engine>)> {
+        let engines = self.engine_map();
+        let mut named_engines: Vec<_> = engines.iter().collect();
+        named_engines.sort_by(|left, right| left.0.cmp(right.0));
+        let mut representatives = std::collections::BTreeMap::new();
+        for (_, engine) in named_engines {
+            representatives
+                .entry(engine.config().provider_connection)
+                .or_insert_with(|| Arc::clone(engine));
+        }
+        representatives.into_iter().collect()
     }
 
     /// Enable persistence: every `Role::Root` agent built by this factory
@@ -240,7 +308,8 @@ impl AgentFactory {
     pub fn without_store(&self) -> Self {
         Self {
             skills: self.skills.clone(),
-            engines: self.engines.clone(),
+            engines: Arc::clone(&self.engines),
+            routed_roots: self.routed_roots,
             auto_approve: self.auto_approve.clone(),
             allowed_tools: self.allowed_tools.clone(),
             store: None,
@@ -257,13 +326,14 @@ impl AgentFactory {
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
         self.validate_profile_skills(profile)?;
         let engines = self
-            .engines
+            .engine_map()
             .iter()
             .map(|(name, engine)| Ok((name.clone(), engine.configured_copy()?)))
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
         Self::build(
             &self.skills,
             &engines,
+            self.routed_roots,
             &self.allowed_tools,
             &self.auto_approve,
             profile,
@@ -361,7 +431,8 @@ impl AgentFactory {
         self.validate_profile_skills(profile)?;
         Self::build(
             &self.skills,
-            &self.engines,
+            &self.engine_map(),
+            self.routed_roots,
             &self.allowed_tools,
             &self.auto_approve,
             profile,
@@ -382,6 +453,7 @@ impl AgentFactory {
     fn build(
         skills: &SkillRuntime,
         engines: &HashMap<String, Arc<dyn Engine>>,
+        routed_roots: bool,
         allowed_tools: &[String],
         auto_approve: &HashSet<AutoApproveTool>,
         profile: &ProfileConfig,
@@ -399,10 +471,15 @@ impl AgentFactory {
             .ok_or_else(|| anyhow::anyhow!("unknown engine: {engine_name}"))?;
         let engine: Arc<dyn Engine> = if let Some(inherited_engine) = inherited_engine {
             inherited_engine
-        } else if engines.len() == 1 {
+        } else if engines.len() == 1 && !routed_roots {
             configured_engine.clone()
         } else {
-            Arc::new(EngineRouter::new(engines.clone(), engine_name)?)
+            let router = EngineRouter::new(engines.clone(), engine_name)?;
+            Arc::new(if routed_roots {
+                router.with_transparent_single_engine()
+            } else {
+                router
+            })
         };
 
         let subagent_role_config = match role {
@@ -693,6 +770,7 @@ impl AgentFactory {
                 let built = AgentFactory::build(
                     &skills,
                     &engines,
+                    false,
                     &allowed_tools,
                     &auto_approve,
                     &profile,

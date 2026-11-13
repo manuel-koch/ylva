@@ -106,18 +106,18 @@ engine = "cheap"
 timeout_sec = 180
 
 [engines.fast]
-provider = "ollama"
+provider_connection = "ollama"
 api_base_url = "http://localhost:11434"
 temperature = 0.2
 
 [engines.cheap]
-provider = "openrouter"
+provider_connection = "openrouter"
 model = "some/cheap-model"
 api_base_url = "https://openrouter.ai"
 context_length = 32000
 
 [engines.thinking]
-provider = "openrouter"
+provider_connection = "openrouter"
 model = "some/thinking-model"
 api_base_url = "https://openrouter.ai"
 context_length = "265K"
@@ -293,7 +293,7 @@ fn numeric_and_boolean_environment_interpolation_loads() {
 input_history_limit = "${INPUT_HISTORY_LIMIT}"
 
 [engines.local]
-provider = "ollama"
+provider_connection = "ollama"
 temperature = "${TEMPERATURE}"
 context_length = "${CONTEXT_LENGTH}"
 
