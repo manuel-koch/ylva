@@ -945,6 +945,33 @@ bare-`ctrl` exception.
 - Membership is published only after a confirmed save and is applied to the
   open picker and the overlay parked in `parked_slash_overlay`.
 
+### Engine saves
+
+- Favorites and engine saves share one `FavoriteModelsWriter` (the startup
+  profile snapshot) behind one `FavoriteSaveOwner`, which runs one blocking write
+  at a time, so neither kind can invalidate the other's snapshot.
+- `Effect::SaveEngine` carries only the origin's *name*: `Effect` is `Eq` and
+  `EngineConfig` is not, so the driver resolves the value from `EngineSaveContext`.
+- The TUI root is always an `EngineRouter` (`with_routed_roots`), transparent
+  while it holds one engine, so a saved engine can be registered later. Updating
+  an engine replaces its router entry even when active, like a `/models` switch:
+  in-flight requests keep their instance and the completion handler re-applies
+  the selection. Subagents of an existing root keep their snapshot.
+- `[ Save & apply ]` activates only while the save page is still pending at
+  completion. The completion handler is synchronous because the store trait
+  object is not `Sync`; it returns the activation for the event loop to await.
+  `switch_model_recording` records model history only when connection, model or
+  parameters changed (for an updated active engine: since before its replacement).
+
+### Model-change notices
+
+- The agent applies a model change (store event, then `UiUpdate::ModelChangeApplied`)
+  before it injects queued steers, after a tool round and at `StreamDone` too, so
+  live order matches replay order. Until that update the TUI keeps the notice in
+  `pending_model_notices`.
+- Replay skips the first and any repeated `model_changed` event, since every
+  process start writes one.
+
 ## Slash commands
 
 Draft normalization, model-filter extraction, suggestions and help all derive

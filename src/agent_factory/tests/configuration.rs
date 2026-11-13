@@ -964,3 +964,86 @@ fn from_profile_enforces_connection_allowed_models_on_every_engine() {
         "cannot chat until bound"
     );
 }
+
+#[test]
+fn launch_engine_mapping_preserves_fixed_roles_and_other_agent_types() {
+    for compaction_name in [None, Some("main"), Some("fast")] {
+        let mut profile = two_engine_profile();
+        profile.agents.get_mut("default").unwrap().engine = Some("fast".to_string());
+        profile.agents.get_mut("quick").unwrap().engine = Some("main".to_string());
+        profile.compaction.engine = compaction_name.map(str::to_string);
+        profile.utility_engine = Some("main".to_string());
+        let factory = factory_for_two_engine_profile(&profile);
+        let (root, _) = factory.create(&profile, "default", Role::Root).unwrap();
+        assert_eq!(root.engine().config().model, "fast-model");
+        let expected = if compaction_name == Some("main") {
+            "main-model"
+        } else {
+            "fast-model"
+        };
+        assert_eq!(root.compaction_engine_config().unwrap().model, expected);
+        root.engine().switch_model("fast-catalog-model").unwrap();
+        let after = if compaction_name.is_none() {
+            "fast-catalog-model"
+        } else {
+            expected
+        };
+        assert_eq!(root.compaction_engine_config().unwrap().model, after);
+        assert_eq!(
+            factory
+                .engine_config(profile.utility_engine_name())
+                .unwrap()
+                .model,
+            "main-model"
+        );
+        let (other, _) = factory.create(&profile, "quick", Role::Root).unwrap();
+        assert_eq!(other.engine().config().model, "main-model");
+    }
+}
+
+fn saved_engine_fixture() -> (
+    EngineConfig,
+    HashMap<String, crate::config::ProviderConnectionConfig>,
+) {
+    let connections: HashMap<String, crate::config::ProviderConnectionConfig> =
+        toml::from_str("[mock]\nprovider = \"mock\"\n").expect("connections parse");
+    let mut config = test_engine_config();
+    config.provider_connection = "mock".to_string();
+    config.model = "saved-model".to_string();
+    (config, connections)
+}
+
+#[test]
+fn registered_engine_is_visible_to_every_factory_copy_and_future_roots() {
+    let (factory, _profile) = make_factory();
+    let copy = factory.without_store();
+    let (config, connections) = saved_engine_fixture();
+
+    let engine = factory
+        .register_engine("saved", &config, &connections, false)
+        .expect("register");
+
+    assert_eq!(engine.config().model, "saved-model");
+    assert!(copy.has_engine("saved"), "copies share one engine map");
+    assert!(factory.has_engine("default"), "existing engines stay");
+}
+
+#[test]
+fn registering_an_engine_enforces_create_versus_replace() {
+    let (factory, _profile) = make_factory();
+    let (config, connections) = saved_engine_fixture();
+
+    assert!(factory
+        .register_engine("default", &config, &connections, false)
+        .is_err());
+    assert!(factory
+        .register_engine("missing", &config, &connections, true)
+        .is_err());
+    factory
+        .register_engine("default", &config, &connections, true)
+        .expect("an update replaces");
+    assert_eq!(
+        factory.engine_map()["default"].config().model,
+        "saved-model"
+    );
+}

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::llm::provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
 use crate::{Engine, EngineImpl, ProfileConfig};
 
-pub(super) fn load_provider_env(
+pub(crate) fn load_provider_env(
     environment: &HashMap<String, String>,
 ) -> Result<ProviderEnv, String> {
     Ok(ProviderEnv::from_values(environment))
@@ -29,7 +29,7 @@ pub(super) fn load_provider_env(
 /// Supply missing API keys for explicitly configured connections and legacy
 /// flat engines from the selected profile environment. Explicit values in
 /// `config.toml` remain authoritative.
-pub(super) fn apply_provider_env_to_profile(
+pub(crate) fn apply_provider_env_to_profile(
     profile: &mut ProfileConfig,
     provider_env: &ProviderEnv,
 ) {
@@ -58,7 +58,7 @@ define a provider connection and engine in your profile.";
 /// The first provider retains the profile's default engine name and therefore
 /// remains the initial active engine. Additional providers use their provider
 /// names as engine names so the engine router can switch to them.
-pub(super) fn engines_from_environment(
+pub(crate) fn engines_from_environment(
     environment: &ProviderEnv,
     default_engine_name: &str,
     default_model: Option<&str>,

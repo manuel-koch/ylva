@@ -13,16 +13,18 @@
 // limitations under the License.
 
 use super::*;
+use crate::config::EngineSaveMode;
 use crate::llm::engine::{ModelSelection, ProviderModelOption, ReasoningEffortChange};
 use crate::llm::InputModality;
 use crate::tui_reducer_state::model_picker::{
-    adjust_context_length, context_length_step, cycle_reasoning_effort, model_parameter_rows,
+    adjust_context_length, cycle_reasoning_effort, model_parameter_rows,
 };
 use crate::tui_reducer_state::model_picker::{
     engine_choice_parts, model_choice_parts, model_picker_row_layout, visible_model_choices,
     ChoiceLabel,
 };
 use crate::tui_reducer_state::selected_choice_detail_texts;
+use crate::tui_reducer_state::{EngineSaveContext, EngineSaveFocus};
 
 #[test]
 fn matching_model_indices_requires_every_filter_word_in_any_order() {
@@ -572,18 +574,15 @@ fn choice_label_keeps_identity_and_details_as_separate_parts() {
     let label = ChoiceLabel {
         identity: "engine → p/m".to_string(),
         details: vec![
-            "context: 1.0K".to_string(),
+            "context: 1K".to_string(),
             "reasoning: unavailable".to_string(),
         ],
     };
     assert_eq!(label.identity, "engine → p/m");
-    assert_eq!(
-        label.details_text(),
-        "context: 1.0K  reasoning: unavailable"
-    );
+    assert_eq!(label.details_text(), "context: 1K  reasoning: unavailable");
     assert_eq!(
         label.single_line(),
-        "engine → p/m  context: 1.0K  reasoning: unavailable"
+        "engine → p/m  context: 1K  reasoning: unavailable"
     );
     let bare = ChoiceLabel {
         identity: "p/m".to_string(),
@@ -703,12 +702,12 @@ fn model_choice_label_formats_context_length_as_compact_decimal_tokens() {
     for (context_length, expected) in [
         (0, "0"),
         (999, "999"),
-        (1_000, "1.0K"),
-        (1_023, "1.0K"),
-        (2_048, "2.0K"),
+        (1_000, "1K"),
+        (1_023, "1K"),
+        (2_048, "2K"),
         (131_072, "131.1K"),
-        (1_000_000, "1.0M"),
-        (1_048_576, "1.0M"),
+        (1_000_000, "1M"),
+        (1_048_576, "1M"),
     ] {
         assert_eq!(
             model_choice_parts(&model_option(context_length)).single_line(),
@@ -771,29 +770,21 @@ fn model_choice_label_marks_advertised_non_text_input_modalities() {
     );
 }
 
-const KB: usize = 1024;
-
-#[test]
-fn context_length_step_is_an_eighth_rounded_to_the_token_step_with_a_floor() {
-    assert_eq!(context_length_step(256 * KB), 32 * KB);
-    assert_eq!(context_length_step(1024 * KB), 128 * KB);
-    assert_eq!(context_length_step(64 * KB), 32 * KB);
-    assert_eq!(context_length_step(0), 32 * KB);
-}
+const KB: usize = 1000;
 
 #[test]
 fn adjust_max_output_tokens_climbs_from_unlimited_and_returns_to_it() {
     use crate::tui_reducer_state::model_picker::adjust_max_output_tokens;
-    assert_eq!(adjust_max_output_tokens(None, 1, None), Some(1024));
-    assert_eq!(adjust_max_output_tokens(Some(1024), 1, None), Some(2048));
-    assert_eq!(adjust_max_output_tokens(Some(1024), -1, None), None);
+    assert_eq!(adjust_max_output_tokens(None, 1, None), Some(KB));
+    assert_eq!(adjust_max_output_tokens(Some(KB), 1, None), Some(2 * KB));
+    assert_eq!(adjust_max_output_tokens(Some(KB), -1, None), None);
     assert_eq!(adjust_max_output_tokens(None, -1, None), None);
     assert_eq!(
-        adjust_max_output_tokens(Some(256 * 1024), 1, None),
-        Some(256 * 1024)
+        adjust_max_output_tokens(Some(256 * KB), 1, None),
+        Some(256 * KB)
     );
     assert_eq!(
-        adjust_max_output_tokens(Some(8192), 1, Some(10_000)),
+        adjust_max_output_tokens(Some(8 * KB), 1, Some(10_000)),
         Some(10_000)
     );
     assert_eq!(
@@ -803,18 +794,46 @@ fn adjust_max_output_tokens_climbs_from_unlimited_and_returns_to_it() {
 }
 
 #[test]
-fn adjust_context_length_steps_and_stays_within_the_bounds() {
-    assert_eq!(adjust_context_length(256 * KB, 1, None), 288 * KB);
-    assert_eq!(adjust_context_length(256 * KB, -1, None), 224 * KB);
+fn token_ladder_uses_simple_base_10_steps() {
+    use crate::tui_reducer_state::model_picker::adjust_max_output_tokens;
+    let mut value = None;
+    let mut climbed = Vec::new();
+    while let Some(next) = adjust_max_output_tokens(value, 1, Some(450 * KB)) {
+        if Some(next) == value {
+            break;
+        }
+        climbed.push(next / KB);
+        value = Some(next);
+    }
     assert_eq!(
-        adjust_context_length(256 * KB, 1, Some(260 * KB)),
-        260 * KB,
+        climbed,
+        [1, 2, 4, 8, 16, 32, 64, 96, 128, 160, 192, 224, 256, 320, 384, 448, 450]
+    );
+    for &expected in climbed.iter().rev().skip(1) {
+        let below = adjust_max_output_tokens(value, -1, Some(450 * KB));
+        assert_eq!(below, Some(expected * KB));
+        value = below;
+    }
+}
+
+#[test]
+fn adjust_context_length_steps_and_stays_within_the_bounds() {
+    assert_eq!(adjust_context_length(256 * KB, 1, None), 320 * KB);
+    assert_eq!(adjust_context_length(256 * KB, -1, None), 224 * KB);
+    assert_eq!(adjust_context_length(320 * KB, -1, None), 256 * KB);
+    assert_eq!(adjust_context_length(16 * KB, 1, None), 32 * KB);
+    assert_eq!(adjust_context_length(32 * KB, 1, None), 64 * KB);
+    assert_eq!(adjust_context_length(64 * KB, -1, None), 32 * KB);
+    assert_eq!(adjust_context_length(32 * KB, -1, None), 16 * KB);
+    assert_eq!(
+        adjust_context_length(224 * KB, 1, Some(240 * KB)),
+        240 * KB,
         "the catalog maximum clamps the step"
     );
     assert_eq!(
-        adjust_context_length(32 * KB, -1, None),
-        32 * KB,
-        "the window never drops below one step unit"
+        adjust_context_length(KB, -1, None),
+        KB,
+        "the window never drops below the lowest step"
     );
 }
 
@@ -1063,7 +1082,7 @@ fn parameter_popup_steps_without_a_cap_when_no_window_is_advertised() {
     for _ in 0..10 {
         state.adjust_model_parameter(1);
     }
-    assert_eq!(popup_window(&state).0, Some(352 * KB));
+    assert_eq!(popup_window(&state).0, Some(448 * KB));
 }
 
 #[test]
@@ -1076,7 +1095,7 @@ fn confirming_an_edited_engine_window_relabels_the_row_with_the_override() {
     let choice = state.selected_model().expect("selected");
     assert_eq!(choice.selection.context_length_override, Some(64 * KB));
     assert!(
-        choice.label.details.contains(&"context: 65.5K".to_string()),
+        choice.label.details.contains(&"context: 64K".to_string()),
         "the row must show the overridden window, got {:?}",
         choice.label.details
     );
@@ -1099,7 +1118,8 @@ fn parameter_popup_shows_reasoning_only_for_models_with_selectable_efforts() {
             ParameterField::ContextLength,
             ParameterField::ReasoningEffort,
             ParameterField::MaxOutputTokens,
-            ParameterField::Apply
+            ParameterField::Apply,
+            ParameterField::Save
         ]
     );
     assert_eq!(
@@ -1125,7 +1145,8 @@ fn parameter_popup_shows_reasoning_only_for_models_with_selectable_efforts() {
         vec![
             ParameterField::ContextLength,
             ParameterField::MaxOutputTokens,
-            ParameterField::Apply
+            ParameterField::Apply,
+            ParameterField::Save
         ]
     );
     assert_eq!(
@@ -1158,7 +1179,7 @@ fn confirming_applies_only_edited_parameters_and_escape_discards_them() {
     let choice = state.selected_model().expect("selected");
     assert_eq!(
         choice.selection.context_length_override,
-        Some(256 * KB + 32 * KB),
+        Some(320 * KB),
         "a confirmed edit becomes the selection's override"
     );
     assert_eq!(
@@ -1166,7 +1187,7 @@ fn confirming_applies_only_edited_parameters_and_escape_discards_them() {
             .selection_target
             .as_ref()
             .map(|target| target.context_length),
-        Some(288 * KB),
+        Some(320 * KB),
         "the compaction preview follows the edited window"
     );
     assert_eq!(choice.selection.reasoning_effort, None);
@@ -1179,10 +1200,11 @@ fn parameter_rows_show_label_and_value_for_each_field() {
     assert_eq!(
         popup_rows(&state),
         vec![
-            "Context length:  ◂ 262.1K ▸".to_string(),
+            "Context length:  ◂ 256K ▸".to_string(),
             "Reasoning effort:    default (medium) ▸".to_string(),
             "Max output tokens:    unlimited ▸".to_string(),
             "✓ Apply".to_string(),
+            "Save…".to_string(),
         ]
     );
 }
@@ -1237,11 +1259,11 @@ fn popup_rows(state: &AppState) -> Vec<String> {
 #[test]
 fn context_length_row_marks_each_direction_that_can_still_move() {
     let cases = [
-        (128 * KB, Some(512 * KB), "Context length:  ◂ 131.1K ▸"),
-        (32 * KB, Some(512 * KB), "Context length:    32.8K ▸"),
-        (512 * KB, Some(512 * KB), "Context length:  ◂ 524.3K"),
-        (128 * KB, None, "Context length:  ◂ 131.1K ▸"),
-        (1024 * KB, Some(512 * KB), "Context length:  ◂ 1.0M"),
+        (128 * KB, Some(512 * KB), "Context length:  ◂ 128K ▸"),
+        (KB, Some(512 * KB), "Context length:    1K ▸"),
+        (512 * KB, Some(512 * KB), "Context length:  ◂ 512K"),
+        (128 * KB, None, "Context length:  ◂ 128K ▸"),
+        (1024 * KB, Some(512 * KB), "Context length:  ◂ 1M"),
     ];
     for (configured, catalog, expected) in cases {
         let mut state = engine_parameter_fixture(configured, catalog);
@@ -1266,7 +1288,8 @@ fn context_length_row_shows_no_arrows_while_the_window_is_unknown() {
         vec![
             "Context length:  unknown".to_string(),
             "Max output tokens:    unlimited ▸".to_string(),
-            "✓ Apply".to_string()
+            "✓ Apply".to_string(),
+            "Save…".to_string()
         ]
     );
 }
@@ -1406,6 +1429,9 @@ fn regrouping_keeps_the_parameter_popup_bound_to_its_model() {
     let index = matching_model_indices(choices, "")[*selected];
     *parameters = Some(crate::tui_reducer_state::ModelParameterEdit {
         restored_baseline: false,
+        initial_context_length: None,
+        initial_max_output_tokens: None,
+        save_form: None,
         choice_index: index,
         fields: Vec::new(),
         cursor: 0,
@@ -1589,7 +1615,7 @@ fn rejected_evidence_does_not_offer_gateway_overrides_but_explicit_effort_can_re
             &choices[0].selection.model,
         );
         state.open_model_parameters();
-        assert_eq!(popup_rows(&state).len(), 3);
+        assert_eq!(popup_rows(&state).len(), 4);
         state.leave_model_parameters();
         let SlashOverlay::ModelPicker { choices, .. } = &mut state.slash_overlay else {
             panic!("picker");
@@ -1650,7 +1676,11 @@ fn reset_row_exists_only_for_named_engine_rows() {
     named.open_model_parameters();
     assert_eq!(
         popup_rows(&named)[2..],
-        ["Reset".to_string(), "✓ Apply".to_string()]
+        [
+            "✓ Apply".to_string(),
+            "Save…".to_string(),
+            "Reset".to_string()
+        ]
     );
 }
 
@@ -1670,7 +1700,7 @@ fn reset_row_reloads_the_draft_keeps_the_popup_open_and_applies_on_confirm() {
         !state.activate_model_parameter_row(),
         "enter on a value row applies nothing"
     );
-    state.cycle_model_parameter_focus(false);
+    state.cycle_model_parameter_focus(true);
     assert!(
         !state.activate_model_parameter_row(),
         "the reset row must not confirm the popup"
@@ -1679,7 +1709,7 @@ fn reset_row_reloads_the_draft_keeps_the_popup_open_and_applies_on_confirm() {
     state.cycle_model_parameter_focus(false);
     assert_eq!(
         state.model_parameters_mut().expect("popup").cursor,
-        3,
+        2,
         "a disabled reset button takes no focus; tab lands on apply"
     );
     assert!(state.activate_model_parameter_row(), "apply confirms");
@@ -1695,7 +1725,7 @@ fn reset_row_reloads_the_draft_keeps_the_popup_open_and_applies_on_confirm() {
 fn leaving_the_popup_after_a_reset_discards_it() {
     let mut state = modified_engine_fixture();
     state.open_model_parameters();
-    state.cycle_model_parameter_focus(false);
+    state.cycle_model_parameter_focus(true);
     state.activate_model_parameter_row();
     state.leave_model_parameters();
 
@@ -1724,13 +1754,15 @@ fn tab_cycles_value_rows_reset_and_apply_and_up_returns_to_the_values() {
     state.cycle_model_parameter_focus(false);
     assert_eq!(cursor(&mut state), 2, "reset while enabled");
     state.cycle_model_parameter_focus(false);
-    assert_eq!(cursor(&mut state), 3, "apply");
+    assert_eq!(cursor(&mut state), 3, "save");
+    state.cycle_model_parameter_focus(false);
+    assert_eq!(cursor(&mut state), 4, "apply");
     state.move_model_parameter_cursor(-1);
     assert_eq!(cursor(&mut state), 1, "up returns to the last value row");
     state.cycle_model_parameter_focus(true);
     assert_eq!(
         cursor(&mut state),
-        3,
+        4,
         "shift-tab from the values reaches apply"
     );
     state.cycle_model_parameter_focus(false);
@@ -1859,10 +1891,296 @@ fn score_segment_follows_price_and_detail_lines_show_the_effort_map() {
         selected_choice_detail_texts(&choice, None),
         vec![
             "cache price: read 0.3 $ per 1M".to_string(),
-            "score: high 90 · low 60 · medium 75 (active: 90)".to_string(),
+            "score: low 60 · medium 75 · high 90 (active: 90)".to_string(),
         ]
     );
     choice.selection.model.score = None;
     choice.selection.model.pricing = None;
     assert!(selected_choice_detail_texts(&choice, None).is_empty());
+}
+
+fn save_page_fixture() -> AppState {
+    let mut state = parameter_fixture(None, Some(128 * KB));
+    state.engine_save_context = EngineSaveContext {
+        destination: "/tmp/profile.toml".to_string(),
+        persistable_connections: ["stub".to_string()].into_iter().collect(),
+        occupied_names: ["taken".to_string()].into_iter().collect(),
+        ..EngineSaveContext::default()
+    };
+    state.open_model_parameters();
+    state.open_engine_save_form();
+    state
+}
+
+fn clear_engine_name(state: &mut AppState) {
+    while !state.engine_save_form().unwrap().name.is_empty() {
+        state.engine_save_backspace();
+    }
+}
+
+fn type_engine_name(state: &mut AppState, name: &str) {
+    clear_engine_name(state);
+    for character in name.chars() {
+        state.engine_save_insert_char(character);
+    }
+}
+
+#[test]
+fn save_page_creates_a_named_engine_from_a_raw_model() {
+    let mut state = save_page_fixture();
+    type_engine_name(&mut state, "fast");
+    state.cycle_engine_save_focus(false);
+    assert_eq!(
+        state.engine_save_form().unwrap().focus,
+        EngineSaveFocus::Save
+    );
+
+    let effects = state.activate_engine_save_focus();
+
+    let [Effect::SaveEngine(job)] = effects.as_slice() else {
+        panic!("expected one save effect, got {effects:?}");
+    };
+    assert_eq!(
+        job.request.mode,
+        EngineSaveMode::Create {
+            name: "fast".to_string(),
+            copy_from: None
+        }
+    );
+    assert!(!job.activate);
+    assert!(state.engine_save_is_pending());
+}
+
+#[test]
+fn save_page_name_field_supports_caret_movement_and_editing_in_the_middle() {
+    use crate::tui_reducer_state::NameCursorMove::{End, Left, Right, Start};
+    let mut state = save_page_fixture();
+    type_engine_name(&mut state, "fat");
+    state.engine_save_move_name_cursor(Left);
+    state.engine_save_move_name_cursor(Left);
+    state.engine_save_insert_char('s');
+    assert_eq!(state.engine_save_form().unwrap().name, "fsat");
+    state.engine_save_delete();
+    assert_eq!(state.engine_save_form().unwrap().name, "fst");
+    state.engine_save_backspace();
+    assert_eq!(state.engine_save_form().unwrap().name, "ft");
+    state.engine_save_move_name_cursor(End);
+    state.engine_save_move_name_cursor(Right);
+    state.engine_save_insert_char('x');
+    assert_eq!(state.engine_save_form().unwrap().name, "ftx");
+    state.engine_save_move_name_cursor(Start);
+    assert_eq!(
+        state.engine_save_form().unwrap().name_caret_column(),
+        Some(7)
+    );
+}
+
+#[test]
+fn save_page_disables_the_buttons_for_invalid_and_occupied_names() {
+    let mut state = save_page_fixture();
+    clear_engine_name(&mut state);
+    let form = state.engine_save_form().unwrap();
+    assert!(!form.buttons_enabled());
+    assert!(form.info_lines()[0].starts_with('✗'));
+    state.focus_engine_save_control(EngineSaveFocus::Save);
+    assert_eq!(
+        state.engine_save_form().unwrap().focus,
+        EngineSaveFocus::Name,
+        "a disabled button takes no focus"
+    );
+    assert!(state.activate_engine_save_focus().is_empty());
+
+    type_engine_name(&mut state, "taken");
+    let form = state.engine_save_form().unwrap();
+    assert!(!form.buttons_enabled());
+    assert!(form.info_lines().iter().any(|line| line.contains("taken")));
+
+    type_engine_name(&mut state, "default");
+    let form = state.engine_save_form().unwrap();
+    assert!(!form.buttons_enabled());
+    assert!(form
+        .info_lines()
+        .iter()
+        .any(|line| line.contains("reserved")));
+
+    state.engine_save_backspace();
+    type_engine_name(&mut state, "free");
+    assert!(state.engine_save_form().unwrap().buttons_enabled());
+}
+
+#[test]
+fn save_page_blocks_a_second_submission_while_pending() {
+    let mut state = save_page_fixture();
+    type_engine_name(&mut state, "fast");
+    state.focus_engine_save_control(EngineSaveFocus::SaveAndApply);
+    assert_eq!(state.activate_engine_save_focus().len(), 1);
+    assert!(state.activate_engine_save_focus().is_empty());
+
+    state.fail_engine_save("disk full".to_string());
+    assert!(!state.engine_save_is_pending());
+    assert_eq!(state.activate_engine_save_focus().len(), 1);
+}
+
+#[test]
+fn save_page_without_a_profile_file_shows_guidance_and_saves_nothing() {
+    let mut state = save_page_fixture();
+    state.engine_save_context.unavailable = Some("create a profile file first".to_string());
+    state.leave_model_parameters();
+    state.leave_model_parameters();
+    state.open_model_parameters();
+    state.open_engine_save_form();
+    type_engine_name(&mut state, "fast");
+    state.focus_engine_save_control(EngineSaveFocus::Save);
+
+    assert!(state.activate_engine_save_focus().is_empty());
+    assert_eq!(
+        state.engine_save_form().unwrap().error.as_deref(),
+        Some("create a profile file first")
+    );
+}
+
+#[test]
+fn escape_from_the_save_page_keeps_the_draft_and_the_next_escape_discards_it() {
+    let mut state = save_page_fixture();
+    state.leave_model_parameters();
+    assert!(state.engine_save_form().is_none());
+    assert!(state.model_parameters_mut().is_some(), "draft retained");
+
+    state.leave_model_parameters();
+    assert!(state.model_parameters_mut().is_none());
+}
+
+#[test]
+fn save_page_rows_end_with_the_two_buttons_and_follow_the_focus() {
+    let mut state = save_page_fixture();
+    type_engine_name(&mut state, "fast");
+    let form = state.engine_save_form().unwrap().clone();
+    let entries = form.entries();
+    assert_eq!(&entries[entries.len() - 2..], ["Save", "Save & apply"]);
+    assert!(entries[1].starts_with("Name:  fast"));
+    assert_eq!(form.focus_entry(entries.len()), 1);
+    assert_eq!(
+        form.entry_focus(entries.len() - 1, entries.len()),
+        Some(EngineSaveFocus::SaveAndApply)
+    );
+    assert_eq!(
+        form.entry_focus(0, entries.len()),
+        None,
+        "no mode switch without an origin engine"
+    );
+}
+
+fn update_page_fixture(edit_window: bool) -> AppState {
+    let mut state = engine_parameter_fixture(100_000, Some(200_000));
+    let configured = crate::llm::EngineConfig {
+        provider_connection: "stub".to_string(),
+        model: "model".to_string(),
+        temperature: None,
+        context_length: Some(100_000),
+        max_output_tokens: None,
+        api_base_url: None,
+        api_key: None,
+        reasoning: None,
+        compact_target_ratio: 0.5,
+        soft_compaction_threshold: 0.7,
+        hard_compaction_threshold: 0.9,
+    };
+    state.engine_save_context = EngineSaveContext {
+        destination: "/tmp/profile.toml".to_string(),
+        persistable_connections: ["stub".to_string()].into_iter().collect(),
+        explicit_engines: [("engine".to_string(), configured)].into_iter().collect(),
+        occupied_names: ["engine".to_string()].into_iter().collect(),
+        ..EngineSaveContext::default()
+    };
+    state.open_model_parameters();
+    if edit_window {
+        let edit = state.model_parameters_mut().expect("parameters");
+        edit.context_length = Some(150_000);
+        edit.context_length_edited = true;
+    }
+    state.open_engine_save_form();
+    state
+}
+
+#[test]
+fn save_page_keeps_read_only_text_out_of_the_control_rows() {
+    let state = update_page_fixture(true);
+    let form = state.engine_save_form().expect("form");
+    let entries = form.entries();
+    assert_eq!(entries.len(), 2 + ENGINE_SAVE_BUTTON_COUNT, "{entries:?}");
+    let info = form.info_lines().join("\n");
+    assert!(info.contains("Destination:"), "{info}");
+    assert!(info.contains("Model parameters:"), "{info}");
+}
+
+#[test]
+fn explicit_engine_opens_the_save_page_in_update_mode_with_a_diff() {
+    let mut state = update_page_fixture(true);
+    let form = state.engine_save_form().expect("form").clone();
+    assert!(form.update && form.update_available);
+    assert_eq!(form.focus, EngineSaveFocus::Mode);
+    let preview = form.preview.expect("preview").lines.join("\n");
+    assert!(preview.contains("context_length"), "{preview}");
+    assert!(preview.contains("was"), "{preview}");
+
+    state.focus_engine_save_control(EngineSaveFocus::Save);
+    let effects = state.activate_engine_save_focus();
+    let [Effect::SaveEngine(job)] = effects.as_slice() else {
+        panic!("expected one save effect");
+    };
+    assert_eq!(
+        job.request.mode,
+        EngineSaveMode::Update {
+            name: "engine".to_string()
+        }
+    );
+    assert_eq!(
+        job.request.context_length,
+        crate::config::EngineSaveChange::Set(150_000)
+    );
+}
+
+#[test]
+fn untouched_limits_are_not_persisted_as_explicit_choices() {
+    let mut state = update_page_fixture(false);
+    state.focus_engine_save_control(EngineSaveFocus::Save);
+    let effects = state.activate_engine_save_focus();
+    let [Effect::SaveEngine(job)] = effects.as_slice() else {
+        panic!("expected one save effect");
+    };
+    assert_eq!(
+        job.request.context_length,
+        crate::config::EngineSaveChange::Keep
+    );
+    assert_eq!(
+        job.request.max_output_tokens,
+        crate::config::EngineSaveChange::Keep
+    );
+}
+
+#[test]
+fn switching_to_create_copies_the_origin_and_checks_name_collisions() {
+    let mut state = update_page_fixture(false);
+    state.toggle_engine_save_mode();
+    assert!(!state.engine_save_form().unwrap().update);
+    state.focus_engine_save_control(EngineSaveFocus::Name);
+    type_engine_name(&mut state, "engine");
+    state.focus_engine_save_control(EngineSaveFocus::Save);
+    assert!(state.activate_engine_save_focus().is_empty(), "name taken");
+
+    state.focus_engine_save_control(EngineSaveFocus::Name);
+    type_engine_name(&mut state, "engine-copy");
+    state.focus_engine_save_control(EngineSaveFocus::SaveAndApply);
+    let effects = state.activate_engine_save_focus();
+    let [Effect::SaveEngine(job)] = effects.as_slice() else {
+        panic!("expected one save effect");
+    };
+    assert_eq!(
+        job.request.mode,
+        EngineSaveMode::Create {
+            name: "engine-copy".to_string(),
+            copy_from: Some("engine".to_string())
+        }
+    );
+    assert!(job.activate);
 }

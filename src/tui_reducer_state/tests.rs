@@ -92,17 +92,17 @@ fn context_usage_formats_as_tokens_and_fill_percentage() {
     assert_eq!(format_context_usage(0, 128_000), "0 (0%)");
     assert_eq!(
         format_context_usage(128_000, 128_000),
-        "128.0K (100%)",
+        "128K (100%)",
         "a full window reads 100%"
     );
     assert_eq!(
         format_context_usage(200_000, 128_000),
-        "200.0K (100%)",
+        "200K (100%)",
         "an estimate overshooting the window clamps the percentage"
     );
     assert_eq!(
         format_context_usage(1_000, 0),
-        "1.0K (0%)",
+        "1K (0%)",
         "a degenerate window reports 0% instead of dividing by zero"
     );
 }

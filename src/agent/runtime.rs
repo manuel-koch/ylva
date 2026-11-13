@@ -47,6 +47,9 @@ struct RunState {
     current_cancel: Option<CancellationToken>,
     current_tool_cancel: Option<CancellationToken>,
     pending_steers: VecDeque<String>,
+    /// Model switches recorded but not yet applied to a request; see
+    /// [`RunState::apply_pending_model_changes`].
+    pending_model_changes: VecDeque<PendingModelChange>,
     pending_tools: VecDeque<PendingTool>,
     iterations: usize,
     clarify_started_at: Option<std::time::Instant>,
@@ -58,6 +61,36 @@ struct RunState {
     session_switch_frozen: bool,
     finished_status: Option<crate::agent::FinishedStatusRegistry>,
     execution_span: tracing::Span,
+}
+
+pub(super) struct PendingModelChange {
+    pub(super) provider_connection: String,
+    pub(super) model: String,
+    pub(super) parameters: crate::store::ModelParameters,
+}
+
+/// Persist every queued model switch and tell the TUI where it took effect.
+/// The store event lands after the messages already committed, so a resumed
+/// transcript orders the switch exactly as the live one did.
+pub(super) async fn apply_model_changes(
+    context: &Context,
+    pending_model_changes: &mut VecDeque<PendingModelChange>,
+    ui_tx: &mpsc::Sender<UiUpdate>,
+) {
+    while let Some(change) = pending_model_changes.pop_front() {
+        record_model_change(context, &change);
+        let _ = ui_tx.send(UiUpdate::ModelChangeApplied).await;
+    }
+}
+
+fn record_model_change(context: &Context, change: &PendingModelChange) {
+    if let Some(store) = context.store() {
+        store.record_model_changed(
+            &change.provider_connection,
+            &change.model,
+            &change.parameters,
+        );
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -95,7 +128,18 @@ impl RunState {
             && self.model_change_capacity_check.is_none()
     }
 
+    async fn apply_pending_model_changes(&mut self) {
+        apply_model_changes(&self.context, &mut self.pending_model_changes, &self.ui_tx).await;
+    }
+
     fn start_request(&mut self) {
+        // The request about to start is the first one served by the switched
+        // engine. A full UI channel only costs the live echo: the TUI commits
+        // leftover staged notices when the turn ends.
+        while let Some(change) = self.pending_model_changes.pop_front() {
+            record_model_change(&self.context, &change);
+            let _ = self.ui_tx.try_send(UiUpdate::ModelChangeApplied);
+        }
         let span = self
             .context
             .store()
@@ -142,6 +186,7 @@ impl RunState {
             self.generation,
             &mut self.clarify_started_at,
             &mut self.pending_steers,
+            &mut self.pending_model_changes,
             &mut self.subagent_manager,
             &mut self.spawn_content_sections,
             self.own_run_id,
@@ -365,6 +410,7 @@ impl AgentLoop {
                 current_cancel,
                 current_tool_cancel,
                 pending_steers,
+                pending_model_changes: VecDeque::new(),
                 pending_tools,
                 iterations,
                 clarify_started_at,
@@ -379,6 +425,12 @@ impl AgentLoop {
             };
 
             loop {
+                if state.mode == AgentMode::Idle
+                    && state.current_cancel.is_none()
+                    && !state.pending_model_changes.is_empty()
+                {
+                    state.apply_pending_model_changes().await;
+                }
                 let session_span = state
                     .context
                     .store()

@@ -305,16 +305,16 @@ pub(super) fn build_entry(
                 ("ⓘ", notice_color())
             };
             for (index, line) in text.lines().enumerate() {
-                let wrapped = textwrap::wrap(line, wrap_width.saturating_sub(6).max(1));
+                let wrapped = textwrap::wrap(line, wrap_width.saturating_sub(4).max(1));
                 if wrapped.is_empty() {
                     layout.rows.push(Line::default());
                 }
                 for (wrap_index, wrapped) in wrapped.into_iter().enumerate() {
                     layout.rows.push(Line::styled(
                         if index == 0 && wrap_index == 0 {
-                            format!("  {marker}  {wrapped}")
+                            format!("{marker}  {wrapped}")
                         } else {
-                            format!("     {wrapped}")
+                            format!("   {wrapped}")
                         },
                         Style::default().fg(color),
                     ));
@@ -520,6 +520,20 @@ pub(in crate::tui_widgets) fn draw_cached_chat(
             },
         ));
     }
+    for (index, text) in source.pending_notices.iter().enumerate() {
+        layouts.push(cache.get_or_build(
+            layout_key(
+                EntrySlot::PendingNotice(index),
+                source.queued_revision,
+                width,
+                false,
+            ),
+            || {
+                let notice = ChatEntry::Notice { text: text.clone() };
+                finish_layout(build_entry(&notice, 0, width, false), width)
+            },
+        ));
+    }
     for (index, text) in source.queued.iter().enumerate() {
         layouts.push(cache.get_or_build(
             layout_key(
@@ -578,6 +592,7 @@ pub(in crate::tui_widgets) fn draw_cached_chat(
         slots.extend([EntrySlot::Thinking, EntrySlot::ThinkingChrome]);
     }
     slots.extend((0..source.queued.len()).map(EntrySlot::Queued));
+    slots.extend((0..source.pending_notices.len()).map(EntrySlot::PendingNotice));
     cache.retain_slots(&slots);
     let total = cache.conversation.height;
     let visible = content_area.height as usize;

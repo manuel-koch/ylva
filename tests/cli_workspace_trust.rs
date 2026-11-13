@@ -24,7 +24,7 @@ const UNRESOLVABLE_ENGINE_CONFIG: &str = r#"
 default_engine = "missing"
 
 [engines.available]
-provider = "mock"
+provider_connection = "mock"
 model = "test-model"
 "#;
 

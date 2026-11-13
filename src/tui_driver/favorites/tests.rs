@@ -167,7 +167,7 @@ async fn repeated_requests_are_ignored_while_a_write_is_pending() {
         .expect("gated")
         .send(())
         .expect("release");
-    let completion = fixture.owner.next_completion().await;
+    let completion = fixture.owner.next_completion().await.favorite();
 
     assert!(completion.result.is_ok());
     assert!(!fixture.owner.is_pending());
@@ -200,7 +200,7 @@ async fn membership_is_published_only_after_confirmed_persistence() {
         .expect("gated")
         .send(())
         .expect("release");
-    let completion = fixture.owner.next_completion().await;
+    let completion = fixture.owner.next_completion().await.favorite();
 
     assert!(completion.result.is_ok());
     assert_eq!(fixture.owner.favorites_of("stub"), ["kept", "model-a"]);
@@ -224,7 +224,7 @@ async fn membership_is_published_only_after_confirmed_persistence() {
         .expect("gated")
         .send(())
         .expect("release");
-    fixture.owner.next_completion().await;
+    fixture.owner.next_completion().await.favorite();
     assert_eq!(fixture.owner.favorites_of("stub"), ["model-a"]);
 }
 
@@ -247,7 +247,7 @@ async fn failed_save_keeps_membership_and_a_retry_reuses_the_writer() {
         fixture.owner.request("stub", "model-a", true),
         FavoriteRequestOutcome::Started
     );
-    let failure = fixture.owner.next_completion().await;
+    let failure = fixture.owner.next_completion().await.favorite();
     apply_favorite_completion(&mut state, &engine, &failure);
 
     assert!(failure
@@ -265,7 +265,7 @@ async fn failed_save_keeps_membership_and_a_retry_reuses_the_writer() {
         fixture.owner.request("stub", "model-a", true),
         FavoriteRequestOutcome::Started
     );
-    let success = fixture.owner.next_completion().await;
+    let success = fixture.owner.next_completion().await.favorite();
     apply_favorite_completion(&mut state, &engine, &success);
 
     assert!(success.result.is_ok());
@@ -289,7 +289,7 @@ async fn source_change_reports_restart_guidance_and_keeps_membership() {
     let mut state = AppState::new();
 
     fixture.owner.request("stub", "model-a", true);
-    let completion = fixture.owner.next_completion().await;
+    let completion = fixture.owner.next_completion().await.favorite();
     apply_favorite_completion(&mut state, &empty_engine(), &completion);
 
     assert_eq!(fixture.owner.favorites_of("stub"), ["kept"]);
@@ -355,7 +355,7 @@ async fn pending_repeat_from_the_effect_path_adds_a_brief_notice() {
         .expect("gated")
         .send(())
         .expect("release");
-    fixture.owner.next_completion().await;
+    fixture.owner.next_completion().await.favorite();
 
     assert_eq!(notices(&state).len(), 1);
     assert!(notices(&state)[0].contains("still being saved"));
@@ -387,7 +387,7 @@ async fn late_completion_applies_after_the_popup_closed_and_after_clear() {
         .expect("gated")
         .send(())
         .expect("release");
-    let completion = fixture.owner.next_completion().await;
+    let completion = fixture.owner.next_completion().await.favorite();
     apply_favorite_completion(&mut state, &empty_engine(), &completion);
 
     assert_eq!(fixture.owner.favorites_of("stub"), ["kept", "model-a"]);
@@ -426,7 +426,10 @@ async fn finish_awaits_a_started_write_and_surfaces_its_outcome() {
         .expect("gated")
         .send(())
         .expect("release");
-    let completion = finishing.await.expect("the started write's completion");
+    let completion = finishing
+        .await
+        .expect("the started write's completion")
+        .favorite();
     assert!(completion.result.is_ok());
     assert_eq!(completion.model_id, "model-a");
     assert_eq!(fixture.owner.favorites_of("stub"), ["kept", "model-a"]);
@@ -499,7 +502,7 @@ async fn real_writer_persists_through_the_owner() {
         owner.request("local", "llama3", true),
         FavoriteRequestOutcome::Started
     );
-    let completion = owner.finish().await.expect("completion");
+    let completion = owner.finish().await.expect("completion").favorite();
 
     assert!(completion.result.is_ok(), "{:?}", completion.result);
     let saved = std::fs::read_to_string(&profile_path).expect("read profile");
@@ -510,7 +513,7 @@ async fn real_writer_persists_through_the_owner() {
     // An outside edit is not rebased: the next save reports restart guidance.
     std::fs::write(&profile_path, format!("{saved}# edited\n")).expect("edit");
     owner.request("local", "other", true);
-    let completion = owner.finish().await.expect("completion");
+    let completion = owner.finish().await.expect("completion").favorite();
     assert!(matches!(
         completion.result,
         Err(FavoriteSaveError::SourceChanged { .. })
@@ -547,4 +550,343 @@ async fn favorite_effect_is_routed_to_the_owner_not_the_agent() {
     assert_eq!(outcome, crate::tui_driver::ActionOutcome::Continue);
     assert!(cmd_rx.try_recv().is_err());
     assert!(state.chat_entries.is_empty());
+}
+
+fn engine_job(activate: bool) -> EngineSaveJob {
+    use crate::config::{EngineSaveChange, EngineSaveMode, EngineSaveRequest};
+    EngineSaveJob {
+        request: EngineSaveRequest {
+            mode: EngineSaveMode::Create {
+                name: "fast".to_string(),
+                copy_from: None,
+            },
+            provider_connection: "stub".to_string(),
+            model: EngineSaveChange::Set("model".to_string()),
+            reasoning: EngineSaveChange::Keep,
+            context_length: EngineSaveChange::Keep,
+            max_output_tokens: EngineSaveChange::Keep,
+        },
+        activate,
+        activation_option: crate::llm::engine::ProviderModelOption {
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
+                id: "model".to_string(),
+                max_output_tokens: None,
+                context_length: None,
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
+            },
+            reasoning_effort: None,
+            context_length_override: None,
+            max_output_tokens_override: None,
+        },
+    }
+}
+
+#[test]
+fn failed_engine_save_keeps_the_save_page_with_the_reason() {
+    let fixture = fixture(Vec::new(), false);
+    let mut state = AppState::new();
+    let completion = EngineSaveCompletion {
+        job: engine_job(false),
+        result: Err(FavoriteSaveError::Retryable {
+            path: PathBuf::from("/tmp/profile.toml"),
+            detail: "disk full".to_string(),
+        }),
+    };
+
+    let follow_up = apply_engine_completion(
+        &mut state,
+        &completion,
+        &fixture.owner,
+        None,
+        &empty_engine(),
+    );
+
+    assert!(!follow_up.picker_closed);
+    assert!(follow_up.activation.is_none());
+    assert!(notices(&state)[0].starts_with("Could not save engine 'fast'"));
+}
+
+#[test]
+fn saved_engine_without_a_session_factory_is_reported_and_not_activated() {
+    let fixture = fixture(Vec::new(), false);
+    let mut state = AppState::new();
+    let completion = EngineSaveCompletion {
+        job: engine_job(true),
+        result: Ok(saved_outcome(FavoriteSourceLayer::Workspace, true)),
+    };
+
+    let follow_up = apply_engine_completion(
+        &mut state,
+        &completion,
+        &fixture.owner,
+        None,
+        &empty_engine(),
+    );
+
+    assert!(follow_up.activation.is_none(), "unpublished engine");
+    let notices = notices(&state);
+    assert!(
+        notices[0].starts_with("Saved engine 'fast' to"),
+        "{notices:?}"
+    );
+    assert!(notices[0].contains("could not be made available"));
+    assert!(notices[0].to_lowercase().contains("trust"), "{notices:?}");
+    assert!(state.engine_save_context.occupied_names.contains("fast"));
+}
+
+#[test]
+fn save_and_use_is_skipped_when_the_save_page_was_left() {
+    use crate::agent_factory::AgentFactory;
+    use crate::llm::engine::EngineRouter;
+    use crate::tui_driver::title::TitleDriver;
+    use std::collections::HashMap;
+
+    let fixture = fixture(Vec::new(), false);
+    let live_root: Arc<dyn crate::llm::engine::Engine> = Arc::new(
+        EngineRouter::new(
+            HashMap::from([("stub".to_string(), empty_engine())]),
+            "stub",
+        )
+        .expect("router"),
+    );
+    let profile: ProfileConfig =
+        toml::from_str("[provider_connections.stub]\nprovider = \"mock\"\n")
+            .expect("profile parses");
+    let (title_update_tx, _title_update_rx) = tokio::sync::mpsc::unbounded_channel();
+    let driver = TitleDriver {
+        factory: Arc::new(AgentFactory::new(HashMap::new()).with_routed_roots()),
+        profile,
+        attempt: Default::default(),
+        title_update_tx,
+    };
+    let mut state = AppState::new();
+    let completion = EngineSaveCompletion {
+        job: engine_job(true),
+        result: Ok(saved_outcome(FavoriteSourceLayer::Home, true)),
+    };
+
+    let follow_up = apply_engine_completion(
+        &mut state,
+        &completion,
+        &fixture.owner,
+        Some(&driver),
+        &live_root,
+    );
+
+    assert!(follow_up.activation.is_none());
+    assert!(!follow_up.picker_closed);
+    assert!(
+        notices(&state)[0].contains("Save & apply was skipped because the save page was left"),
+        "{:?}",
+        notices(&state)
+    );
+    assert!(
+        live_root
+            .named_engines()
+            .iter()
+            .any(|(name, _)| name == "fast"),
+        "the saved engine is still published"
+    );
+}
+
+#[test]
+fn updating_the_active_engine_replaces_it_and_reapplies_it_to_the_session() {
+    use crate::agent_factory::AgentFactory;
+    use crate::llm::engine::EngineRouter;
+    use crate::tui_driver::title::TitleDriver;
+    use std::collections::HashMap;
+
+    let fixture = fixture(Vec::new(), false);
+    let live_root: Arc<dyn crate::llm::engine::Engine> = Arc::new(
+        EngineRouter::new(
+            HashMap::from([("fast".to_string(), empty_engine())]),
+            "fast",
+        )
+        .expect("router"),
+    );
+    let profile: ProfileConfig =
+        toml::from_str("[provider_connections.stub]\nprovider = \"mock\"\n")
+            .expect("profile parses");
+    let (title_update_tx, _title_update_rx) = tokio::sync::mpsc::unbounded_channel();
+    let driver = TitleDriver {
+        factory: Arc::new(
+            AgentFactory::new(HashMap::from([("fast".to_string(), empty_engine())]))
+                .with_routed_roots(),
+        ),
+        profile,
+        attempt: Default::default(),
+        title_update_tx,
+    };
+    let mut job = engine_job(false);
+    job.request.mode = crate::config::EngineSaveMode::Update {
+        name: "fast".to_string(),
+    };
+    job.request.model = crate::config::EngineSaveChange::Set("replacement".to_string());
+    let completion = EngineSaveCompletion {
+        job,
+        result: Ok(saved_outcome(FavoriteSourceLayer::Home, true)),
+    };
+    let mut state = AppState::new();
+
+    let follow_up = apply_engine_completion(
+        &mut state,
+        &completion,
+        &fixture.owner,
+        Some(&driver),
+        &live_root,
+    );
+
+    assert_eq!(live_root.config().model, "replacement");
+    assert!(matches!(
+        follow_up.activation,
+        Some(ModelSelection::NamedEngine { ref engine_name, .. }) if engine_name == "fast"
+    ));
+    assert!(
+        follow_up.previous_state.is_some(),
+        "history compares with the state before the replacement"
+    );
+    assert!(!notices(&state)[0].contains("previous settings"));
+}
+
+const REAL_PROFILE: &str = "# keep me\n[provider_connections.local]\nprovider = \"ollama\"\n";
+
+fn real_owner(directory: &tempfile::TempDir) -> (FavoriteSaveOwner, PathBuf) {
+    let profile_path = directory.path().join("config.toml");
+    std::fs::write(&profile_path, REAL_PROFILE).expect("write profile");
+    let profile: ProfileConfig = toml::from_str(REAL_PROFILE).expect("profile parses");
+    let writer = FavoriteModelsWriter::from_loaded_source(
+        profile_path.clone(),
+        REAL_PROFILE.to_string(),
+        FavoriteSourceLayer::Home,
+    );
+    let owner =
+        FavoriteSaveOwner::from_setup(FavoriteSaveSetup::from_profile(Some(writer), &profile));
+    (owner, profile_path)
+}
+
+fn local_engine_job(name: &str) -> EngineSaveJob {
+    let mut job = engine_job(false);
+    job.request.provider_connection = "local".to_string();
+    job.request.model = crate::config::EngineSaveChange::Set("llama3".to_string());
+    job.request.mode = crate::config::EngineSaveMode::Create {
+        name: name.to_string(),
+        copy_from: None,
+    };
+    job
+}
+
+#[tokio::test]
+async fn engine_and_favorite_saves_never_overlap_and_share_one_snapshot() {
+    let directory = tempfile::Builder::new()
+        .prefix("ylva-engine-save-")
+        .tempdir()
+        .expect("tempdir");
+    let (mut owner, profile_path) = real_owner(&directory);
+
+    assert_eq!(
+        owner.request("local", "llama3", true),
+        FavoriteRequestOutcome::Started
+    );
+    assert_eq!(
+        owner.request_engine(local_engine_job("fast")),
+        FavoriteRequestOutcome::IgnoredPending
+    );
+    assert!(owner.finish().await.is_some());
+
+    assert_eq!(
+        owner.request_engine(local_engine_job("fast")),
+        FavoriteRequestOutcome::Started
+    );
+    assert_eq!(
+        owner.request("local", "other", true),
+        FavoriteRequestOutcome::IgnoredPending
+    );
+    let SaveCompletion::Engine(completion) = owner.finish().await.expect("completion") else {
+        panic!("expected an engine completion");
+    };
+    assert!(completion.result.is_ok(), "{:?}", completion.result);
+
+    let saved = std::fs::read_to_string(&profile_path).expect("read profile");
+    assert!(saved.contains("# keep me"), "{saved}");
+    assert!(saved.contains("favorite_models = [\"llama3\"]"), "{saved}");
+    assert!(saved.contains("[engines.fast]"), "{saved}");
+}
+
+#[tokio::test]
+async fn engine_save_without_a_backing_connection_table_is_unavailable() {
+    let directory = tempfile::Builder::new()
+        .prefix("ylva-engine-save-")
+        .tempdir()
+        .expect("tempdir");
+    let (mut owner, profile_path) = real_owner(&directory);
+    let mut job = local_engine_job("fast");
+    job.request.provider_connection = "missing".to_string();
+
+    assert!(matches!(
+        owner.request_engine(job),
+        FavoriteRequestOutcome::Unavailable(_)
+    ));
+    assert_eq!(
+        std::fs::read_to_string(&profile_path).expect("read"),
+        REAL_PROFILE
+    );
+}
+
+#[tokio::test]
+async fn external_edit_fails_the_engine_save_and_keeps_the_page_state() {
+    let directory = tempfile::Builder::new()
+        .prefix("ylva-engine-save-")
+        .tempdir()
+        .expect("tempdir");
+    let (mut owner, profile_path) = real_owner(&directory);
+    let edited = format!("{REAL_PROFILE}# edited\n");
+    std::fs::write(&profile_path, &edited).expect("edit");
+
+    assert_eq!(
+        owner.request_engine(local_engine_job("fast")),
+        FavoriteRequestOutcome::Started
+    );
+    let SaveCompletion::Engine(completion) = owner.finish().await.expect("completion") else {
+        panic!("expected an engine completion");
+    };
+    assert!(matches!(
+        completion.result,
+        Err(FavoriteSaveError::SourceChanged { .. })
+    ));
+    let mut state = AppState::new();
+    let follow_up = apply_engine_completion(&mut state, &completion, &owner, None, &empty_engine());
+
+    assert!(!follow_up.picker_closed);
+    assert!(follow_up.activation.is_none());
+    assert!(notices(&state)[0].contains("Restart Ylva"));
+    assert_eq!(
+        std::fs::read_to_string(&profile_path).expect("read"),
+        edited,
+        "the foreign edit is never overwritten"
+    );
+    assert!(!state.engine_save_context.occupied_names.contains("fast"));
+}
+
+#[tokio::test]
+async fn finish_awaits_a_started_engine_write() {
+    let directory = tempfile::Builder::new()
+        .prefix("ylva-engine-save-")
+        .tempdir()
+        .expect("tempdir");
+    let (mut owner, profile_path) = real_owner(&directory);
+
+    owner.request_engine(local_engine_job("fast"));
+    let completion = owner.finish().await.expect("completion");
+
+    assert!(matches!(completion, SaveCompletion::Engine(_)));
+    assert!(std::fs::read_to_string(&profile_path)
+        .expect("read")
+        .contains("[engines.fast]"));
+    assert!(!owner.is_pending());
 }

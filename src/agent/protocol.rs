@@ -418,6 +418,10 @@ pub enum UiUpdate {
         /// root if that changes. See `UiUpdate::ToolPending::run_id`.
         run_id: Option<Uuid>,
     },
+    /// The oldest model switch announced through
+    /// `AgentCommand::RecordModelChanged` took effect: the next request is the
+    /// first the switched engine serves. Root loop only.
+    ModelChangeApplied,
     /// All previously queued steers have been injected into the LLM context.
     SteerApplied {
         /// See `UiUpdate::SteerQueued::run_id`.

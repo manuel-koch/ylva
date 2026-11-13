@@ -218,6 +218,14 @@ pub(super) fn draw_chat(
         lines.push(Line::default());
     }
 
+    // Model changes apply before queued steers are sent, so show them first.
+    for notice_text in &state.pending_model_notices {
+        let notice = ChatEntry::Notice {
+            text: notice_text.clone(),
+        };
+        lines.extend(build_entry(&notice, 0, content_area.width, false).rows);
+    }
+
     // Flush staged (not-yet-committed) queued steer messages after the
     // stream bubble so they appear visually after the current in-progress
     // response/thinking/tool-call content. See `AppState::queue_steer_message`.
@@ -358,12 +366,12 @@ fn compute_scrollbar_thumb(
 
 /// Render the custom chat scrollbar into `scrollbar_area` (1 column wide).
 ///
-/// Layout (when height ≥ 4):
+/// Layout (when height ≥ 2):
 ///   row 0                  → ↑ (Blue when can scroll up, DarkGray otherwise)
-///   rows 1 .. height-2     → thin │ track (DarkGray), ┃ thumb (Gray)
+///   rows 1 .. height-2     → thin │ track (DarkGray), ┃ thumb (Gray); empty at height 2
 ///   row height-1           → ↓ (Blue when can scroll down, DarkGray otherwise)
 ///
-/// On very short areas (< 4 rows) the track fills the whole column with no
+/// On very short areas (1 row) the track fills the whole column with no
 /// arrow rows.
 pub(super) fn render_chat_scrollbar(
     frame: &mut Frame,
@@ -378,14 +386,17 @@ pub(super) fn render_chat_scrollbar(
     if height == 0 {
         return;
     }
-    let has_arrows = height >= 4;
+    let has_arrows = height >= 2;
     let (track_y, track_height) = if has_arrows {
         (scrollbar_area.y + 1, height - 2)
     } else {
         (scrollbar_area.y, height)
     };
-    let (thumb_top, thumb_size) =
-        compute_scrollbar_thumb(track_height, total_lines, visible, row_offset, max_offset);
+    let (thumb_top, thumb_size) = if track_height == 0 {
+        (0, 0)
+    } else {
+        compute_scrollbar_thumb(track_height, total_lines, visible, row_offset, max_offset)
+    };
 
     for row in 0..track_height {
         let is_thumb = row >= thumb_top && row < thumb_top + thumb_size;

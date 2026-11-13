@@ -16,7 +16,11 @@ use super::*;
 use crate::llm::ModelInfo;
 use crate::tui_reducer_state::{ChoiceLabel, ModelChoice, PromptButton};
 
-fn picker_choice(connection: &str, model: &str, favorite_rank: Option<usize>) -> ModelChoice {
+pub(super) fn picker_choice(
+    connection: &str,
+    model: &str,
+    favorite_rank: Option<usize>,
+) -> ModelChoice {
     let mut choice = ModelChoice {
         configured: None,
         configuration_warnings: Vec::new(),

@@ -597,7 +597,9 @@ pub(super) async fn run_cli_to_with_title(
                     response_finished = true;
                 }
             }
-            Some(UiUpdate::SteerQueued { .. }) | Some(UiUpdate::SteerApplied { .. }) => {}
+            Some(UiUpdate::SteerQueued { .. })
+            | Some(UiUpdate::SteerApplied { .. })
+            | Some(UiUpdate::ModelChangeApplied) => {}
             // Headless output has no footer for the model-view readout.
             Some(UiUpdate::ContextUsage { .. } | UiUpdate::SubagentContextUsage { .. }) => {}
             // Headless output renders messages inline as they stream, so a

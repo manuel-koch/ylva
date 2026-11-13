@@ -34,7 +34,8 @@ use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, model_picker_row_is_details,
     model_picker_row_layout, slash_overlay_text_rows, visible_model_choices, BannerDragSelection,
     ParameterField, ParameterGlyphHit, PickerRow, PickerRowLayout, PromptButton, SessionAction,
-    SlashOverlay, SlashOverlayLayout, GREATER_VALUE_GLYPH, SMALLER_VALUE_GLYPH,
+    SlashOverlay, SlashOverlayLayout, ENGINE_SAVE_BUTTON_COUNT, GREATER_VALUE_GLYPH,
+    SMALLER_VALUE_GLYPH,
 };
 
 use super::chat::{apply_selection_highlight_to_line, render_chat_scrollbar};
@@ -74,13 +75,40 @@ fn model_name_emphasized_line<'a>(
 }
 
 /// Indent of a `/models` details row, aligning it under the identity text
-/// (past the two-column selection marker).
-const MODEL_PICKER_DETAIL_INDENT: &str = "    ";
+/// (past the two-column selection marker) plus two further columns.
+const MODEL_PICKER_DETAIL_INDENT: &str = "      ";
 /// Indent of a `/models` group header, one column left of the selection marker.
 const MODEL_PICKER_HEADER_INDENT: &str = " ";
 /// Panel columns a single-line `/models` label cannot use: both border
 /// columns, the scrollbar column and the two-column selection marker.
 const MODEL_PICKER_CHROME_WIDTH: usize = 5;
+
+/// Narrowest terminal width at which the parameters and save pages keep every
+/// action readable; below it the popup only asks for a wider terminal.
+const PARAMETER_PAGE_MINIMUM_WIDTH: usize = 20;
+
+/// Replace an unusably narrow parameters/save page by resize guidance. The
+/// draft and focus stay in the reducer state; Esc keeps working.
+fn draw_resize_guidance(frame: &mut Frame, input_area: Rect) {
+    let height = input_area.y.min(4);
+    let area = Rect::new(
+        input_area.x,
+        input_area.y - height,
+        input_area.width,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let text = format!(
+        "Widen the terminal to at least {PARAMETER_PAGE_MINIMUM_WIDTH} columns. \
+         Your edits are kept; Esc cancels."
+    );
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(ratatui::widgets::Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL)),
+        area,
+    );
+}
 
 /// Draw the slash-command overlay as a floating panel whose bottom edge sits
 /// directly above the input box, so the list grows upward over the
@@ -95,6 +123,7 @@ pub(super) fn draw_slash_overlay(
     mouse_pos: Option<(u16, u16)>,
 ) {
     let previous_first_visible = overlay_layout.first_visible_row;
+    let previous_detail_first_visible_row = overlay_layout.detail_first_visible_row;
     *overlay_layout = SlashOverlayLayout::default();
     // Visible choices are computed once per frame; the row layout and the
     // active-model styling both read this list.
@@ -143,10 +172,12 @@ pub(super) fn draw_slash_overlay(
                     .get(edit.choice_index)
                     .map(|choice| choice.label.identity.clone())
                     .unwrap_or_default();
-                (
-                    format!("Model parameters  ·  {identity}"),
-                    Some(edit.cursor),
-                )
+                let page = if edit.save_form.is_some() {
+                    "Save engine"
+                } else {
+                    "Model parameters"
+                };
+                (format!("{page}  ·  {identity}"), Some(edit.cursor))
             }
             None => {
                 let visible_indices = matching_model_indices(choices, filter);
@@ -183,19 +214,77 @@ pub(super) fn draw_slash_overlay(
     if entries.is_empty() || input_area.width < 4 || input_area.y < 3 {
         return;
     }
+    if matches!(
+        overlay,
+        SlashOverlay::ModelPicker {
+            parameters: Some(_),
+            ..
+        }
+    ) && usize::from(input_area.width) < PARAMETER_PAGE_MINIMUM_WIDTH
+    {
+        draw_resize_guidance(frame, input_area);
+        return;
+    }
 
-    // Reset and Apply share one row: the Apply entry gets no row of its own
-    // and is drawn beside Reset, which owns the row.
-    let apply_button_index_sharing_row = match overlay {
+    let save_form = match overlay {
         SlashOverlay::ModelPicker {
             parameters: Some(edit),
             ..
-        } => edit
-            .fields
-            .iter()
-            .position(|field| *field == ParameterField::ResetToConfigured)
-            .map(|reset_index| reset_index + 1),
+        } => edit.save_form.as_ref(),
         _ => None,
+    };
+    let selected = match save_form {
+        Some(form) => Some(form.focus_entry(entries.len())),
+        None => selected,
+    };
+    // Action buttons wrap by measured display width: consecutive buttons share
+    // a row while they fit, and the first button of a row stands for the row.
+    let button_indices: Vec<usize> = match overlay {
+        SlashOverlay::ModelPicker {
+            parameters: Some(edit),
+            ..
+        } => match save_form {
+            Some(_) => {
+                (entries.len().saturating_sub(ENGINE_SAVE_BUTTON_COUNT)..entries.len()).collect()
+            }
+            None => edit
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| {
+                    matches!(
+                        field,
+                        ParameterField::ResetToConfigured
+                            | ParameterField::Save
+                            | ParameterField::Apply
+                    )
+                })
+                .map(|(index, _)| index)
+                .collect(),
+        },
+        _ => Vec::new(),
+    };
+    let button_row_width = (input_area.width as usize).saturating_sub(5 + 2);
+    let mut button_groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_width = 0;
+    for index in &button_indices {
+        let width = Span::raw(format!(" [ {} ] ", entries[*index])).width();
+        match button_groups.last_mut() {
+            Some(group) if group_width + 1 + width <= button_row_width => {
+                group.push(*index);
+                group_width += 1 + width;
+            }
+            _ => {
+                button_groups.push(vec![*index]);
+                group_width = width;
+            }
+        }
+    }
+    let button_leader = |entry_index: usize| {
+        button_groups
+            .iter()
+            .find(|group| group.contains(&entry_index))
+            .map_or(entry_index, |group| group[0])
     };
     // Map each rendered row to the entry it shows, or to the group header
     // that precedes a group of model-picker entries.
@@ -204,7 +293,7 @@ pub(super) fn draw_slash_overlay(
             parameters: Some(_),
             ..
         } => (0..entries.len())
-            .filter(|entry_index| Some(*entry_index) != apply_button_index_sharing_row)
+            .filter(|entry_index| button_leader(*entry_index) == *entry_index)
             .map(PickerRow::Entry)
             .collect(),
         SlashOverlay::ModelPicker {
@@ -217,7 +306,13 @@ pub(super) fn draw_slash_overlay(
 
     // Cap the panel at two thirds of the space above the input so a provider
     // with hundreds of models cannot hide the conversation entirely.
-    let max_content_height = super::maximum_panel_content_height(input_area);
+    // The model picker instead takes every row above the input, minus its borders.
+    let is_model_picker = matches!(overlay, SlashOverlay::ModelPicker { .. });
+    let max_content_height = if is_model_picker {
+        input_area.y.saturating_sub(2).max(1)
+    } else {
+        super::maximum_panel_content_height(input_area)
+    };
     let detail_lines = if let SlashOverlay::SessionPicker(picker) = overlay {
         let mut details = Vec::new();
         if input_area.y >= 4 {
@@ -236,13 +331,62 @@ pub(super) fn draw_slash_overlay(
             max_content_height,
         )
     };
+    // In the model picker the list above dominates and keeps its size while the
+    // selection moves: it gets a fixed share of the height (at least three
+    // rows; exactly the controls on the parameters page), the details take
+    // the rest and scroll (mouse wheel over the details) when longer.
+    let mut detail_lines = detail_lines;
+    let parameters_open = matches!(
+        overlay,
+        SlashOverlay::ModelPicker {
+            parameters: Some(_),
+            ..
+        }
+    );
+    let mut detail_first_visible_row = 0;
+    let detail_total_rows = detail_lines.len();
+    let mut model_picker_list_height = 0;
+    if is_model_picker {
+        let list_rows = saturating_u16(rows.len());
+        model_picker_list_height = if parameters_open {
+            list_rows.min(max_content_height)
+        } else {
+            list_rows
+                .min(max_content_height.saturating_sub(1) * 2 / 3)
+                .max(MINIMUM_LIST_ROWS)
+                .min(max_content_height)
+        };
+        let mut detail_capacity =
+            usize::from(max_content_height.saturating_sub(model_picker_list_height + 1));
+        if parameters_open {
+            detail_capacity = detail_capacity.max(usize::from(MINIMUM_SCROLLED_DETAIL_ROWS));
+        }
+        if detail_lines.len() > detail_capacity {
+            let maximum_first_row = detail_lines.len() - detail_capacity;
+            detail_first_visible_row = previous_detail_first_visible_row.min(maximum_first_row);
+            detail_lines = detail_lines
+                .into_iter()
+                .skip(detail_first_visible_row)
+                .take(detail_capacity)
+                .collect();
+        }
+        // Fill the remaining height so the dialog keeps its size while the
+        // selection (and with it the details) changes.
+        if !detail_lines.is_empty() {
+            detail_lines.resize(detail_capacity.max(detail_lines.len()), Line::default());
+        }
+    }
     let detail_height = saturating_u16(detail_lines.len());
     let detail_separator_height =
         u16::from(detail_height > 0 && !matches!(overlay, SlashOverlay::SessionPicker(_)));
     let list_max_height = max_content_height
         .saturating_sub(detail_height + detail_separator_height)
         .max(1);
-    let mut content_height = saturating_u16(rows.len()).min(list_max_height);
+    let mut content_height = if is_model_picker {
+        model_picker_list_height.min(list_max_height)
+    } else {
+        saturating_u16(rows.len()).min(list_max_height)
+    };
     if matches!(overlay, SlashOverlay::SessionPicker(_)) {
         content_height = content_height.min(
             input_area
@@ -264,19 +408,20 @@ pub(super) fn draw_slash_overlay(
     // repositioning the popup unnecessarily.
     // A selected entry may span two rows; keep its whole span in view.
     let selected_span = selected.and_then(|selected| {
-        let selected = if Some(selected) == apply_button_index_sharing_row {
-            selected - 1
-        } else {
-            selected
-        };
+        let selected = button_leader(selected);
         let first_row = rows
             .iter()
             .position(|row| *row == PickerRow::Entry(selected))?;
         let last_row = rows
             .iter()
             .rposition(|row| *row == PickerRow::Entry(selected))?;
-        // A group's first entry keeps its header in view.
-        let first_row = if first_row > 0 && matches!(rows[first_row - 1], PickerRow::Header(_)) {
+        // A group's first entry keeps its header in view, unless the window is
+        // too short for both: a span that never fits makes the window jump
+        // between two positions on every frame.
+        let first_row = if first_row > 0
+            && matches!(rows[first_row - 1], PickerRow::Header(_))
+            && last_row + 1 - (first_row - 1) <= content_height as usize
+        {
             first_row - 1
         } else {
             first_row
@@ -297,15 +442,10 @@ pub(super) fn draw_slash_overlay(
     }
     let content_width = panel_area.width.saturating_sub(3) as usize;
     let list_origin = (panel_area.x + 1, panel_area.y + 1);
-    let is_button_hovered = |row_index: usize, first_column: u16, width: usize| {
-        mouse_pos.is_some_and(|(column, row)| {
-            row == list_origin.1 + (row_index - first_visible) as u16
-                && column >= first_column
-                && (column as usize) < first_column as usize + width
-        })
-    };
     let mut parameter_glyphs: Vec<ParameterGlyphHit> = Vec::new();
     let mut parameter_buttons: Vec<(Rect, usize)> = Vec::new();
+    let mut engine_save_controls: Vec<(Rect, crate::tui_reducer_state::EngineSaveFocus)> =
+        Vec::new();
     let mut lines: Vec<Line<'static>> = rows
         .iter()
         .enumerate()
@@ -329,7 +469,11 @@ pub(super) fn draw_slash_overlay(
                 }
                 PickerRow::Entry(entry_index) => *entry_index,
             };
-            let entry = &entries[row_index];
+            let entry = if button_indices.is_empty() {
+                &entries[row_index]
+            } else {
+                &entries[entry_index]
+            };
             let is_selected = selected == Some(entry_index);
             let is_model_details_row = matches!(overlay, SlashOverlay::ModelPicker { .. })
                 && model_picker_row_is_details(&rows, row_index);
@@ -398,83 +542,106 @@ pub(super) fn draw_slash_overlay(
                 ..
             } = overlay
             {
-                match edit.fields.get(entry_index) {
-                    Some(ParameterField::ResetToConfigured) => {
-                        let reset_enabled = choices
+                let first_save_button = entries.len().saturating_sub(ENGINE_SAVE_BUTTON_COUNT);
+                let button_enabled = |index: usize| match (save_form, edit.fields.get(index)) {
+                    (Some(form), _) => {
+                        (index >= first_save_button).then_some(form.buttons_enabled())
+                    }
+                    (None, Some(ParameterField::ResetToConfigured)) => Some(
+                        choices
                             .get(edit.choice_index)
-                            .is_some_and(|choice| edit.reset_enabled(choice));
-                        let reset_label = format!(" [ {entry} ] ");
-                        let apply_label = format!(" [ {} ] ", entries[entry_index + 1]);
-                        let reset_column = list_origin.0 + marker.chars().count() as u16;
-                        let apply_column = reset_column + reset_label.chars().count() as u16 + 1;
-                        let reset_hovered = reset_enabled
-                            && is_button_hovered(
-                                row_index,
-                                reset_column,
-                                reset_label.chars().count(),
-                            );
-                        let apply_hovered =
-                            is_button_hovered(row_index, apply_column, apply_label.chars().count());
-                        let button_row = list_origin.1 + (row_index - first_visible) as u16;
-                        if reset_enabled {
-                            parameter_buttons.push((
-                                Rect::new(
-                                    reset_column,
-                                    button_row,
-                                    reset_label.chars().count() as u16,
-                                    1,
-                                ),
-                                entry_index,
-                            ));
-                        }
-                        parameter_buttons.push((
-                            Rect::new(
-                                apply_column,
-                                button_row,
-                                apply_label.chars().count() as u16,
-                                1,
-                            ),
-                            entry_index + 1,
-                        ));
-                        let apply_focused = selected == Some(entry_index + 1);
-                        return Line::from(vec![
-                            Span::styled(marker, Style::default().fg(list_text_color())),
-                            Span::styled(
-                                reset_label,
-                                parameter_button_style(reset_enabled, reset_hovered, is_selected),
-                            ),
-                            Span::raw(" "),
-                            Span::styled(
-                                apply_label,
-                                parameter_button_style(true, apply_hovered, apply_focused),
-                            ),
-                        ]);
-                    }
-                    Some(ParameterField::Apply) => {
-                        let apply_label = format!(" [ {entry} ] ");
-                        let apply_hovered = is_button_hovered(
-                            row_index,
-                            list_origin.0 + marker.chars().count() as u16,
-                            apply_label.chars().count(),
+                            .is_some_and(|choice| edit.reset_enabled(choice)),
+                    ),
+                    (None, Some(ParameterField::Save | ParameterField::Apply)) => Some(true),
+                    _ => None,
+                };
+                if let Some(group) = button_groups.iter().find(|group| group[0] == entry_index) {
+                    let screen_row = list_origin.1 + (row_index - first_visible) as u16;
+                    let mut column = list_origin.0 + marker.chars().count() as u16;
+                    let available = content_width.saturating_sub(marker.chars().count());
+                    let mut spans =
+                        vec![Span::styled(marker, Style::default().fg(list_text_color()))];
+                    for (position, button_index) in group.iter().enumerate() {
+                        let is_enabled = button_enabled(*button_index).unwrap_or(false);
+                        let label = truncate_with_ellipsis(
+                            &format!(" [ {} ] ", entries[*button_index]),
+                            available,
                         );
-                        parameter_buttons.push((
+                        let label_width = Span::raw(label.clone()).width();
+                        let hovered = is_enabled
+                            && mouse_pos.is_some_and(|(mouse_column, mouse_row)| {
+                                mouse_row == screen_row
+                                    && mouse_column >= column
+                                    && (mouse_column as usize) < column as usize + label_width
+                            });
+                        if is_enabled {
+                            let area = Rect::new(column, screen_row, label_width as u16, 1);
+                            match save_form {
+                                Some(form) => {
+                                    if let Some(focus) =
+                                        form.entry_focus(*button_index, entries.len())
+                                    {
+                                        engine_save_controls.push((area, focus));
+                                    }
+                                }
+                                None => parameter_buttons.push((area, *button_index)),
+                            }
+                        }
+                        if position > 0 {
+                            spans.push(Span::raw(" "));
+                        }
+                        spans.push(Span::styled(
+                            label,
+                            parameter_button_style(
+                                is_enabled,
+                                hovered,
+                                selected == Some(*button_index),
+                            ),
+                        ));
+                        column += label_width as u16 + 1;
+                    }
+                    return Line::from(spans);
+                }
+                if let Some(form) = save_form {
+                    // Mode and name rows are pointer targets; the rest is text.
+                    if let Some(focus) = form.entry_focus(entry_index, entries.len()) {
+                        engine_save_controls.push((
                             Rect::new(
-                                list_origin.0 + marker.chars().count() as u16,
+                                list_origin.0,
                                 list_origin.1 + (row_index - first_visible) as u16,
-                                apply_label.chars().count() as u16,
+                                content_width as u16,
                                 1,
                             ),
-                            entry_index,
+                            focus,
                         ));
+                    }
+                    let text = truncate_with_ellipsis(
+                        entry,
+                        content_width.saturating_sub(marker.chars().count()),
+                    );
+                    let caret_column = form
+                        .name_caret_column()
+                        .filter(|column| entry_index == 1 && *column <= text.chars().count());
+                    if let Some(caret_column) = caret_column {
+                        // A highlighted cell marks the caret on the character
+                        // under it, so the text itself never shifts.
+                        let mut characters: Vec<char> = text.chars().collect();
+                        characters.push(' ');
+                        let before: String = characters[..caret_column].iter().collect();
+                        let after: String = characters[caret_column + 1..].iter().collect();
                         return Line::from(vec![
-                            Span::styled(marker, Style::default().fg(list_text_color())),
+                            Span::styled(format!("{marker}{before}"), style),
                             Span::styled(
-                                apply_label,
-                                parameter_button_style(true, apply_hovered, is_selected),
+                                characters[caret_column].to_string(),
+                                // Inverse of the selected row, which the name row is.
+                                Style::default()
+                                    .fg(list_selection_background_color())
+                                    .bg(list_selection_foreground_color()),
                             ),
+                            Span::styled(after, style),
                         ]);
                     }
-                    _ => {}
+                    return Line::styled(format!("{marker}{text}"), style);
                 }
             }
             let text = if is_model_identity_row {
@@ -557,6 +724,16 @@ pub(super) fn draw_slash_overlay(
         .collect();
     overlay_layout.parameter_glyphs = parameter_glyphs;
     overlay_layout.parameter_buttons = parameter_buttons;
+    if !button_indices.is_empty() {
+        overlay_layout.parameter_row_entries = rows
+            .iter()
+            .map(|row| match row {
+                PickerRow::Entry(entry_index) => *entry_index,
+                PickerRow::Header(_) => usize::MAX,
+            })
+            .collect();
+    }
+    overlay_layout.engine_save_controls = engine_save_controls;
 
     frame.render_widget(Clear, panel_area);
     let block = Block::default()
@@ -601,9 +778,10 @@ pub(super) fn draw_slash_overlay(
         );
         if !matches!(overlay, SlashOverlay::SessionPicker(_)) {
             overlay_layout.detail_area = details_area;
+            overlay_layout.detail_first_visible_row = detail_first_visible_row;
+            overlay_layout.detail_total_rows = detail_total_rows;
             overlay_layout.detail_rows = detail_lines.iter().map(line_plain_text).collect();
         }
-        let mut detail_lines = detail_lines;
         if let SlashOverlay::SessionPicker(picker) = overlay {
             let [resume_action, clone_action, delete_action] = session_button_areas(details_area);
             overlay_layout.resume_action = resume_action;
@@ -632,6 +810,21 @@ pub(super) fn draw_slash_overlay(
             Paragraph::new(detail_lines).style(Style::default().fg(muted_text_color())),
             details_area,
         );
+        if detail_total_rows > usize::from(detail_height) {
+            render_chat_scrollbar(
+                frame,
+                Rect {
+                    x: details_area.right().saturating_sub(1),
+                    width: 1,
+                    ..details_area
+                },
+                detail_first_visible_row,
+                detail_total_rows - usize::from(detail_height),
+                detail_total_rows,
+                usize::from(detail_height),
+                chat_scrollbar_color(),
+            );
+        }
     }
 
     if rows.len() > content_height as usize {
@@ -778,6 +971,20 @@ fn apply_overlay_drag_highlight(
     }
 }
 
+/// Fewest detail rows kept on the parameters page, however many controls it has.
+const MINIMUM_SCROLLED_DETAIL_ROWS: u16 = 3;
+/// Fewest list rows the model picker keeps while its details scroll.
+const MINIMUM_LIST_ROWS: u16 = 3;
+
+/// Wrap a single-style line to `width` columns instead of dropping it.
+fn wrap_styled_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let style = line.style;
+    textwrap::wrap(&line.to_string(), width.max(1))
+        .into_iter()
+        .map(|part| Line::styled(part.into_owned(), style))
+        .collect()
+}
+
 fn model_picker_detail_lines(
     overlay: &SlashOverlay,
     engine_display: &crate::llm::engine::EngineDisplayInfo,
@@ -793,9 +1000,38 @@ fn model_picker_detail_lines(
     else {
         return Vec::new();
     };
-    if width < 40 || available_height < 3 || matching_model_indices(choices, filter).is_empty() {
+    if width == 0 || available_height < 3 || matching_model_indices(choices, filter).is_empty() {
         return Vec::new();
     }
+    let save_info: Vec<Line<'static>> = parameters
+        .as_ref()
+        .and_then(|edit| edit.save_form.as_deref())
+        .map(|form| {
+            let lines: Vec<Line<'static>> = form
+                .info_lines()
+                .iter()
+                .flat_map(|text| {
+                    let (indent, body) = match text.strip_prefix("  ") {
+                        Some(body) => ("  ", body),
+                        None => ("", text.as_str()),
+                    };
+                    let is_problem = text.starts_with('✗');
+                    textwrap::wrap(body, width.saturating_sub(indent.len()).max(1))
+                        .into_iter()
+                        .map(|part| {
+                            let line = format!("{indent}{part}");
+                            if is_problem {
+                                Line::styled(line, Style::default().fg(warning_color()))
+                            } else {
+                                Line::from(line)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            lines
+        })
+        .unwrap_or_default();
 
     let selected_choice_index = matching_model_indices(choices, filter)
         .get(*selected)
@@ -859,22 +1095,32 @@ fn model_picker_detail_lines(
             )
         },
     );
-    if compaction_effect.width() > width {
-        return Vec::new();
-    }
     let draft_reasoning_effort = match parameters {
         Some(edit) if Some(edit.choice_index) == selected_choice_index => {
             edit.reasoning_effort.as_deref()
         }
         _ => None,
     };
-    let mut lines = vec![compaction_effect];
+    let mut lines = save_info;
+    // The list row may be elided on a narrow terminal, so spell out the identity here.
+    if let Some(choice) = selected_choice {
+        let identity_texts = choice
+            .engine_name
+            .iter()
+            .map(|engine_name| format!("engine: {engine_name}"))
+            .chain([
+                format!("provider: {}", choice.selection.provider_connection),
+                format!("model: {}", choice.selection.model.id),
+            ])
+            .chain((!choice.label.details.is_empty()).then(|| choice.label.details_text()));
+        lines.extend(identity_texts.flat_map(|text| wrap_styled_line(Line::from(text), width)));
+    }
+    lines.extend(wrap_styled_line(compaction_effect, width));
     if let Some(choice) = selected_choice {
         lines.extend(
             crate::tui_reducer_state::selected_choice_detail_texts(choice, draft_reasoning_effort)
                 .into_iter()
-                .filter(|text| text.chars().count() <= width)
-                .map(Line::from),
+                .flat_map(|text| wrap_styled_line(Line::from(text), width)),
         );
     }
     lines

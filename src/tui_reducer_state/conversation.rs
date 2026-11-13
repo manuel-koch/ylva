@@ -624,6 +624,37 @@ impl AppState {
             self.chat_entries
                 .push(ChatEntry::UserMessage { text, state });
         }
+        if state == UserMessageState::Cancelled {
+            self.commit_staged_model_notices();
+        }
+    }
+
+    /// Hold a model-switch notice below the live bubble until the agent
+    /// applies the switch (see `apply_staged_model_notice`).
+    pub fn stage_model_notice(&mut self, text: String) {
+        self.queued_render_revision += 1;
+        self.pending_model_notices.push(text);
+    }
+
+    /// The agent applied the oldest staged model switch: commit its notice
+    /// after everything the previous request produced.
+    pub fn apply_staged_model_notice(&mut self) {
+        if self.pending_model_notices.is_empty() {
+            return;
+        }
+        self.flush_partial_assistant_message(false);
+        self.queued_render_revision += 1;
+        let text = self.pending_model_notices.remove(0);
+        self.chat_entries.push(ChatEntry::Notice { text });
+    }
+
+    /// Commit every still-staged model-switch notice, e.g. when the round
+    /// ends before the agent echoed the switch.
+    pub fn commit_staged_model_notices(&mut self) {
+        self.queued_render_revision += 1;
+        for text in std::mem::take(&mut self.pending_model_notices) {
+            self.chat_entries.push(ChatEntry::Notice { text });
+        }
     }
 
     /// Flush `run_id`'s own `TurnBuffer` (accumulated `SubagentToken`

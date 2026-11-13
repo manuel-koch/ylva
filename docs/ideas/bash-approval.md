@@ -126,6 +126,9 @@ extending grammars or suggesting persistent rules.
 Maybe improve/add grammar for further commands or propose modified bash rules
 in `tests/sandbox_evaluation/sample.config.toml`.
 
+- `xxd`
+- `base32` and `base64`
+
 ## Grammar coverage and adversarial validation
 
 Extend the grammar roster only when repeated approvals demonstrate a useful

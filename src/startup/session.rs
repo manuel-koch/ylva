@@ -123,6 +123,7 @@ pub(super) fn open_store(
 pub(super) fn print_resume_hint(
     snapshot: &crate::app::SessionExitSnapshot,
     explicit_profile_name: Option<&str>,
+    explicit_engine_name: Option<&str>,
 ) {
     eprintln!(
         "{}",
@@ -130,7 +131,8 @@ pub(super) fn print_resume_hint(
             snapshot.session_id,
             &snapshot.title,
             crate::llm::CostLedger::process().totals_text().as_deref(),
-            explicit_profile_name
+            explicit_profile_name,
+            explicit_engine_name
         )
     );
 }
@@ -147,6 +149,7 @@ fn resume_hint_text(
     title: &str,
     cost_text: Option<&str>,
     explicit_profile_name: Option<&str>,
+    explicit_engine_name: Option<&str>,
 ) -> String {
     let mut hint = format!("\nSession: {session_id}");
     if !title.is_empty() {
@@ -161,6 +164,10 @@ fn resume_hint_text(
     if let Some(profile_name) = explicit_profile_name {
         hint.push_str(&format!(" --profile {profile_name}"));
     }
+    if let Some(engine_name) = explicit_engine_name {
+        let quoted = format!("'{}'", engine_name.replace('\'', "'\"'\"'"));
+        hint.push_str(&format!(" --engine {quoted}"));
+    }
     hint
 }
 
@@ -169,9 +176,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resume_hint_quotes_explicit_engine_names() {
+        let session_id = uuid::Uuid::nil();
+        let hint = resume_hint_text(session_id, "", None, None, Some("fast"));
+        assert!(hint.ends_with(" --engine 'fast'"));
+        let hint = resume_hint_text(session_id, "", None, None, Some("engine's name"));
+        assert!(hint.ends_with(" --engine 'engine'\"'\"'s name'"));
+    }
+
+    #[test]
     fn resume_hint_text_without_a_profile_names_only_the_conversation_id() {
         let session_id = uuid::Uuid::nil();
-        let hint = resume_hint_text(session_id, "", None, None);
+        let hint = resume_hint_text(session_id, "", None, None, None);
         assert_eq!(
             hint,
             format!("\nSession: {session_id}\nResume with: ylva --conversation-id {session_id}")
@@ -181,7 +197,7 @@ mod tests {
     #[test]
     fn resume_hint_text_with_an_explicit_profile_includes_it() {
         let session_id = uuid::Uuid::nil();
-        let hint = resume_hint_text(session_id, "", None, Some("work"));
+        let hint = resume_hint_text(session_id, "", None, Some("work"), None);
         assert_eq!(
             hint,
             format!(
@@ -194,7 +210,7 @@ mod tests {
     fn resume_hint_includes_a_safe_single_line_title() {
         let session_id = uuid::Uuid::nil();
         assert_eq!(
-            resume_hint_text(session_id, "One\nTwo\u{1b}", None, Some("work")),
+            resume_hint_text(session_id, "One\nTwo\u{1b}", None, Some("work"), None),
             format!("\nSession: {session_id}\nTitle:   One Two \nResume with: ylva --conversation-id {session_id} --profile work")
         );
     }
@@ -203,7 +219,7 @@ mod tests {
     fn resume_hint_places_costs_between_title_and_resume_command() {
         let session_id = uuid::Uuid::nil();
         assert_eq!(
-            resume_hint_text(session_id, "Title", Some("0.12 EUR + 0.10 USD"), None),
+            resume_hint_text(session_id, "Title", Some("0.12 EUR + 0.10 USD"), None, None),
             format!("\nSession: {session_id}\nTitle:   Title\nCosts:   0.12 EUR + 0.10 USD\nResume with: ylva --conversation-id {session_id}")
         );
     }

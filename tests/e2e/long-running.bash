@@ -13,4 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-for i in {1..100000}; do date +%s; echo "hello world"; sleep 5; done
+COUNT=${1:-320}
+for i in $(seq 1 "$COUNT"); do date +%s; echo "hello world"; sleep 1; done

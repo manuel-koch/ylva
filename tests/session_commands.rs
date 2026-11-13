@@ -239,7 +239,7 @@ fn write_mock_profile(directory: &std::path::Path) {
     std::fs::create_dir_all(&profile_directory).unwrap();
     std::fs::write(
         profile_directory.join("config.toml"),
-        "[engines.default]\nprovider = \"mock\"\nmodel = \"test-model\"\n",
+        "[engines.default]\nprovider_connection = \"mock\"\nmodel = \"test-model\"\n",
     )
     .unwrap();
 }

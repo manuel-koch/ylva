@@ -14,6 +14,7 @@
 
 //! Model picker state and operations.
 
+use super::engine_save::EngineSaveForm;
 use super::{AppState, BannerDragSelection, ConversationView, Focus};
 use crate::llm::engine::{
     ModelSelection, ModelSelectionTarget, ProviderModelOption, ReasoningEffortChange,
@@ -369,7 +370,7 @@ pub(crate) fn selected_choice_detail_texts(
             ));
         }
     }
-    if let Some(crate::llm::ModelScore::PerEffort { default, efforts }) = &model.score {
+    if let Some(crate::llm::ModelScore::PerEffort { default, .. }) = &model.score {
         let mut parts: Vec<String> = default
             .iter()
             .map(|value| {
@@ -379,11 +380,16 @@ pub(crate) fn selected_choice_detail_texts(
                 )
             })
             .collect();
-        parts.extend(efforts.iter().map(|(effort, value)| {
-            format!(
-                "{effort} {}",
-                crate::llm::model_scores::format_score_value(*value)
-            )
+        parts.extend(model.score.iter().flat_map(|score| {
+            score
+                .efforts_by_strength()
+                .into_iter()
+                .map(|(effort, value)| {
+                    format!(
+                        "{effort} {}",
+                        crate::llm::model_scores::format_score_value(value)
+                    )
+                })
         }));
         let effort = draft_reasoning_effort
             .or(choice.selection.reasoning_effort.as_deref())
@@ -665,6 +671,8 @@ pub enum ParameterField {
     /// Action row, shown for named-engine rows only: reload the draft from
     /// the engine's configured settings. Nothing is applied until confirmed.
     ResetToConfigured,
+    /// Action row: open the save page to persist the draft as a named engine.
+    Save,
     /// Action row, always last: confirm the draft and switch to the model.
     Apply,
 }
@@ -673,7 +681,7 @@ impl ParameterField {
     fn is_button(self) -> bool {
         matches!(
             self,
-            ParameterField::ResetToConfigured | ParameterField::Apply
+            ParameterField::ResetToConfigured | ParameterField::Save | ParameterField::Apply
         )
     }
 }
@@ -706,6 +714,14 @@ pub struct ModelParameterEdit {
     /// applies the engine's configured model, effort and cleared overrides,
     /// plus any edit made after the reset.
     pub restored_baseline: bool,
+    /// Context window the popup (or the last reset) started from; a draft
+    /// that was edited back to it is not an explicit choice when saving.
+    pub initial_context_length: Option<usize>,
+    /// Output limit the popup (or the last reset) started from.
+    pub initial_max_output_tokens: Option<usize>,
+    /// Save page opened from the "Save…" button; the draft above stays intact
+    /// underneath it.
+    pub save_form: Option<Box<EngineSaveForm>>,
 }
 
 impl ModelParameterEdit {
@@ -722,7 +738,7 @@ impl ModelParameterEdit {
     }
     /// The row whose reasoning options and limits the draft currently shows:
     /// the configured baseline once the draft was reloaded from it.
-    fn source_choice<'a>(&self, choice: &'a ModelChoice) -> &'a ModelChoice {
+    pub(crate) fn source_choice<'a>(&self, choice: &'a ModelChoice) -> &'a ModelChoice {
         match (&choice.configured, self.restored_baseline) {
             (Some(baseline), true) => &baseline.choice,
             _ => choice,
@@ -747,35 +763,82 @@ impl ModelParameterEdit {
     }
 }
 
-/// Smallest output-limit step; every ladder value is this unit doubled.
-const MAX_OUTPUT_TOKENS_LADDER_UNIT: usize = 1024;
-/// Number of doublings on the output-limit ladder (1K up to 256K).
-const MAX_OUTPUT_TOKENS_LADDER_DOUBLINGS: u32 = 8;
+/// Smallest token step of the parameter ladder (base-10 "1K").
+const TOKEN_LADDER_UNIT: usize = 1_000;
+/// Last value of the doubling part of the ladder; steps above it are linear.
+const TOKEN_LADDER_DOUBLING_LIMIT: usize = 32_000;
+/// Last value that still moves in [`TOKEN_LADDER_MEDIUM_STEP`] increments.
+const TOKEN_LADDER_MEDIUM_LIMIT: usize = 256_000;
+const TOKEN_LADDER_MEDIUM_STEP: usize = 32_000;
+const TOKEN_LADDER_LARGE_STEP: usize = 64_000;
+/// Highest output limit offered when the catalog states no maximum.
+const MAX_OUTPUT_TOKENS_UNKNOWN_MAXIMUM: usize = 256_000;
 
-/// Move the output-token limit along a 1K…256K doubling ladder capped at the
-/// catalog `maximum` (which becomes the last step when known). Moving up from
-/// `None` selects the lowest step; moving down from the lowest step returns
-/// to `None`.
+/// Linear step size of the ladder above [`TOKEN_LADDER_DOUBLING_LIMIT`]
+/// when moving from a value that is `at_or_below_medium_limit`.
+fn token_ladder_linear_step(at_or_below_medium_limit: bool) -> usize {
+    if at_or_below_medium_limit {
+        TOKEN_LADDER_MEDIUM_STEP
+    } else {
+        TOKEN_LADDER_LARGE_STEP
+    }
+}
+
+/// Smallest ladder value above `value`. The ladder doubles from 1K up to 32K
+/// (1K, 2K, 4K, … 32K), then moves in 32K steps up to 256K and in 64K steps
+/// beyond. All values are base-10 multiples of 1K.
+fn next_token_ladder_value(value: usize) -> usize {
+    if value < TOKEN_LADDER_DOUBLING_LIMIT {
+        let mut step = TOKEN_LADDER_UNIT;
+        while step <= value {
+            step *= 2;
+        }
+        return step;
+    }
+    let step = token_ladder_linear_step(value < TOKEN_LADDER_MEDIUM_LIMIT);
+    (value / step + 1) * step
+}
+
+/// Largest ladder value below `value`, or `None` at or below the lowest step.
+fn previous_token_ladder_value(value: usize) -> Option<usize> {
+    if value <= TOKEN_LADDER_UNIT {
+        return None;
+    }
+    if value <= TOKEN_LADDER_DOUBLING_LIMIT {
+        let mut step = TOKEN_LADDER_UNIT;
+        while step * 2 < value {
+            step *= 2;
+        }
+        return Some(step);
+    }
+    let step = token_ladder_linear_step(value <= TOKEN_LADDER_MEDIUM_LIMIT);
+    Some((value - 1) / step * step)
+}
+
+/// Move the output-token limit along the token ladder, capped at the catalog
+/// `maximum` (which becomes the last step when known) or 256K otherwise.
+/// Moving up from `None` selects the lowest step; moving down from the lowest
+/// step returns to `None`.
 pub(crate) fn adjust_max_output_tokens(
     current: Option<usize>,
     delta: isize,
     maximum: Option<usize>,
 ) -> Option<usize> {
-    let mut steps: Vec<usize> = (0..=MAX_OUTPUT_TOKENS_LADDER_DOUBLINGS)
-        .map(|doublings| MAX_OUTPUT_TOKENS_LADDER_UNIT << doublings)
-        .filter(|step| maximum.is_none_or(|maximum| *step < maximum))
-        .collect();
-    if let Some(maximum) = maximum {
-        steps.push(maximum);
-    }
+    let ceiling = maximum.unwrap_or(MAX_OUTPUT_TOKENS_UNKNOWN_MAXIMUM);
     let floor = current.unwrap_or(0);
     if delta >= 0 {
-        match steps.iter().copied().find(|step| *step > floor) {
-            Some(step) => Some(step),
-            None => current,
+        let next = next_token_ladder_value(floor);
+        if next <= ceiling {
+            Some(next)
+        } else if floor < ceiling && maximum.is_some() {
+            Some(ceiling)
+        } else {
+            current
         }
+    } else if floor > ceiling && maximum.is_some() {
+        Some(ceiling)
     } else {
-        steps.iter().copied().rev().find(|step| *step < floor)
+        previous_token_ladder_value(floor)
     }
 }
 
@@ -787,41 +850,25 @@ fn max_output_tokens_directions(current: Option<usize>, maximum: Option<usize>) 
     )
 }
 
-/// Smallest context-window step and the unit every step is a multiple of.
-pub(crate) const CONTEXT_LENGTH_STEP_UNIT: usize = 32 * 1024;
-
 /// Shown before a parameter value when a smaller value can be selected.
 pub(crate) const SMALLER_VALUE_GLYPH: &str = "◂";
 /// Shown after a parameter value when a greater value can be selected.
 pub(crate) const GREATER_VALUE_GLYPH: &str = "▸";
 
-/// Step size for the context window: one eighth of it, rounded down to a
-/// multiple of [`CONTEXT_LENGTH_STEP_UNIT`] and never below that unit.
-pub(crate) fn context_length_step(context_length: usize) -> usize {
-    (context_length / 8 / CONTEXT_LENGTH_STEP_UNIT).max(1) * CONTEXT_LENGTH_STEP_UNIT
-}
-
-/// Move the context window one step up (`delta > 0`) or down (`delta < 0`).
-///
-/// The window stays on multiples of [`CONTEXT_LENGTH_STEP_UNIT`]: from a
-/// multiple the step is added or subtracted; from any other value the first
-/// move lands on the next multiple in that direction. The result is never
-/// below one step unit and never above `maximum` when the catalog knows the
-/// model's window, even when that maximum is not a multiple.
+/// Move the context window one step up (`delta > 0`) or down (`delta < 0`)
+/// along the token ladder, so an off-ladder value first lands on the next
+/// ladder value in that direction. The result is never below the lowest step
+/// and never above `maximum` when the catalog knows the model's window, even
+/// when that maximum is not on the ladder.
 pub(crate) fn adjust_context_length(current: usize, delta: isize, maximum: Option<usize>) -> usize {
-    let unit = CONTEXT_LENGTH_STEP_UNIT;
-    let step = context_length_step(current);
-    let on_multiple = current.is_multiple_of(unit);
-    let moved = match (delta >= 0, on_multiple) {
-        (true, true) => current + step,
-        (true, false) => current.div_ceil(unit) * unit,
-        (false, true) => current.saturating_sub(step),
-        (false, false) => current / unit * unit,
+    let moved = if delta >= 0 {
+        next_token_ladder_value(current)
+    } else {
+        previous_token_ladder_value(current).unwrap_or(TOKEN_LADDER_UNIT)
     };
-    let bounded = moved.max(unit);
     match maximum {
-        Some(maximum) => bounded.min(maximum),
-        None => bounded,
+        Some(maximum) => moved.min(maximum),
+        None => moved,
     }
 }
 
@@ -1109,6 +1156,7 @@ pub(crate) fn model_parameter_rows(edit: &ModelParameterEdit, choice: &ModelChoi
                 )
             }
             ParameterField::ResetToConfigured => "Reset".to_string(),
+            ParameterField::Save => "Save…".to_string(),
             ParameterField::Apply => "✓ Apply".to_string(),
         })
         .collect()
@@ -1145,7 +1193,10 @@ pub(crate) fn slash_overlay_text_rows(
             ..
         } => choices
             .get(edit.choice_index)
-            .map(|choice| model_parameter_rows(edit, choice))
+            .map(|choice| match &edit.save_form {
+                Some(form) => form.entries(),
+                None => model_parameter_rows(edit, choice),
+            })
             .unwrap_or_default(),
         SlashOverlay::ModelPicker {
             choices, filter, ..
@@ -1313,6 +1364,7 @@ impl AppState {
     /// Move the visible slash overlay's selection by `delta` entries,
     /// saturating at both ends. A no-op unless a selectable overlay is open.
     pub fn move_slash_selection(&mut self, delta: isize) {
+        self.layout.slash_overlay.detail_first_visible_row = 0;
         match &mut self.slash_overlay {
             SlashOverlay::Suggestions { choices, selected } => {
                 move_selection(selected, choices.len(), delta);
@@ -1363,12 +1415,16 @@ impl AppState {
             fields.push(ParameterField::ReasoningEffort);
         }
         fields.push(ParameterField::MaxOutputTokens);
+        fields.push(ParameterField::Apply);
+        fields.push(ParameterField::Save);
         if choice.configured.is_some() {
             fields.push(ParameterField::ResetToConfigured);
         }
-        fields.push(ParameterField::Apply);
         let (context_length, max_output_tokens) = choice.draft_limits();
         *parameters = Some(ModelParameterEdit {
+            initial_context_length: context_length,
+            initial_max_output_tokens: max_output_tokens,
+            save_form: None,
             choice_index,
             fields,
             max_output_tokens,
@@ -1409,7 +1465,7 @@ impl AppState {
     }
 
     /// Tab / shift-tab: cycle the focus through the value rows (one stop),
-    /// the reset button (only while enabled) and the apply button.
+    /// then the apply, save and reset buttons (reset only while enabled).
     pub fn cycle_model_parameter_focus(&mut self, backwards: bool) {
         let SlashOverlay::ModelPicker {
             choices,
@@ -1423,11 +1479,13 @@ impl AppState {
             .get(edit.choice_index)
             .is_some_and(|choice| edit.reset_enabled(choice));
         let mut stops = vec![0];
+        for button in [ParameterField::Apply, ParameterField::Save] {
+            if let Some(row) = edit.fields.iter().position(|field| *field == button) {
+                stops.push(row);
+            }
+        }
         if let (true, Some(reset_row)) = (reset_enabled, edit.reset_row()) {
             stops.push(reset_row);
-        }
-        if let Some(apply_row) = edit.fields.iter().position(|f| *f == ParameterField::Apply) {
-            stops.push(apply_row);
         }
         let current = stops
             .iter()
@@ -1502,7 +1560,7 @@ impl AppState {
                     delta,
                 );
             }
-            ParameterField::ResetToConfigured | ParameterField::Apply => {}
+            ParameterField::ResetToConfigured | ParameterField::Save | ParameterField::Apply => {}
         }
     }
 
@@ -1535,6 +1593,8 @@ impl AppState {
         edit.max_output_tokens_maximum = baseline.selection.model.max_output_tokens;
         edit.max_output_tokens_edited = false;
         edit.reasoning_effort = baseline.selection.reasoning_effort.clone();
+        edit.initial_context_length = context_length;
+        edit.initial_max_output_tokens = max_output_tokens;
         edit.restored_baseline = true;
         // The reset button disappears once the draft equals the baseline.
         edit.cursor = 0;
@@ -1550,6 +1610,10 @@ impl AppState {
         match field {
             Some(ParameterField::ResetToConfigured) => {
                 self.reset_model_parameters_to_configured();
+                false
+            }
+            Some(ParameterField::Save) => {
+                self.open_engine_save_form();
                 false
             }
             Some(ParameterField::Apply) => {
@@ -1626,10 +1690,15 @@ impl AppState {
         choice.refresh_label();
     }
 
-    /// Close the parameter popup without applying its draft.
+    /// Leave the innermost parameter layer: the save page returns to the
+    /// parameters page with the draft intact, the parameters page closes
+    /// without applying its draft.
     pub fn leave_model_parameters(&mut self) {
         if let SlashOverlay::ModelPicker { parameters, .. } = &mut self.slash_overlay {
-            *parameters = None;
+            match parameters {
+                Some(edit) if edit.save_form.is_some() => edit.save_form = None,
+                _ => *parameters = None,
+            }
         }
     }
 

@@ -642,3 +642,143 @@ fn built_in_layer_has_no_favorite_layer() {
         None
     );
 }
+
+const ENGINE_PROFILE: &str = r#"[provider_connections.dummy]
+provider = "dummy"
+api_key = "${DUMMY_API_KEY}"
+
+# the work engine
+[engines.work]
+provider_connection = "dummy"
+model = "a/one" # keep
+api_key = "${DUMMY_ENGINE_API_KEY}"
+api_base_url = "http://example"
+context_length = 1000
+"#;
+
+fn engine_request(mode: EngineSaveMode) -> EngineSaveRequest {
+    EngineSaveRequest {
+        mode,
+        provider_connection: CONNECTION.to_string(),
+        model: EngineSaveChange::Keep,
+        reasoning: EngineSaveChange::Keep,
+        context_length: EngineSaveChange::Keep,
+        max_output_tokens: EngineSaveChange::Keep,
+    }
+}
+
+#[test]
+fn engine_update_edits_only_changed_keys_and_keeps_comments() {
+    let mut fixture = fixture(ENGINE_PROFILE);
+    let mut request = engine_request(EngineSaveMode::Update {
+        name: "work".to_string(),
+    });
+    request.reasoning = EngineSaveChange::Set("high".to_string());
+    request.context_length = EngineSaveChange::Remove;
+    let outcome = fixture.writer.save_engine(&request).expect("save");
+    assert!(outcome.changed);
+    let contents = read(&fixture);
+    assert!(contents.contains("# the work engine"), "{contents}");
+    assert!(contents.contains("model = \"a/one\" # keep"), "{contents}");
+    assert!(contents.contains("reasoning = \"high\""), "{contents}");
+    assert!(!contents.contains("context_length"), "{contents}");
+    assert!(
+        contents.contains("api_key = \"${DUMMY_ENGINE_API_KEY}\""),
+        "{contents}"
+    );
+}
+
+#[test]
+fn engine_update_without_change_writes_nothing() {
+    let mut fixture = fixture(ENGINE_PROFILE);
+    let request = engine_request(EngineSaveMode::Update {
+        name: "work".to_string(),
+    });
+    assert!(!fixture.writer.save_engine(&request).expect("save").changed);
+    assert_eq!(read(&fixture), ENGINE_PROFILE);
+}
+
+#[test]
+fn engine_create_copy_omits_credentials() {
+    let mut fixture = fixture(ENGINE_PROFILE);
+    let mut request = engine_request(EngineSaveMode::Create {
+        name: "fast".to_string(),
+        copy_from: Some("work".to_string()),
+    });
+    request.model = EngineSaveChange::Set("b/two".to_string());
+    fixture.writer.save_engine(&request).expect("save");
+    let value: toml::Value = toml::from_str(&read(&fixture)).expect("valid toml");
+    let created = &value["engines"]["fast"];
+    assert_eq!(created["model"].as_str(), Some("b/two"));
+    assert_eq!(created["provider_connection"].as_str(), Some("dummy"));
+    assert_eq!(created["context_length"].as_integer(), Some(1000));
+    assert!(created.get("api_key").is_none());
+    assert!(created.get("api_base_url").is_none());
+    assert_eq!(
+        value["engines"]["work"]["api_key"].as_str(),
+        Some("${DUMMY_ENGINE_API_KEY}")
+    );
+}
+
+#[test]
+fn engine_create_from_raw_model_adds_engines_section() {
+    let mut fixture = fixture("[provider_connections.dummy]\nprovider = \"dummy\"\n");
+    let mut request = engine_request(EngineSaveMode::Create {
+        name: "new-1".to_string(),
+        copy_from: None,
+    });
+    request.model = EngineSaveChange::Set("a/one".to_string());
+    request.max_output_tokens = EngineSaveChange::Set(2048);
+    fixture.writer.save_engine(&request).expect("save");
+    let value: toml::Value = toml::from_str(&read(&fixture)).expect("valid toml");
+    assert_eq!(
+        value["engines"]["new-1"]["max_output_tokens"].as_integer(),
+        Some(2048)
+    );
+}
+
+#[test]
+fn engine_create_rejects_existing_name_and_missing_connection() {
+    let mut fixture = fixture(ENGINE_PROFILE);
+    let existing = engine_request(EngineSaveMode::Create {
+        name: "work".to_string(),
+        copy_from: None,
+    });
+    assert!(matches!(
+        fixture.writer.save_engine(&existing),
+        Err(FavoriteSaveError::EngineExists { .. })
+    ));
+    let mut missing = engine_request(EngineSaveMode::Create {
+        name: "other".to_string(),
+        copy_from: None,
+    });
+    missing.provider_connection = "absent".to_string();
+    assert!(matches!(
+        fixture.writer.save_engine(&missing),
+        Err(FavoriteSaveError::MissingConnectionTable { .. })
+    ));
+    assert_eq!(read(&fixture), ENGINE_PROFILE);
+}
+
+#[test]
+fn engine_save_detects_external_change() {
+    let mut fixture = fixture(ENGINE_PROFILE);
+    fs::write(&fixture.path, format!("{ENGINE_PROFILE}# edit\n")).expect("edit");
+    let request = engine_request(EngineSaveMode::Update {
+        name: "work".to_string(),
+    });
+    assert!(matches!(
+        fixture.writer.save_engine(&request),
+        Err(FavoriteSaveError::SourceChanged { .. })
+    ));
+}
+
+#[test]
+fn engine_name_grammar() {
+    for valid in ["a", "A1", "work_2-x", &"a".repeat(64)] {
+        assert!(validate_engine_name(valid).is_ok(), "{valid}");
+    }
+    for invalid in ["", "-a", "_a", "a b", "a.b", "é", &"a".repeat(65)] {
+        assert!(validate_engine_name(invalid).is_err(), "{invalid}");
+    }
+}

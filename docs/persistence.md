@@ -195,6 +195,13 @@ are optional: `engine_name`, `reasoning_effort`, `temperature`,
 not restore these settings. It starts from the engine your current profile
 configures.
 
+Ylva writes the post-switch event when the agent applies the switch: at once
+while idle, otherwise when the next request starts, so it follows the messages
+already committed. Replay turns each event that follows a message and differs
+from the previous event (a restart on the same model is not a switch) into a
+"Switched to…" notice at that position in the transcript. The replayed text is
+derived from the event alone, so it has less detail than the live notice.
+
 ### `subagent_start` / `subagent_result`
 
 Ylva writes them to the parent session when a subagent starts and when it

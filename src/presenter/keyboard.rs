@@ -20,8 +20,9 @@ use crate::slash_command::{
     parse_slash_command_invocation, SlashCommand, SlashCommandInvocation, MODELS_COMMAND_NAME,
 };
 use crate::tui_reducer_state::{
-    AppState, ConfirmKey, ConversationView, Effect, Focus, HistoryDirection, InputEvent,
-    PromptButton, SlashOverlay, TuiMode, UserMessageState, HELP_HORIZONTAL_SCROLL_COLUMNS,
+    AppState, ConfirmKey, ConversationView, Effect, EngineSaveFocus, Focus, HistoryDirection,
+    InputEvent, NameCursorMove, PromptButton, SlashOverlay, TuiMode, UserMessageState,
+    HELP_HORIZONTAL_SCROLL_COLUMNS,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::time::Instant;
@@ -756,6 +757,9 @@ fn handle_model_picker_key(
         }
     );
     if parameters_open {
+        if state.engine_save_form().is_some() {
+            return Some(handle_engine_save_key(state, key_event));
+        }
         match code {
             KeyCode::Up => state.move_slash_selection(-1),
             KeyCode::Down => state.move_slash_selection(1),
@@ -785,6 +789,48 @@ fn handle_model_picker_key(
         _ => return None,
     }
     Some(vec![])
+}
+
+/// Keys on the engine save page. Text fields never submit: only Enter on a
+/// focused button does. Esc is handled by the global escape ladder.
+fn handle_engine_save_key(
+    state: &mut AppState,
+    key_event: crossterm::event::KeyEvent,
+) -> Vec<Effect> {
+    match key_event.code {
+        KeyCode::Tab => state.cycle_engine_save_focus(false),
+        KeyCode::BackTab => state.cycle_engine_save_focus(true),
+        KeyCode::Left | KeyCode::Right
+            if state
+                .engine_save_form()
+                .is_some_and(|form| form.focus == EngineSaveFocus::Mode) =>
+        {
+            state.toggle_engine_save_mode();
+        }
+        KeyCode::Left => state.engine_save_move_name_cursor(NameCursorMove::Left),
+        KeyCode::Right => state.engine_save_move_name_cursor(NameCursorMove::Right),
+        KeyCode::Home => state.engine_save_move_name_cursor(NameCursorMove::Start),
+        KeyCode::End => state.engine_save_move_name_cursor(NameCursorMove::End),
+        KeyCode::Delete => state.engine_save_delete(),
+        KeyCode::Backspace => state.engine_save_backspace(),
+        KeyCode::Enter => return state.activate_engine_save_focus(),
+        KeyCode::Char(' ')
+            if state
+                .engine_save_form()
+                .is_some_and(|form| form.focus == EngineSaveFocus::Mode) =>
+        {
+            state.toggle_engine_save_mode();
+        }
+        KeyCode::Char(character)
+            if !key_event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            state.engine_save_insert_char(character);
+        }
+        _ => {}
+    }
+    Vec::new()
 }
 
 /// Close the picker and switch to the highlighted choice, applying any

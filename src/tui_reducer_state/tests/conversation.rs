@@ -40,7 +40,7 @@ fn replay_places_the_compaction_marker_at_the_boundary_and_keeps_the_transcript(
     ];
 
     let mut state = AppState::new();
-    state.replay_messages(&messages, &[], Some(2));
+    state.replay_messages(&messages, &[], Some(2), &[]);
 
     assert_eq!(
         state.chat_entries.len(),
@@ -87,7 +87,7 @@ fn replay_places_the_compaction_marker_at_the_boundary_and_keeps_the_transcript(
 
     // A session without a snapshot replays exactly as before.
     let mut plain = AppState::new();
-    plain.replay_messages(&messages, &[], None);
+    plain.replay_messages(&messages, &[], None, &[]);
     assert_eq!(plain.chat_entries.len(), 4);
 }
 
@@ -263,7 +263,7 @@ fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_subagent_st
         },
     ];
 
-    let entries = project_messages_with_subagent_runs(&messages, &subagent_runs, None);
+    let entries = project_messages_with_subagent_runs(&messages, &subagent_runs, None, &[]);
     let finished_entry = entries
         .iter()
         .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == finished_call_id))
@@ -346,7 +346,7 @@ fn replay_subagent_transcripts_load_once_on_drill_in() {
     ];
 
     let mut state = AppState::new();
-    state.replay_messages(&root_messages, &subagent_runs, None);
+    state.replay_messages(&root_messages, &subagent_runs, None, &[]);
     assert!(state.subagent_needs_lazy_load(run_id));
     assert_eq!(
         state.subagent_conversations[&run_id].outcome,
@@ -365,7 +365,7 @@ fn replay_subagent_transcripts_load_once_on_drill_in() {
         .messages
         .is_empty());
 
-    state.load_subagent_messages(run_id, &subagent_messages, None);
+    state.load_subagent_messages(run_id, &subagent_messages, None, &[]);
     let loaded_messages = state
         .subagent_conversations
         .get(&run_id)
@@ -383,6 +383,7 @@ fn replay_subagent_transcripts_load_once_on_drill_in() {
             tool_calls: vec![],
         }],
         Some(1),
+        &[],
     );
     assert_eq!(
         state
@@ -1262,4 +1263,53 @@ fn two_running_subagents_each_keep_their_own_agent_mode() {
         AgentMode::Streaming,
         "finishing one subagent leaves its sibling running"
     );
+}
+
+#[test]
+fn replay_places_model_change_notices_before_the_message_they_preceded() {
+    let user = |content: &str| Message::User {
+        content: content.to_string(),
+        kind: UserMessageKind::Explicit,
+    };
+    let messages = vec![user("one"), user("two")];
+    let change = |transcript_index| crate::store::ModelChangeRecord {
+        transcript_index,
+        provider_connection: "local".to_string(),
+        model: "small".to_string(),
+        parameters: Default::default(),
+    };
+    let mut state = AppState::new();
+    state.replay_messages(&messages, &[], None, &[change(1), change(2)]);
+
+    let kinds = state
+        .chat_entries
+        .iter()
+        .map(|entry| match entry {
+            ChatEntry::UserMessage { .. } => "user",
+            ChatEntry::Notice { .. } => "notice",
+            _ => "other",
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["user", "notice", "user", "notice"]);
+}
+
+#[test]
+fn a_staged_model_notice_commits_in_order_on_apply_and_on_cancel() {
+    let mut state = AppState::new();
+    state.stage_model_notice("first".to_string());
+    state.stage_model_notice("second".to_string());
+    state.turn_buffer.partial_assistant_text = "reply".to_string();
+    state.apply_staged_model_notice();
+    assert!(matches!(
+        state.chat_entries.as_slice(),
+        [ChatEntry::AssistantMessage { .. }, ChatEntry::Notice { text }] if text == "first"
+    ));
+    assert_eq!(state.pending_model_notices, ["second"]);
+
+    state.commit_queued_steer_messages(UserMessageState::Cancelled);
+    assert!(state.pending_model_notices.is_empty());
+    assert!(matches!(
+        state.chat_entries.last(),
+        Some(ChatEntry::Notice { text }) if text == "second"
+    ));
 }

@@ -246,7 +246,7 @@ fn effective_context_length_falls_back_to_the_built_in_default() {
 #[test]
 fn compact_target_ratio_defaults_to_half_the_window_and_is_configurable_per_engine() {
     let default_config: EngineConfig =
-        toml::from_str("provider = \"mock\"\nmodel = \"test-model\"\n")
+        toml::from_str("provider_connection = \"mock\"\nmodel = \"test-model\"\n")
             .expect("a config without compact_target_ratio parses");
     assert_eq!(
         default_config.compact_target_ratio,
@@ -255,7 +255,7 @@ fn compact_target_ratio_defaults_to_half_the_window_and_is_configurable_per_engi
     assert_eq!(default_config.compact_target_ratio, 0.5);
 
     let configured: EngineConfig = toml::from_str(
-        "provider = \"mock\"\nmodel = \"test-model\"\ncompact_target_ratio = 0.25\n",
+        "provider_connection = \"mock\"\nmodel = \"test-model\"\ncompact_target_ratio = 0.25\n",
     )
     .expect("an explicit compact_target_ratio parses");
     assert_eq!(configured.compact_target_ratio, 0.25);

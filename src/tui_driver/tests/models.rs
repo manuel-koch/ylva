@@ -14,7 +14,7 @@
 
 use super::super::models::{
     engine_configuration_warnings, start_startup_engine_check, switch_model,
-    wait_for_startup_engine_check, ModelListResult,
+    switch_model_recording, wait_for_startup_engine_check, ModelListResult, ModelSnapshot,
 };
 use super::*;
 
@@ -616,7 +616,7 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_efforts() {
     );
     assert_eq!(
         shortcut.label.single_line(),
-        "  openrouter → stub/thinking  context: 32.0K  reasoning: max",
+        "  openrouter → stub/thinking  context: 32K  reasoning: max",
         "the shortcut must show its configured reasoning effort instead of 'unavailable'"
     );
     let baseline = shortcut
@@ -683,7 +683,7 @@ async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_default() {
     );
     assert_eq!(
         shortcut.label.single_line(),
-        "  openrouter → stub/thinking  context: 32.0K  reasoning: default (medium)",
+        "  openrouter → stub/thinking  context: 32K  reasoning: default (medium)",
         "the shortcut's default slot must name the advertised default"
     );
 }
@@ -728,7 +728,7 @@ async fn models_lists_an_engine_shortcut_falling_back_to_the_catalogs_context_le
     assert_eq!(shortcut.catalog_context_length, Some(999_999));
     assert_eq!(
         shortcut.label.single_line(),
-        "  openrouter → stub/thinking  context: 1000.0K  reasoning: max"
+        "  openrouter → stub/thinking  context: 1000K  reasoning: max"
     );
 }
 
@@ -1029,7 +1029,7 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
         "the draft must not reach the choice before confirmation"
     );
 
-    // Tab focuses Apply; Enter then switches with the adjusted effort.
+    // One tab focuses Apply; Enter then switches with the adjusted effort.
     press(&mut state, KeyCode::Tab);
     let effects = press(&mut state, KeyCode::Enter);
     assert!(matches!(
@@ -1584,7 +1584,7 @@ async fn gateway_shortcut_after_catalog_failure_applies_enter_without_acknowledg
     assert!(first_enter.is_empty());
     state.move_model_parameter_cursor(1);
     state.adjust_model_parameter(1);
-    state.cycle_model_parameter_focus(true);
+    state.cycle_model_parameter_focus(false);
     let confirm = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -1729,7 +1729,7 @@ async fn gateway_shortcut_escape_keeps_profile_effort_and_default_reset_applies(
     state.open_model_parameters();
     state.move_model_parameter_cursor(1);
     state.adjust_model_parameter(-3);
-    state.cycle_model_parameter_focus(true);
+    state.cycle_model_parameter_focus(false);
     let confirm = presenter::update(
         &mut state,
         TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
@@ -1927,6 +1927,189 @@ async fn named_engine_switch_notices(catalog_models: &[&str]) -> (String, Option
         (Some(ChatEntry::Notice { text: notice }), _) => (notice.clone(), None),
         other => panic!("unexpected notices: {other:?}"),
     }
+}
+
+/// Engine whose request preparation queues an uncertainty warning.
+struct RequestNoticeEngine {
+    inner: Arc<dyn Engine>,
+    queued: std::sync::Mutex<Vec<String>>,
+}
+
+impl Engine for RequestNoticeEngine {
+    fn chat<'a>(
+        &'a self,
+        messages: Vec<crate::agent::Message>,
+        tools: Vec<crate::llm::ToolSchema>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<crate::agent::StreamEvent>>>
+    {
+        self.inner.chat(messages, tools, cancel)
+    }
+
+    fn config(&self) -> EngineConfig {
+        self.inner.config()
+    }
+
+    fn list_models(
+        &self,
+    ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>> {
+        self.inner.list_models()
+    }
+
+    fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        self.inner.switch_model(model)
+    }
+
+    fn select_model(&self, _selection: &ModelSelection) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn prepare_request_notices(&self) -> anyhow::Result<()> {
+        self.queued
+            .lock()
+            .unwrap()
+            .push("effort is unverified".to_string());
+        Ok(())
+    }
+
+    fn take_pending_notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.queued.lock().unwrap())
+    }
+}
+
+#[tokio::test]
+async fn request_time_engine_warning_joins_the_switch_notice() {
+    let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+    let engine: Arc<dyn Engine> = Arc::new(RequestNoticeEngine {
+        inner: StubEngine::with_models(&["opus"], "opus"),
+        queued: std::sync::Mutex::default(),
+    });
+    let selection = ModelSelection::ProviderModel(crate::llm::ProviderModelOption {
+        provider_connection: "stub".to_string(),
+        model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
+            id: "opus".to_string(),
+            max_output_tokens: None,
+            context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+        context_length_override: None,
+        max_output_tokens_override: None,
+    });
+
+    switch_model(&mut state, &selection, &engine, &cmd_tx).await;
+
+    assert!(matches!(
+        state.chat_entries.last(),
+        Some(ChatEntry::Notice { text }) if text.contains("Switched to") && text.contains("effort is unverified")
+    ));
+    assert!(engine.take_pending_notices().is_empty());
+}
+
+#[tokio::test]
+async fn a_switch_during_a_turn_stages_its_notice_until_the_agent_applies_it() {
+    let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+    let engine: Arc<dyn Engine> = StubEngine::with_models(&["haiku", "opus"], "haiku");
+    let selection = ModelSelection::ProviderModel(crate::llm::ProviderModelOption {
+        provider_connection: "stub".to_string(),
+        model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
+            id: "opus".to_string(),
+            max_output_tokens: None,
+            context_length: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+        context_length_override: None,
+        max_output_tokens_override: None,
+    });
+    state.mode = crate::tui_reducer_state::TuiMode::Streaming;
+
+    switch_model(&mut state, &selection, &engine, &cmd_tx).await;
+
+    assert!(state.chat_entries.is_empty(), "{:?}", state.chat_entries);
+    assert_eq!(state.pending_model_notices.len(), 1);
+    state.apply_staged_model_notice();
+    assert!(matches!(
+        state.chat_entries.last(),
+        Some(ChatEntry::Notice { text }) if text.contains("opus")
+    ));
+}
+
+#[tokio::test]
+async fn activation_after_a_save_records_history_only_for_an_actual_change() {
+    let selection = |model: &str| {
+        ModelSelection::ProviderModel(crate::llm::ProviderModelOption {
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                pricing: None,
+                score: None,
+                id: model.to_string(),
+                max_output_tokens: None,
+                context_length: None,
+                reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
+            },
+            reasoning_effort: None,
+            context_length_override: None,
+            max_output_tokens_override: None,
+        })
+    };
+    let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+    let engine: Arc<dyn Engine> = StubEngine::with_models(&["haiku", "opus"], "haiku");
+
+    let unchanged_from = Some(ModelSnapshot::of(engine.as_ref()));
+    switch_model_recording(
+        &mut state,
+        &selection("haiku"),
+        &engine,
+        &cmd_tx,
+        unchanged_from.clone(),
+    )
+    .await;
+    assert!(cmd_rx.try_recv().is_err(), "nothing changed");
+
+    switch_model_recording(
+        &mut state,
+        &selection("opus"),
+        &engine,
+        &cmd_tx,
+        unchanged_from,
+    )
+    .await;
+    assert!(matches!(
+        cmd_rx.try_recv(),
+        Ok(AgentCommand::RecordModelChanged { model, .. }) if model == "opus"
+    ));
+
+    switch_model(&mut state, &selection("opus"), &engine, &cmd_tx).await;
+    assert!(
+        cmd_rx.try_recv().is_ok(),
+        "ordinary /models switches always record"
+    );
+
+    // A snapshot taken before the engine was replaced still counts as a change.
+    let before = ModelSnapshot::of(engine.as_ref());
+    switch_model_recording(
+        &mut state,
+        &selection("haiku"),
+        &engine,
+        &cmd_tx,
+        Some(before),
+    )
+    .await;
+    assert!(cmd_rx.try_recv().is_ok(), "haiku differs from opus");
 }
 
 #[tokio::test]

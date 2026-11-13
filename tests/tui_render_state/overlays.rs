@@ -365,6 +365,7 @@ async fn typed_manual_compaction_preserves_persisted_transcript_and_replays_mark
         &persisted.messages,
         &[],
         persisted.compaction_transcript_boundary,
+        &[],
     );
     assert!(replay.chat_entries.iter().any(|entry| matches!(
         entry,
@@ -549,8 +550,8 @@ async fn switching_models_rechecks_compaction_capacity_before_any_prompt() {
         type_and_enter(&action_tx, "").await;
         action_tx
             .send(AppAction::KeyInput(KeyEvent::new(
-                KeyCode::BackTab,
-                KeyModifiers::SHIFT,
+                KeyCode::Tab,
+                KeyModifiers::NONE,
             )))
             .await
             .expect("action channel open");
@@ -642,7 +643,9 @@ async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pendi
     let idle = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             match updates.recv().await {
-                Some(ylva::UiUpdate::ContextUsage { .. }) => continue,
+                Some(ylva::UiUpdate::ContextUsage { .. } | ylva::UiUpdate::ModelChangeApplied) => {
+                    continue
+                }
                 other => break other,
             }
         }
@@ -690,7 +693,10 @@ async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pendi
             let idle = tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
                     match updates.recv().await {
-                        Some(ylva::UiUpdate::ContextUsage { .. }) => continue,
+                        Some(
+                            ylva::UiUpdate::ContextUsage { .. }
+                            | ylva::UiUpdate::ModelChangeApplied,
+                        ) => continue,
                         other => break other,
                     }
                 }
@@ -702,7 +708,9 @@ async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pendi
     let update = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             match updates.recv().await {
-                Some(ylva::UiUpdate::ContextUsage { .. }) => continue,
+                Some(ylva::UiUpdate::ContextUsage { .. } | ylva::UiUpdate::ModelChangeApplied) => {
+                    continue
+                }
                 other => break other,
             }
         }
@@ -1520,7 +1528,7 @@ fn model_picker_click_uses_absolute_row_after_scrolling() {
             );
         })
         .expect("initial draw");
-    for _ in 0..10 {
+    for _ in 0..20 {
         ylva::presenter::update(
             &mut state,
             TuiEvent::Mouse(MouseEvent {
@@ -1621,7 +1629,7 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
             );
         })
         .expect("initial draw");
-    for _ in 0..10 {
+    for _ in 0..20 {
         ylva::presenter::update(
             &mut state,
             TuiEvent::Mouse(MouseEvent {
@@ -2303,7 +2311,7 @@ fn model_picker_click_on_details_row_selects_its_model_on_narrow_terminals() {
 }
 
 #[test]
-fn model_picker_height_is_capped_at_two_thirds_of_the_space_above_input() {
+fn model_picker_height_fills_the_space_above_input() {
     use ylva::tui_reducer_state::{AppState, SlashOverlay};
     let mut state = AppState::new();
     state.slash_overlay = SlashOverlay::ModelPicker {
@@ -2312,11 +2320,10 @@ fn model_picker_height_is_capped_at_two_thirds_of_the_space_above_input() {
         filter: String::new(),
         selected: 0,
     };
-    // The popup's inner area (list plus detail rows) is capped; the border
-    // rows sit outside that cap. The popup's bottom border touches the input.
+    // The popup's bottom border touches the input.
     let (rows, _terminal) = draw_app_state_rows(&mut state, 100, 60);
     let space_above_input = state.layout.input_area.rect.y;
-    let expected_inner_height = (space_above_input.saturating_sub(1) * 2 / 3) as usize;
+    let expected_inner_height = space_above_input.saturating_sub(2) as usize;
     assert!(
         expected_inner_height > 0,
         "the fixture terminal must leave room above the input"
@@ -2329,7 +2336,7 @@ fn model_picker_height_is_capped_at_two_thirds_of_the_space_above_input() {
     assert_eq!(
         popup_outer_height - 2,
         expected_inner_height,
-        "a long model list must fill two thirds of the space above the input"
+        "the picker must use all the space above the input"
     );
 }
 

@@ -310,6 +310,11 @@ engine = "ollama/local"
 | `[engines.<name>]` | table | A named engine — see [Engine configuration](#engine-configuration) below. |
 | `[agents.<type>]` | table | Per-agent-type settings — see [Per-agent configuration](#per-agent-configuration) below. |
 
+Engines can also be written from the TUI: `/models` → parameters page → `[ Save… ]`
+adds or updates an `[engines.<name>]` table in the profile file loaded at startup
+(see [features](./features.md#slash-commands)). It references an existing
+`[provider_connections.*]` table and never writes credentials, endpoints or trust.
+
 When at least one `[engines.*]` table is present, those engines are what Ylva
 uses to create agents. The resolved `default_engine` must name one of those
 entries: omitting the field is valid only if an `[engines.default]` entry exists;
@@ -329,6 +334,11 @@ model.
 Referencing an engine name that no table defines (from `default_engine`,
 `[compaction].engine`, `utility_engine`, or an agent override) is a hard error rather
 than a silent fallback.
+
+The CLI option `--engine <name>` selects an existing explicit `[engines.<name>]` entry for one
+run; see [engine selection](./cli-options.md#engine-selection).
+
+The `ylva models` listing follows the [listing contract](cli-options.md#models-command).
 
 When the root agent changes its active provider connection or model through
 `/models`, a subagent spawned afterwards that resolves the same named engine uses

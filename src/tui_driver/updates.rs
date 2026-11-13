@@ -72,6 +72,7 @@ pub(super) fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent
         }),
         UiUpdate::SteerQueued { run_id } => Some(DomainEvent::SteerQueued { run_id: *run_id }),
         UiUpdate::SteerApplied { run_id } => Some(DomainEvent::SteerApplied { run_id: *run_id }),
+        UiUpdate::ModelChangeApplied => None,
         UiUpdate::ToolPending {
             id,
             name,
@@ -210,7 +211,7 @@ pub(super) fn prepare_subagent_replay_effects(
         match effect {
             Effect::LoadSubagentTranscript { run_id } => {
                 if state.subagent_needs_lazy_load(run_id) {
-                    let (messages, compaction_boundary) = match store {
+                    let (messages, compaction_boundary, model_changes) = match store {
                         Some(store) => {
                             let path = crate::store::session_path(
                                 store.chats_root(),
@@ -221,6 +222,7 @@ pub(super) fn prepare_subagent_replay_effects(
                                 Ok(session_state) => (
                                     session_state.messages,
                                     session_state.compaction_transcript_boundary,
+                                    session_state.model_changes,
                                 ),
                                 Err(error) => {
                                     tracing::warn!(
@@ -238,9 +240,14 @@ pub(super) fn prepare_subagent_replay_effects(
                                 }
                             }
                         }
-                        None => (Vec::new(), None),
+                        None => (Vec::new(), None, Vec::new()),
                     };
-                    state.load_subagent_messages(run_id, &messages, compaction_boundary);
+                    state.load_subagent_messages(
+                        run_id,
+                        &messages,
+                        compaction_boundary,
+                        &model_changes,
+                    );
                 }
                 state.switch_to_subagent_view(run_id);
             }
@@ -302,6 +309,10 @@ pub(super) async fn process_one_update(
     }
     if let UiUpdate::Notice { text, run_id } = update {
         state.push_notice_to(*run_id, text.clone());
+        return ActionOutcome::Continue;
+    }
+    if matches!(update, UiUpdate::ModelChangeApplied) {
+        state.apply_staged_model_notice();
         return ActionOutcome::Continue;
     }
     if let UiUpdate::OutputTruncated { text, run_id } = update {
@@ -370,6 +381,7 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
         partial_thinking_collapsed: app.turn_buffer.partial_thinking_collapsed,
         engine_display: app.engine_display,
         queued_steer_texts: app.queued_steer_texts,
+        pending_model_notices: app.pending_model_notices,
         steer_indicator: app.steer_indicator,
         context_usage_text,
         cost_total_text: crate::llm::CostLedger::process().totals_text(),

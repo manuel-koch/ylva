@@ -34,6 +34,7 @@ mod app_state;
 mod context_usage;
 mod conversation;
 mod double_click;
+mod engine_save;
 mod events;
 mod favorites;
 mod input_history;
@@ -57,6 +58,10 @@ pub use conversation::{
     SubagentRunInfo, SubagentViewState, ToolCallState, TurnBuffer, UserMessageState,
 };
 pub use double_click::DoubleClickTracker;
+pub use engine_save::{
+    EngineSaveContext, EngineSaveFocus, EngineSaveForm, EngineSaveJob, EngineSavePreview,
+    NameCursorMove, ENGINE_SAVE_BUTTON_COUNT,
+};
 pub use events::{ConfirmKey, DomainEvent, Effect, Focus, InputEvent, TuiMode};
 pub use input_history::HistoryDirection;
 pub use layout::{

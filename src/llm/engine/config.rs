@@ -45,9 +45,7 @@ pub const DEFAULT_COMPACT_TARGET_RATIO: f64 = 0.5;
 ///   (see `crate::agent::compaction`).
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EngineConfig {
-    /// Named provider connection. Legacy flat profiles may use `provider`,
-    /// which is accepted as an alias for this field.
-    #[serde(alias = "provider")]
+    /// Named provider connection.
     pub provider_connection: String,
     /// Model identifier. May be left empty in a profile's `[engines.*]` table,
     /// in which case the profile's `default_model` fills it in.

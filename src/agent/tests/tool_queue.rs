@@ -380,6 +380,7 @@ async fn advance_tool_queue_emits_clarify_pending_for_clarify_tool() {
         0,
         &mut clarify_started_at,
         &mut pending_steers,
+        &mut VecDeque::new(),
         &mut None,
         &mut HashMap::new(),
         None,
@@ -449,6 +450,7 @@ async fn advance_tool_queue_emits_tool_pending_for_non_clarify_tool() {
         0,
         &mut clarify_started_at,
         &mut pending_steers,
+        &mut VecDeque::new(),
         &mut None,
         &mut HashMap::new(),
         None,
@@ -496,6 +498,11 @@ async fn advance_tool_queue_injects_pending_steers_before_starting_next_request(
     let max_tool_iterations = DEFAULT_MAX_TOOL_USE_ITERATIONS;
     let mut clarify_started_at = None;
     let mut pending_steers = VecDeque::from(["steered while tool ran".to_string()]);
+    let mut pending_model_changes = VecDeque::from([crate::agent::runtime::PendingModelChange {
+        provider_connection: "connection".to_string(),
+        model: "model".to_string(),
+        parameters: crate::store::ModelParameters::default(),
+    }]);
 
     advance_tool_queue(
         &mut pending_tools,
@@ -513,6 +520,7 @@ async fn advance_tool_queue_injects_pending_steers_before_starting_next_request(
         0,
         &mut clarify_started_at,
         &mut pending_steers,
+        &mut pending_model_changes,
         &mut None,
         &mut HashMap::new(),
         None,
@@ -532,6 +540,13 @@ async fn advance_tool_queue_injects_pending_steers_before_starting_next_request(
             kind: UserMessageKind::Explicit,
         })
     );
+    assert!(pending_model_changes.is_empty());
+    // The switch is announced before the steer so the TUI commits the
+    // model-change notice ahead of the queued message.
+    assert!(matches!(
+        ui_rx.recv().await,
+        Some(UiUpdate::ModelChangeApplied)
+    ));
     assert!(matches!(
         ui_rx.recv().await,
         Some(UiUpdate::SteerApplied { .. })
@@ -571,6 +586,7 @@ async fn a_budgeted_call_without_a_useful_allowance_is_skipped_not_executed() {
         agent_tx,
         0,
         &mut None,
+        &mut VecDeque::new(),
         &mut VecDeque::new(),
         &mut None,
         &mut HashMap::new(),

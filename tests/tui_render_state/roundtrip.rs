@@ -154,7 +154,7 @@ fn assert_tool_bubble_roundtrip_with_subagent_runs(
         })
         .collect::<Vec<_>>();
     let mut replayed_state = AppState::new();
-    replayed_state.replay_messages(&replayed_messages, subagent_runs, None);
+    replayed_state.replay_messages(&replayed_messages, subagent_runs, None, &[]);
     let replayed_entries = replayed_state.chat_entries.clone();
 
     // Keep the surrounding frame identical so this compares the actual
@@ -229,7 +229,7 @@ fn assert_tool_error_bubble_roundtrip(case: ToolErrorBubbleRoundtripCase) {
         })
         .collect::<Vec<_>>();
     let mut replayed_state = AppState::new();
-    replayed_state.replay_messages(&replayed_messages, &[], None);
+    replayed_state.replay_messages(&replayed_messages, &[], None, &[]);
     let replayed_entries = replayed_state.chat_entries.clone();
 
     live_state.mode = TuiMode::Idle;
@@ -612,7 +612,7 @@ fn live_multiline_clarify_fixture_matches_after_resume() {
         })
         .collect::<Vec<_>>();
     let mut replayed_state = AppState::new();
-    replayed_state.replay_messages(&replayed_messages, &[], None);
+    replayed_state.replay_messages(&replayed_messages, &[], None, &[]);
     let replayed_entries = replayed_state.chat_entries.clone();
 
     live_state.mode = TuiMode::Idle;

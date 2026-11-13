@@ -49,6 +49,8 @@ pub struct AppState {
     /// Active profile and workspace paths shown by the TUI's startup logo
     /// and help popup.
     pub display_metadata: TuiDisplayMetadata,
+    /// Startup-sourced facts the engine save form validates against.
+    pub engine_save_context: super::EngineSaveContext,
     /// Profile `[tui]` presentation settings (tool-bubble auto-expansion).
     pub tui_config: crate::config::TuiConfig,
     /// Tool bubbles that `[tui] auto_expand_approval` expanded while awaiting
@@ -74,6 +76,11 @@ pub struct AppState {
     /// rendering as `Queued` bubbles, not yet committed to `chat_entries`.
     /// See `queue_steer_message` / `commit_queued_steer_messages`.
     pub queued_steer_texts: Vec<String>,
+    /// "Switched to…" notices whose model change the agent has not applied
+    /// yet, oldest first. They render below the live bubble and move into
+    /// `chat_entries` on `UiUpdate::ModelChangeApplied`, so the transcript
+    /// shows the switch where it affected the conversation.
+    pub pending_model_notices: Vec<String>,
 
     // ── scroll state / chat selection / bubble hit-testing ─────────────────
     pub conversation: ConversationListState,
@@ -313,6 +320,7 @@ impl AppState {
             focus: Focus::MainInput,
             layout: AppLayout::default(),
             display_metadata: TuiDisplayMetadata::default(),
+            engine_save_context: super::EngineSaveContext::default(),
             session_title: None,
             tui_config: crate::config::TuiConfig::default(),
             approval_auto_expanded: std::collections::HashSet::new(),
@@ -324,6 +332,7 @@ impl AppState {
             chat_entries: Vec::new(),
             turn_buffer: TurnBuffer::default(),
             queued_steer_texts: Vec::new(),
+            pending_model_notices: Vec::new(),
 
             conversation: ConversationListState::default(),
 
@@ -399,6 +408,7 @@ impl AppState {
         self.chat_entries.clear();
         self.turn_buffer = TurnBuffer::default();
         self.queued_steer_texts.clear();
+        self.pending_model_notices.clear();
         self.steer_indicator = false;
         self.subagent_conversations.clear();
         self.running_subagents.clear();

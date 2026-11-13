@@ -144,7 +144,7 @@ fn wrapped_document_bottom_scroll_does_not_narrow_absolute_offsets() {
     assert!(rendered_text(&buffer).contains("34999"));
     state.conversation.chat_selection = Some(ylva::ChatSelection {
         anchor_line: 1,
-        anchor_col: 5,
+        anchor_col: 3,
         cursor_line: state.conversation.chat_rendered_lines.len() - 1,
         cursor_col: 10,
     });

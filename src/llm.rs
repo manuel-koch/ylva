@@ -402,7 +402,7 @@ pub(crate) fn order_reasoning_efforts(mut reasoning_efforts: Vec<String>) -> Vec
     reasoning_efforts
 }
 
-fn reasoning_effort_rank(effort: &str) -> usize {
+pub(crate) fn reasoning_effort_rank(effort: &str) -> usize {
     REASONING_EFFORT_LADDER
         .iter()
         .position(|aliases| aliases.contains(&effort))

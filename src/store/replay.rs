@@ -16,8 +16,8 @@
 
 use super::archive;
 use super::{
-    project_directory, session_path, CompactionEffect, CompactionRecord, SessionMeta, Store,
-    StoreError, StoreEvent, SubagentRunRecord,
+    project_directory, session_path, CompactionEffect, CompactionRecord, ModelParameters,
+    SessionMeta, Store, StoreError, StoreEvent, SubagentRunRecord,
 };
 use crate::agent::{Message, UserMessageKind};
 use crate::home_relative_path::display_path;
@@ -47,6 +47,32 @@ pub struct SessionSummary {
 
 /// One session's full persisted state, as [`Store::read_session_state`]
 /// returns it.
+/// A model switch that happened mid-conversation, placed in the transcript.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelChangeRecord {
+    /// Number of transcript messages committed before the switch took effect.
+    pub transcript_index: usize,
+    pub provider_connection: String,
+    pub model: String,
+    pub parameters: ModelParameters,
+}
+
+impl ModelChangeRecord {
+    /// The notice replay shows for this switch. It is derived from the event
+    /// alone, so it carries less detail than the live "Switched to…" notice.
+    pub fn notice_text(&self) -> String {
+        let target = format!("{}/{}", self.provider_connection, self.model);
+        let mut text = match self.parameters.engine_name.as_deref() {
+            Some(engine_name) => format!("Switched to engine '{engine_name}' ({target})."),
+            None => format!("Switched to {target}."),
+        };
+        if let Some(effort) = self.parameters.reasoning_effort.as_deref() {
+            text.push_str(&format!(" Reasoning effort: {effort}."));
+        }
+        text
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionState {
     /// Every event in append order — the record the TUI replays and the
@@ -67,6 +93,10 @@ pub struct SessionState {
     /// Every compaction event in append order, superseded ones included — the
     /// history `/status` reports.
     pub compactions: Vec<CompactionRecord>,
+    /// Model switches in append order, each placed by transcript position.
+    /// The first `model_changed` event and any event identical to its
+    /// predecessor (process starts that resolved the same model) are omitted.
+    pub model_changes: Vec<ModelChangeRecord>,
 }
 
 impl Store {
@@ -241,6 +271,8 @@ impl Store {
         let mut compaction_transcript_boundary: Option<usize> = None;
         let mut model_projection: Option<crate::agent::compaction::ModelProjectionSnapshot> = None;
         let mut compactions = Vec::new();
+        let mut model_changes: Vec<ModelChangeRecord> = Vec::new();
+        let mut previous_model: Option<(&String, &String, &ModelParameters)> = None;
         for event in &events {
             match event {
                 StoreEvent::Message { message, .. } => messages.push(message.clone()),
@@ -279,6 +311,23 @@ impl Store {
                         compaction_transcript_boundary = *transcript_boundary;
                     }
                 }
+                StoreEvent::ModelChanged {
+                    provider_connection,
+                    model,
+                    parameters,
+                    ..
+                } => {
+                    let current = (provider_connection, model, parameters);
+                    if previous_model.is_some_and(|previous| previous != current) {
+                        model_changes.push(ModelChangeRecord {
+                            transcript_index: messages.len(),
+                            provider_connection: provider_connection.clone(),
+                            model: model.clone(),
+                            parameters: parameters.clone(),
+                        });
+                    }
+                    previous_model = Some(current);
+                }
                 StoreEvent::ModelProjection { projection }
                     if model_projection.as_ref().is_none_or(|current| {
                         projection.projection_revision > current.projection_revision
@@ -296,6 +345,7 @@ impl Store {
             compaction_transcript_boundary,
             model_projection,
             compactions,
+            model_changes,
         })
     }
 
