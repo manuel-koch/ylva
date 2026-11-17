@@ -15,6 +15,222 @@
 use super::*;
 
 #[test]
+fn profile_and_inline_agent_tool_timeouts_expand_environment_independently() {
+    let temporary = tempfile::tempdir().unwrap();
+    write_profile_config(
+        temporary.path(),
+        "timeouts",
+        r#"
+[tools.bash]
+timeout_secs = "${BASH_TIMEOUT}"
+[tools.web_fetch]
+timeout_secs = "${FETCH_TIMEOUT}"
+[tools.web_search]
+timeout_secs = "${SEARCH_TIMEOUT}"
+[agents.worker.tools.web_fetch]
+timeout_secs = "${WORKER_FETCH_TIMEOUT}"
+[agents.specialist.tools.bash]
+timeout_secs = "${WORKER_BASH_TIMEOUT}"
+[agents.specialist.tools.web_fetch]
+timeout_secs = "${WORKER_FETCH_TIMEOUT}"
+[agents.specialist.tools.web_search]
+timeout_secs = "${WORKER_SEARCH_TIMEOUT}"
+"#,
+    );
+    let profile = ProfileConfig::load_with_environment_at_workspace_root(
+        temporary.path(),
+        "timeouts",
+        &HashMap::from([
+            ("BASH_TIMEOUT".into(), "900".into()),
+            ("FETCH_TIMEOUT".into(), "45".into()),
+            ("SEARCH_TIMEOUT".into(), "60".into()),
+            ("WORKER_BASH_TIMEOUT".into(), "1200".into()),
+            ("WORKER_FETCH_TIMEOUT".into(), "90".into()),
+            ("WORKER_SEARCH_TIMEOUT".into(), "75".into()),
+        ]),
+        None,
+    )
+    .unwrap();
+    for (tool, expected) in [("bash", 900), ("web_fetch", 45), ("web_search", 60)] {
+        assert_eq!(
+            profile.effective_tool_timeout_secs(None, tool),
+            Some(expected)
+        );
+    }
+    assert_eq!(
+        profile.effective_tool_timeout_secs(Some("worker"), "web_fetch"),
+        Some(90)
+    );
+    assert_eq!(
+        profile.effective_tool_timeout_secs(Some("worker"), "bash"),
+        Some(900)
+    );
+    for (tool, expected) in [("bash", 1200), ("web_fetch", 90), ("web_search", 75)] {
+        assert_eq!(
+            profile.effective_tool_timeout_secs(Some("specialist"), tool),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn agent_type_files_expand_environment_in_tool_timeouts() {
+    let environment = HashMap::from([
+        ("BASH_TIMEOUT".into(), "900".into()),
+        ("FETCH_TIMEOUT".into(), "45".into()),
+        ("SEARCH_TIMEOUT".into(), "60".into()),
+    ]);
+    for (filename, contents) in [
+        (
+            "worker.toml",
+            "[tools.bash]\ntimeout_secs = \"${BASH_TIMEOUT}\"\n\
+             [tools.web_fetch]\ntimeout_secs = \"${FETCH_TIMEOUT}\"\n\
+             [tools.web_search]\ntimeout_secs = \"${SEARCH_TIMEOUT}\"\n",
+        ),
+        (
+            "worker.md",
+            "+++\n[tools.bash]\ntimeout_secs = \"${BASH_TIMEOUT}\"\n\
+             [tools.web_fetch]\ntimeout_secs = \"${FETCH_TIMEOUT}\"\n\
+             [tools.web_search]\ntimeout_secs = \"${SEARCH_TIMEOUT}\"\n\
+             +++\nKeep ${BASH_TIMEOUT} literal in the persona.\n",
+        ),
+        (
+            "worker.md",
+            "---\ntools:\n  bash:\n    timeout_secs: \"${BASH_TIMEOUT}\"\n\
+             \x20 web_fetch:\n    timeout_secs: \"${FETCH_TIMEOUT}\"\n\
+             \x20 web_search:\n    timeout_secs: \"${SEARCH_TIMEOUT}\"\n\
+             ---\nKeep ${BASH_TIMEOUT} literal in the persona.\n",
+        ),
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let profiles_root = temporary.path().join("profiles");
+        write_profile_config(&profiles_root, "work", "");
+        write_agent_type_file(temporary.path(), &format!("agents/{filename}"), contents);
+
+        let profile = ProfileConfig::load_with_environment_at_workspace_root(
+            &profiles_root,
+            "work",
+            &environment,
+            None,
+        )
+        .expect(filename);
+        for (tool, expected) in [("bash", 900), ("web_fetch", 45), ("web_search", 60)] {
+            assert_eq!(
+                profile.effective_tool_timeout_secs(Some("worker"), tool),
+                Some(expected),
+                "{filename}: {tool}"
+            );
+        }
+        if filename.ends_with(".md") {
+            assert_eq!(
+                profile.agents["worker"].persona.as_deref(),
+                Some("Keep ${BASH_TIMEOUT} literal in the persona.")
+            );
+        }
+    }
+}
+
+#[test]
+fn undefined_environment_in_an_agent_file_reports_its_path() {
+    let temporary = tempfile::tempdir().unwrap();
+    let profiles_root = temporary.path().join("profiles");
+    write_profile_config(&profiles_root, "work", "");
+    write_agent_type_file(
+        temporary.path(),
+        "agents/worker.toml",
+        "[tools.bash]\ntimeout_secs = \"${MISSING_TIMEOUT}\"\n",
+    );
+    let error = ProfileConfig::load_with_environment_at_workspace_root(
+        &profiles_root,
+        "work",
+        &HashMap::new(),
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ConfigError::MissingEnvironmentVariable { ref path, ref name }
+            if path.ends_with("worker.toml") && name == "MISSING_TIMEOUT"
+    ));
+}
+
+#[test]
+fn inline_tool_overrides_merge_with_agent_files_per_tool_and_field() {
+    let temporary = tempfile::tempdir().unwrap();
+    let profiles_root = temporary.path().join("profiles");
+    write_agent_type_file(
+        temporary.path(),
+        "agents/worker.toml",
+        r#"
+[tools.bash]
+timeout_secs = 600
+rules = [{ rule = "backgrounded", verdict = "auto_denied" }]
+[tools.web_fetch]
+timeout_secs = 45
+[tools.read]
+rules = [{ rule = "dot_path", verdict = "auto_denied" }]
+"#,
+    );
+    write_profile_config(
+        &profiles_root,
+        "work",
+        r#"
+[tools.bash]
+rules = [{ command = ["echo", "**"], verdict = "auto_approved" }]
+[agents.worker.tools.bash]
+timeout_secs = 900
+[agents.worker.tools.web_fetch]
+rules = [{ rule = "network_request", verdict = "auto_approved" }]
+[agents.worker.tools.write]
+rules = []
+"#,
+    );
+
+    let profile = ProfileConfig::load_with_environment_at_workspace_root(
+        &profiles_root,
+        "work",
+        &HashMap::new(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        profile.effective_tool_timeout_secs(Some("worker"), "bash"),
+        Some(900)
+    );
+    assert!(matches!(
+        &profile
+            .effective_tool_rules(Some("worker"), "bash")
+            .unwrap()[0],
+        crate::sandbox::SandboxRuleConfig::Named {
+            rule: crate::sandbox::NamedSandboxRule::Backgrounded,
+            ..
+        }
+    ));
+    assert_eq!(
+        profile.effective_tool_timeout_secs(Some("worker"), "web_fetch"),
+        Some(45)
+    );
+    assert_eq!(
+        profile
+            .effective_tool_rules(Some("worker"), "web_fetch")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        profile
+            .effective_tool_rules(Some("worker"), "read")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(profile
+        .effective_tool_rules(Some("worker"), "write")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn allowed_skills_preserves_omission_empty_and_replacement_across_formats() {
     use crate::config::agent_type_file::parse_agent_type_contents;
     let mut config = parse_agent_type_contents(

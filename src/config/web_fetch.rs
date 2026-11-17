@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `[web_fetch]` profile section: which fetch backend serves the
-//! `web_fetch` tool and how long one request may take.
+//! `[web_fetch]` profile section: which fetch backend serves the tool.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -25,42 +24,28 @@ use crate::agent::tools::backends::web_fetch::{backend_for, WebFetchBackend, Web
 
 use super::ConfigError;
 
-/// Internal HTTP timeout for one web-fetch request (seconds), used when
-/// `[web_fetch] timeout_secs` is absent.
-const DEFAULT_WEB_FETCH_TIMEOUT_SECS: u64 = 30;
+/// Default HTTP timeout for one web-fetch request, in seconds.
+pub const DEFAULT_WEB_FETCH_TIMEOUT_SECS: u64 = 30;
 
 fn default_backend() -> String {
     WebFetchBackendKind::Native.as_str().to_string()
 }
 
-fn default_timeout_secs() -> u64 {
-    DEFAULT_WEB_FETCH_TIMEOUT_SECS
-}
-
 /// A profile's `[web_fetch]` table.
 ///
-/// Every field has an explicit default (`backend` = `"native"`,
-/// `timeout_secs` = [`DEFAULT_WEB_FETCH_TIMEOUT_SECS`]), so an absent
-/// section behaves exactly like the written-out form.
+/// The backend defaults to `"native"` when the section is absent.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct WebFetchConfig {
     /// Fetch backend serving the `web_fetch` tool. Validated at config
     /// load; an unknown value is a [`ConfigError::InvalidWebFetchBackend`].
     #[serde(default = "default_backend")]
     pub backend: String,
-    /// Internal HTTP timeout for a single fetch request, in seconds. The
-    /// tool's outer timeout is derived from it (internal +
-    /// [`crate::agent::tools::backends::web_fetch::WEB_FETCH_OUTER_TIMEOUT_GRACE_SECS`]),
-    /// so the backend's own timeout always fires first.
-    #[serde(default = "default_timeout_secs")]
-    pub timeout_secs: u64,
 }
 
 impl Default for WebFetchConfig {
     fn default() -> Self {
         WebFetchConfig {
             backend: default_backend(),
-            timeout_secs: default_timeout_secs(),
         }
     }
 }
@@ -80,15 +65,9 @@ impl WebFetchConfig {
         Ok(())
     }
 
-    /// The internal HTTP timeout for one request. A configured `0` would make
-    /// every request time out instantly, so it floors at one second.
-    pub(crate) fn http_timeout(&self) -> Duration {
-        Duration::from_secs(self.timeout_secs.max(1))
-    }
-
     /// Build the configured backend instance.
-    pub(crate) fn build_backend(&self) -> Arc<dyn WebFetchBackend> {
-        backend_for(&self.backend, self.http_timeout())
+    pub(crate) fn build_backend(&self, http_timeout: Duration) -> Arc<dyn WebFetchBackend> {
+        backend_for(&self.backend, http_timeout)
     }
 }
 
@@ -100,7 +79,6 @@ mod tests {
     fn defaults_match_the_documented_section() {
         let config = WebFetchConfig::default();
         assert_eq!(config.backend, "native");
-        assert_eq!(config.timeout_secs, 30);
     }
 
     #[test]
@@ -112,16 +90,14 @@ mod tests {
     #[test]
     fn explicit_values_deserialize() {
         let config: WebFetchConfig =
-            toml::from_str("backend = \"native\"\ntimeout_secs = 5\n").expect("values parse");
+            toml::from_str("backend = \"native\"\n").expect("values parse");
         assert_eq!(config.backend, "native");
-        assert_eq!(config.timeout_secs, 5);
     }
 
     #[test]
     fn unknown_backend_is_rejected_naming_the_config_path() {
         let config = WebFetchConfig {
             backend: "camofox".to_string(),
-            ..WebFetchConfig::default()
         };
         let path = Path::new("/home/user/.ylva/profiles/default/config.toml");
         let error = config
@@ -147,17 +123,9 @@ mod tests {
     }
 
     #[test]
-    fn zero_timeout_floors_to_one_second() {
-        let config = WebFetchConfig {
-            timeout_secs: 0,
-            ..WebFetchConfig::default()
-        };
-        assert_eq!(config.http_timeout(), Duration::from_secs(1));
-    }
-
-    #[test]
     fn build_backend_returns_the_native_backend() {
-        let backend = WebFetchConfig::default().build_backend();
+        let backend = WebFetchConfig::default()
+            .build_backend(Duration::from_secs(DEFAULT_WEB_FETCH_TIMEOUT_SECS));
         assert!(format!("{backend:?}").contains("HttpFetchBackend"));
     }
 }

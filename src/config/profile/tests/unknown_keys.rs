@@ -95,6 +95,29 @@ rules = [{ pattern = "**", verdict = "auto_approved" }]
 }
 
 #[test]
+fn removed_backend_timeout_fields_are_reported_as_unknown_keys() {
+    let temporary = tempfile::tempdir().unwrap();
+    write_profile_config(
+        temporary.path(),
+        "old-timeouts",
+        "[web_fetch]\ntimeout_secs = 5\n[web_search]\ntimeout_secs = 6\n",
+    );
+    let profile = load(temporary.path(), "old-timeouts").unwrap();
+    let mut keys: Vec<&str> = profile
+        .config_warnings
+        .iter()
+        .map(|warning| warning.key_path.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["web_fetch.timeout_secs", "web_search.timeout_secs"]);
+    assert_eq!(profile.effective_tool_timeout_secs(None, "web_fetch"), None);
+    assert_eq!(
+        profile.effective_tool_timeout_secs(None, "web_search"),
+        None
+    );
+}
+
+#[test]
 fn agent_type_files_report_unknown_keys_in_every_format() {
     let temporary = tempfile::tempdir().unwrap();
     write_profile_config(temporary.path(), "files", "");
@@ -130,6 +153,7 @@ fn unknown_keys_in_sandbox_rule_tables_are_hard_errors() {
             "[tools.bash]\nrule = [{ command = [\"git\", \"*\"], verdict = \"auto_denied\" }]\n",
             "rule",
         ),
+        ("[tools.bash]\ntimeout_sec = 60\n", "timeout_sec"),
         (
             "[tools.read]\nrules = [{ pattern = \"**\", verdict = \"auto_denied\", reson = \"x\" }]\n",
             "reson",

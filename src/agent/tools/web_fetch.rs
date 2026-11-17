@@ -34,6 +34,7 @@
 //! [`WebFetchTool::title`] (user-facing) hints at the configured backend.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -108,12 +109,15 @@ impl WebFetchTool {
         backend: Arc<dyn WebFetchBackend>,
         config: &WebFetchConfig,
         sandbox_context: SandboxContext,
+        http_timeout: Duration,
     ) -> Self {
         let backend_display_name = WebFetchBackendKind::from_name(&config.backend)
             .map(|kind| kind.display_name().to_string())
             .unwrap_or_else(|| config.backend.clone());
         WebFetchTool {
-            timeout_secs: config.http_timeout().as_secs() + WEB_FETCH_OUTER_TIMEOUT_GRACE_SECS,
+            timeout_secs: http_timeout
+                .as_secs()
+                .saturating_add(WEB_FETCH_OUTER_TIMEOUT_GRACE_SECS),
             backend_display_name,
             backend,
             sandbox_context,

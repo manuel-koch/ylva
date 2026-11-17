@@ -76,11 +76,11 @@ pub const BASH_OUTPUT_LIMIT_BYTES: usize = 65_536;
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct BashInputArgs {
     /// Shell command or multi-line script passed verbatim to `bash -c` and
-    /// executed from the current working directory, which is the workspace
-    /// root. Use relative paths directly; do not prefix the command with a
-    /// redundant `cd` to the workspace root. Use `cd` only when intentionally
-    /// changing directories. Runs in a new process group; stdout+stderr merged
-    /// into one stream.
+    /// executed from the current working directory (Ylva's launch directory),
+    /// which may differ from the workspace root. Use relative paths directly;
+    /// do not prefix the command with a redundant `cd` to the launch directory.
+    /// Use `cd` only when intentionally changing directories. Runs in a new
+    /// process group; stdout+stderr merged into one stream.
     pub command: String,
     /// Optional 3–6 word purpose of the shell command, e.g. "List workspace
     /// files". Shown as a dim `label=…` prop on the (possibly collapsed)
@@ -204,10 +204,11 @@ pub struct BashTool {
 fn build_description(timeout_secs: u64) -> String {
     format!(
         "Execute a shell command or multi-line script via `bash -c` from the current \
-         working directory, which is the workspace root. Use relative paths directly; \
-         do not prefix the command with a redundant `cd` to the workspace root. Use \
-         `cd` only when intentionally changing directories. stdout/stderr merged in \
-         arrival order. Output capped at {} lines or {} bytes, whichever is hit first \
+         working directory (Ylva's launch directory), which may differ from the \
+         workspace root. Use relative paths directly; do not prefix the command with \
+         a redundant `cd` to the launch directory. Use `cd` only when intentionally \
+         changing directories. stdout/stderr merged in arrival order. Output capped at \
+         {} lines or {} bytes, whichever is hit first \
          (excess discarded). Times out after {} s, killing the whole process group. \
          You may supply an optional short `label` (3–6 words) stating the purpose of \
          the command; it is shown on the tool-call title line while the call awaits \
@@ -222,23 +223,14 @@ impl BashTool {
     pub const NAME: &'static str = "bash";
 
     pub fn new(sandbox_context: SandboxContext) -> Self {
-        BashTool {
-            timeout_secs: 0,
-            sandbox_context,
-            description: build_description(DEFAULT_BASH_TIMEOUT_SECS),
-        }
+        Self::with_timeout(DEFAULT_BASH_TIMEOUT_SECS, sandbox_context)
     }
 
     pub fn with_timeout(timeout_secs: u64, sandbox_context: SandboxContext) -> Self {
-        let effective_timeout = if timeout_secs == 0 {
-            DEFAULT_BASH_TIMEOUT_SECS
-        } else {
-            timeout_secs
-        };
         BashTool {
             timeout_secs,
             sandbox_context,
-            description: build_description(effective_timeout),
+            description: build_description(timeout_secs),
         }
     }
 }
@@ -290,11 +282,7 @@ impl Tool for BashTool {
     }
 
     fn timeout_secs(&self) -> u64 {
-        if self.timeout_secs == 0 {
-            DEFAULT_BASH_TIMEOUT_SECS
-        } else {
-            self.timeout_secs
-        }
+        self.timeout_secs
     }
 
     fn create_call(&self, id: uuid::Uuid, arguments: Value) -> Box<dyn ToolCall> {

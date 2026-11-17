@@ -113,6 +113,7 @@ fn tool_with(backend: StubBackend, sandbox_context: SandboxContext) -> WebFetchT
         Arc::new(backend),
         &WebFetchConfig::default(),
         sandbox_context,
+        std::time::Duration::from_secs(crate::config::DEFAULT_WEB_FETCH_TIMEOUT_SECS),
     )
 }
 

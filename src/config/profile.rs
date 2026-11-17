@@ -23,6 +23,7 @@ use crate::sandbox::network_target_pattern::NetworkTargetPattern;
 use crate::ylva_home::YLVA_DIR_NAME;
 
 use super::{
+    agent::deserialize_optional_u64_or_string as deserialize_optional_timeout_secs,
     agent_type_file::{
         discover_agent_type_files, AgentConfigOverrides, AgentTypeFile, AgentTypeScope,
     },
@@ -86,23 +87,15 @@ pub struct ProfileConfig {
     pub max_concurrent_subagents: Option<usize>,
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
-    /// Map of tool name (e.g. `read`, `write`) to its `[tools.<name>]`
-    /// sandbox rule list. When a tool name has no entry here, its
-    /// `SandboxContext` falls back to the built-in default floor
-    /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`, see
-    /// `docs/configuration.md`'s "Sandbox" section and
-    /// [`crate::sandbox::SandboxContext`]); when it does, that entry's rule
-    /// list fully replaces the default floor for that tool.
+    /// Per-tool settings. An omitted rules list inherits the built-in
+    /// sandbox floor; an explicit list replaces it.
     #[serde(default)]
-    pub tools: HashMap<String, ToolSandboxConfig>,
-    /// `[web_search]` section: which search backend serves the `web_search`
-    /// tool, its internal HTTP timeout, and its default result limit. The
-    /// `backend` value is validated when the profile loads.
+    pub tools: HashMap<String, ToolConfig>,
+    /// `[web_search]` section: the backend and its default result limit.
+    /// The `backend` value is validated when the profile loads.
     #[serde(default)]
     pub web_search: WebSearchConfig,
-    /// `[web_fetch]` section: which fetch backend serves the `web_fetch`
-    /// tool and its internal HTTP timeout. The `backend` value is validated
-    /// when the profile loads.
+    /// `[web_fetch]` section: the fetch backend, validated at profile load.
     #[serde(default)]
     pub web_fetch: WebFetchConfig,
     /// `[tui]` section: presentation preferences of the interactive TUI.
@@ -188,15 +181,16 @@ fn default_compaction_timeout_secs() -> u64 {
     crate::agent::compaction::DEFAULT_COMPACTION_TIMEOUT_SECS
 }
 
-/// A single `[tools.<name>]` TOML table: currently just the ordered
-/// `rules` list evaluated by [`crate::sandbox::SandboxContext`] for that
-/// tool (last match wins). See [`crate::sandbox::SandboxRuleConfig`].
+/// Configuration for one tool at profile or agent-type scope.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct ToolSandboxConfig {
-    /// Ordered sandbox rules for this tool; last match wins.
+pub struct ToolConfig {
+    /// Ordered sandbox rules; omission inherits and the last match wins.
     #[serde(default)]
-    pub rules: Vec<crate::sandbox::SandboxRuleConfig>,
+    pub rules: Option<Vec<crate::sandbox::SandboxRuleConfig>>,
+    /// Optional execution timeout in seconds for supported tools.
+    #[serde(default, deserialize_with = "deserialize_optional_timeout_secs")]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Validate that every `[tools.<name>]`/`[agents.<type>.tools.<name>]` rule
@@ -224,15 +218,23 @@ pub struct ToolSandboxConfig {
 /// [`crate::sandbox::SandboxRuleConfig::has_misplaced_command_glob_wildcard`]):
 /// left unchecked, it would silently degrade to a literal (never-matching)
 /// token instead of a wildcard.
-fn validate_tool_sandbox_rules(
-    tools: &HashMap<String, ToolSandboxConfig>,
+fn validate_tool_configs(
+    tools: &HashMap<String, ToolConfig>,
     path: &Path,
+    agent_type: Option<&str>,
 ) -> Result<(), ConfigError> {
     for (tool_name, tool_config) in tools {
         let is_bash = tool_name == crate::agent::tools::bash::BashTool::NAME;
         let is_network_tool = tool_name == crate::agent::tools::web_search::WebSearchTool::NAME
             || tool_name == crate::agent::tools::web_fetch::WebFetchTool::NAME;
-        for (index, rule) in tool_config.rules.iter().enumerate() {
+        validate_tool_timeout(tool_name, tool_config.timeout_secs, path, agent_type)?;
+        for (index, rule) in tool_config
+            .rules
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
             if rule.is_read_tool_only() && tool_name != "read" {
                 return Err(ConfigError::InvalidSandboxRuleKind {
                     path: path.to_path_buf(),
@@ -307,6 +309,41 @@ fn validate_tool_sandbox_rules(
                     source,
                 })?;
         }
+    }
+    Ok(())
+}
+
+fn validate_tool_timeout(
+    tool_name: &str,
+    timeout_secs: Option<u64>,
+    path: &Path,
+    agent_type: Option<&str>,
+) -> Result<(), ConfigError> {
+    let Some(timeout_secs) = timeout_secs else {
+        return Ok(());
+    };
+    let scope = match agent_type {
+        Some(agent_type) => format!("[agents.{agent_type}.tools.{tool_name}]"),
+        None => format!("[tools.{tool_name}]"),
+    };
+    if !matches!(
+        tool_name,
+        crate::agent::tools::bash::BashTool::NAME
+            | crate::agent::tools::web_fetch::WebFetchTool::NAME
+            | crate::agent::tools::web_search::WebSearchTool::NAME
+    ) {
+        return Err(ConfigError::UnsupportedToolTimeout {
+            path: path.to_path_buf(),
+            scope,
+            tool: tool_name.to_string(),
+        });
+    }
+    if timeout_secs == 0 {
+        return Err(ConfigError::InvalidToolTimeout {
+            path: path.to_path_buf(),
+            scope,
+            tool: tool_name.to_string(),
+        });
     }
     Ok(())
 }
@@ -702,6 +739,7 @@ impl ProfileConfig {
                     profiles_root,
                     profile_name,
                     workspace_root,
+                    environment,
                 )
             }
             Err(other) => Err(other),
@@ -750,6 +788,7 @@ impl ProfileConfig {
                     profiles_root,
                     profile_name,
                     workspace_root,
+                    environment,
                 )
                 .map(|profile| (profile, None))
             }
@@ -794,23 +833,25 @@ impl ProfileConfig {
                 },
             )?;
         profile.apply_default_model();
-        profile.agents = load_agent_types(
+        let (agents, agent_warnings) = load_agent_types(
             profiles_root,
             profile_name,
             workspace_root,
             layer,
             &path,
             inline_agents,
-            &mut warnings,
+            environment,
         )?;
+        profile.agents = agents;
+        warnings.extend(agent_warnings);
         profile.config_warnings = warnings;
         profile.warn_about_unknown_auto_expand_tools(&path);
         validate_provider_connection_models(&profile, &path)?;
-        validate_tool_sandbox_rules(&profile.tools, &path)?;
+        validate_tool_configs(&profile.tools, &path, None)?;
         profile.web_search.validate(&path)?;
         profile.web_fetch.validate(&path)?;
-        for agent in profile.agents.values() {
-            validate_tool_sandbox_rules(&agent.tools, &path)?;
+        for (agent_type, agent) in &profile.agents {
+            validate_tool_configs(&agent.tools, &path, Some(agent_type))?;
         }
         validate_agent_max_tool_iterations(&profile.agents, &path)?;
         validate_compaction_settings(&profile.engines, &path)?;
@@ -839,22 +880,23 @@ impl ProfileConfig {
         profiles_root: &Path,
         profile_name: &str,
         workspace_root: Option<&Path>,
+        environment: &HashMap<String, String>,
     ) -> Result<ProfileConfig, ConfigError> {
-        let mut warnings = Vec::new();
-        profile.agents = load_agent_types(
+        let (agents, warnings) = load_agent_types(
             profiles_root,
             profile_name,
             workspace_root,
             ConfigLayer::BuiltIn,
             Path::new("<built-in>"),
             HashMap::new(),
-            &mut warnings,
+            environment,
         )?;
+        profile.agents = agents;
         profile.config_warnings = warnings;
         let built_in_path = Path::new("<built-in>");
-        validate_tool_sandbox_rules(&profile.tools, built_in_path)?;
-        for agent in profile.agents.values() {
-            validate_tool_sandbox_rules(&agent.tools, built_in_path)?;
+        validate_tool_configs(&profile.tools, built_in_path, None)?;
+        for (agent_type, agent) in &profile.agents {
+            validate_tool_configs(&agent.tools, built_in_path, Some(agent_type))?;
         }
         validate_agent_max_tool_iterations(&profile.agents, built_in_path)?;
         validate_compaction_settings(&profile.engines, built_in_path)?;
@@ -916,6 +958,36 @@ impl ProfileConfig {
     /// cap. Non-positive values mean unlimited, matching profile deserialization.
     pub fn apply_max_concurrent_subagents_override(&mut self, value: i64) {
         self.max_concurrent_subagents = concurrency_limit_from_setting(value);
+    }
+
+    /// Resolve a tool's explicitly configured rule list for an agent type.
+    pub fn effective_tool_rules(
+        &self,
+        agent_type: Option<&str>,
+        tool_name: &str,
+    ) -> Option<&[crate::sandbox::SandboxRuleConfig]> {
+        agent_type
+            .and_then(|name| self.agents.get(name))
+            .and_then(|agent| agent.tools.get(tool_name))
+            .and_then(|tool| tool.rules.as_deref())
+            .or_else(|| {
+                self.tools
+                    .get(tool_name)
+                    .and_then(|tool| tool.rules.as_deref())
+            })
+    }
+
+    /// Resolve an explicitly configured tool timeout for an agent type.
+    pub fn effective_tool_timeout_secs(
+        &self,
+        agent_type: Option<&str>,
+        tool_name: &str,
+    ) -> Option<u64> {
+        agent_type
+            .and_then(|name| self.agents.get(name))
+            .and_then(|agent| agent.tools.get(tool_name))
+            .and_then(|tool| tool.timeout_secs)
+            .or_else(|| self.tools.get(tool_name).and_then(|tool| tool.timeout_secs))
     }
 
     /// Profile-level compaction engine without agent-type resolution:
@@ -1013,8 +1085,8 @@ fn load_agent_types(
     config_layer: ConfigLayer,
     config_path: &Path,
     inline_agents: HashMap<String, AgentConfigOverrides>,
-    warnings: &mut Vec<ConfigWarning>,
-) -> Result<HashMap<String, AgentConfig>, ConfigError> {
+    environment: &HashMap<String, String>,
+) -> Result<(HashMap<String, AgentConfig>, Vec<ConfigWarning>), ConfigError> {
     let global_agents_root = profiles_root
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -1028,13 +1100,13 @@ fn load_agent_types(
         (&global_agents_root, AgentTypeScope::Global),
         (&profile_agents_root, AgentTypeScope::Profile),
     ] {
-        for (agent_type, file) in discover_agent_type_files(directory, scope)? {
+        for (agent_type, file) in discover_agent_type_files(directory, scope, environment)? {
             resolved_files.insert(agent_type, file);
         }
     }
     if let Some(project_agents_root) = project_agents_root {
         for (agent_type, file) in
-            discover_agent_type_files(&project_agents_root, AgentTypeScope::Project)?
+            discover_agent_type_files(&project_agents_root, AgentTypeScope::Project, environment)?
         {
             resolved_files.insert(agent_type, file);
         }
@@ -1058,6 +1130,20 @@ fn load_agent_types(
         }
     }
 
+    for (agent_type, file) in &resolved_files {
+        for (tool_name, tool) in &file.definition.config.tools {
+            let inline_timeout = inline_agents
+                .get(agent_type)
+                .and_then(|overrides| overrides.tools.as_ref())
+                .and_then(|tools| tools.get(tool_name))
+                .and_then(|tool| tool.timeout_secs);
+            if inline_timeout.is_none() {
+                validate_tool_timeout(tool_name, tool.timeout_secs, &file.path, Some(agent_type))?;
+            }
+        }
+    }
+
+    let mut warnings = Vec::new();
     let mut agents = resolved_files
         .into_iter()
         .map(|(agent_type, file)| {
@@ -1085,7 +1171,7 @@ fn load_agent_types(
         });
         apply_agent_config_overrides(config, overrides);
     }
-    Ok(agents)
+    Ok((agents, warnings))
 }
 
 fn apply_agent_config_overrides(config: &mut AgentConfig, overrides: AgentConfigOverrides) {
@@ -1124,8 +1210,16 @@ fn apply_agent_config_overrides(config: &mut AgentConfig, overrides: AgentConfig
     if let Some(can_spawn) = overrides.can_spawn {
         config.can_spawn = can_spawn;
     }
-    if overrides.tools.is_some() {
-        config.tools = overrides.tools.unwrap_or_default();
+    if let Some(tools) = overrides.tools {
+        for (name, overrides) in tools {
+            let tool = config.tools.entry(name).or_default();
+            if overrides.rules.is_some() {
+                tool.rules = overrides.rules;
+            }
+            if overrides.timeout_secs.is_some() {
+                tool.timeout_secs = overrides.timeout_secs;
+            }
+        }
     }
 }
 
@@ -1163,7 +1257,7 @@ pub(crate) fn resolve_profile_config_file(
     )
 }
 
-fn interpolate_toml_strings(
+pub(super) fn interpolate_toml_strings(
     value: &mut toml::Value,
     environment: &HashMap<String, String>,
     path: &Path,
@@ -1190,7 +1284,7 @@ fn interpolate_toml_strings(
     Ok(())
 }
 
-fn interpolate_string(
+pub(super) fn interpolate_string(
     value: &str,
     environment: &HashMap<String, String>,
     path: &Path,

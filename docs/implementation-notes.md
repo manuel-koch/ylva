@@ -454,9 +454,8 @@ Security-relevant HTTP behavior:
 
 ## CLI driver
 
-- The CLI builds a separate registry for tool display; it must receive the
-  same `[web_search]`/`[web_fetch]` configuration as the execution registry, or
-  the displayed backend can differ from the one the agent calls.
+- The CLI shares the executing agent's registry for tool display and approval,
+  keeping titles and decisions consistent with the agent's configuration.
 - With `--auto-approve-spawn` the process stays alive after the root's
   `StreamDone` until every spawned call reaches a terminal outcome: the
   `spawn_subagent` result reports admission, not completion.

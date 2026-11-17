@@ -76,22 +76,28 @@ impl ConsoleApp {
     }
 }
 
-/// Registry configuration for the CLI's display/approval registry.
-///
-/// `run_cli_to_with_title` renders tool titles and approval decisions from
-/// this registry while the agent executes through the registry
-/// [`AgentFactory`] builds. Both must receive the profile's `[web_search]`
-/// and `[web_fetch]` sections, otherwise the rendered title names a
-/// different backend than the one the agent actually calls.
+/// Profile-level registry configuration for CLI display tests.
+/// Production uses the executing agent's registry directly.
 #[cfg(test)]
 pub(super) fn display_registry_config(profile: &ProfileConfig) -> ToolRegistryConfig {
     let tool_sandbox_rules = profile
         .tools
         .iter()
-        .map(|(tool_name, tool_config)| (tool_name.clone(), tool_config.rules.clone()))
+        .filter_map(|(tool_name, tool_config)| {
+            Some((tool_name.clone(), tool_config.rules.clone()?))
+        })
         .collect();
     ToolRegistryConfig {
         tool_sandbox_rules,
+        bash_timeout_secs: profile
+            .effective_tool_timeout_secs(None, "bash")
+            .unwrap_or(crate::agent::tools::bash::DEFAULT_BASH_TIMEOUT_SECS),
+        web_search_timeout_secs: profile
+            .effective_tool_timeout_secs(None, "web_search")
+            .unwrap_or(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
+        web_fetch_timeout_secs: profile
+            .effective_tool_timeout_secs(None, "web_fetch")
+            .unwrap_or(crate::config::DEFAULT_WEB_FETCH_TIMEOUT_SECS),
         web_search: profile.web_search.clone(),
         web_fetch: profile.web_fetch.clone(),
         ..ToolRegistryConfig::default()

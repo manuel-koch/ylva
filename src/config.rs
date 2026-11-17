@@ -42,16 +42,17 @@ pub use favorite_models::{
 };
 pub use profile::{
     is_valid_profile_name, profile_config_source_path, AgentCompactionConfig, CompactionConfig,
-    ProfileConfig, ToolSandboxConfig, TuiConfig, MAX_PROFILE_NAME_LENGTH,
+    ProfileConfig, ToolConfig, TuiConfig, MAX_PROFILE_NAME_LENGTH,
 };
 pub use provider::{
     ModelPolicy, ModelPolicyError, ProviderConfig, ProviderConnectionConfig, ProviderKind,
 };
 pub(crate) use unknown_keys::deserialize_reporting_unknown_keys;
 pub use unknown_keys::ConfigWarning;
-pub use web_fetch::WebFetchConfig;
+pub use web_fetch::{WebFetchConfig, DEFAULT_WEB_FETCH_TIMEOUT_SECS};
 pub use web_search::{
     BraveBackendConfig, SearXngBackendConfig, WebSearchBackendsConfig, WebSearchConfig,
+    DEFAULT_WEB_SEARCH_TIMEOUT_SECS,
 };
 
 /// File name of a profile's configuration inside its profile directory.
@@ -141,15 +142,35 @@ pub enum ConfigError {
     #[error("malformed profile environment at {}: {message}", display_path(path))]
     EnvironmentMalformed { path: PathBuf, message: String },
     #[error(
-        "profile config at {} references missing environment variable '{name}'",
+        "configuration at {} references missing environment variable '{name}'",
         display_path(path)
     )]
     MissingEnvironmentVariable { path: PathBuf, name: String },
     #[error(
-        "profile config at {} contains invalid environment variable reference '{reference}'",
+        "configuration at {} contains invalid environment variable reference '{reference}'",
         display_path(path)
     )]
     InvalidEnvironmentReference { path: PathBuf, reference: String },
+    #[error(
+        "configuration at {} has unsupported timeout_secs in {scope} for tool '{tool}'; \
+         only bash, web_fetch and web_search support it",
+        display_path(path)
+    )]
+    UnsupportedToolTimeout {
+        path: PathBuf,
+        scope: String,
+        tool: String,
+    },
+    #[error(
+        "configuration at {} has invalid timeout_secs in {scope} for tool '{tool}'; \
+         the timeout must be greater than zero",
+        display_path(path)
+    )]
+    InvalidToolTimeout {
+        path: PathBuf,
+        scope: String,
+        tool: String,
+    },
     #[error(
         "profile config at {} has an invalid sandbox rule for tool '{tool}' \
          ([tools.{tool}].rules[{index}]): expected {expected}",

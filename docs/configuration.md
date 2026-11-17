@@ -90,9 +90,10 @@ types are validated, including unused ones. Unknown explicit names fail
 startup with rejection provenance where available. Nonempty explicit skill
 lists require `load_skill` in the effective `allowed_tools`.
 
-`[agents.<type>.tools.load_skill]` replaces `[tools.load_skill]` when present.
+An explicit `[agents.<type>.tools.load_skill]` `rules` list replaces
+`[tools.load_skill].rules`; an omitted list inherits it.
 Only path rules are accepted, using existing last-match-wins semantics on the
-snapshot's absolute canonical source. With neither table, or an explicit
+snapshot's absolute canonical source. With no configured list, or an explicit
 empty rules list, the loader auto-approves eligible instructions instead of
 inheriting the ordinary dot/outside floor. Discovery reads the snapshot before
 this delivery policy is applied: loader rules are not discovery-I/O guards.
@@ -130,7 +131,8 @@ directories; TUI approval-required callable skills do.
 
 The rule neither enables an absent `read` tool nor freezes sidecar contents.
 A later deny rule can override it; `--auto-approve-read` retains its existing
-final precedence. Agent-specific `tools.read` replaces profile-level rules.
+final precedence. An explicit agent-specific `tools.read` rule list replaces
+profile-level rules.
 `skill_sidecar` is rejected for every other tool, including `load_skill`.
 It grants no shell execution, write/edit access, or inherited subagent body.
 
@@ -356,14 +358,14 @@ present, override the connection values. A missing connection API key may be
 filled from the matching provider environment variable; an inline value
 remains authoritative.
 
-`${ENV_VAR}` references are expanded in every TOML string value after the
-profile `.env` and process environment are merged. Numeric and boolean fields
-also accept expanded string values and parse them according to their field
-type; for example, `temperature = "${TEMPERATURE}"`,
-`timeout_secs = "${TIMEOUT_SECONDS}"`, and
-`can_spawn = "${CAN_SPAWN}"`. Missing variables, malformed references, and
-values that cannot be parsed as the target type are hard startup errors;
-expanded secret values are never logged.
+`${ENV_VAR}` references are expanded in configuration string values in the
+profile TOML and agent-type TOML files or TOML/YAML frontmatter, after the
+profile `.env` and process environment are merged. Markdown persona bodies
+remain literal. Numeric and boolean fields also accept expanded string values
+and parse them according to their field type; for example, `temperature = "${TEMPERATURE}"`,
+`timeout_secs = "${TIMEOUT_SECONDS}"`, and `can_spawn = "${CAN_SPAWN}"`.
+Missing variables, malformed references, and values that cannot be parsed
+as the target type are hard startup errors; expanded secret values are never logged.
 
 `ylva init` writes code-owned starters (`SOUL.md`, `profiles/default/config.toml`, and
 `profiles/default/.env`) into `~/.ylva/`; it does not seed agent-type files. Use
@@ -741,8 +743,10 @@ Markdown file is a load error. A profile's inline
 `[agents.<type>]` table is applied afterward as a field-level override
 (`engine`, `allowed_tools`, `timeout_secs`, `persona`, and related settings):
 an inline `persona` replaces the file-sourced persona while the other
-overridden fields merge individually. Every configured agent `engine` must
-name an engine available to
+overridden fields merge individually. Nested `tools` entries merge per tool
+and per field: an inline `rules` or `timeout_secs` overrides only that field,
+leaving other tools and omitted fields from the file intact.
+Every configured agent `engine` must name an engine available to
 the initialized profile; invalid references are hard startup errors rather
 than deferred until that agent is spawned. If the active `config.toml` and its
 same-scope `agents/<type>`
@@ -871,7 +875,14 @@ field table, defaults, and engine-reference requirements.
 | `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to concurrent subagents (one level deep; subagents cannot spawn further subagents). The profile-level `max_concurrent_subagents` setting caps running subagents across the delegation tree; excess spawns wait FIFO. Running agents also share the [provider request concurrency cap](../CONTEXT.md#models-and-providers) of 4 concurrent requests per connection, so excess requests wait for a free permit. Use `--auto-approve-spawn` to skip the human-approval prompt. See "Subagent delegation" in `docs/features.md`. |
 | `[agents.<type>.compaction].engine` | string (optional) | Explicit compaction engine for this agent type's context. Overrides `[compaction].engine`; if neither is set, summaries follow the agent type's active conversation engine. Applies to root and subagent runs of this agent type. |
 | `[agents.<type>.compaction].timeout_sec` | number (optional) | Summary request timeout for this agent type, in seconds. Overrides `[compaction].timeout_sec` (default `60`); must be greater than `0`. |
-| `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tools.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
+| `tools` | table | Per-tool rules and supported timeouts scoped to this agent type, keyed by tool name (`[agents.<type>.tools.<name>]` inline, or a file-authored agent-type's top-level `[tools.<name>]`/`tools: { <name>: ... }`). Each field independently inherits from the profile. See [Bash](#bash-configuration), [web search](#web-search-configuration), [web fetch](#web-fetch-configuration), and [sandbox rules](#sandbox-tool-approval-rules). |
+
+Tool `timeout_secs` is supported only for `bash`, `web_search`, and
+`web_fetch`. Values must be positive integers or strings that parse as positive
+integers; `${ENV_VAR}` interpolation is supported. Zero and timeouts on
+other tools are hard startup errors. An agent-specific timeout overrides the
+profile's `[tools.<name>].timeout_secs`, independently of `rules`; an omitted
+value inherits the profile value, then the tool's default.
 
 An agent can use a dedicated compaction engine and timeout when its conversation
 engine has a different context capacity:
@@ -985,16 +996,41 @@ auto_expand_approval = true
 Auto-expansion never shows the `Expanding…` feedback and never unpins a view
 that follows the bottom of the conversation.
 
+### Bash configuration
+
+`[tools.bash].timeout_secs` sets the command execution timeout in seconds,
+defaulting to `300`. The outer guard adds 5 seconds for cleanup and partial
+output. Configure it for one agent with
+`[agents.<type>.tools.bash].timeout_secs`; agent-type files use their own
+top-level `[tools.bash]` table or YAML equivalent.
+
+```toml
+[tools.bash]
+timeout_secs = 600
+
+[agents.worker.tools.bash]
+timeout_secs = 900
+```
+
+Omitting `rules` leaves the inherited sandbox rules intact. See
+[`bash` command rules](#bash-command-rules) for configuring them.
+
 ### Web search configuration
 
-The `[web_search]` table configures the `web_search` tool (see
-`docs/features.md`):
+The `[web_search]` table selects the `web_search` backend and result limit (see
+`docs/features.md`).
 
 | Field | Type | Description |
 |---|---|---|
 | `backend` | string | Search backend serving `web_search`: `duckduckgo`, `searxng` or `brave`. An unknown value is a hard config error naming the accepted values. |
-| `timeout_secs` | number | Internal HTTP timeout for one search request, in seconds (default `30`, floored at `1`). The tool's outer execution timeout is this value plus a small grace period, so the backend's own timeout fires first. |
 | `result_limit` | number | Result count a `web_search` call returns when it omits `limit` (default `15`). Clamped to `1..=20` so config can never disagree with the tool schema's maximum. |
+
+`[tools.web_search].timeout_secs` sets the HTTP timeout for one search request
+in seconds, defaulting to `30`. The outer tool guard adds 10 seconds for
+request pacing and dispatch. Override it for one agent with
+`[agents.<type>.tools.web_search].timeout_secs`. A `timeout_secs` key under
+`[web_search]` is unknown and produces a configuration warning, or an error
+with `--strict-config`.
 
 The available `web_search` backends:
 
@@ -1012,11 +1048,13 @@ Per-backend settings live in nested tables under `[web_search.backends]`:
 ```toml
 [web_search]
 backend = "duckduckgo"
-timeout_secs = 30
 result_limit = 15
+
+[tools.web_search]
+timeout_secs = 30
 ```
 
-An absent `[web_search]` table behaves exactly like the written-out default.
+When `[web_search]` is absent, its backend and result limit use the values shown.
 
 Selecting SearXNG additionally requires its instance root:
 
@@ -1085,17 +1123,24 @@ to run and no URL to configure.
 
 ### Web fetch configuration
 
-The `[web_fetch]` table configures the `web_fetch` tool (see
-`docs/features.md`):
+The `[web_fetch]` table selects the `web_fetch` backend (see
+`docs/features.md`).
 
 | Field | Type | Description |
 |---|---|---|
 | `backend` | string | Fetch backend serving `web_fetch`. Only `"native"` (a plain local HTTP `GET`) is supported today; an unknown value is a hard config error naming the accepted values. |
-| `timeout_secs` | number | Internal HTTP timeout for one fetch request, in seconds (default `30`, floored at `1`). The tool's outer execution timeout is this value plus a small grace period, so the backend's own timeout fires first. |
+
+`[tools.web_fetch].timeout_secs` sets the HTTP timeout for one fetch request
+in seconds, defaulting to `30`. The outer tool guard adds 10 seconds. Override
+it for one agent with `[agents.<type>.tools.web_fetch].timeout_secs`. A
+`timeout_secs` key under `[web_fetch]` is unknown and produces a configuration
+warning, or an error with `--strict-config`.
 
 ```toml
 [web_fetch]
 backend = "native"
+
+[tools.web_fetch]
 timeout_secs = 30
 ```
 
@@ -1103,7 +1148,7 @@ Fetching private or reserved addresses (e.g. a local docs server) is allowed
 by a `network_private_address` rule, see
 [Private and reserved addresses](#private-and-reserved-addresses-network_private_address).
 
-An absent `[web_fetch]` table behaves exactly like the written-out default.
+When `[web_fetch]` is absent, its backend defaults to `"native"`.
 
 ## Sandbox (tool-approval rules)
 
@@ -1131,8 +1176,8 @@ matches that rule. `dot_path` matches `.env` in either `project/service/` or
 Launching from `project/` instead also uses
 a different session group; see [project-key derivation](persistence.md#project_key-derivation).
 
-**Default floor.** When a tool has no `[tools.<name>]` config table (see
-below) at any resolved layer, two rules apply unconditionally, evaluated in
+**Default floor.** When a path tool has no explicit `rules` list at any
+resolved layer (see below), two rules apply unconditionally, evaluated in
 this order, before any custom rule added by a CLI flag (e.g.
 `--auto-approve-write`/`--auto-approve-edit`, last match wins):
 
@@ -1158,7 +1203,7 @@ through the same `dot_path`/`outside_workspace` evaluation as `read`,
 checks but allows dot-prefixed paths because it only enumerates paths.
 
 **Per-tool `[tools.<name>]` config.** A profile's `config.toml` may configure
-a tool's rule list explicitly, e.g.:
+a tool's rule list explicitly, independently of its timeout, e.g.:
 
 ```toml
 [tools.read]
@@ -1222,17 +1267,18 @@ mount point under the sandbox root). Semantics:
 Rules are evaluated in list order; last match wins — the same
 last-match-wins semantics as the default floor and as CLI-flag-added rules.
 
-**A configured `[tools.<name>]` table fully replaces the default floor for
-that tool — it does not merge with it.** A profile that configures
-`[tools.read]` must include its own `{ rule = "outside_workspace", ... }`/
+**An explicit `rules` list fully replaces the lower-tier list or default
+floor — it does not merge with it.** An explicit `rules = []` clears that
+list, whereas omitting `rules`, including in an empty table or a timeout-only
+table, inherits the lower tier. A profile that supplies `[tools.read].rules`
+must include its own `{ rule = "outside_workspace", ... }`/
 `{ rule = "dot_path", ... }` entries if it still wants those protections for
-`read`; a tool with no `[tools.<name>]` table at all keeps the unconditional
-default floor. `load_skill` is the exception: its unconfigured default
-auto-approves callable instructions, as described in [Agent Skills](#agent-skills).
+`read`. `load_skill` is the exception: its unconfigured default auto-approves
+callable instructions, as described in [Agent Skills](#agent-skills).
 
 **Per-agent-type `[agents.<type>.tools.<name>]` override.** An agent type
 may configure its own rule list for a tool, taking precedence over the
-profile-level `[tools.<name>]` table for that tool, for that agent type only
+profile-level rules for that tool, for that agent type only
 — other agent types in the same profile are unaffected:
 
 ```toml
@@ -1257,13 +1303,14 @@ with a top-level `[tools.<name>]` table (TOML) or `tools: { <name>: { rules:
 [...] } }` (YAML) — no `agents.<type>.` prefix, since the file itself is
 already scoped to that one agent type.
 
-**Resolution order**, most specific wins, each tier fully replacing the
-next (no merging across tiers):
+**Rule resolution order**, most specific explicit list wins; lists never
+merge across tiers:
 
 1. `[agents.<type>.tools.<name>]` (or the agent-type file's `[tools.<name>]`/
-   `tools: { <name>: ... }`), if present.
-2. The profile-level `[tools.<name>]` table, if present.
-3. The unconditional default floor described above.
+   `tools: { <name>: ... }`) `rules`, if supplied.
+2. The profile-level `[tools.<name>]` `rules`, if supplied.
+3. The tool-specific default floor, or the empty auto-approving default for
+   `load_skill`.
 
 Both `[tools.<name>]` and `[agents.<type>.tools.<name>]` (and their
 file-authored equivalents) hard-validate their tool name against the

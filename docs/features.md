@@ -153,8 +153,9 @@ symlink's target. Path tools can instead use configurable rule lists,
 including the opt-in `cross_filesystem` rule that matches paths on a
 different filesystem (device) than the sandbox root.
 A profile-level `[tools.<name>]` or higher-precedence
-`[agents.<type>.tools.<name>]` table fully replaces, rather than supplements,
-the default floor for that tool — see
+`[agents.<type>.tools.<name>]` explicit `rules` list fully replaces, rather
+than supplements, the lower-tier rules. Omitting `rules` inherits them, even
+when the table configures a timeout — see
 [sandbox rule replacement and precedence](./configuration.md#sandbox-tool-approval-rules).
 `load_skill` is an exception: without configured rules, it auto-approves eligible
 skill instructions instead of applying the ordinary floor — see
@@ -834,7 +835,9 @@ hit first (`truncated` field present in result metadata when capped).
 Excess lines are discarded; a line that alone exceeds the remaining byte budget
 is kept as a UTF-8-safe prefix up to the byte cap so oversized first lines
 still yield non-empty output.
-Default timeout: 30 s. On timeout or cancellation the entire
+Default timeout: 300 s, configurable via `[tools.bash].timeout_secs` or
+`[agents.<type>.tools.bash].timeout_secs`; see
+[Bash configuration](./configuration.md#bash-configuration). On timeout or cancellation the entire
 process (including any child processes it spawned) is killed. See
 [implementation notes](./implementation-notes.md#bash-tool-process-group-cleanup).
 The tool description explicitly tells the model never to use it to sleep,

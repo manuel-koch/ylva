@@ -28,9 +28,8 @@ use crate::agent::tools::backends::web_search::{
 
 use super::ConfigError;
 
-/// Internal HTTP timeout for one web-search request (seconds), used when
-/// `[web_search] timeout_secs` is absent.
-const DEFAULT_WEB_SEARCH_TIMEOUT_SECS: u64 = 30;
+/// Default HTTP timeout for one web-search request, in seconds.
+pub const DEFAULT_WEB_SEARCH_TIMEOUT_SECS: u64 = 30;
 
 /// Config key of the SearXNG instance root, named in validation errors.
 const SEARXNG_BASE_URL_KEY: &str = "[web_search.backends.searxng] base_url";
@@ -43,32 +42,20 @@ fn default_backend() -> String {
     WebSearchBackendKind::DuckDuckGo.as_str().to_string()
 }
 
-fn default_timeout_secs() -> u64 {
-    DEFAULT_WEB_SEARCH_TIMEOUT_SECS
-}
-
 fn default_result_limit() -> usize {
     WEB_SEARCH_DEFAULT_RESULT_LIMIT
 }
 
 /// A profile's `[web_search]` table.
 ///
-/// Every field has an explicit default (`backend` = `"duckduckgo"`,
-/// `timeout_secs` = [`DEFAULT_WEB_SEARCH_TIMEOUT_SECS`], `result_limit` =
-/// [`WEB_SEARCH_DEFAULT_RESULT_LIMIT`], `backends` = no per-backend
-/// settings), so an absent section behaves exactly like the written-out form.
+/// The backend defaults to `"duckduckgo"`, the result limit to
+/// [`WEB_SEARCH_DEFAULT_RESULT_LIMIT`], and backend-specific settings to none.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct WebSearchConfig {
     /// Search backend serving the `web_search` tool. Validated at config
     /// load; an unknown value is a [`ConfigError::InvalidWebSearchBackend`].
     #[serde(default = "default_backend")]
     pub backend: String,
-    /// Internal HTTP timeout for a single search request, in seconds. The
-    /// tool's outer timeout is derived from it (internal +
-    /// [`crate::agent::tools::web_search::WEB_SEARCH_OUTER_TIMEOUT_GRACE_SECS`]),
-    /// so the backend's own timeout always fires first.
-    #[serde(default = "default_timeout_secs")]
-    pub timeout_secs: u64,
     /// Number of results a `web_search` call returns when it omits `limit`.
     /// Capped at [`WEB_SEARCH_MAX_RESULT_LIMIT`] so config can never
     /// disagree with the tool schema.
@@ -137,7 +124,6 @@ impl Default for WebSearchConfig {
     fn default() -> Self {
         WebSearchConfig {
             backend: default_backend(),
-            timeout_secs: default_timeout_secs(),
             result_limit: default_result_limit(),
             backends: WebSearchBackendsConfig::default(),
         }
@@ -270,12 +256,6 @@ impl WebSearchConfig {
         Ok(())
     }
 
-    /// The internal HTTP timeout for one request. A configured `0` would make
-    /// every request time out instantly, so it floors at one second.
-    pub(crate) fn http_timeout(&self) -> Duration {
-        Duration::from_secs(self.timeout_secs.max(1))
-    }
-
     /// Build the configured backend instance.
     ///
     /// The backend-specific config tables are mapped onto their own
@@ -284,7 +264,10 @@ impl WebSearchConfig {
     /// reachable when `validate()` was skipped — profile load always
     /// validates first, so `default_registry` turns the error into an
     /// explicit invariant panic rather than falling back to another backend.
-    pub(crate) fn build_backend(&self) -> Result<Arc<dyn WebSearchBackend>, WebSearchBackendError> {
+    pub(crate) fn build_backend(
+        &self,
+        http_timeout: Duration,
+    ) -> Result<Arc<dyn WebSearchBackend>, WebSearchBackendError> {
         let settings = match WebSearchBackendKind::from_name(&self.backend) {
             Some(WebSearchBackendKind::DuckDuckGo) => WebSearchBackendSettings::DuckDuckGo,
             Some(WebSearchBackendKind::SearXng) => WebSearchBackendSettings::SearXng {
@@ -305,7 +288,7 @@ impl WebSearchConfig {
                 backend_name: &self.backend,
             },
         };
-        backend_for(settings, self.http_timeout())
+        backend_for(settings, http_timeout)
     }
 
     /// The default result count for calls omitting `limit`, capped at the
@@ -323,7 +306,6 @@ mod tests {
     fn defaults_match_the_documented_section() {
         let config = WebSearchConfig::default();
         assert_eq!(config.backend, "duckduckgo");
-        assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.result_limit, WEB_SEARCH_DEFAULT_RESULT_LIMIT);
         assert_eq!(config.backends.searxng, None);
         assert_eq!(config.backends.brave, None);
@@ -338,10 +320,8 @@ mod tests {
     #[test]
     fn explicit_values_deserialize() {
         let config: WebSearchConfig =
-            toml::from_str("backend = \"duckduckgo\"\ntimeout_secs = 5\nresult_limit = 3\n")
-                .expect("values parse");
+            toml::from_str("backend = \"duckduckgo\"\nresult_limit = 3\n").expect("values parse");
         assert_eq!(config.backend, "duckduckgo");
-        assert_eq!(config.timeout_secs, 5);
         assert_eq!(config.result_limit, 3);
     }
 
@@ -650,17 +630,10 @@ mod tests {
             .validate(Path::new("config.toml"))
             .expect("an unselected brave table never breaks the default");
         assert_eq!(config.backend, "duckduckgo");
-        let backend = config.build_backend().expect("the default still builds");
+        let backend = config
+            .build_backend(Duration::from_secs(DEFAULT_WEB_SEARCH_TIMEOUT_SECS))
+            .expect("the default still builds");
         assert!(format!("{backend:?}").contains("DuckDuckGoBackend"));
-    }
-
-    #[test]
-    fn zero_timeout_floors_to_one_second() {
-        let config = WebSearchConfig {
-            timeout_secs: 0,
-            ..WebSearchConfig::default()
-        };
-        assert_eq!(config.http_timeout(), Duration::from_secs(1));
     }
 
     #[test]
@@ -680,7 +653,7 @@ mod tests {
     #[test]
     fn build_backend_returns_the_configured_backend() {
         let backend = WebSearchConfig::default()
-            .build_backend()
+            .build_backend(Duration::from_secs(DEFAULT_WEB_SEARCH_TIMEOUT_SECS))
             .expect("the default config always builds");
         assert!(format!("{backend:?}").contains("DuckDuckGoBackend"));
 
@@ -688,7 +661,9 @@ mod tests {
             "backend = \"searxng\"\n\n[backends.searxng]\nbase_url = \"https://searx.example.org/\"\n",
         )
         .expect("the table parses");
-        let backend = searxng.build_backend().expect("a valid config builds");
+        let backend = searxng
+            .build_backend(Duration::from_secs(DEFAULT_WEB_SEARCH_TIMEOUT_SECS))
+            .expect("a valid config builds");
         assert!(
             format!("{backend:?}").contains("SearXngBackend"),
             "the configured backend is built, not substituted: {backend:?}"
@@ -699,7 +674,9 @@ mod tests {
             "backend = \"brave\"\n\n[backends.brave]\napi_key = \"{sentinel_token}\"\n"
         ))
         .expect("the table parses");
-        let backend = brave.build_backend().expect("a valid config builds");
+        let backend = brave
+            .build_backend(Duration::from_secs(DEFAULT_WEB_SEARCH_TIMEOUT_SECS))
+            .expect("a valid config builds");
         let rendered_backend = format!("{backend:?}");
         assert!(
             rendered_backend.contains("BraveBackend"),
@@ -725,7 +702,7 @@ mod tests {
         };
         assert!(
             missing_table
-                .build_backend()
+                .build_backend(Duration::from_secs(DEFAULT_WEB_SEARCH_TIMEOUT_SECS))
                 .is_err_and(|error| error.to_string().contains("base_url")),
             "searxng without base_url must not yield a different backend"
         );
@@ -739,7 +716,9 @@ mod tests {
             ..WebSearchConfig::default()
         };
         assert!(
-            missing_url.build_backend().is_err(),
+            missing_url
+                .build_backend(Duration::from_secs(DEFAULT_WEB_SEARCH_TIMEOUT_SECS))
+                .is_err(),
             "an empty base_url must not yield a different backend"
         );
 
@@ -749,7 +728,7 @@ mod tests {
         };
         assert!(
             unsupported
-                .build_backend()
+                .build_backend(Duration::from_secs(DEFAULT_WEB_SEARCH_TIMEOUT_SECS))
                 .is_err_and(|error| { error.to_string().contains("duckduckgo, searxng, brave") }),
             "an unknown backend must not yield a different backend"
         );
@@ -759,11 +738,11 @@ mod tests {
             ..WebSearchConfig::default()
         };
         assert!(
-            brave_without_key.build_backend().is_err_and(|error| error
-                .to_string()
-                .contains("api_key")
-                && error.to_string().contains("brave")
-                && !error.to_string().contains("DuckDuckGo")),
+            brave_without_key
+                .build_backend(Duration::from_secs(DEFAULT_WEB_SEARCH_TIMEOUT_SECS))
+                .is_err_and(|error| error.to_string().contains("api_key")
+                    && error.to_string().contains("brave")
+                    && !error.to_string().contains("DuckDuckGo")),
             "brave without api_key must not yield a different backend"
         );
     }

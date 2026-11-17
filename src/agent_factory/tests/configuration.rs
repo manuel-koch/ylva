@@ -786,7 +786,7 @@ fn validate_profile_agent_engines_rejects_unknown_profile_level_tool_name() {
     let (factory, mut profile) = make_factory();
     profile.tools.insert(
         "not-a-real-tool".to_string(),
-        crate::config::ToolSandboxConfig { rules: vec![] },
+        crate::config::ToolConfig::default(),
     );
     let error = factory
         .validate_profile_agent_engines(&profile)
@@ -816,7 +816,7 @@ fn validate_profile_agent_engines_rejects_unknown_agent_type_scoped_tool_name() 
             can_spawn: false,
             tools: HashMap::from([(
                 "not-a-real-tool".to_string(),
-                crate::config::ToolSandboxConfig { rules: vec![] },
+                crate::config::ToolConfig::default(),
             )]),
         },
     );

@@ -45,6 +45,7 @@ This change unifies tool execution timeouts and sandbox rule inheritance under `
     `timeout_secs` from `WebFetchConfig` and `WebSearchConfig` must emit a standard `UnknownKey`
     `ConfigWarning` (and fail under `--strict-config`). `"timeout_secs"` remains in `KNOWN_KEYS`
     because `[agents.<type>]` and `[tools.<name>]` use it.
+    Do not add compatibility aliases or migration handling for the removed settings.
   - **Strict `timeout_secs` validation (YAGNI + fail-fast)**:
     - `timeout_secs` is valid **only** on `bash`, `web_fetch`, and `web_search`. Setting
       `timeout_secs` on any other tool (for example `read`, `write`, `edit`, `glob`, `search`,
@@ -103,58 +104,62 @@ This change unifies tool execution timeouts and sandbox rule inheritance under `
 ## Implementation Plan
 
 As you implement this plan, flip each completed step's `[ ]` checkbox to `[x]` immediately after
-finishing that step and rewrite `docs/plans/tool-config.plan.md` in place so progress remains
+finishing that step and rewrite `docs/plans/tool-config-plan.md` in place so progress remains
 resumable across sessions.
 
-1. [ ] Extend per-tool config schema with optional `rules` and `timeout_secs`, and merge inline agent
+1. [x] Extend per-tool config schema with optional `rules` and `timeout_secs`, and merge inline agent
    tool overrides per field.
-   1. [ ] In `src/config/profile.rs` (and re-exports in `src/config.rs`), rename `ToolSandboxConfig`
+   1. [x] In `src/config/profile.rs` (and re-exports in `src/config.rs`), rename `ToolSandboxConfig`
           to `ToolConfig` across the crate and `tests/sandbox_evaluation/bash_policy_replay.rs`
           (retaining `#[serde(deny_unknown_fields)]`), change `rules` to
           `Option<Vec<SandboxRuleConfig>>` (`#[serde(default)]`), and add
           `timeout_secs: Option<u64>`
           (`#[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]`).
-   2. [ ] Make `deserialize_optional_u64_or_string` `pub(super)` in `src/config/agent.rs`
+   2. [x] Make `deserialize_optional_u64_or_string` `pub(super)` in `src/config/agent.rs`
           (deduplicating the copy in `src/config/agent_type_file.rs`) so `AgentConfig`,
           `AgentConfigOverrides`, and `ToolConfig` share one SSOT deserializer across TOML and YAML
           frontmatter.
-   3. [ ] Update `apply_agent_config_overrides` in `src/config/profile.rs` so `overrides.tools`
+   3. [x] Update `apply_agent_config_overrides` in `src/config/profile.rs` so `overrides.tools`
           merges per tool name into `config.tools`, overwriting `entry.rules` only when
           `override_tool.rules.is_some()` and `entry.timeout_secs` only when
           `override_tool.timeout_secs.is_some()`.
-   4. [ ] Add `ProfileConfig` helper methods for effective per-tool resolution given
+   4. [x] Add `ProfileConfig` helper methods for effective per-tool resolution given
           `agent_type: Option<&str>` and `tool_name: &str` (for example `effective_tool_rules`
           returning `Option<&[SandboxRuleConfig]>` and `effective_tool_timeout_secs` returning
           `Option<u64>`, or typed per-tool timeout getters), resolving `agent.tools[tool]` →
           `profile.tools[tool]`.
+   5. [x] Interpolate agent-type file configuration values with the resolved profile environment,
+          including numeric tool timeouts in TOML and YAML frontmatter; keep Markdown bodies
+          literal.
 
-2. [ ] Validate per-tool `timeout_secs` and remove `timeout_secs` from `WebFetchConfig` and
+2. [x] Validate per-tool `timeout_secs` and remove `timeout_secs` from `WebFetchConfig` and
    `WebSearchConfig`.
-   1. [ ] Add `ConfigError` variants in `src/config.rs` for unsupported `timeout_secs` on a tool
+   1. [x] Add `ConfigError` variants in `src/config.rs` for unsupported `timeout_secs` on a tool
           outside `{"bash", "web_fetch", "web_search"}` and for `timeout_secs = 0`, including the
           config `path`, scope description (profile `[tools.<tool>]` vs. agent type
           `[agents.<agent>.tools.<tool>]`), and `tool` name.
-   2. [ ] Extend tool config validation in `src/config/profile.rs` (`validate_tool_sandbox_rules` /
+   2. [x] Extend tool config validation in `src/config/profile.rs` (`validate_tool_sandbox_rules` /
       `validate_tool_configs`, called in both `load_file_with_source` and
       `load_agent_types_into_profile` for profile-level and every agent's `tools` map) to:
       - iterate `tool_config.rules.as_deref().unwrap_or(&[])` for existing sandbox rule validation,
         and
       - reject `timeout_secs` on unsupported tool names and reject `timeout_secs == Some(0)`.
-   3. [ ] In `src/config/web_fetch.rs` and `src/config/web_search.rs`, remove the `timeout_secs`
+   3. [x] In `src/config/web_fetch.rs` and `src/config/web_search.rs`, remove the `timeout_secs`
           field and `http_timeout(&self)` method from `WebFetchConfig` and `WebSearchConfig`, expose
           `pub const DEFAULT_WEB_FETCH_TIMEOUT_SECS: u64 = 30` and
           `pub const DEFAULT_WEB_SEARCH_TIMEOUT_SECS: u64 = 30` as the single sources of truth, and
           change `build_backend(&self, http_timeout: Duration)` on both structs to accept the
           resolved HTTP timeout from the caller.
 
-3. [ ] Wire resolved tool timeouts and optional `rules` through `BashTool`, `ToolRegistryConfig`,
+3. [x] Wire resolved tool timeouts and optional `rules` through `BashTool`, `ToolRegistryConfig`,
    `AgentFactory`, `skills::policy`, CLI display registry, and `bash_policy_replay`.
-   1. [ ] In `src/agent/tools/bash.rs`, export `pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 300`, add
+   1. [x] In `src/agent/tools/bash.rs`, export `pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 300`, add
           a `timeout_secs: u64` field to `BashTool` and `BashCall` (defaulting to
           `DEFAULT_BASH_TIMEOUT_SECS` in `BashTool::new` and customizable via
-          `BashTool::with_timeout(timeout_secs, sandbox_context)`), and return `self.timeout_secs`
-          from both `Tool::timeout_secs` and `ToolCall::timeout_secs`.
-   2. [ ] In `src/agent/tools.rs`, add per-tool timeout fields to `ToolRegistryConfig`
+          `BashTool::with_timeout(timeout_secs, sandbox_context)`). Preserve the existing
+          `BASH_OUTER_TIMEOUT_GRACE_SECS` on `ToolCall::timeout_secs` so the inner timeout can
+          return partial output before the outer cancellation guard fires.
+   2. [x] In `src/agent/tools.rs`, add per-tool timeout fields to `ToolRegistryConfig`
           (`bash_timeout_secs: u64`, `web_search_timeout_secs: u64`, `web_fetch_timeout_secs: u64`,
           defaulting in `ToolRegistryConfig::default()` to `DEFAULT_BASH_TIMEOUT_SECS`,
           `DEFAULT_WEB_SEARCH_TIMEOUT_SECS`, and `DEFAULT_WEB_FETCH_TIMEOUT_SECS`), and update
@@ -163,25 +168,25 @@ resumable across sessions.
           `config.web_search.build_backend(...)` and `WebSearchTool::new(...)`, and pass
           `Duration::from_secs(config.web_fetch_timeout_secs)` into
           `config.web_fetch.build_backend(...)` and `WebFetchTool::new(...)`.
-   3. [ ] In `src/agent_factory.rs`, update `tool_sandbox_rules` assembly so only tools with
+   3. [x] In `src/agent_factory.rs`, update `tool_sandbox_rules` assembly so only tools with
           `Some(rules)` (resolving `agent.tools[name].rules` then `profile.tools[name].rules`) are
           inserted into `ToolRegistryConfig::tool_sandbox_rules`—preserving the built-in default
           floor when `rules` is `None` and passing an empty `Vec` when `rules` is `Some(vec![])`—and
           pass the resolved per-agent `bash`, `web_search`, and `web_fetch` timeouts into
           `ToolRegistryConfig`.
-   4. [ ] Update `src/skills/policy.rs` (`resolve_policy`), `src/cli_driver/console_app.rs`
+   4. [x] Update `src/skills/policy.rs` (`resolve_policy`), `src/cli_driver/console_app.rs`
           (`display_registry_config`), and `tests/sandbox_evaluation/bash_policy_replay.rs` to
           unwrap/filter `Option<Vec<SandboxRuleConfig>>` cleanly while preserving `load_skill`'s
           rule inheritance (`agent.rules` → `profile.rules` → `&[]`).
 
-4. [ ] Update existing tests and add focused unit and integration tests for timeout resolution,
+4. [x] Update existing tests and add focused unit and integration tests for timeout resolution,
    validation, and independent `rules` inheritance.
-   1. [ ] Update existing fixtures in `src/config/web_fetch.rs`, `src/config/web_search.rs`,
+   1. [x] Update existing fixtures in `src/config/web_fetch.rs`, `src/config/web_search.rs`,
           `src/config/profile/tests/backends.rs`, `src/config/profile/tests/sandbox.rs`,
           `src/agent_factory/tests/{configuration,roles}.rs`, and `src/skills/tests.rs` for the new
           `ToolConfig` shape and removal of `[web_fetch].timeout_secs` /
           `[web_search].timeout_secs`.
-   2. [ ] Add config loading and validation tests in `src/config/profile/tests/` and
+   2. [x] Add config loading and validation tests in `src/config/profile/tests/` and
       `src/config/agent_type_file.rs` covering:
       - `[tools.<name>].timeout_secs` and `[agents.<type>.tools.<name>].timeout_secs` (inline TOML,
         `.toml` agent file, `.md` TOML/YAML frontmatter, and `${ENV_VAR}` interpolation) for `bash`,
@@ -193,7 +198,7 @@ resumable across sessions.
         `[web_search]`, while unknown keys under `[tools.<name>]` remain hard errors;
       - inline `[agents.<type>.tools.<name>]` merging per tool and per field onto a lower-scope
         agent-type file without dropping sibling tools or unmentioned `rules`/`timeout_secs`.
-   3. [ ] Add registry and `AgentFactory` tests in `src/agent/tools/tests/registry.rs` and
+   3. [x] Add registry and `AgentFactory` tests in `src/agent/tools/tests/registry.rs` and
       `src/agent_factory/tests/` verifying:
       - `[tools.bash]\ntimeout_secs = 900` (with `rules` omitted) sets `BashTool` / `BashCall`
         timeout to `900` while preserving `bash`'s built-in default sandbox floor (`backgrounded`
@@ -206,8 +211,8 @@ resumable across sessions.
       - per-agent `web_fetch` and `web_search` `timeout_secs` update `Tool::timeout_secs()`
         (`timeout_secs + 10` s outer grace) independently per agent.
 
-5. [ ] Update affected project documentation and diagrams.
-   1. [ ] Update `docs/configuration.md`:
+5. [x] Update affected project documentation and diagrams.
+   1. [x] Update `docs/configuration.md`:
       - remove `timeout_secs` from the `[web_search]` and `[web_fetch]` field tables and TOML
         examples, cross-referencing `[tools.web_search]` / `[tools.web_fetch]`;
       - document `timeout_secs` under `[tools.<name>]` and `[agents.<type>.tools.<name>]` (supported
@@ -218,19 +223,19 @@ resumable across sessions.
         agent-override prose so it accurately states that an explicit `rules` list (including
         `rules = []`) replaces the lower tier's rules without merging rule items, while omitting
         `rules` inherits the lower tier's rules independently of `timeout_secs`.
-   2. [ ] Update `docs/features.md`:
+   2. [x] Update `docs/features.md`:
       - fix the stale `Default timeout: 30 s.` sentence under `### bash` to `300 s` and note that
         `[tools.bash].timeout_secs` / `[agents.<type>.tools.bash].timeout_secs` configures it;
       - adjust the sandbox `[tools.<name>]` summary around rule-list replacement vs. `rules`
         omission so it stays consistent with `docs/configuration.md`.
-   3. [ ] Check `docs/diagrams/configuration-policy-flow.mmd` around tool-policy resolution and
+   3. [x] Check `docs/diagrams/configuration-policy-flow.mmd` around tool-policy resolution and
           adjust any label that says a `[tools.<name>]` *table* (rather than an explicit `rules`
           *list*) unconditionally replaces lower rules.
 
-6. [ ] Run documentation and code verification gates.
-   1. [ ] Run `rumdl fmt docs/configuration.md docs/features.md docs/plans/tool-config.plan.md` and
-          `rumdl check docs/configuration.md docs/features.md docs/plans/tool-config.plan.md`.
-   2. [ ] Run `make format lint` and the single mandatory test-and-coverage gate
+6. [x] Run documentation and code verification gates.
+   1. [x] Run `rumdl fmt docs/configuration.md docs/features.md docs/plans/tool-config-plan.md` and
+          `rumdl check docs/configuration.md docs/features.md docs/plans/tool-config-plan.md`.
+   2. [x] Run `make format lint` and the single mandatory test-and-coverage gate
           `make test-coverage`, fixing any formatting, clippy, test, or coverage issues before
           reporting completion.
 
@@ -267,18 +272,16 @@ resumable across sessions.
   - `WebFetchConfig` (`src/config/web_fetch.rs:28-100`) and `WebSearchConfig`
     (`src/config/web_search.rs:31-315`) currently pass `self.http_timeout()` into
     `backend_for(...)`.
-  - `WebFetchTool::new(sandbox_context, backend, internal_timeout)`
-    (`src/agent/tools/web_fetch.rs:97-112`) adds `WEB_FETCH_OUTER_TIMEOUT_GRACE_SECS = 10`
-    (`src/agent/tools/web_fetch.rs:44`), and
-    `WebSearchTool::new(sandbox_context, backend, internal_timeout, default_limit)`
-    (`src/agent/tools/web_search.rs:96-116`) adds `WEB_SEARCH_OUTER_TIMEOUT_GRACE_SECS = 10`
-    (`src/agent/tools/web_search.rs:37`).
-  - `BashTool` (`src/agent/tools/bash.rs:34, 48-70, 88-115, 195-198`) currently uses the
-    module-private `const DEFAULT_BASH_TIMEOUT_SECS: u64 = 300` in both `ToolCall::timeout_secs` and
-    `Tool::timeout_secs`. Note that `AgentLoop` enforces `ToolCall::timeout_secs()` as the execution
-    deadline (`src/agent/tool_execution.rs`), while `Tool::timeout_secs()` exposes the tool-level
-    budget—both `BashTool` and `BashCall` must return the configured value, matching
-    `WebFetchTool`/`WebFetchCall` and `WebSearchTool`/`WebSearchCall`.
+  - `WebFetchTool::new` and `WebSearchTool::new` receive the backend, backend configuration and
+    sandbox context. Pass each resolved HTTP timeout into its constructor while retaining the
+    configuration needed for the backend title and search result limit. Each tool adds its
+    `OUTER_TIMEOUT_GRACE_SECS` of 10 seconds.
+  - `BashTool` already supports `with_timeout` and its call adds
+    `BASH_OUTER_TIMEOUT_GRACE_SECS` to the inner command timeout. Preserve that existing grace
+    period: the inner timeout drains and reports partial output before the outer guard cancels it.
+  - Agent-type files do not yet interpolate environment variables. Pass the resolved profile
+    environment into file loading and interpolate parsed configuration values without modifying
+    Markdown persona bodies.
 - **Other `ToolConfig::rules` call sites**:
   - `src/agent_factory.rs:536-555`: builds
     `tool_sandbox_rules: HashMap<String, Vec<SandboxRuleConfig>>` per agent; `default_registry`

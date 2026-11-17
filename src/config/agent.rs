@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use super::profile::{AgentCompactionConfig, ToolSandboxConfig};
+use super::profile::{AgentCompactionConfig, ToolConfig};
 
 /// Per-agent configuration within a profile.
 #[derive(Debug, Clone, Deserialize)]
@@ -41,15 +41,10 @@ pub struct AgentConfig {
     /// Eligible discovered skill names. Omission allows all; an empty list allows none.
     #[serde(default)]
     pub allowed_skills: Option<Vec<String>>,
-    /// Per-tool sandbox rule lists scoped to this agent type, keyed by tool
-    /// name (`[agents.<type>.tools.<name>]`/agent-type-file `[tools.<name>]`
-    /// tables). When a tool name has an entry here it takes precedence over
-    /// the profile-level `ProfileConfig::tools` entry for the same tool, for
-    /// this agent type only; when absent, resolution falls back to the
-    /// profile-level entry and then the built-in default floor. See
-    /// `docs/configuration.md`'s "Sandbox" section.
+    /// Per-tool settings scoped to this agent type. Each configured field
+    /// overrides the corresponding profile-level field independently.
     #[serde(default)]
-    pub tools: HashMap<String, ToolSandboxConfig>,
+    pub tools: HashMap<String, ToolConfig>,
     /// Maximum wall-clock seconds the agent may run before being cancelled.
     /// `None` means no timeout is enforced.
     #[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]
@@ -77,7 +72,9 @@ pub struct AgentConfig {
     pub can_spawn: bool,
 }
 
-fn deserialize_optional_u64_or_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+pub(super) fn deserialize_optional_u64_or_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

@@ -757,8 +757,8 @@ fn policy_never_selects_a_shadowed_source_after_denial() {
     let mut profile = crate::ProfileConfig::default();
     profile.tools.insert(
         "load_skill".into(),
-        crate::config::ToolSandboxConfig {
-            rules: vec![crate::sandbox::SandboxRuleConfig::PathGlob {
+        crate::config::ToolConfig {
+            rules: Some(vec![crate::sandbox::SandboxRuleConfig::PathGlob {
                 pattern: source
                     .canonicalize()
                     .unwrap()
@@ -766,7 +766,8 @@ fn policy_never_selects_a_shadowed_source_after_denial() {
                     .into_owned(),
                 verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
                 reason: None,
-            }],
+            }]),
+            ..crate::config::ToolConfig::default()
         },
     );
     assert!(resolve_policy(&catalog, &profile, temporary.path(), true)
@@ -878,12 +879,13 @@ fn policy_denial_and_approval_respect_mode_and_agent_override() {
     let (temporary, catalog, mut profile) = policy_fixture();
     profile.tools.insert(
         "load_skill".into(),
-        crate::config::ToolSandboxConfig {
-            rules: vec![crate::sandbox::SandboxRuleConfig::PathGlob {
+        crate::config::ToolConfig {
+            rules: Some(vec![crate::sandbox::SandboxRuleConfig::PathGlob {
                 pattern: "**".into(),
                 verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
                 reason: Some("blocked".into()),
-            }],
+            }]),
+            ..crate::config::ToolConfig::default()
         },
     );
     assert!(resolve_policy(&catalog, &profile, temporary.path(), true)
@@ -895,9 +897,22 @@ fn policy_denial_and_approval_respect_mode_and_agent_override() {
         .unwrap_err()
         .to_string()
         .contains("blocked"));
+    profile
+        .agents
+        .get_mut("default")
+        .unwrap()
+        .tools
+        .insert("load_skill".into(), crate::config::ToolConfig::default());
+    assert!(resolve_policy(&catalog, &profile, temporary.path(), true)
+        .unwrap_err()
+        .to_string()
+        .contains("blocked"));
     profile.agents.get_mut("default").unwrap().tools.insert(
         "load_skill".into(),
-        crate::config::ToolSandboxConfig { rules: vec![] },
+        crate::config::ToolConfig {
+            rules: Some(vec![]),
+            ..crate::config::ToolConfig::default()
+        },
     );
     assert_eq!(
         resolve_policy(&catalog, &profile, temporary.path(), false)
@@ -908,11 +923,11 @@ fn policy_denial_and_approval_respect_mode_and_agent_override() {
     );
     profile.agents.get_mut("default").unwrap().tools.clear();
     profile.tools.get_mut("load_skill").unwrap().rules =
-        vec![crate::sandbox::SandboxRuleConfig::PathGlob {
+        Some(vec![crate::sandbox::SandboxRuleConfig::PathGlob {
             pattern: "**".into(),
             verdict: crate::sandbox::ApprovalVerdictConfig::UserApprovalRequired,
             reason: None,
-        }];
+        }]);
     assert!(resolve_policy(&catalog, &profile, temporary.path(), false).is_err());
     assert!(resolve_policy(&catalog, &profile, temporary.path(), true)
         .unwrap()
@@ -946,7 +961,7 @@ fn unknown_skill_reports_rejection_provenance() {
 #[test]
 fn callable_skill_policy_propagates_malformed_direct_restrictions() {
     let (temporary, catalog, mut profile) = policy_fixture();
-    let rules: crate::config::ToolSandboxConfig = toml::from_str(
+    let rules: crate::config::ToolConfig = toml::from_str(
         r#"
 rules = [
   { pattern = "**", verdict = "auto_approved" },

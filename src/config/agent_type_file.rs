@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::profile::AgentCompactionConfig;
-use super::profile::ToolSandboxConfig;
+use super::agent::deserialize_optional_u64_or_string;
+use super::profile::{AgentCompactionConfig, ToolConfig};
 use super::{deserialize_reporting_unknown_keys, AgentConfig, ConfigError, ConfigWarning};
 
 /// The parsed configuration supplied by one agent-type file.
@@ -34,11 +34,18 @@ pub struct AgentTypeDefinition {
 
 /// Parse one agent-type file from disk.
 pub fn parse_agent_type_file(path: &Path) -> Result<AgentTypeDefinition, ConfigError> {
+    parse_agent_type_file_with_environment(path, None)
+}
+
+fn parse_agent_type_file_with_environment(
+    path: &Path,
+    environment: Option<&HashMap<String, String>>,
+) -> Result<AgentTypeDefinition, ConfigError> {
     let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::Unreadable {
         path: path.to_path_buf(),
         source,
     })?;
-    parse_agent_type_contents(path, &contents)
+    parse_agent_type_contents_with_environment(path, &contents, environment)
 }
 
 /// Parse one agent-type file's contents according to its extension.
@@ -46,9 +53,17 @@ pub fn parse_agent_type_contents(
     path: &Path,
     contents: &str,
 ) -> Result<AgentTypeDefinition, ConfigError> {
+    parse_agent_type_contents_with_environment(path, contents, None)
+}
+
+fn parse_agent_type_contents_with_environment(
+    path: &Path,
+    contents: &str,
+    environment: Option<&HashMap<String, String>>,
+) -> Result<AgentTypeDefinition, ConfigError> {
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("toml") => parse_toml(path, contents),
-        Some("md") => parse_markdown(path, contents),
+        Some("toml") => parse_toml(path, contents, environment),
+        Some("md") => parse_markdown(path, contents, environment),
         Some(extension) => Err(malformed(
             path,
             format!("unsupported agent-type file extension '.{extension}'"),
@@ -61,6 +76,7 @@ pub fn parse_agent_type_contents(
 pub(crate) fn discover_agent_type_files(
     directory: &Path,
     scope: AgentTypeScope,
+    environment: &HashMap<String, String>,
 ) -> Result<HashMap<String, AgentTypeFile>, ConfigError> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -112,7 +128,7 @@ pub(crate) fn discover_agent_type_files(
                 second_path: path,
             });
         }
-        let definition = parse_agent_type_file(&path)?;
+        let definition = parse_agent_type_file_with_environment(&path, Some(environment))?;
         files.insert(
             agent_type.clone(),
             AgentTypeFile {
@@ -126,16 +142,27 @@ pub(crate) fn discover_agent_type_files(
     Ok(files)
 }
 
-fn parse_toml(path: &Path, contents: &str) -> Result<AgentTypeDefinition, ConfigError> {
+fn parse_toml(
+    path: &Path,
+    contents: &str,
+    environment: Option<&HashMap<String, String>>,
+) -> Result<AgentTypeDefinition, ConfigError> {
     let mut warnings = Vec::new();
-    let deserializer = toml::Deserializer::parse(contents)
+    let mut document: toml::Value = toml::from_str(contents)
         .map_err(|source| malformed(path, format!("invalid TOML: {source}")))?;
-    let config = deserialize_reporting_unknown_keys(deserializer, path, "", &mut warnings)
+    if let Some(environment) = environment {
+        super::profile::interpolate_toml_strings(&mut document, environment, path)?;
+    }
+    let config = deserialize_reporting_unknown_keys(document, path, "", &mut warnings)
         .map_err(|source| malformed(path, format!("invalid TOML: {source}")))?;
     Ok(AgentTypeDefinition { config, warnings })
 }
 
-fn parse_markdown(path: &Path, contents: &str) -> Result<AgentTypeDefinition, ConfigError> {
+fn parse_markdown(
+    path: &Path,
+    contents: &str,
+    environment: Option<&HashMap<String, String>>,
+) -> Result<AgentTypeDefinition, ConfigError> {
     let mut lines = contents.split_inclusive('\n');
     let opening_line = lines.next().map(trim_line_ending).unwrap_or_default();
     let format = match opening_line {
@@ -170,19 +197,25 @@ fn parse_markdown(path: &Path, contents: &str) -> Result<AgentTypeDefinition, Co
     let mut warnings = Vec::new();
     let mut config: AgentConfig = match format {
         AgentFrontmatterFormat::Toml => {
-            let deserializer = toml::Deserializer::parse(&frontmatter)
+            let mut document: toml::Value = toml::from_str(&frontmatter)
                 .map_err(|source| malformed(path, format!("invalid frontmatter TOML: {source}")))?;
-            deserialize_reporting_unknown_keys(deserializer, path, "", &mut warnings)
+            if let Some(environment) = environment {
+                super::profile::interpolate_toml_strings(&mut document, environment, path)?;
+            }
+            deserialize_reporting_unknown_keys(document, path, "", &mut warnings)
                 .map_err(|source| malformed(path, format!("invalid frontmatter TOML: {source}")))?
         }
-        AgentFrontmatterFormat::Yaml => serde_saphyr::with_deserializer_from_str_with_options(
-            &frontmatter,
-            crate::yaml_options(),
-            |deserializer| {
-                deserialize_reporting_unknown_keys(deserializer, path, "", &mut warnings)
-            },
-        )
-        .map_err(|source| malformed(path, format!("invalid frontmatter YAML: {source}")))?,
+        AgentFrontmatterFormat::Yaml => {
+            let mut document: serde_json::Value =
+                serde_saphyr::from_str_with_options(&frontmatter, crate::yaml_options()).map_err(
+                    |source| malformed(path, format!("invalid frontmatter YAML: {source}")),
+                )?;
+            if let Some(environment) = environment {
+                interpolate_yaml_strings(&mut document, environment, path)?;
+            }
+            deserialize_reporting_unknown_keys(document, path, "", &mut warnings)
+                .map_err(|source| malformed(path, format!("invalid frontmatter YAML: {source}")))?
+        }
     };
     // The body *is* the persona: it overrides whatever `persona` value the
     // frontmatter carried (both deserialize through the same standard
@@ -199,6 +232,30 @@ fn parse_markdown(path: &Path, contents: &str) -> Result<AgentTypeDefinition, Co
     }
     config.persona = Some(persona.to_string());
     Ok(AgentTypeDefinition { config, warnings })
+}
+
+fn interpolate_yaml_strings(
+    value: &mut serde_json::Value,
+    environment: &HashMap<String, String>,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    match value {
+        serde_json::Value::String(string) => {
+            *string = super::profile::interpolate_string(string, environment, path)?;
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                interpolate_yaml_strings(value, environment, path)?;
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                interpolate_yaml_strings(value, environment, path)?;
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -280,27 +337,7 @@ pub(crate) struct AgentConfigOverrides {
     #[serde(default, deserialize_with = "deserialize_optional_bool_or_string")]
     pub can_spawn: Option<bool>,
     #[serde(default)]
-    pub tools: Option<HashMap<String, ToolSandboxConfig>>,
-}
-
-fn deserialize_optional_u64_or_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum TimeoutValue {
-        Number(u64),
-        Text(String),
-    }
-
-    match Option::<TimeoutValue>::deserialize(deserializer)? {
-        Some(TimeoutValue::Number(value)) => Ok(Some(value)),
-        Some(TimeoutValue::Text(value)) => value.trim().parse::<u64>().map(Some).map_err(|error| {
-            serde::de::Error::custom(format!("invalid timeout_secs '{value}': {error}"))
-        }),
-        None => Ok(None),
-    }
+    pub tools: Option<HashMap<String, ToolConfig>>,
 }
 
 fn deserialize_optional_usize_or_string<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
@@ -530,12 +567,14 @@ rules = [
         )
         .expect("pure TOML with tools table parses");
 
-        let write_rules = &definition
+        let write_rules = definition
             .config
             .tools
             .get("write")
             .expect("write tool entry present")
-            .rules;
+            .rules
+            .as_ref()
+            .expect("write rules");
         assert_eq!(write_rules.len(), 2);
     }
 
@@ -547,12 +586,14 @@ rules = [
         )
         .expect("TOML frontmatter with tools table parses");
 
-        let write_rules = &definition
+        let write_rules = definition
             .config
             .tools
             .get("write")
             .expect("write tool entry present")
-            .rules;
+            .rules
+            .as_ref()
+            .expect("write rules");
         assert_eq!(write_rules.len(), 1);
     }
 
@@ -564,12 +605,14 @@ rules = [
         )
         .expect("YAML frontmatter with tools table parses");
 
-        let write_rules = &definition
+        let write_rules = definition
             .config
             .tools
             .get("write")
             .expect("write tool entry present")
-            .rules;
+            .rules
+            .as_ref()
+            .expect("write rules");
         assert_eq!(write_rules.len(), 1);
     }
 
@@ -632,8 +675,12 @@ rules = [
         )
         .expect("write TOML definition");
 
-        let error = discover_agent_type_files(temporary_directory.path(), AgentTypeScope::Global)
-            .expect_err("duplicate definitions fail");
+        let error = discover_agent_type_files(
+            temporary_directory.path(),
+            AgentTypeScope::Global,
+            &HashMap::new(),
+        )
+        .expect_err("duplicate definitions fail");
         let message = error.to_string();
         assert!(message.contains("research"), "{message}");
         assert!(message.contains("global"), "{message}");

@@ -19,6 +19,7 @@ flowchart TD
         Roots --> Profile
         Roots --> Environment
         Environment -->|"interpolate selected file"| Profile
+        Environment -->|"interpolate configuration fields"| AgentFiles
         Roots --> AgentFiles --> Agents
         Profile --> Agents --> Validate
     end
@@ -27,13 +28,15 @@ flowchart TD
         Engine["Conversation engine<br/>Agent engine > profile default_engine<br/>Bind named provider connection and model"]
         Compact["Summary engine / timeout<br/>Each agent override inherits independently from profile<br/>No explicit summary engine: follow conversation engine<br/>Explicit engine: independent configured copy"]
         Tools["Role + allowed_tools<br/>Root can_spawn gates spawn_subagent<br/>Subagents cannot spawn; receive agent_finish"]
-        Rules["Per-tool sandbox rule list<br/>Agent entry > profile entry > tool-specific default<br/>Ordinary tools default: built-in floor<br/>load_skill default: empty rules; eligible instructions auto-approved<br/>A configured list replaces, not merges, the lower list"]
+        Rules["Per-tool sandbox rule list<br/>Agent rules > profile rules > tool-specific default<br/>Omitted list inherits; explicit list, including empty, replaces<br/>Ordinary tools default: built-in floor<br/>load_skill default: empty rules; eligible instructions auto-approved"]
+        Timeouts["Per-tool timeout, resolved independently of rules<br/>Agent value > profile value > tool-specific default<br/>bash / web_fetch / web_search only"]
         Catalog["Immutable process skill discovery snapshot"]
         Callable["Per-agent callable skills<br/>load_skill permission + allowed_skills<br/>+ loader sandbox verdict + host approval capability"]
         Validate --> Engine
         Validate --> Compact
         Validate --> Tools
         Validate --> Rules
+        Validate --> Timeouts
         Roots --> Catalog
         Tools --> Callable
         Rules --> Callable
@@ -64,6 +67,7 @@ flowchart TD
         Call --> Admission --> Verdict
         Tools -->|"callable registry / schemas"| Call
         Rules --> Admission
+        Timeouts --> Approved
         Callable -->|"loader membership and recorded source identity"| Admission
         Verdict -->|"auto-approved"| Approved
         Verdict -->|"auto-denied"| Denied
