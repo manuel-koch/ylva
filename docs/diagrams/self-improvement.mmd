@@ -1,0 +1,102 @@
+---
+title: Ylva - guided self-improvement workflow (3 focused skills + deterministic step runner, v1 slice)
+config:
+  layout: elk
+  flowchart:
+    useMaxWidth: false
+---
+
+flowchart TD
+    %% Process and responsibility overview for docs/ideas/self-improvement.md
+    %% Interactive skills handle human judgment; self_improve_ctl.py owns state.json and execution.
+
+    User(["User initiates self-improvement"])
+    ScenarioBank[("Reusable Scenario Bank<br/>self-improvement/scenarios/<br/>Empty on first run; grows from promoted fixes")]
+
+    subgraph ReflectSkill["Skill 1: self-improve-reflect (interactive session mining)"]
+        Sessions["Past conversation transcripts"]
+        Mine["Analyze transcripts for recurring patterns<br/>Missing context, weak instructions, effective workflows,<br/>failure root causes, and stale or bloated rules"]
+        Curate["Update improvement backlog<br/>Classify each item as Add, Refine, or Prune"]
+        Complexity{"Needs competing<br/>experiments?"}
+        FastPath["Draft direct single-change proposal<br/>(small fix or rule pruning)"]
+
+        Sessions --> Mine --> Curate --> Complexity
+        Complexity -->|"no — small / unambiguous"| FastPath
+    end
+
+    subgraph ScenarioSkill["Skill 2: self-improve-scenario ('Red before Green' calibration)"]
+        CalibrateScenario["Iteratively define target scenario with user<br/>Minimize real session turns or grill on a repo task<br/>Draft prompt, optional fixture, verifier, and rubric"]
+        ProbeHead["self_improve_ctl.py probe-scenario<br/>Dry-run target scenario against current HEAD"]
+        Triggered{"Triggers target gap<br/>cleanly on HEAD?"}
+
+        CalibrateScenario --> ProbeHead --> Triggered
+        Triggered -->|"setup or sandbox error — fix scenario"| CalibrateScenario
+        Triggered -->|"no — HEAD already passes; refine prompt"| CalibrateScenario
+    end
+
+    subgraph PlanPhase["Skill 3: self-improve-tournament (interactive spec + sign-off)"]
+        DraftPlan["Prepare tournament spec.json + K strategy briefs<br/>Goal, editable scope, locked target scenario,<br/>optional blind regression scenarios, models, and budget"]
+        SignOff{"User approves<br/>tournament plan?"}
+
+        DraftPlan --> SignOff
+    end
+
+    subgraph StepRunner["Deterministic runner: self_improve_ctl.py step (persisted state.json)"]
+        CheckRegressions["Verify current HEAD on selected regression scenarios<br/>(target baseline reused from calibration)"]
+        RegressionsValid{"Selected regressions<br/>still pass on HEAD?"}
+
+        subgraph CandidateLoop["v1 single-round sweep: strategies 1..K run sequentially"]
+            IsolateCandidate["Prepare isolated candidate worktree + ephemeral YLVA_HOME<br/>Auto-generate capability briefing from sandbox rules"]
+            ImplementCandidate["Headless Proposer implements assigned strategy"]
+            GatesOk{"Within allowed scope and<br/>passes build, lint, and tests?"}
+            RunScenarios["Evaluate candidate on target + blind regression scenarios<br/>under live YLVA_RUN_REPORT_PATH budget supervision"]
+            NoRegression{"Keeps passing all<br/>regression scenarios?"}
+            Disqualify["Disqualify candidate + archive failure"]
+            Qualify["Qualify contender + archive diff, metrics, and traces"]
+            MoreCandidates{"More strategies<br/>remaining?"}
+
+            IsolateCandidate --> ImplementCandidate --> GatesOk
+            GatesOk -->|"no"| Disqualify
+            GatesOk -->|"yes"| RunScenarios --> NoRegression
+            NoRegression -->|"regression"| Disqualify
+            NoRegression -->|"ok (or none on first run)"| Qualify
+            Disqualify --> MoreCandidates
+            Qualify --> MoreCandidates
+            MoreCandidates -->|"next strategy"| IsolateCandidate
+        end
+
+        AnyContenders{"Any qualified<br/>contenders?"}
+        BlindJudge["Assemble anonymized judge-view + scorecard<br/>Headless Judge compares contenders blindly vs. baseline<br/>Weigh quality, efficiency, and simplicity (penalize bloat)"]
+        BeatsBaseline{"Contender meaningfully<br/>beats baseline?"}
+        KeepBaseline["Keep baseline (promote nothing)<br/>Prune worktrees and temporary homes"]
+        StageWinner["Stage winner on review branch + write verdict.md<br/>Prune losing worktrees and temporary homes"]
+
+        CheckRegressions --> RegressionsValid
+        RegressionsValid -->|"yes (or none on first run)"| IsolateCandidate
+        MoreCandidates -->|"all K done"| AnyContenders
+        AnyContenders -->|"no"| KeepBaseline
+        AnyContenders -->|"yes"| BlindJudge --> BeatsBaseline
+        BeatsBaseline -->|"no"| KeepBaseline
+        BeatsBaseline -->|"yes"| StageWinner
+    end
+
+    HumanGate(["Human Promotion Gate<br/>Skill presents verdict.md and diff; user merges or discards"])
+    RetainScenario{"Keep calibrated target scenario<br/>for future runs?"}
+    Done(["Run complete"])
+
+    User -->|"reflect on past sessions"| Sessions
+    User -->|"pose a specific problem or feature"| CalibrateScenario
+    Complexity -->|"yes — behavioral / trade-off"| CalibrateScenario
+    Triggered -->|"yes — 'Red' baseline locked"| DraftPlan
+    Triggered -->|"stop — issue no longer reproduces"| Done
+    ScenarioBank -.->|"optional saved regression checks"| DraftPlan
+    SignOff -->|"cancel"| Done
+    SignOff -->|"approved"| CheckRegressions
+    RegressionsValid -->|"no — stale after repo changes; update or drop"| DraftPlan
+    FastPath --> HumanGate
+    KeepBaseline --> HumanGate
+    StageWinner --> HumanGate
+    HumanGate -->|"tournament fix promoted"| RetainScenario
+    HumanGate -->|"fast-path applied or nothing promoted"| Done
+    RetainScenario -->|"yes — guard future runs"| ScenarioBank
+    RetainScenario -->|"no — discard one-off"| Done
