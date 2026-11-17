@@ -15,6 +15,90 @@
 use super::*;
 
 #[test]
+fn bash_timeout_can_be_configured_without_a_rules_list() {
+    let temporary = tempfile::tempdir().unwrap();
+    write_profile_config(
+        temporary.path(),
+        "timeouts",
+        "[tools.bash]\ntimeout_secs = 900\n",
+    );
+
+    let profile = ProfileConfig::load_with_environment_at_workspace_root(
+        temporary.path(),
+        "timeouts",
+        &HashMap::new(),
+        None,
+    )
+    .expect("a timeout-only tool table must load");
+    assert_eq!(profile.tools["bash"].timeout_secs, Some(900));
+    assert!(profile.tools["bash"].rules.is_none());
+}
+
+#[test]
+fn invalid_tool_timeouts_name_the_scope_and_tool() {
+    for (table, timeout) in [
+        ("tools.bash", 0),
+        ("agents.worker.tools.web_fetch", 0),
+        ("tools.read", 30),
+        ("agents.worker.tools.load_skill", 30),
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        write_profile_config(
+            temporary.path(),
+            "invalid-timeout",
+            &format!("[{table}]\ntimeout_secs = {timeout}\n"),
+        );
+        let error = ProfileConfig::load_with_environment_at_workspace_root(
+            temporary.path(),
+            "invalid-timeout",
+            &HashMap::new(),
+            None,
+        )
+        .expect_err("invalid tool timeouts must fail at profile load");
+        let message = error.to_string();
+        assert!(message.contains(table), "{message}");
+        assert!(message.contains("config.toml"), "{message}");
+        assert!(message.contains("timeout_secs"), "{message}");
+    }
+}
+
+#[test]
+fn invalid_agent_file_timeouts_name_their_source_including_default_fallback() {
+    for (tool, timeout) in [("bash", 0), ("read", 30)] {
+        for has_profile in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let profiles_root = temporary.path().join("profiles");
+            if has_profile {
+                write_profile_config(&profiles_root, "default", "");
+            }
+            write_agent_type_file(
+                temporary.path(),
+                "agents/worker.toml",
+                &format!("[tools.{tool}]\ntimeout_secs = {timeout}\n"),
+            );
+            let error = ProfileConfig::load_or_default_with_environment_at_workspace_root(
+                &profiles_root,
+                "default",
+                &HashMap::new(),
+                None,
+            )
+            .expect_err("invalid agent-file timeout must fail");
+            let message = error.to_string();
+            assert!(message.contains("worker.toml"), "{message}");
+            assert!(
+                message.contains(&format!("agents.worker.tools.{tool}")),
+                "{message}"
+            );
+            if timeout == 0 {
+                assert!(matches!(error, ConfigError::InvalidToolTimeout { .. }));
+            } else {
+                assert!(matches!(error, ConfigError::UnsupportedToolTimeout { .. }));
+            }
+        }
+    }
+}
+
+#[test]
 fn conditional_command_rules_validate_profile_and_inline_agents() {
     for scope in ["tools.bash", "agents.reviewer.tools.bash"] {
         for condition in [
@@ -94,17 +178,18 @@ fn skill_sidecar_is_read_only_and_loader_accepts_path_rules() {
     ] {
         let tools = HashMap::from([(
             tool.into(),
-            ToolSandboxConfig {
-                rules: vec![crate::sandbox::SandboxRuleConfig::Named {
+            ToolConfig {
+                rules: Some(vec![crate::sandbox::SandboxRuleConfig::Named {
                     rule: crate::sandbox::NamedSandboxRule::SkillSidecar,
                     verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
                     reason: None,
                     target: None,
-                }],
+                }]),
+                ..ToolConfig::default()
             },
         )]);
         assert!(
-            validate_tool_sandbox_rules(&tools, Path::new("config.toml")).is_err(),
+            validate_tool_configs(&tools, Path::new("config.toml"), None).is_err(),
             "{tool}"
         );
     }
@@ -126,8 +211,8 @@ rules = [{ pattern = "**", verdict = "auto_approved" }]
         None,
     )
     .unwrap();
-    assert!(profile.tools["read"].rules[0].is_read_tool_only());
-    assert!(profile.tools["load_skill"].rules[0].is_path_tool_only());
+    assert!(profile.tools["read"].rules.as_ref().unwrap()[0].is_read_tool_only());
+    assert!(profile.tools["load_skill"].rules.as_ref().unwrap()[0].is_path_tool_only());
 }
 #[test]
 fn tool_sandbox_rules_table_loads_named_and_glob_rules() {
@@ -151,7 +236,7 @@ rules = [
 
     let profile = ProfileConfig::load(temp.path(), "with-tools").expect("the fixture loads");
 
-    let read_rules = &profile.tools.get("read").expect("read table").rules;
+    let read_rules = profile.tools["read"].rules.as_ref().expect("read rules");
     assert_eq!(read_rules.len(), 1);
     assert!(matches!(
         read_rules[0],
@@ -161,7 +246,7 @@ rules = [
         }
     ));
 
-    let write_rules = &profile.tools.get("write").expect("write table").rules;
+    let write_rules = profile.tools["write"].rules.as_ref().expect("write rules");
     assert_eq!(write_rules.len(), 2);
     assert!(matches!(
         write_rules[0],
@@ -196,7 +281,7 @@ rules = [
     );
 
     let profile = ProfileConfig::load(temp.path(), "with-bash-tools").expect("the fixture loads");
-    let bash_rules = &profile.tools.get("bash").expect("bash table").rules;
+    let bash_rules = profile.tools["bash"].rules.as_ref().expect("bash rules");
     assert_eq!(bash_rules.len(), 2);
     assert!(matches!(
         bash_rules[0],
@@ -399,15 +484,17 @@ rules = [
     let profile =
         ProfileConfig::load(temp.path(), "agent-scoped-tools").expect("the fixture loads");
 
-    let profile_write_rules = &profile.tools.get("write").expect("write table").rules;
+    let profile_write_rules = profile.tools["write"].rules.as_ref().expect("write rules");
     assert_eq!(profile_write_rules.len(), 1);
 
     let custom_agent = profile.agents.get("custom").expect("the custom agent");
-    let agent_write_rules = &custom_agent
+    let agent_write_rules = custom_agent
         .tools
         .get("write")
         .expect("agent-scoped write table")
-        .rules;
+        .rules
+        .as_ref()
+        .expect("agent write rules");
     assert_eq!(
         agent_write_rules.len(),
         2,
@@ -433,7 +520,7 @@ rules = [
     );
 
     let profile = ProfileConfig::load(temp.path(), "with-cross-fs").expect("the fixture loads");
-    let read_rules = &profile.tools.get("read").expect("read table").rules;
+    let read_rules = profile.tools["read"].rules.as_ref().expect("read rules");
     assert_eq!(read_rules.len(), 3);
     assert!(
         matches!(
@@ -496,15 +583,17 @@ rules = [
     let profile =
         ProfileConfig::load(temp.path(), "agent-scoped-cross-fs").expect("the fixture loads");
 
-    let profile_read_rules = &profile.tools.get("read").expect("read table").rules;
+    let profile_read_rules = profile.tools["read"].rules.as_ref().expect("read rules");
     assert_eq!(profile_read_rules.len(), 1);
 
     let custom_agent = profile.agents.get("custom").expect("the custom agent");
-    let agent_read_rules = &custom_agent
+    let agent_read_rules = custom_agent
         .tools
         .get("read")
         .expect("agent-scoped read table")
-        .rules;
+        .rules
+        .as_ref()
+        .expect("agent read rules");
     assert_eq!(agent_read_rules.len(), 2);
     assert!(
         matches!(
@@ -766,11 +855,13 @@ rules = [
 
     let profile =
         ProfileConfig::load(temp.path(), "network-web-search").expect("the fixture loads");
-    let rules = &profile
+    let rules = profile
         .tools
         .get("web_search")
         .expect("web_search table")
-        .rules;
+        .rules
+        .as_ref()
+        .expect("web search rules");
     assert_eq!(rules.len(), 1);
     assert!(matches!(
         rules[0],
@@ -831,11 +922,13 @@ rules = [
     let profile =
         ProfileConfig::load(temp.path(), "agent-scoped-network").expect("the fixture loads");
     let custom = profile.agents.get("custom").expect("the custom agent");
-    let rules = &custom
+    let rules = custom
         .tools
         .get("web_search")
         .expect("web_search table")
-        .rules;
+        .rules
+        .as_ref()
+        .expect("web search rules");
     assert_eq!(rules.len(), 1);
 }
 
@@ -904,11 +997,13 @@ rules = [
     );
 
     let profile = ProfileConfig::load(temp.path(), "web-fetch-targets").expect("the fixture loads");
-    let rules = &profile
+    let rules = profile
         .tools
         .get("web_fetch")
         .expect("web_fetch table")
-        .rules;
+        .rules
+        .as_ref()
+        .expect("web fetch rules");
     assert_eq!(rules.len(), 2);
     assert!(matches!(
         rules[0],
@@ -947,11 +1042,13 @@ rules = [
 
     let profile = ProfileConfig::load(temp.path(), "web-fetch-target-vocabulary")
         .expect("the full target vocabulary loads");
-    let rules = &profile
+    let rules = profile
         .tools
         .get("web_fetch")
         .expect("web_fetch table")
-        .rules;
+        .rules
+        .as_ref()
+        .expect("web fetch rules");
     assert_eq!(rules.len(), 4);
 }
 

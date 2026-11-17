@@ -221,7 +221,7 @@ impl CommandGlobPattern {
     /// of being treated as a wildcard. This is the single source of truth
     /// for that check, shared by `from_tokens`'s `debug_assert!` and
     /// [`SandboxRuleConfig::has_misplaced_command_glob_wildcard`] (used by
-    /// `crate::config::profile::validate_tool_sandbox_rules`'s hard startup
+    /// `crate::config::profile::validate_tool_configs`'s hard startup
     /// error and [`ResolvedRule::from_config`]'s defense-in-depth check for
     /// callers that bypass profile loading).
     fn has_misplaced_wildcard(tokens: &[String]) -> bool {
@@ -685,7 +685,7 @@ pub enum ResolvedRuleError {
     InvalidNetworkTargetPattern(String),
     /// A `command` rule's `*`/`**` wildcard isn't the last element — see
     /// [`SandboxRuleConfig::has_misplaced_command_glob_wildcard`].
-    /// `crate::config::profile::validate_tool_sandbox_rules` already
+    /// `crate::config::profile::validate_tool_configs` already
     /// rejects this as a hard startup error for profile-loaded rules; this
     /// is defense in depth for callers that build [`SandboxRuleConfig`]s
     /// directly and pass them to [`super::SandboxContext::with_configured_rules`]

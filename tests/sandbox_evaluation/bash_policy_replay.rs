@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ylva::config::ToolSandboxConfig;
+use ylva::config::ToolConfig;
 use ylva::{ApprovalCheck, Sandbox, SandboxContext};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -110,16 +110,14 @@ fn policy_context(rules_source: Option<&str>) -> Result<SandboxContext> {
         .and_then(|tools| tools.get("bash"))
         .context("rules file must contain [tools.bash] with an explicit rules array")?;
     let table = bash.as_table().context("[tools.bash] must be a table")?;
-    for key in table.keys() {
-        if key != "rules" {
-            bail!("unknown [tools.bash] field '{key}'");
-        }
-    }
     if !table.contains_key("rules") {
         bail!("[tools.bash] must contain an explicit rules array");
     }
-    let configuration: ToolSandboxConfig = bash.clone().try_into()?;
-    Ok(context.with_tool_rules("bash", configuration.rules)?)
+    let configuration: ToolConfig = bash.clone().try_into()?;
+    let rules = configuration
+        .rules
+        .context("[tools.bash] must contain an explicit rules array")?;
+    Ok(context.with_tool_rules("bash", rules)?)
 }
 
 fn replay(corpus: Corpus, context: &SandboxContext) -> Result<Report> {
@@ -352,6 +350,18 @@ rules = [{rule = "outside_workspace", verdict = "auto_approved"}]"#,
         ] {
             assert!(policy_context(Some(source)).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn replay_accepts_a_bash_timeout_alongside_explicit_rules() {
+        let context = policy_context(Some(
+            "[tools.bash]\ntimeout_secs = 900\nrules = [{ command = [\"git\", \"status\"], verdict = \"auto_approved\" }]\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            context.check_command("git status"),
+            Some(ApprovalCheck::AutoApproved)
+        );
     }
 
     #[test]

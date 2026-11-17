@@ -139,13 +139,16 @@ impl WebSearchTool {
         backend: Arc<dyn WebSearchBackend>,
         config: &WebSearchConfig,
         sandbox_context: SandboxContext,
+        http_timeout: Duration,
     ) -> Self {
         let default_result_limit = config.effective_result_limit();
         let backend_display_name = WebSearchBackendKind::from_name(&config.backend)
             .map(|kind| kind.display_name().to_string())
             .unwrap_or_else(|| config.backend.clone());
         WebSearchTool {
-            timeout_secs: config.http_timeout().as_secs() + WEB_SEARCH_OUTER_TIMEOUT_GRACE_SECS,
+            timeout_secs: http_timeout
+                .as_secs()
+                .saturating_add(WEB_SEARCH_OUTER_TIMEOUT_GRACE_SECS),
             default_result_limit,
             backend_display_name,
             backend,

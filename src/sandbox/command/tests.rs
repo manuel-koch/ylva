@@ -367,7 +367,7 @@ fn conditional_context(rules: &str) -> SandboxContext {
 fn migrated_sample_uses_argument_filters_and_explicit_structural_protection() {
     #[derive(serde::Deserialize)]
     struct Sample {
-        tools: std::collections::HashMap<String, crate::config::ToolSandboxConfig>,
+        tools: std::collections::HashMap<String, crate::config::ToolConfig>,
     }
     let sample: Sample = toml::from_str(include_str!(
         "../../../tests/sandbox_evaluation/sample.config.toml"
@@ -376,7 +376,7 @@ fn migrated_sample_uses_argument_filters_and_explicit_structural_protection() {
     let context = SandboxContext::new(Arc::new(std::sync::RwLock::new(
         crate::sandbox::Sandbox::with_root("/workspace".into()),
     )))
-    .with_tool_rules("bash", sample.tools["bash"].rules.clone())
+    .with_tool_rules("bash", sample.tools["bash"].rules.clone().unwrap())
     .unwrap();
     for command in [
         "true",

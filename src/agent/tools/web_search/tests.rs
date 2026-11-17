@@ -112,6 +112,7 @@ fn tool_with(backend: Arc<StubBackend>) -> (WebSearchTool, Arc<StubBackend>) {
         backend.clone(),
         &WebSearchConfig::default(),
         default_sandbox_context(),
+        Duration::from_secs(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
     );
     (tool, backend)
 }
@@ -262,7 +263,12 @@ fn configured_result_limit_replaces_the_builtin_default() {
         ..WebSearchConfig::default()
     };
     let backend = Arc::new(StubBackend::returning(Vec::new()));
-    let tool = WebSearchTool::new(backend.clone(), &config, default_sandbox_context());
+    let tool = WebSearchTool::new(
+        backend.clone(),
+        &config,
+        default_sandbox_context(),
+        Duration::from_secs(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
+    );
     run_call(&tool, serde_json::json!({ "terms": "query" })).expect("ok");
     assert_eq!(backend.requested_limit(), Some(4));
 }
@@ -314,6 +320,7 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
         Arc::new(StubBackend::returning(Vec::new())),
         &config,
         default_sandbox_context(),
+        Duration::from_secs(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
     );
     assert!(matches!(
         default_tool.needs_approval(&arguments),
@@ -333,6 +340,7 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
         Arc::new(StubBackend::returning(Vec::new())),
         &config,
         configured_context,
+        Duration::from_secs(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
     );
     assert!(matches!(
         configured_tool.needs_approval(&arguments),
@@ -345,6 +353,7 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
         Arc::new(StubBackend::returning(Vec::new())),
         &config,
         auto_approve_catch_all_context(),
+        Duration::from_secs(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
     );
     assert!(matches!(
         flagged_tool.needs_approval(&arguments),
@@ -359,13 +368,13 @@ fn outer_timeout_exceeds_the_internal_http_timeout() {
         Arc::new(StubBackend::returning(Vec::new())),
         &config,
         default_sandbox_context(),
+        Duration::from_secs(17),
     );
     assert_eq!(
         tool.timeout_secs(),
-        config.http_timeout().as_secs() + WEB_SEARCH_OUTER_TIMEOUT_GRACE_SECS,
+        17 + WEB_SEARCH_OUTER_TIMEOUT_GRACE_SECS,
         "outer = internal + grace"
     );
-    assert_eq!(tool.timeout_secs(), 40, "documented default outer timeout");
 }
 
 #[test]
@@ -375,6 +384,7 @@ fn description_is_backend_agnostic_and_title_names_the_backend() {
         Arc::new(StubBackend::returning(Vec::new())),
         &config,
         default_sandbox_context(),
+        Duration::from_secs(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
     );
 
     // The LLM interface is identical whichever backend serves the

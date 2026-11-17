@@ -23,6 +23,7 @@ fn web_fetch_section_loads_explicit_values() {
         r#"
 [web_fetch]
 backend = "native"
+[tools.web_fetch]
 timeout_secs = 5
 "#,
     );
@@ -30,7 +31,10 @@ timeout_secs = 5
     let profile =
         ProfileConfig::load(temp.path(), "explicit-web-fetch").expect("the fixture loads");
     assert_eq!(profile.web_fetch.backend, "native");
-    assert_eq!(profile.web_fetch.timeout_secs, 5);
+    assert_eq!(
+        profile.effective_tool_timeout_secs(None, "web_fetch"),
+        Some(5)
+    );
 }
 
 #[test]
@@ -80,15 +84,19 @@ fn web_search_section_loads_explicit_values() {
         r#"
 [web_search]
 backend = "duckduckgo"
-timeout_secs = 5
 result_limit = 4
+[tools.web_search]
+timeout_secs = 5
 "#,
     );
 
     let profile =
         ProfileConfig::load(temp.path(), "explicit-web-search").expect("the fixture loads");
     assert_eq!(profile.web_search.backend, "duckduckgo");
-    assert_eq!(profile.web_search.timeout_secs, 5);
+    assert_eq!(
+        profile.effective_tool_timeout_secs(None, "web_search"),
+        Some(5)
+    );
     assert_eq!(profile.web_search.result_limit, 4);
 }
 
@@ -104,7 +112,10 @@ fn absent_web_search_section_defaults_to_duckduckgo() {
         "an absent [web_search] section behaves like the written-out default"
     );
     assert_eq!(profile.web_search.backend, "duckduckgo");
-    assert_eq!(profile.web_search.timeout_secs, 30);
+    assert_eq!(
+        profile.effective_tool_timeout_secs(None, "web_search"),
+        None
+    );
     assert_eq!(
         profile.web_search.result_limit,
         crate::agent::tools::backends::web_search::WEB_SEARCH_DEFAULT_RESULT_LIMIT

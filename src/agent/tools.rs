@@ -814,19 +814,23 @@ pub struct ToolRegistryConfig {
     /// Present only for `Role::Subagent` agents: registers `agent_finish`, wired to
     /// send its result through this config's channel/ids.
     pub agent_finish: Option<agent_finish::AgentFinishToolConfig>,
-    /// Per-tool sandbox rule lists parsed from the profile's `[tools.<name>]`
-    /// tables (`ProfileConfig::tools`), keyed by tool name. A tool name with
+    /// Effective explicit sandbox rule lists, keyed by tool name. A tool with
     /// no entry here falls back to `SandboxContext`'s built-in default floor
     /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`); an entry
     /// fully replaces that floor for its tool. See `docs/configuration.md`'s
     /// "Sandbox" section.
     pub tool_sandbox_rules: HashMap<String, Vec<crate::sandbox::SandboxRuleConfig>>,
+    /// Maximum seconds for one Bash command before collecting partial output.
+    pub bash_timeout_secs: u64,
+    /// HTTP timeout in seconds for one web-search request.
+    pub web_search_timeout_secs: u64,
+    /// HTTP timeout in seconds for one web-fetch request.
+    pub web_fetch_timeout_secs: u64,
     /// The profile's `[web_search]` section: which backend serves
-    /// `web_search`, its internal HTTP timeout, and its default result
-    /// limit.
+    /// `web_search` and its default result limit.
     pub web_search: crate::config::WebSearchConfig,
     /// The profile's `[web_fetch]` section: which backend serves
-    /// `web_fetch` and its internal HTTP timeout.
+    /// `web_fetch`.
     pub web_fetch: crate::config::WebFetchConfig,
 }
 
@@ -841,6 +845,9 @@ impl Default for ToolRegistryConfig {
             spawn_agent_types: Vec::new(),
             agent_finish: None,
             tool_sandbox_rules: HashMap::new(),
+            bash_timeout_secs: bash::DEFAULT_BASH_TIMEOUT_SECS,
+            web_search_timeout_secs: crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS,
+            web_fetch_timeout_secs: crate::config::DEFAULT_WEB_FETCH_TIMEOUT_SECS,
             web_search: crate::config::WebSearchConfig::default(),
             web_fetch: crate::config::WebFetchConfig::default(),
         }
@@ -860,8 +867,8 @@ pub fn default_registry(
     let mut registry = ToolRegistry::new();
 
     // Builds a tool's SandboxContext, replacing the built-in default floor
-    // with `config.tool_sandbox_rules`'s entry for `tool_name` (a profile's
-    // `[tools.<name>]` table) when one is configured; otherwise the default
+    // with `config.tool_sandbox_rules`'s explicit list for `tool_name` when
+    // one is configured; otherwise the default
     // floor (`outside_workspace`/`dot_path` → `UserApprovalRequired`) applies.
     // When
     // `auto_approve_tool` is set in `config.auto_approve`, a catch-all
@@ -913,7 +920,10 @@ pub fn default_registry(
         Arc::new(glob::GlobTool::new(context))
     })?;
     register_sandboxed_tool(bash::BashTool::NAME, AutoApproveTool::Bash, &|context| {
-        Arc::new(bash::BashTool::new(context))
+        Arc::new(bash::BashTool::with_timeout(
+            config.bash_timeout_secs,
+            context,
+        ))
     })?;
     register_sandboxed_tool(
         search::SearchTool::NAME,
@@ -956,14 +966,16 @@ pub fn default_registry(
         .iter()
         .any(|name| name == web_search::WebSearchTool::NAME)
     {
+        let http_timeout = std::time::Duration::from_secs(config.web_search_timeout_secs);
         let web_search_backend = config
             .web_search
-            .build_backend()
+            .build_backend(http_timeout)
             .expect("web search backend builds from a profile config validated at load");
         registry.register(Arc::new(web_search::WebSearchTool::new(
             web_search_backend,
             &config.web_search,
             sandbox_context_for(web_search::WebSearchTool::NAME, AutoApproveTool::WebSearch)?,
+            http_timeout,
         )));
     }
 
@@ -975,10 +987,12 @@ pub fn default_registry(
         .iter()
         .any(|name| name == web_fetch::WebFetchTool::NAME)
     {
+        let http_timeout = std::time::Duration::from_secs(config.web_fetch_timeout_secs);
         registry.register(Arc::new(web_fetch::WebFetchTool::new(
-            config.web_fetch.build_backend(),
+            config.web_fetch.build_backend(http_timeout),
             &config.web_fetch,
             sandbox_context_for(web_fetch::WebFetchTool::NAME, AutoApproveTool::WebFetch)?,
+            http_timeout,
         )));
     }
 

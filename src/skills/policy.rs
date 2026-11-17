@@ -144,11 +144,8 @@ pub fn loader_context(
     agent_type: &str,
 ) -> Result<SandboxContext, crate::sandbox::SandboxRuleError> {
     let rules = profile
-        .agents
-        .get(agent_type)
-        .and_then(|agent| agent.tools.get("load_skill"))
-        .or_else(|| profile.tools.get("load_skill"))
-        .map(|config| config.rules.clone())
-        .unwrap_or_default();
+        .effective_tool_rules(Some(agent_type), "load_skill")
+        .unwrap_or_default()
+        .to_vec();
     SandboxContext::new(sandbox).with_tool_rules("load_skill", rules)
 }

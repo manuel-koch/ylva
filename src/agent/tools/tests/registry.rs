@@ -19,7 +19,7 @@ fn conditional_rules_are_wired_and_cli_override_requires_valid_policy() {
     let sandbox = Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::with_root(
         "/workspace".into(),
     )));
-    let rules: crate::config::ToolSandboxConfig = toml::from_str(
+    let rules: crate::config::ToolConfig = toml::from_str(
         r#"
 rules = [{ command = ["sort", "**"], only_arguments = ["-n"], verdict = "auto_approved" }]
 "#,
@@ -33,7 +33,10 @@ rules = [{ command = ["sort", "**"], only_arguments = ["-n"], verdict = "auto_ap
     };
     let registry = default_registry(
         sandbox.clone(),
-        configuration(rules.rules.clone(), std::collections::HashSet::new()),
+        configuration(
+            rules.rules.clone().unwrap(),
+            std::collections::HashSet::new(),
+        ),
     )
     .unwrap();
     let tool = registry.get("bash").unwrap();
@@ -48,7 +51,7 @@ rules = [{ command = ["sort", "**"], only_arguments = ["-n"], verdict = "auto_ap
     let registry = default_registry(
         sandbox.clone(),
         configuration(
-            rules.rules,
+            rules.rules.unwrap(),
             std::collections::HashSet::from([AutoApproveTool::Bash]),
         ),
     )
@@ -60,7 +63,7 @@ rules = [{ command = ["sort", "**"], only_arguments = ["-n"], verdict = "auto_ap
             .needs_approval(&serde_json::json!({"command":"sort -o output file"})),
         ApprovalCheck::AutoApproved
     );
-    let malformed: crate::config::ToolSandboxConfig = toml::from_str(
+    let malformed: crate::config::ToolConfig = toml::from_str(
         r#"
 rules = [
   { command = ["sort", "**"], verdict = "auto_approved" },
@@ -73,7 +76,7 @@ rules = [
         default_registry(
             sandbox,
             configuration(
-                malformed.rules,
+                malformed.rules.unwrap(),
                 std::collections::HashSet::from([AutoApproveTool::Bash])
             )
         )

@@ -40,7 +40,7 @@ fn bash_tool_requires_user_approval_via_sandbox_abstain() {
 }
 
 #[test]
-fn bash_tool_has_default_30s_timeout() {
+fn bash_tool_has_default_timeout() {
     let tool = BashTool::default();
     assert_eq!(tool.timeout_secs(), DEFAULT_BASH_TIMEOUT_SECS);
 }
@@ -64,11 +64,12 @@ fn bash_tool_description_contains_actual_timeout_and_output_cap() {
 }
 
 #[test]
-fn bash_tool_description_explains_workspace_working_directory() {
+fn bash_tool_description_explains_launch_working_directory() {
     let tool = BashTool::default();
     let description = tool.description();
     assert!(description.contains("current working directory"));
-    assert!(description.contains("workspace root"));
+    assert!(description.contains("launch directory"));
+    assert!(description.contains("may differ from the workspace root"));
     assert!(description.contains("do not prefix"));
     assert!(description.contains("Use relative paths directly"));
 }
@@ -662,14 +663,15 @@ fn bash_input_args_all_properties_have_descriptions() {
 }
 
 #[test]
-fn bash_input_schema_explains_workspace_working_directory() {
+fn bash_input_schema_explains_launch_working_directory() {
     let schema = BashTool::default().input_schema();
     let schema = serde_json::to_value(schema).expect("schema serializes");
     let description = schema["properties"]["command"]["description"]
         .as_str()
         .expect("command schema has a description");
     assert!(description.contains("current working directory"));
-    assert!(description.contains("workspace root"));
+    assert!(description.contains("launch directory"));
+    assert!(description.contains("may differ from the workspace root"));
     assert!(description.contains("do not prefix"));
     assert!(description.contains("Use relative paths directly"));
 }

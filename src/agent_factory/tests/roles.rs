@@ -15,6 +15,247 @@
 use super::*;
 
 #[test]
+fn configured_bash_timeout_preserves_the_default_sandbox_floor() {
+    let _lock = crate::test_support::SUBSCRIBER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (factory, mut profile) = make_factory();
+    profile.tools.insert(
+        "bash".into(),
+        crate::config::ToolConfig {
+            timeout_secs: Some(900),
+            ..crate::config::ToolConfig::default()
+        },
+    );
+    let (agent, _ui_rx) = factory.create(&profile, "default", Role::Root).unwrap();
+    let bash = agent.registry().get("bash").unwrap();
+    assert_eq!(bash.timeout_secs(), 900);
+    let call = bash.create_call(Uuid::new_v4(), serde_json::json!({"command": "echo hi"}));
+    assert_eq!(
+        call.timeout_secs(),
+        900 + crate::agent::tools::bash::BASH_OUTER_TIMEOUT_GRACE_SECS
+    );
+    assert_eq!(
+        bash.needs_approval(&serde_json::json!({"command": "echo hi"})),
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    );
+    assert!(matches!(
+        bash.needs_approval(&serde_json::json!({"command": "echo hi &"})),
+        crate::sandbox::ApprovalCheck::AutoDenied { .. }
+    ));
+}
+
+#[test]
+fn empty_read_table_inherits_the_default_sandbox_floor() {
+    let _lock = crate::test_support::SUBSCRIBER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (factory, mut profile) = make_factory();
+    profile.tools.insert("read".into(), Default::default());
+    let (agent, _ui_rx) = factory.create(&profile, "default", Role::Root).unwrap();
+    assert_eq!(
+        agent
+            .registry()
+            .get("read")
+            .unwrap()
+            .needs_approval(&serde_json::json!({"path": ".ylva-private-test-file"})),
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    );
+}
+
+#[test]
+fn agent_timeout_inherits_profile_rules_and_explicit_empty_rules_replace_them() {
+    let _lock = crate::test_support::SUBSCRIBER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (factory, mut profile) = make_factory();
+    profile.tools.insert(
+        "bash".into(),
+        toml::from_str(
+            r#"rules = [
+              { rule = "backgrounded", verdict = "auto_denied" },
+              { command = ["git", "status"], verdict = "auto_approved" },
+            ]"#,
+        )
+        .unwrap(),
+    );
+    let mut worker = profile.agents["default"].clone();
+    worker.can_spawn = false;
+    worker.tools.insert(
+        "bash".into(),
+        crate::config::ToolConfig {
+            timeout_secs: Some(900),
+            ..crate::config::ToolConfig::default()
+        },
+    );
+    profile.agents.insert("worker".into(), worker);
+    for (name, timeout) in [("default", 300), ("worker", 900)] {
+        let (agent, _ui_rx) = factory.create(&profile, name, Role::Root).unwrap();
+        let bash = agent.registry().get("bash").unwrap();
+        assert_eq!(bash.timeout_secs(), timeout);
+        assert_eq!(
+            bash.needs_approval(&serde_json::json!({"command": "git status"})),
+            crate::sandbox::ApprovalCheck::AutoApproved
+        );
+        assert!(matches!(
+            bash.needs_approval(&serde_json::json!({"command": "echo hi &"})),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+    }
+
+    profile
+        .agents
+        .get_mut("worker")
+        .unwrap()
+        .tools
+        .get_mut("bash")
+        .unwrap()
+        .rules = Some(vec![]);
+    let (agent, _ui_rx) = factory.create(&profile, "worker", Role::Root).unwrap();
+    let bash = agent.registry().get("bash").unwrap();
+    assert_eq!(
+        bash.needs_approval(&serde_json::json!({"command": "git status"})),
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    );
+    assert_eq!(
+        bash.needs_approval(&serde_json::json!({"command": "echo hi &"})),
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    );
+
+    profile.tools.get_mut("bash").unwrap().rules = Some(vec![]);
+    let (agent, _ui_rx) = factory.create(&profile, "default", Role::Root).unwrap();
+    assert_eq!(
+        agent
+            .registry()
+            .get("bash")
+            .unwrap()
+            .needs_approval(&serde_json::json!({"command": "echo hi &"})),
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    );
+}
+
+#[test]
+fn web_tool_timeouts_resolve_independently_per_agent() {
+    let _lock = crate::test_support::SUBSCRIBER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (factory, mut profile) = make_factory();
+    for (name, timeout_secs) in [("web_fetch", 11), ("web_search", 12)] {
+        profile.tools.insert(
+            name.into(),
+            crate::config::ToolConfig {
+                timeout_secs: Some(timeout_secs),
+                ..crate::config::ToolConfig::default()
+            },
+        );
+    }
+    let mut worker = profile.agents["default"].clone();
+    worker.can_spawn = false;
+    for (name, timeout_secs) in [("web_fetch", 21), ("web_search", 22)] {
+        worker.tools.insert(
+            name.into(),
+            crate::config::ToolConfig {
+                timeout_secs: Some(timeout_secs),
+                ..crate::config::ToolConfig::default()
+            },
+        );
+    }
+    profile.agents.insert("worker".into(), worker);
+
+    for (agent_type, fetch_timeout, search_timeout) in [("default", 21, 22), ("worker", 31, 32)] {
+        let (agent, _ui_rx) = factory.create(&profile, agent_type, Role::Root).unwrap();
+        assert_eq!(
+            agent.registry().get("web_fetch").unwrap().timeout_secs(),
+            fetch_timeout
+        );
+        assert_eq!(
+            agent.registry().get("web_search").unwrap().timeout_secs(),
+            search_timeout
+        );
+        let call = agent.registry().get("web_fetch").unwrap().create_call(
+            Uuid::new_v4(),
+            serde_json::json!({"url": "https://example.com"}),
+        );
+        assert_eq!(call.timeout_secs(), fetch_timeout);
+    }
+}
+
+#[test]
+fn agent_web_timeouts_reach_the_http_backends() {
+    crate::test_support::run_locked(async {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (received_requests, requests_received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert_ne!(count, 0, "client closed before sending its request");
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                sockets.push(socket);
+            }
+            received_requests.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (factory, mut profile) = make_factory();
+        profile.web_search = toml::from_str(&format!(
+            "backend = \"searxng\"\n[backends.searxng]\nbase_url = \"{base_url}\""
+        ))
+        .unwrap();
+        profile.tools.insert(
+            "web_fetch".into(),
+            toml::from_str(
+                "timeout_secs = 10\nrules = [{ rule = \"network_private_address\", verdict = \"auto_approved\" }]",
+            )
+            .unwrap(),
+        );
+        profile.tools.insert(
+            "web_search".into(),
+            toml::from_str("timeout_secs = 10").unwrap(),
+        );
+        let mut worker = profile.agents["default"].clone();
+        worker.can_spawn = false;
+        for name in ["web_fetch", "web_search"] {
+            worker
+                .tools
+                .insert(name.into(), toml::from_str("timeout_secs = 1").unwrap());
+        }
+        profile.agents.insert("worker".into(), worker);
+        let (agent, _ui_rx) = factory.create(&profile, "worker", Role::Root).unwrap();
+        let fetch = agent.registry().get("web_fetch").unwrap().create_call(
+            Uuid::new_v4(),
+            serde_json::json!({"url": format!("{base_url}/page")}),
+        );
+        let search = agent
+            .registry()
+            .get("web_search")
+            .unwrap()
+            .create_call(Uuid::new_v4(), serde_json::json!({"terms": "timeout"}));
+        let (fetch_result, search_result, requests_result) =
+            tokio::time::timeout(Duration::from_secs(4), async {
+                tokio::join!(fetch.run(), search.run(), requests_received)
+            })
+            .await
+            .expect("backend HTTP deadlines must fire before the outer tool deadlines");
+        server.abort();
+        assert!(
+            requests_result.is_ok(),
+            "both requests must reach the server"
+        );
+        assert!(fetch_result.is_err(), "fetch must time out");
+        assert!(search_result.is_err(), "search must time out");
+    });
+}
+
+#[test]
 fn root_spawn_tool_advertises_configured_agent_type_descriptions() {
     let (factory, mut profile) = make_factory();
     profile.agents.insert(
@@ -244,13 +485,14 @@ fn create_honors_per_agent_type_tools_sandbox_rules_override() {
     let (factory, mut profile) = make_factory();
     profile.tools.insert(
         "write".to_string(),
-        crate::config::ToolSandboxConfig {
-            rules: vec![crate::sandbox::SandboxRuleConfig::Named {
+        crate::config::ToolConfig {
+            rules: Some(vec![crate::sandbox::SandboxRuleConfig::Named {
                 rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
                 verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
                 reason: None,
                 target: None,
-            }],
+            }]),
+            ..crate::config::ToolConfig::default()
         },
     );
     profile.agents.insert(
@@ -267,8 +509,8 @@ fn create_honors_per_agent_type_tools_sandbox_rules_override() {
             can_spawn: false,
             tools: HashMap::from([(
                 "write".to_string(),
-                crate::config::ToolSandboxConfig {
-                    rules: vec![
+                crate::config::ToolConfig {
+                    rules: Some(vec![
                         crate::sandbox::SandboxRuleConfig::Named {
                             rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
                             verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
@@ -280,7 +522,8 @@ fn create_honors_per_agent_type_tools_sandbox_rules_override() {
                             verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
                             reason: None,
                         },
-                    ],
+                    ]),
+                    ..crate::config::ToolConfig::default()
                 },
             )]),
         },

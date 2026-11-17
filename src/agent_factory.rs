@@ -521,11 +521,8 @@ impl AgentFactory {
             .and_then(|agent_config| agent_config.allowed_tools.clone())
             .unwrap_or_else(|| allowed_tools.to_vec());
 
-        // Per-tool sandbox rules resolve most-specific-wins, each tier fully
-        // replacing the next (no merging across tiers): the agent type's own
-        // `[agents.<type>.tools.<name>]` table, then the profile-wide
-        // `[tools.<name>]` table, then (absent from both) the built-in default
-        // floor handled by `default_registry`/`SandboxContext`.
+        // An explicitly configured rule list replaces the lower tier; an
+        // omitted list inherits it independently of other tool settings.
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
         let callable_skills = Arc::new(crate::skills::policy::CallableSkills::resolve(
             &skills.catalog,
@@ -546,10 +543,8 @@ impl AgentFactory {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .filter_map(|tool_name| {
-                let resolved = agent_type_tools
-                    .and_then(|tools| tools.get(tool_name))
-                    .or_else(|| profile.tools.get(tool_name))?;
-                Some((tool_name.clone(), resolved.rules.clone()))
+                let rules = profile.effective_tool_rules(Some(agent_type), tool_name)?;
+                Some((tool_name.clone(), rules.to_vec()))
             })
             .collect();
         let registry = Arc::new(default_registry(
@@ -562,6 +557,15 @@ impl AgentFactory {
                 spawn_agent_types,
                 agent_finish: agent_finish_config,
                 tool_sandbox_rules,
+                bash_timeout_secs: profile
+                    .effective_tool_timeout_secs(Some(agent_type), "bash")
+                    .unwrap_or(crate::agent::tools::bash::DEFAULT_BASH_TIMEOUT_SECS),
+                web_search_timeout_secs: profile
+                    .effective_tool_timeout_secs(Some(agent_type), "web_search")
+                    .unwrap_or(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
+                web_fetch_timeout_secs: profile
+                    .effective_tool_timeout_secs(Some(agent_type), "web_fetch")
+                    .unwrap_or(crate::config::DEFAULT_WEB_FETCH_TIMEOUT_SECS),
                 web_search: profile.web_search.clone(),
                 web_fetch: profile.web_fetch.clone(),
             },
