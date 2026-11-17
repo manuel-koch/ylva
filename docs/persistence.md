@@ -470,6 +470,10 @@ events and time zones work. Older messages can have no timestamp or an empty one
 and `model_projection` events have none. These do not advance the last use.
 Ylva skips unreadable JSON lines and logs a diagnostic.
 
+For comparisons, elapsed times and local-time display, RFC 3339 leap seconds
+(`:60`) in stored timestamps and `--before` values are clamped to the last
+nanosecond of the preceding second. Stored timestamp text is not rewritten.
+
 Every start or resume records a timestamped `model_changed` event. Messages,
 subagent events, selection changes and compactions can advance the last use.
 Listing, title updates, compression, decompression and cloning the source cannot.

@@ -18,6 +18,8 @@ use super::{SessionMeta, StoreError, StoreEvent};
 use flate2::{read::MultiGzDecoder, write::GzEncoder, Compression};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub(super) fn invalid(path: &Path, reason: impl ToString) -> StoreError {
@@ -89,7 +91,7 @@ pub(super) fn validate_identity(meta: &SessionMeta, path: &Path) -> Result<(), S
             "metadata identity does not match file name and project",
         ));
     }
-    chrono::DateTime::parse_from_rfc3339(&meta.created_at)
+    OffsetDateTime::parse(&meta.created_at, &Rfc3339)
         .map_err(|error| invalid(path, format!("invalid creation timestamp: {error}")))?;
     Ok(())
 }

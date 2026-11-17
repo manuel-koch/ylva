@@ -288,7 +288,7 @@ pub struct SessionMeta {
 /// subagent's `subagent_start`/`subagent_result` pair, or several tool-call turns in
 /// one second — don't collide on the same value.
 pub fn now_timestamp() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    crate::unix_time::current_utc_timestamp()
 }
 
 /// Joined subagent lifecycle metadata reconstructed from a parent session.

@@ -21,18 +21,26 @@ use crate::store::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
+use time::{Date, OffsetDateTime, UtcOffset};
 
 #[cfg(test)]
 mod tests;
 
-pub fn parse_date(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
-    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        if date.format("%Y-%m-%d").to_string() == value {
-            return Ok(date.and_hms_opt(0, 0, 0).expect("midnight").and_utc());
+pub fn parse_date(value: &str) -> Result<OffsetDateTime, String> {
+    let date_format = format_description!("[year]-[month]-[day]");
+    if let Ok(date) = Date::parse(value, date_format) {
+        if date
+            .format(date_format)
+            .expect("date format contains only date components")
+            == value
+        {
+            return Ok(date.midnight().assume_utc());
         }
     }
-    chrono::DateTime::parse_from_rfc3339(value)
-        .map(|date| date.with_timezone(&chrono::Utc))
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map(|date| date.to_offset(UtcOffset::UTC))
         .map_err(|error| {
             format!("invalid date '{value}': expected YYYY-MM-DD or RFC 3339 with offset: {error}")
         })

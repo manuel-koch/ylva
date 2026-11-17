@@ -99,10 +99,28 @@ fn session_tree_reports_parent_cycles_without_hiding_or_repeating_sessions() {
 }
 
 #[test]
+fn session_before_dates_return_utc_instants_for_callers() {
+    let parsed: time::OffsetDateTime = parse_date("2026-01-02T03:04:05.123456+03:00").unwrap();
+    assert_eq!(
+        parsed,
+        time::macros::datetime!(2026-01-02 00:04:05.123456 UTC)
+    );
+    assert_eq!(parsed.offset(), time::UtcOffset::UTC);
+}
+
+#[test]
+fn leap_second_cutoffs_are_clamped_to_the_last_nanosecond() {
+    assert_eq!(
+        parse_date("2016-12-31T23:59:60.5Z").unwrap(),
+        parse_date("2016-12-31T23:59:59.999999999Z").unwrap()
+    );
+}
+
+#[test]
 fn dates_require_exact_calendar_dates_or_offset_timestamps() {
     assert_eq!(
-        parse_date("2026-01-02").unwrap().to_rfc3339(),
-        "2026-01-02T00:00:00+00:00"
+        parse_date("2026-01-02").unwrap(),
+        time::macros::datetime!(2026-01-02 00:00 UTC)
     );
     assert_eq!(
         parse_date("2026-01-02T03:00:00+03:00").unwrap(),

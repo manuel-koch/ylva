@@ -75,17 +75,96 @@ impl Backend for SessionTestBackend {
     }
 }
 
-async fn wait_for_frame(frames: &mut mpsc::UnboundedReceiver<String>, text: &str) {
+async fn wait_for_frame(frames: &mut mpsc::UnboundedReceiver<String>, text: &str) -> String {
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(frame) = frames.recv().await {
             if frame.contains(text) {
-                return;
+                return frame;
             }
         }
         panic!("frame channel closed before {text}");
     })
     .await
-    .unwrap_or_else(|_| panic!("no frame containing {text}"));
+    .unwrap_or_else(|_| panic!("no frame containing {text}"))
+}
+
+#[cfg(unix)]
+#[test]
+fn session_picker_shows_the_local_offset_for_each_session_date() {
+    const CHILD_MARKER: &str = "YLVA_SESSION_TIME_TEST_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tui_driver::tests::sessions::session_picker_shows_the_local_offset_for_each_session_date",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env("TZ", "America/New_York")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "isolated timezone test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    crate::test_support::run_locked(async {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        for (identity, created_at) in [(1, "2026-01-15T12:00:00Z"), (2, "2026-07-15T12:00:00Z")] {
+            write_session(
+                directory.path(),
+                &cwd,
+                Uuid::from_u128(identity),
+                created_at,
+                None,
+                None,
+            );
+        }
+        let store = Store::create(
+            directory.path(),
+            &cwd,
+            Uuid::new_v4(),
+            "mock",
+            "configured",
+            Some("default"),
+        )
+        .unwrap();
+        let (agent, updates) = session_factory()
+            .with_store(store)
+            .create(&ProfileConfig::default(), "default", Role::Root)
+            .unwrap();
+        let (frame_sender, mut frames) = mpsc::unbounded_channel();
+        let mut terminal = Terminal::new(SessionTestBackend {
+            backend: TestBackend::new(120, 30),
+            frames: frame_sender,
+        })
+        .unwrap();
+        let (actions, action_rx) = mpsc::channel(32);
+        let controller = async {
+            submit(&actions, "/session").await;
+            let frame = wait_for_frame(&mut frames, "2026-01-15 07:00:00 -05:00").await;
+            assert!(frame.contains("2026-07-15 08:00:00 -04:00"), "{frame}");
+            actions.send(AppAction::Escape).await.unwrap();
+            actions.send(AppAction::CtrlC).await.unwrap();
+            actions.send(AppAction::CtrlC).await.unwrap();
+        };
+        let mut clipboard = NoopClipboard;
+        let run = crate::tui_driver::run_tui(
+            &mut terminal,
+            agent,
+            updates,
+            None,
+            action_rx,
+            &mut clipboard,
+        );
+        let (result, ()) = tokio::join!(run, controller);
+        result.unwrap();
+    });
 }
 
 async fn submit(actions: &mpsc::Sender<AppAction>, text: &str) {

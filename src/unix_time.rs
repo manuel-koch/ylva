@@ -15,6 +15,7 @@
 //! Wall-clock helpers.
 
 use std::time::{SystemTime, UNIX_EPOCH};
+use time::macros::format_description;
 
 /// Seconds since the Unix epoch; `0` if the clock is set before the epoch and
 /// saturating at `i64::MAX`.
@@ -23,6 +24,14 @@ pub(crate) fn unix_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+pub(crate) fn current_utc_timestamp() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        ))
+        .expect("UTC timestamp format contains available components")
 }
 
 #[cfg(test)]

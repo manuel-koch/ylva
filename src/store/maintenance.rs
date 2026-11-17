@@ -19,12 +19,15 @@ use super::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub enum SessionSelection {
     Ids(Vec<Uuid>),
-    Before(chrono::DateTime<chrono::Utc>),
+    Before(OffsetDateTime),
     All,
 }
 
@@ -104,7 +107,7 @@ impl Store {
                 .values()
                 .filter(|session| {
                     (action != MaintenanceAction::Delete || session.parent_session.is_none())
-                        && chrono::DateTime::parse_from_rfc3339(&session.last_used_at)
+                        && OffsetDateTime::parse(&session.last_used_at, &Rfc3339)
                             .expect("validated timestamp")
                             < *before
                 })
@@ -402,6 +405,30 @@ fn deletion_groups(
     Ok(groups)
 }
 
+fn format_before(before: OffsetDateTime) -> String {
+    let date = before
+        .format(format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second]"
+        ))
+        .expect("timestamp format contains available components");
+    let nanoseconds = before.nanosecond();
+    let fraction = if nanoseconds == 0 {
+        String::new()
+    } else if nanoseconds.is_multiple_of(1_000_000) {
+        format!(".{:03}", nanoseconds / 1_000_000)
+    } else if nanoseconds.is_multiple_of(1_000) {
+        format!(".{:06}", nanoseconds / 1_000)
+    } else {
+        format!(".{nanoseconds:09}")
+    };
+    let offset = before
+        .format(format_description!(
+            "[offset_hour sign:mandatory]:[offset_minute]"
+        ))
+        .expect("timestamp format contains an offset");
+    format!("{date}{fraction}{offset}")
+}
+
 pub(super) fn process_group(
     chats_root: &Path,
     project_key: &str,
@@ -428,12 +455,12 @@ pub(super) fn process_group(
         if let SessionSelection::Before(before) = selection {
             if action != MaintenanceAction::Delete || metadata.parent_session.is_none() {
                 let last_used_at = super::replay::last_used_at(&bytes, &metadata, &path)?;
-                if chrono::DateTime::parse_from_rfc3339(&last_used_at).expect("validated timestamp")
+                if OffsetDateTime::parse(&last_used_at, &Rfc3339).expect("validated timestamp")
                     >= *before
                 {
                     report.notices.push(format!(
                         "skipped {identity}: last use is not before {}",
-                        before.to_rfc3339()
+                        format_before(*before)
                     ));
                     return Ok(());
                 }

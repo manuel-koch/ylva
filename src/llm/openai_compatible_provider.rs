@@ -836,7 +836,7 @@ impl Provider for OpenAiCompatibleProvider {
                 });
             }
             let request_id = uuid::Uuid::new_v4();
-            let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let timestamp = crate::unix_time::current_utc_timestamp();
             let serialized_request_body = request_body.to_string();
             let estimated_input_tokens =
                 crate::llm::TokenEstimator::Tiktoken.estimate_tokens(&serialized_request_body);

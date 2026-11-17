@@ -29,9 +29,16 @@ async fn before_is_revalidated_after_a_selected_session_is_used_again() {
         ),
     )
     .unwrap();
-    let before = chrono::Utc::now() - chrono::Duration::hours(1);
+    let before = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
     let summary = Store::list_sessions(&chats_root, &key).unwrap().remove(0);
-    assert!(chrono::DateTime::parse_from_rfc3339(&summary.last_used_at).unwrap() < before);
+    assert!(
+        time::OffsetDateTime::parse(
+            &summary.last_used_at,
+            &time::format_description::well_known::Rfc3339
+        )
+        .unwrap()
+            < before
+    );
     let resumed = Store::resume(&chats_root, directory.path(), identity).unwrap();
     resumed.record_model_changed("mock", "mock", &Default::default());
     resumed.flush().await;
@@ -57,12 +64,18 @@ async fn before_is_revalidated_after_a_selected_session_is_used_again() {
             .unwrap();
             assert!(report.paths.is_empty());
             assert!(report.failures.is_empty());
+            assert_eq!(report.notices.len(), 1);
+            let reported_before = report.notices[0]
+                .strip_prefix(&format!("skipped {identity}: last use is not before "))
+                .unwrap();
+            assert!(reported_before.ends_with("+00:00"));
             assert_eq!(
-                report.notices,
-                vec![format!(
-                    "skipped {identity}: last use is not before {}",
-                    before.to_rfc3339()
-                )]
+                time::OffsetDateTime::parse(
+                    reported_before,
+                    &time::format_description::well_known::Rfc3339
+                )
+                .unwrap(),
+                before
             );
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             assert!(!archive::archive_path(&path).exists());
@@ -369,9 +382,11 @@ async fn strict_dates_bulk_transforms_and_noops() {
     let (directory, chats_root, identity, path, bytes) = super::archive::fixture().await;
     let key = project_key(directory.path());
     let summary = Store::list_sessions(&chats_root, &key).unwrap().remove(0);
-    let last_used_at = chrono::DateTime::parse_from_rfc3339(&summary.last_used_at)
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let last_used_at = time::OffsetDateTime::parse(
+        &summary.last_used_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
     let report = Store::maintain_sessions(
         &chats_root,
         &key,
@@ -385,7 +400,7 @@ async fn strict_dates_bulk_transforms_and_noops() {
     let report = Store::maintain_sessions(
         &chats_root,
         &key,
-        &SessionSelection::Before(last_used_at + chrono::Duration::milliseconds(1)),
+        &SessionSelection::Before(last_used_at + time::Duration::milliseconds(1)),
         MaintenanceAction::Compress,
         false,
     )

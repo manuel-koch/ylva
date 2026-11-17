@@ -23,6 +23,8 @@ use crate::agent::{Message, UserMessageKind};
 use crate::home_relative_path::display_path;
 use crate::subagent_manager::FinishResultOrigin;
 use std::path::{Path, PathBuf};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// Read-only metadata and latest persisted activity timestamp of one session.
@@ -167,10 +169,10 @@ impl Store {
             }
         }
         summaries.sort_by(|left, right| {
-            chrono::DateTime::parse_from_rfc3339(&right.last_used_at)
+            OffsetDateTime::parse(&right.last_used_at, &Rfc3339)
                 .expect("validated timestamp")
                 .cmp(
-                    &chrono::DateTime::parse_from_rfc3339(&left.last_used_at)
+                    &OffsetDateTime::parse(&left.last_used_at, &Rfc3339)
                         .expect("validated timestamp"),
                 )
                 .then_with(|| right.session_id.cmp(&left.session_id))
@@ -535,9 +537,9 @@ impl Store {
 }
 
 fn elapsed_duration(started_at: &str, completed_at: &str) -> Option<std::time::Duration> {
-    let started_at = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
-    let completed_at = chrono::DateTime::parse_from_rfc3339(completed_at).ok()?;
-    completed_at.signed_duration_since(started_at).to_std().ok()
+    let started_at = OffsetDateTime::parse(started_at, &Rfc3339).ok()?;
+    let completed_at = OffsetDateTime::parse(completed_at, &Rfc3339).ok()?;
+    std::time::Duration::try_from(completed_at - started_at).ok()
 }
 
 pub(super) fn last_used_at(
@@ -555,7 +557,7 @@ fn session_activity(
     path: &Path,
 ) -> Result<(String, bool), StoreError> {
     let mut has_messages = false;
-    let mut latest = chrono::DateTime::parse_from_rfc3339(&metadata.created_at)
+    let mut latest = OffsetDateTime::parse(&metadata.created_at, &Rfc3339)
         .map_err(|error| archive::invalid(path, format!("invalid creation timestamp: {error}")))?;
     let mut latest_value = metadata.created_at.clone();
     for (line_index, line) in bytes.split(|byte| *byte == b'\n').enumerate().skip(1) {
@@ -593,7 +595,7 @@ fn session_activity(
             if timestamp.is_empty() {
                 continue;
             }
-            let instant = chrono::DateTime::parse_from_rfc3339(timestamp).map_err(|error| {
+            let instant = OffsetDateTime::parse(timestamp, &Rfc3339).map_err(|error| {
                 archive::invalid(
                     path,
                     format!(

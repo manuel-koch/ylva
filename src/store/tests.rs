@@ -363,13 +363,15 @@ async fn every_committed_message_carries_a_millisecond_precision_timestamp() {
     assert_eq!(timestamps.len(), 2, "one timestamp per committed message");
     for timestamp in timestamps {
         assert!(
-            chrono::DateTime::parse_from_rfc3339(timestamp).is_ok(),
+            time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+                .is_ok(),
             "expected an RFC 3339 timestamp, got {timestamp:?}"
         );
-        assert!(
-            timestamp.contains('.'),
-            "expected millisecond precision (a fractional-seconds part), got {timestamp:?}"
-        );
+        let fraction = timestamp
+            .split_once('.')
+            .and_then(|(_, fraction)| fraction.strip_suffix('Z'))
+            .expect("UTC timestamp with fractional seconds");
+        assert_eq!(fraction.len(), 3, "expected millisecond precision");
     }
 }
 

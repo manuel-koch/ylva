@@ -297,6 +297,7 @@ ylva session decompress --before 2026-01-01T12:00:00+02:00
 ```
 
 Date-only input means UTC midnight; timestamps require an RFC 3339 offset.
+Leap-second handling is described in [persistence](persistence.md#listing-sessions).
 Selection compares last-use times strictly before that instant, not session
 creation times. Last use is revalidated under the identity lock: a session/group
 used again after discovery is skipped if it no longer qualifies. There is no

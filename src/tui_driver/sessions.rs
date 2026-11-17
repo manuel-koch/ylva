@@ -16,6 +16,9 @@
 
 use std::path::{Path, PathBuf};
 
+use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -296,10 +299,11 @@ pub(super) fn list_candidates(
         })
         .map(|session| {
             let title = crate::app::single_line(&session.title).trim().to_string();
-            let last_used_at = chrono::DateTime::parse_from_rfc3339(&session.last_used_at)?
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M:%S %:z")
-                .to_string();
+            let last_used_at = OffsetDateTime::parse(&session.last_used_at, &Rfc3339)?;
+            let local_offset = UtcOffset::local_offset_at(last_used_at)?;
+            let last_used_at = last_used_at.to_offset(local_offset).format(format_description!(
+                "[year]-[month]-[day] [hour]:[minute]:[second] [offset_hour sign:mandatory]:[offset_minute]"
+            ))?;
             Ok(SessionChoice {
                 session_id: session.session_id,
                 title: if title.is_empty() {

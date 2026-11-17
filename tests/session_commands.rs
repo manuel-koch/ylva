@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::process::{Command, Stdio};
+use time::format_description::well_known::Rfc3339;
 use ylva::{project_key, session_path, Store};
 
 #[tokio::test]
@@ -56,7 +57,7 @@ async fn resumed_old_sessions_sort_by_last_use_and_are_not_selected_by_before() 
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", output);
-    let resumed_at = chrono::Utc::now();
+    let resumed_at = time::OffsetDateTime::now_utc();
     let output = command(directory.path())
         .args([
             "--no-tui",
@@ -90,8 +91,11 @@ async fn resumed_old_sessions_sort_by_last_use_and_are_not_selected_by_before() 
     assert!(lines[0].contains(&inactive_identity.to_string()));
     assert!(lines[1].contains(&resumed_identity.to_string()));
     let last_used_at =
-        chrono::DateTime::parse_from_rfc3339(lines[1].split_whitespace().next().unwrap()).unwrap();
-    assert!(last_used_at.timestamp_millis() >= resumed_at.timestamp_millis());
+        time::OffsetDateTime::parse(lines[1].split_whitespace().next().unwrap(), &Rfc3339).unwrap();
+    assert!(
+        last_used_at.unix_timestamp_nanos().div_euclid(1_000_000)
+            >= resumed_at.unix_timestamp_nanos().div_euclid(1_000_000)
+    );
     assert_eq!(
         Store::read_session_meta(&resumed_path)
             .unwrap()
@@ -99,7 +103,9 @@ async fn resumed_old_sessions_sort_by_last_use_and_are_not_selected_by_before() 
             .created_at,
         "2020-01-01T00:00:00Z"
     );
-    let before = (resumed_at - chrono::Duration::hours(1)).to_rfc3339();
+    let before = (resumed_at - time::Duration::hours(1))
+        .format(&Rfc3339)
+        .unwrap();
     for operation in ["compress", "decompress", "delete"] {
         let preview = command(directory.path())
             .args(["session", operation, "--before", &before, "--dry-run"])
@@ -125,6 +131,46 @@ async fn resumed_old_sessions_sort_by_last_use_and_are_not_selected_by_before() 
         inactive_identity
     )
     .exists());
+}
+
+#[tokio::test]
+async fn leap_second_cutoffs_do_not_delete_sessions_at_the_same_clamped_instant() {
+    let directory = tempfile::tempdir().unwrap();
+    let chats_root = directory.path().join("chats");
+    let store = Store::create(
+        &chats_root,
+        directory.path(),
+        uuid::Uuid::new_v4(),
+        "mock",
+        "mock",
+        None,
+    )
+    .unwrap();
+    store.flush().await;
+    let path = store.path().to_path_buf();
+    let mut metadata = Store::read_session_meta(&path).unwrap().unwrap();
+    metadata.created_at = "2016-12-31T23:59:60.5Z".into();
+    drop(store);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let original = format!(
+        "{}\n",
+        serde_json::to_string(&ylva::StoreEvent::Meta(metadata)).unwrap()
+    );
+    std::fs::write(&path, &original).unwrap();
+
+    let output = command(directory.path())
+        .args([
+            "session",
+            "delete",
+            "--before",
+            "2016-12-31T23:59:60.9Z",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
 }
 
 #[tokio::test]

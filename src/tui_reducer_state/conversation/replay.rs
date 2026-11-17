@@ -23,6 +23,8 @@ use crate::agent::{AssistantStatus, Message, UserMessageKind};
 use crate::store::{ModelChangeRecord, SubagentRunRecord};
 use std::collections::HashMap;
 use std::time::Duration;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// Project persisted domain messages into the same terminal-free chat model
@@ -343,13 +345,10 @@ fn replace_or_append_tool_bubble(
 }
 
 fn duration_since_timestamp(timestamp: &str) -> Duration {
-    let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+    let Ok(started_at) = OffsetDateTime::parse(timestamp, &Rfc3339) else {
         return Duration::ZERO;
     };
-    chrono::Utc::now()
-        .signed_duration_since(started_at)
-        .to_std()
-        .unwrap_or_default()
+    Duration::try_from(OffsetDateTime::now_utc() - started_at).unwrap_or_default()
 }
 
 impl AppState {

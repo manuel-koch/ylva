@@ -806,17 +806,33 @@ fn create_call_leaves_non_path_like_argument_unchanged() {
 
 #[test]
 fn create_call_expands_path_tokens_before_dispatch() {
-    // Reads std::env::current_dir(); must hold SUBSCRIBER_LOCK to avoid
-    // racing the logging test that temporarily mutates process cwd (see
-    // docs/known-test-issues.md "Process-global cwd mutation in tests").
-    let _lock = crate::test_support::SUBSCRIBER_LOCK
-        .lock()
-        .expect("subscriber mutex poisoned");
-    // A uniquely named variable, set and unset inside this test only, so
-    // no shared process-environment entry is touched.
-    let variable_name = "YLVA_TEST_PATH_TOKEN_EXPANSION";
-    let temporary_dir = tempfile::tempdir().expect("tempdir");
-    std::env::set_var(variable_name, temporary_dir.path());
+    const CHILD_MARKER: &str = "YLVA_PATH_TOKEN_TEST_CHILD";
+    const VARIABLE_NAME: &str = "YLVA_TEST_PATH_TOKEN_EXPANSION";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        // Other tests may read the environment through local-time conversion.
+        let temporary_dir = tempfile::tempdir().expect("tempdir");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agent::tools::tests::registry::create_call_expands_path_tokens_before_dispatch",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env(VARIABLE_NAME, temporary_dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "isolated path expansion test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let expected_directory = std::path::PathBuf::from(
+        std::env::var_os(VARIABLE_NAME).expect("path expansion variable is set"),
+    );
 
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(TestTool));
@@ -824,14 +840,13 @@ fn create_call_expands_path_tokens_before_dispatch() {
         .create_call(
             "test",
             uuid::Uuid::new_v4(),
-            serde_json::json!({ "field": format!("${{{variable_name}}}/notes.md") }),
+            serde_json::json!({ "field": format!("${{{VARIABLE_NAME}}}/notes.md") }),
         )
         .expect("test tool is registered");
-    std::env::remove_var(variable_name);
 
     assert_eq!(
         call.arguments()["field"],
-        serde_json::json!(format!("{}/notes.md", temporary_dir.path().display())),
+        serde_json::json!(format!("{}/notes.md", expected_directory.display())),
         "the token must be expanded before the argument reaches the tool"
     );
 }

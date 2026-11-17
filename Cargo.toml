@@ -49,7 +49,6 @@ jsonschema = { version = "0.61", default-features = false }
 pulldown-cmark = { version = "0.13.6", default-features = false }
 sha2 = "0.11"
 dirs = "7"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 toml = "1.1.5"
 dotenvy = "0.15"
 tree-sitter = "0.27"
@@ -64,6 +63,7 @@ libc = "0.2"
 serde_ignored = "0.1.14"
 serde-saphyr = "2"
 toml_edit = "0.25.17"
+time = { version = "0.3", features = ["formatting", "macros", "parsing", "local-offset", "large-dates"] }
 
 [build-dependencies]
 time = { version = "0.3", features = ["formatting", "macros"] }

@@ -450,7 +450,8 @@ fn each_request_gets_its_own_estimate_and_optional_reported_usage_record() {
         for record in &records {
             assert_eq!(record["session_id"], session_id.to_string());
             let timestamp = record["timestamp"].as_str().expect("timestamp");
-            chrono::DateTime::parse_from_rfc3339(timestamp).expect("RFC 3339 timestamp");
+            time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
+                .expect("RFC 3339 timestamp");
         }
         assert_eq!(records[0]["reported_input_tokens"], 31);
         assert_eq!(

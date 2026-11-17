@@ -67,6 +67,24 @@ async fn last_use_takes_the_latest_top_level_timestamp_by_instant_not_line_order
 }
 
 #[tokio::test]
+async fn leap_second_activity_is_compared_at_the_last_nanosecond() {
+    let (directory, chats_root, _, path, _) = super::archive::fixture().await;
+    let mut metadata = Store::read_session_meta(&path).unwrap().unwrap();
+    metadata.created_at = "2016-12-31T23:59:59.999999999Z".into();
+    let header = serde_json::to_string(&StoreEvent::Meta(metadata)).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "{header}\n{{\"type\":\"future_event\",\"timestamp\":\"2016-12-31T23:59:60.5Z\"}}\n"
+        ),
+    )
+    .unwrap();
+
+    let summaries = Store::list_sessions(&chats_root, &project_key(directory.path())).unwrap();
+    assert_eq!(summaries[0].last_used_at, "2016-12-31T23:59:59.999999999Z");
+}
+
+#[tokio::test]
 async fn invalid_activity_timestamps_are_diagnosed_and_block_age_based_deletion() {
     let (directory, chats_root, _, path, _) = super::archive::fixture().await;
     let mut bytes = std::fs::read(&path).unwrap();
@@ -81,7 +99,7 @@ async fn invalid_activity_timestamps_are_diagnosed_and_block_age_based_deletion(
     let report = Store::maintain_sessions(
         &chats_root,
         &key,
-        &crate::store::SessionSelection::Before(chrono::Utc::now()),
+        &crate::store::SessionSelection::Before(time::OffsetDateTime::now_utc()),
         crate::store::MaintenanceAction::Delete,
         false,
     )
