@@ -90,6 +90,78 @@ Such a security boundary would require separate product justification, design an
 an architecture decision record. It is not a planned enhancement here. Bash
 auto-approval does not promise read-only execution.
 
+### If it were ever pursued: macOS Seatbelt design notes
+
+Seatbelt is the macOS kernel-enforced process sandbox used for per-process
+policies. Its policy language, SBPL, is a TinyScheme dialect. A profile can start
+with default denial and selectively allow required operations; for example, an
+allow for writes beneath a workspace followed by a deny for other writes. Policy
+surfaces include file reads and writes, outbound network, process execution,
+Mach service lookup (which can mediate desktop/browser control), signals and
+other operations. This is distinct from the entitlement-based App Sandbox, which
+requires signing/provisioning and applies at the app level.
+
+The key properties for a shell tool are that confinement is **irreversible**
+(the confined process cannot widen its policy) and **inherited** (descendants
+remain confined). This could constrain what commands actually access, unlike
+operand checks or executable drift observations. A command cannot escape merely
+by changing `PATH` or shell state. The harness must choose carefully where the
+boundary is applied:
+
+- `/usr/bin/sandbox-exec -p <profile> -- <command> ...` runs the target in a
+  separate sandboxed process, leaving Ylva unrestricted. Apple marks the CLI
+  deprecated, though it still ships and is used by Chromium and others.
+- The `libsandbox.dylib` C API (`sandbox_init` /
+  `sandbox_init_with_parameters`) applies the profile to the calling process and
+  all descendants. Because this is irreversible, Ylva would need to fork first or
+  use a helper that applies the sandbox and then execs the command if the harness
+  must stay unrestricted. The library remains available, but the API is also
+  marked deprecated in headers and is a private/formally unsupported surface.
+- A per-command helper is an alternative when another process owns spawning,
+  including async process APIs; the helper can establish its own process group so
+  cancellation can terminate the command tree.
+
+The implementation trade-off is not simply CLI versus FFI. Keep policy generation
+and execution separated: generate/validate profiles, run one command under the
+profile, capture exit status and sandbox violations, and attach policy/backend
+provenance to the result. Candidate Rust approaches include:
+
+| Approach | Relevant trade-off |
+| --- | --- |
+| `procage` | Uses `libsandbox` on macOS and Landlock + seccomp + namespaces on Linux; offers child spawning, async support, violation reporting and policy receipts. It is pre-1.0, so its API may change. |
+| Microsoft MXC (`mxc-sdk`) | JSON filesystem/network policy with Seatbelt on macOS and platform backends elsewhere; includes audit/learning mode to observe accesses and help converge on a policy. Its Seatbelt profile builder is also available separately. |
+| Per-command `sandbox-exec` wrappers | Keep the harness unrestricted and can be lightweight, but depend on Apple's deprecated CLI and require profile generation/maintenance. |
+| Raw `sandbox_init` FFI (`nono` is a reference) | Avoids a helper CLI and can be minimal, but inherits the irreversible in-process boundary and private API risk. |
+| Cross-platform sandbox crates | Options such as `ai-sandbox` aim to map OS-specific mechanisms (Seatbelt, Bubblewrap/seccomp/Landlock, Windows restricted tokens, Capsicum or pledge) behind one API; support and semantics still differ by OS. |
+
+Other Rust projects illustrate the range: `mxc-alpha-seatbelt-common` focuses on
+profile building and a Seatbelt runner; `byob-sandbox`, `crabpot-macos`,
+`harness-rs-sandbox`, `wardstone` and `sandbox-runtime` wrap generated or
+hand-written SBPL with `sandbox-exec`. A hand-rolled SBPL profile plus
+`std::process::Command` is the minimal-dependency option. These are research
+candidates, not selected dependencies.
+
+Two operational ideas are particularly relevant to Ylva even without adopting a
+sandbox. First, violation reporting can turn denied operations from opaque
+`EPERM` failures into explainable records (operation, process, target and rule),
+which could feed the [approval verdict trail](approval-verdict-trail.md) and
+make compatibility failures actionable. Second, audit/learning mode can record
+observed access and help discover necessary exceptions before enforcement. Such
+observations support policy authoring; they are not proof that a policy is safe or
+complete. Policy digests, backend/tier and any relaxations should accompany
+results for provenance.
+
+Caveats: deny-by-default profiles need tuning because ordinary tools and
+toolchains may read system program files and may need temporary, cache, lock or
+state writes; network access is commonly denied unless explicitly allowed. Every
+exception increases policy complexity. Path rules alone do not settle hard-link
+and symlink risks or prevent secrets from being exposed through another allowed
+channel; link/hand-off audits and network controls may be needed. SBPL behavior
+must be tested across supported macOS versions and architectures (including
+ARM64/x64). A macOS-only Seatbelt implementation is not a cross-platform
+boundary; Linux, Windows and other systems need their own enforcement backend and
+must not be assumed semantically identical.
+
 ## Learned persistent rules
 
 Offer an explicit user-owned "always allow this command prefix" action when
