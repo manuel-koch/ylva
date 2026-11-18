@@ -164,14 +164,8 @@ must not be assumed semantically identical.
 
 ## Learned persistent rules
 
-Offer an explicit user-owned "always allow this command prefix" action when
-approving a command, for example `git log`. Persist a narrowly scoped rule rather
-than learning a broad command-name wildcard.
-
-Reuse grammar knowledge to distinguish subcommands, options, values and operands.
-Decide how learned rules interact with existing rule order, configuration layers,
-agent types and later grammar changes. The approval UI should preview the exact
-scope being persisted.
+See [reusable tool-approval grants](tool-approval-grants.md) for user-approved
+temporary and persistent Bash grants and their interaction with existing rules.
 
 ## Verdict provenance and explanations
 
