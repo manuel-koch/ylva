@@ -23,17 +23,6 @@ endif
 # and `make test-coverage-missing` without project-specific file exclusions.
 COVERAGE_THRESHOLD := 80
 
-.PHONY: render-all-diagrams \
-	lint audit format format-check format-rust format-markdown \
-	install-git-hooks uninstall-git-hooks test-git-conventions \
-	graphify-update graphify-watch \
-    clean \
-	build-debug build-debug-and-run \
-	build-release build-release-and-run build-debug-and-run-with-logs \
-	test test-e2e-persistence test-coverage test-coverage-missing \
-	install \
-	outdated-dependencies upgrade-dependencies
-
 docs/diagrams/%.svg: docs/diagrams/%.mmd
 	docker run --rm --network none \
 	    --user "$$(id -u):$$(id -g)" \
@@ -42,9 +31,11 @@ docs/diagrams/%.svg: docs/diagrams/%.mmd
 	    minlag/mermaid-cli \
 	    -i "$(notdir $<)" -o "$(notdir $@)"
 
+.PHONY: render-all-diagrams
 render-all-diagrams: $(patsubst %.mmd,%.svg,$(wildcard docs/diagrams/*.mmd))
 
 # Run cargo check/clippy and report all warnings
+.PHONY: lint
 lint:
 	cargo check \
 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
@@ -53,64 +44,80 @@ lint:
  	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
 	    --all-targets --all-features
 
+.PHONY: audit
 audit:
 	cargo audit --quiet
 
 # Run rumdl to enforce consistent formatting of Markdown files
+.PHONY: format-markdown
 format-markdown:
 	rumdl fmt --quiet $(REPO_ROOT)
 
 # Run cargo fmt to enforce consistent formatting of Rust files
+.PHONY: format-rust
 format-rust:
 	cargo fmt
 
 # Enforce consistent formatting
+.PHONY: format
 format: format-rust format-markdown
 
 # Verify formatting without modifying files (used by CI)
+.PHONY: format-check
 format-check:
 	cargo fmt --check
 	rumdl check --quiet $(REPO_ROOT)
 
 # Install the lefthook git hooks and the commit message template
+.PHONY: install-git-hooks
 install-git-hooks:
 	lefthook install
 	git config --local commit.template .gitmessage
 
+.PHONY: uninstall-git-hooks
 uninstall-git-hooks:
 	lefthook uninstall
 	git config --local --unset commit.template || true
 
 # Verify the git convention check script
+.PHONY: test-git-conventions
 test-git-conventions:
 	scripts/test-git-conventions.sh
 
+.PHONY: graphify-update
 graphify-update:
 	graphify update .
 	graphify export html
 	graphify export callflow-html
 
+.PHONY: graphify-watch
 graphify-watch:
 	graphify watch
 
+.PHONY: clean
 clean:
 	cargo clean -p ylva --target-dir "$(CARGO_TARGET_DIR)"
 
+.PHONY: show-debug-executable
 show-debug-executable:
 	@echo "$(CARGO_TARGET_DIR)/debug/ylva"
 
+.PHONY: show-release-executable
 show-release-executable:
 	@echo "$(CARGO_TARGET_DIR)/release/ylva"
 
 # Build debug binary (output: target/debug/ylva)
+.PHONY: build-debug
 build-debug:
 	cargo build
 
 # Build debug binary and launch it
+.PHONY: build-debug-and-run
 build-debug-and-run:
 	cargo run
 
 # Build debug binary and launch it with logging and request-dump enabled
+.PHONY: build-debug-and-run-with-logs
 build-debug-and-run-with-logs:
 	YLVA_REQUEST_DUMP_PATH=tmp/ylva.json \
 	    cargo run -- \
@@ -118,22 +125,27 @@ build-debug-and-run-with-logs:
 	        --log-level trace
 
 # Build optimized release binary (output: ${CARGO_TARGET_DIR}/release/ylva)
+.PHONY: build-release
 build-release:
 	cargo build --release
 
 # Build optimized release binary
+.PHONY: build-release-and-run
 build-release-and-run: build-release
 	$(CARGO_TARGET_DIR)/release/ylva
 
 # Build optimized release binary and install it `~/.cargo/bin`
+.PHONY: install
 install:
 	cargo install --path .
 
 # Run all unit and integration tests
+.PHONY: test
 test:
 	cargo test $(if $(filter true,$(strip $(VERBOSE))),,--quiet)
 
 # Run e2e persistence tests
+.PHONY: test-e2e-persistence
 test-e2e-persistence:
 	. $(REPO_ROOT)/tests/e2e/ollama-local/.envrc && \
 	    cargo test --test store_persistence_e2e persistence_e2e_ollama_local -- --ignored --no-capture
@@ -147,6 +159,7 @@ test-e2e-persistence:
 # Includes renderer and binary source; cargo-llvm-cov's default filters still apply.
 # Requires: cargo install cargo-llvm-cov
 #           rustup component add llvm-tools-preview
+.PHONY: test-coverage
 test-coverage:
 	cargo llvm-cov \
 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
@@ -156,6 +169,7 @@ test-coverage:
 # Useful for finding exactly which lines to target with new tests.
 # Still enforces the coverage threshold — use this variant when you want the
 # line-level hint and the build to fail below $(COVERAGE_THRESHOLD)%.
+.PHONY: test-coverage-missing
 test-coverage-missing:
 	cargo llvm-cov \
 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
@@ -163,9 +177,11 @@ test-coverage-missing:
 	    --show-missing-lines
 
 # Show available dependency upgrades (within semver bounds)
+.PHONY: outdated-dependencies
 outdated-dependencies:
 	cargo update --dry-run
 
 # Apply dependency upgrades to Cargo.lock (within semver bounds)
+.PHONY: upgrade-dependencies
 upgrade-dependencies:
 	cargo update
