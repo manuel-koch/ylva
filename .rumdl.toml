@@ -7,3 +7,6 @@ line-length = 100
 code-blocks = false
 # Let `rumdl fmt` re-wrap long paragraphs to the line length
 reflow = true
+
+[MD076]
+style = "tight"

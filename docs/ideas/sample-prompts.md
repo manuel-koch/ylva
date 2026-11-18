@@ -244,7 +244,6 @@ Run the following tasks each in a distinct subagent concurrently:
   - Search for files that relate to bash tool
   - Run bash script `for i in {1..3}; do date +%s; echo "hello world"; sleep 1; done`
   - Use `rumdl` to check markdown docs at `docs/ideas/*.md`
-
 - Task B:
   - Clarify with user ( using the `clarify` tool and ask for an animal name )
   - Create a four line poem about a the selected animal and save it to `tmp/poem.md`
@@ -404,18 +403,15 @@ Execute the steps; do not merely describe them.
 
 1. As the root agent, use the Bash tool to run:
    printf 'ROOT_BASH_START\n'; pwd
-
 2. Launch two subagents, in parallel if supported. Explicitly instruct each
    subagent to use its own Bash tool, not ask the root agent to run commands:
    - Subagent A: run `printf 'SUBAGENT_A_BASH\n' ; sleep 10 ; uname -s`
    - Subagent B: run `printf 'SUBAGENT_B_BASH\n' ; sleep 10 ; printf '42\n'`
    Each subagent must return the command, actual stdout, and exit status.
    Do not allow further delegation.
-
 3. Wait for both subagents to finish. Then, as the root agent, use the Bash
    tool again to run:
    printf 'ROOT_BASH_END\n'
-
 4. Report a compact table with one row per Bash execution: agent,
    command, stdout, exit status. Mark the test PASS only if both subagents
    actually executed their Bash calls and both root Bash calls succeeded.

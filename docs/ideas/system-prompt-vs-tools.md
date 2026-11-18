@@ -10,15 +10,12 @@ failure modes observed:
   context window unnecessarily. Each file read is one tool-call round, so a
   task that touches many files inflates context and burns through the
   iteration limit quickly.
-
 - **Sequential reads that could be parallel.** The model reads files one at a
   time even when the reads are independent (e.g. tracing a module tree where
   sibling modules could be fetched in one batch).
-
 - **Ignoring `offset`/`limit`.** The model reads an entire file when only a
   small region is relevant (e.g. just the first few lines of a config file or
   a specific function).
-
 - **Re-reading files already in context.** Particularly with weaker models,
   the model calls `read` on content it received in a prior round.
 
