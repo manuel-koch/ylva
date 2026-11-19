@@ -74,4 +74,4 @@ tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", features = ["signal", "process", "fs"] }
+nix = { version = "0.32", features = ["signal", "process", "fs"] }
