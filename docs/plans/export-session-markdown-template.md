@@ -9,8 +9,8 @@ illustrative.
 
 `{{subagent_reference}}` is the numbered subagent label, optionally linked to
 its bundled transcript. `{{parent_reference}}` and `{{parent_references}}` are
-the bundled parent links described in the rendering rules, including a start
-heading fragment when one is available.
+the bundled parent links described in the rendering rules, including the
+explicit start fragment when one is available.
 
 ````text
 # {{heading}}
@@ -51,6 +51,10 @@ Parents: {{parent_references}}
 [[end]]
 
 [[if subagent started]]
+[[if this is the first rendered start for this child in this parent]]
+<a name="{{start_fragment}}"></a>
+
+[[end]]
 ## {{subagent_reference}} started
 
 Task: {{subagent_task}}
@@ -65,7 +69,7 @@ Task: {{subagent_task}}
 [[end]]
 [[end]]
 
-[[if unmatched tool result]]
+[[if unpaired tool result]]
 ## Tool result: {{tool_name}}
 
 {{result_block}}
@@ -93,8 +97,9 @@ Task: {{subagent_task}}
 
 `{{parent_label}}` is `Session` or a numbered subagent label;
 `{{parent_path}}` is that parent's bundle-local Markdown filename. The
-`{{start_fragment}}` is derived from the first rendered start heading for
-this child in that parent.
+`{{start_fragment}}` is `ylva-start:subagent-<number>` with the bundle-local
+reference number. It is emitted before the first rendered start in that
+parent, not derived from the heading text.
 
 ```text
 [[if the parent has a rendered start heading for this child]]
@@ -181,8 +186,20 @@ Render `{{result_block}}` as exactly one of these alternatives:
 > Result not recorded.
 [[end]]
 
-[[if result is media]]
+[[if a result could not be paired unambiguously]]
+> Result not paired.
+[[end]]
+
+[[if the identified result was withheld]]
+> Content withheld.
+[[end]]
+
+[[if result is media, even with --raw]]
 > Media omitted: {{media_type}}.
+[[end]]
+
+[[if a non-media Base64 read result is omitted in sanitized output]]
+> Encoded content omitted.
 [[end]]
 
 [[if recognized subagent admission]]

@@ -67,6 +67,8 @@ I'll ask a subagent to verify the port.
 
 [Subagent #1](subagent-1.md) accepted (`running`).
 
+<a name="ylva-start:subagent-1"></a>
+
 ## [Subagent #1](subagent-1.md) started
 
 Task: Check the configured server port.
