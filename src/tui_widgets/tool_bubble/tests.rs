@@ -653,6 +653,74 @@ fn bash_exit_error_collapsed_shows_header_only_and_expanded_output_is_neutral() 
 }
 
 #[test]
+fn edit_error_bubble_collapsed_shows_error_only_and_expanded_shows_searched_text() {
+    // An `edit` call whose diff could not be computed (`old_string` not
+    // found) has no diff section, so `old_string`/`new_string` stay in the
+    // title arguments as the only place the searched-for text is visible.
+    // Like every other tool, the collapsed bubble must show only the title
+    // and the error line — the `old_string=`/`new_string=` arguments lines
+    // (and the full values) render only when the user expands the bubble.
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::tui_reducer_state::ToolCallState;
+
+    let state = ToolCallState::Error {
+        error: "Tool 'edit' failed: `old_string` not found in 'README.md'".to_string(),
+        title_arguments: vec![
+            ("path".into(), serde_json::json!("README.md")),
+            ("mode".into(), serde_json::json!("search_replace")),
+            ("old_string".into(), serde_json::json!("sentinel-old")),
+            ("new_string".into(), serde_json::json!("sentinel-new")),
+        ],
+        duration: std::time::Duration::ZERO,
+        content_sections: vec![],
+    };
+    let render = |collapsed: bool| {
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "edit",
+                state: &state,
+                collapsed,
+                spinner_frame: 0,
+                elapsed_seconds: None,
+                display_title_override: None,
+                subtype_argument: None,
+                path_like_arguments: &["path"],
+            },
+            &mut bubble_title_rows,
+            80,
+        );
+        lines
+    };
+    let text_of = |lines: &[Line<'static>]| -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+
+    let collapsed_text = text_of(&render(true));
+    assert!(
+        collapsed_text.contains("`old_string` not found"),
+        "collapsed bubble must show the error, got: {collapsed_text:?}"
+    );
+    assert!(
+        !collapsed_text.contains("old_string=") && !collapsed_text.contains("sentinel-old"),
+        "collapsed bubble must hide the searched-for text, got: {collapsed_text:?}"
+    );
+
+    let expanded_text = text_of(&render(false));
+    assert!(
+        expanded_text.contains("old_string=sentinel-old"),
+        "expanded bubble must show the searched-for text, got: {expanded_text:?}"
+    );
+}
+
+#[test]
 fn failed_subagent_status_is_red_in_root_and_header_bubble_titles() {
     use super::{append_tool_bubble_lines, ToolBubbleArgs};
     use crate::theme::error_color;

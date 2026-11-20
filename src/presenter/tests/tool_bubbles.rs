@@ -775,6 +775,51 @@ fn manual_toggle_during_approval_is_kept_after_resolution() {
 }
 
 #[test]
+fn auto_expanded_pending_bubble_collapses_when_it_fails_instead_of_running() {
+    // With `[tui] auto_expand_approval`, the Pending bubble is expanded while
+    // the user reviews it. If the call never reaches `Running` because the
+    // tool fails immediately after approval (e.g. `edit` with an
+    // `old_string` that does not exist), the failure event itself must end
+    // the approval expansion — exactly as `ToolStart` does on the happy
+    // path — so the failed bubble collapses back to title + error line.
+    let mut state = auto_expand_state(&[], true);
+    let id = Uuid::new_v4();
+    update(
+        &mut state,
+        tool_pending_event(id, "edit", None),
+        &empty_textarea(),
+    );
+    assert!(!bubble_collapsed(&mut state, id));
+
+    // Failure arrives without an intervening `ToolStart` (the agent's error
+    // event can land before/instead of the start event being rendered).
+    state.apply_tool_error(
+        id,
+        "Tool 'edit' failed: `old_string` not found in 'README.md'".into(),
+        std::time::Duration::from_millis(1),
+        vec![],
+        None,
+    );
+    assert!(bubble_collapsed(&mut state, id));
+
+    // The same collapse applies when the failure follows `ToolStart`
+    // (failure before the start event was consumed).
+    let mut state = auto_expand_state(&[], true);
+    let id = Uuid::new_v4();
+    update(
+        &mut state,
+        tool_pending_event(id, "edit", None),
+        &empty_textarea(),
+    );
+    update(
+        &mut state,
+        tool_start_event(id, "edit", None),
+        &empty_textarea(),
+    );
+    assert!(bubble_collapsed(&mut state, id));
+}
+
+#[test]
 fn listed_tool_stays_expanded_after_approval() {
     let mut state = auto_expand_state(&["bash"], true);
     let id = Uuid::new_v4();
