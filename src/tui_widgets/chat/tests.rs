@@ -15,6 +15,35 @@
 use super::*;
 
 #[test]
+fn user_bubble_displays_tabs_in_pasted_fenced_code() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut state = TuiState::new();
+    state.chat_entries.push(ChatEntry::UserMessage {
+        text:
+            "```text\n$ print-report\nid\t7\tmonthly-inventory-report-with-a-long-filename.txt\n```"
+                .to_owned(),
+        state: UserMessageState::Sent,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(36, 10)).expect("terminal");
+    terminal
+        .draw(|frame| draw_chat(frame, frame.area(), &mut state, &ToolRegistry::new()))
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let row = |y| -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    };
+    let first = row(3);
+    assert!(first.starts_with("▌  2 │ id  7   monthly"), "{first:?}");
+    let continuation = row(4);
+    assert!(continuation.starts_with("▌      "), "{continuation:?}");
+    assert!(state.conversation.chat_rendered_lines[3].starts_with("2 │ id  7   monthly"));
+}
+
+#[test]
 fn scrollbar_thumb_sits_at_bottom_at_max_offset() {
     let total = 30usize;
     let visible = 10usize;

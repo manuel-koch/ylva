@@ -49,10 +49,8 @@ enum ListKind {
 
 /// Convert `text` (Markdown) into styled, word-wrapped lines no wider than
 /// `width` columns. Fenced code block lines are the one exception to
-/// word-wrapping: their content is preserved verbatim (no word-boundary
-/// reflow) to keep code formatting intact, but a line that is still too long
-/// to fit is character-wrapped onto continuation rows — never clipped — so
-/// it never renders past the bubble's right edge.
+/// word-wrapping: tabs expand to four-column stops for display, and long code
+/// lines are character-wrapped onto continuation rows without word reflow.
 pub fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let parser = Parser::new_ext(text, Options::ENABLE_TABLES);

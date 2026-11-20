@@ -128,6 +128,13 @@ fn fenced_code_block_line_too_long_for_width_wraps_onto_continuation_rows() {
 }
 
 #[test]
+fn fenced_code_expands_tabs_before_wrapping() {
+    let lines = render_markdown("```\n\tX\nab\t0123456789\n```", 12);
+    let rendered: Vec<String> = lines.iter().map(plain_text).collect();
+    assert_eq!(rendered, ["1 │     X", "2 │ ab  0123", "    456789"]);
+}
+
+#[test]
 fn fenced_code_block_with_language_shows_label() {
     let lines = render_markdown("```rust\nlet x = 1;\n```", 80);
     let rendered: Vec<String> = lines.iter().map(plain_text).collect();

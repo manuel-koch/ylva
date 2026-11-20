@@ -18,9 +18,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::highlight::{
-    active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line,
+    active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line, HighlightedLine,
 };
 use crate::theme::markdown_dim_fg;
+
+use super::terminal_display_width;
+
+const CODE_TAB_WIDTH: usize = 4;
 
 /// Renders a fenced code block using syntect syntax highlighting.
 /// Each source line is prefixed with a right-aligned line number and a dim
@@ -59,10 +63,11 @@ pub(super) fn push_highlighted_code_block(
         .filter(|s| !s.is_empty())
         .map(normalize_lang_ext);
     let highlighted = highlighted_lines_cached(trimmed, ext.as_deref(), active_theme());
-    for (line_index, hl_line) in highlighted.into_iter().enumerate() {
+    for (line_index, mut highlighted_line) in highlighted.into_iter().enumerate() {
+        expand_code_tabs(&mut highlighted_line);
         let line_number = format!("{:>gutter_width$} │ ", line_index + 1);
         let gutter = Span::styled(line_number, gutter_style);
-        for (row_index, row_tokens) in wrap_highlighted_line(hl_line, content_width)
+        for (row_index, row_tokens) in wrap_highlighted_line(highlighted_line, content_width)
             .into_iter()
             .enumerate()
         {
@@ -79,6 +84,31 @@ pub(super) fn push_highlighted_code_block(
             );
             out.push(Line::from(spans));
         }
+    }
+}
+
+fn expand_code_tabs(line: &mut HighlightedLine) {
+    if !line.iter().any(|(_, token)| token.contains('\t')) {
+        return;
+    }
+
+    // Ratatui does not draw tabs. Expand them relative to the source line,
+    // across syntax spans and before the gutter or visual wraps are added.
+    let mut column = 0;
+    for (_, token) in line {
+        let Some((first, rest)) = token.split_once('\t') else {
+            column += terminal_display_width(token);
+            continue;
+        };
+        column += terminal_display_width(first);
+        let mut expanded = String::from(first);
+        for segment in rest.split('\t') {
+            let spaces = CODE_TAB_WIDTH - column % CODE_TAB_WIDTH;
+            expanded.extend(std::iter::repeat_n(' ', spaces));
+            expanded.push_str(segment);
+            column += spaces + terminal_display_width(segment);
+        }
+        *token = expanded;
     }
 }
 

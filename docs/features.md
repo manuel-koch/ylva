@@ -1338,11 +1338,13 @@ for the full mechanics.
 - **Markdown rendering:** assistant messages, user messages, the clarify
   banner's question/context text, and a user's clarify answer render Markdown
   instead of plain wrapped text. Supported: **bold**/*italic*, `inline code`
-  (distinct color), fenced code blocks (dim, verbatim, syntax-highlighted
+  (distinct color), fenced code blocks (dim, no word reflow, syntax-highlighted
   when a language tag is given), bullet/numbered lists (nested lists are
   indented under their parent item), headings, blockquotes,
   horizontal rules, and tables. Tables fit the bubble width,
   including by character-wrapping unbroken cell content when necessary.
+  Code block tabs expand to four-column stops for display and selection
+  without changing the message text.
   Styled Markdown rows use terminal display widths, including for wide
   Unicode glyphs, so content stays inside the bubble. Plain text with no
   Markdown syntax wraps as plain text. Unsupported syntax (links, images,
