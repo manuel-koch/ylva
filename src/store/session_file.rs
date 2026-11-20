@@ -115,8 +115,12 @@ pub(super) type IdentityLock = nix::fcntl::Flock<std::fs::File>;
 #[cfg(not(unix))]
 pub(super) type IdentityLock = std::fs::File;
 
+fn identity_lock_path(path: &Path, session_id: Uuid) -> std::path::PathBuf {
+    path.with_file_name(format!("{session_id}.lock"))
+}
+
 pub(super) fn lock_identity(path: &Path, session_id: Uuid) -> Result<IdentityLock, StoreError> {
-    let lock_path = path.with_file_name(format!("{session_id}.lock"));
+    let lock_path = identity_lock_path(path, session_id);
     if let Some(parent) = lock_path.parent() {
         crate::private_fs::create_private_dir_all(parent).map_err(|source| StoreError::Io {
             path: parent.into(),
@@ -141,7 +145,7 @@ pub(super) fn probe_identity(
     path: &Path,
     session_id: Uuid,
 ) -> Result<Option<IdentityLock>, StoreError> {
-    let lock_path = path.with_file_name(format!("{session_id}.lock"));
+    let lock_path = identity_lock_path(path, session_id);
     match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -153,6 +157,49 @@ pub(super) fn probe_identity(
             path: lock_path,
             source,
         }),
+    }
+}
+
+/// Check for an exclusive lock without creating a lock file or waiting.
+pub(crate) fn session_is_live(path: &Path, session_id: Uuid) -> Result<bool, StoreError> {
+    #[cfg(unix)]
+    {
+        use nix::errno::Errno;
+        use nix::fcntl::{Flock, FlockArg};
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let lock_path = identity_lock_path(path, session_id);
+        let check = || -> std::io::Result<bool> {
+            let file = match std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+                .open(&lock_path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            if !file.metadata()?.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "expected a regular session lock file",
+                ));
+            }
+            match Flock::lock(file, FlockArg::LockSharedNonblock) {
+                Ok(_) => Ok(false),
+                Err((_, Errno::EWOULDBLOCK)) => Ok(true),
+                Err((_, error)) => Err(error.into()),
+            }
+        };
+        check().map_err(|source| StoreError::Io {
+            path: lock_path,
+            source,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, session_id);
+        Ok(false)
     }
 }
 

@@ -14,14 +14,19 @@
 
 //! Home-relative path labels shared by CLI output and TUI rendering.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 /// Render `path` with the user's home directory replaced by `~`. Paths outside
 /// `home_directory`, or every path when it is `None`, stay as displayed.
 /// Canonical paths also match a home directory reached through a symlink.
 pub fn format_home_relative_path(path: &Path, home_directory: Option<&Path>) -> String {
+    abbreviate_home(path, home_directory).display().to_string()
+}
+
+fn abbreviate_home<'a>(path: &'a Path, home_directory: Option<&Path>) -> Cow<'a, Path> {
     let Some(home_directory) = home_directory else {
-        return path.display().to_string();
+        return Cow::Borrowed(path);
     };
 
     let relative_path = path.strip_prefix(home_directory).ok().or_else(|| {
@@ -29,9 +34,11 @@ pub fn format_home_relative_path(path: &Path, home_directory: Option<&Path>) -> 
         path.strip_prefix(canonical_home_directory).ok()
     });
     match relative_path {
-        Some(relative_path) if relative_path.as_os_str().is_empty() => "~".to_string(),
-        Some(relative_path) => Path::new("~").join(relative_path).display().to_string(),
-        None => path.display().to_string(),
+        Some(relative_path) if relative_path.as_os_str().is_empty() => {
+            Cow::Borrowed(Path::new("~"))
+        }
+        Some(relative_path) => Cow::Owned(Path::new("~").join(relative_path)),
+        None => Cow::Borrowed(path),
     }
 }
 
@@ -39,6 +46,11 @@ pub fn format_home_relative_path(path: &Path, home_directory: Option<&Path>) -> 
 /// for every path shown to a person.
 pub fn display_path(path: &Path) -> String {
     format_home_relative_path(path, dirs::home_dir().as_deref())
+}
+
+/// Quote and escape a path for diagnostics without losing non-UTF-8 bytes.
+pub(crate) fn quote_path(path: &Path) -> String {
+    format!("{:?}", abbreviate_home(path, dirs::home_dir().as_deref()))
 }
 
 #[cfg(test)]

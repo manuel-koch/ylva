@@ -83,6 +83,47 @@ async fn before_is_revalidated_after_a_selected_session_is_used_again() {
     }
 }
 
+#[tokio::test]
+async fn untitled_delete_skips_a_group_if_its_root_gains_a_title_after_selection() {
+    let (directory, chats_root, identity, path, titled_bytes) = super::archive::fixture().await;
+    let key = project_key(directory.path());
+    let mut metadata = Store::read_session_meta(&path).unwrap().unwrap();
+    metadata.title.clear();
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&StoreEvent::Meta(metadata)).unwrap()
+        ),
+    )
+    .unwrap();
+    let discovered = Store::list_sessions(&chats_root, &key).unwrap();
+    assert!(discovered[0].title.is_empty());
+    let group = discovered
+        .iter()
+        .map(|session| session.session_id)
+        .collect();
+    std::fs::write(&path, &titled_bytes).unwrap();
+
+    let mut report = crate::store::MaintenanceReport::default();
+    crate::store::maintenance::process_group(
+        &chats_root,
+        &key,
+        &group,
+        &SessionSelection::Untitled,
+        MaintenanceAction::Delete,
+        false,
+        &mut report,
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.notices,
+        [format!("skipped {identity}: session now has a title")]
+    );
+    assert_eq!(std::fs::read(path).unwrap(), titled_bytes);
+}
+
 fn snapshot(directory: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
     let mut entries: Vec<_> = std::fs::read_dir(directory)
         .unwrap()

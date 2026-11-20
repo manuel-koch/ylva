@@ -75,6 +75,11 @@ fn help_lists_every_exit_code_with_its_meaning() {
         stdout.contains("Exit codes:"),
         "help lacks exit codes: {stdout}"
     );
+    assert!(stdout.contains("129 SIGHUP in the TUI"), "{stdout}");
+    assert!(
+        stdout.contains("130 User interruption (SIGINT or SIGTERM)"),
+        "{stdout}"
+    );
     for code in ylva::ExitCode::ALL {
         let expected = format!("{:<4}{}", u8::from(code), code.description());
         assert!(
