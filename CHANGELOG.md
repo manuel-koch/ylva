@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0](https://github.com/manuel-koch/ylva/compare/v0.37.0...v0.38.0) - 2026-11-20
+
+### Added
+
+- [**breaking**] Refactor tool configuration
+
+### Fixed
+
+- Improve cursor handling when editing long draft message
+- Improve handling of tab characters in TUI bubble markdown rendering
+
 ## [0.37.0](https://github.com/manuel-koch/ylva/compare/v0.36.0...v0.37.0) - 2026-11-13
 
 ### Added
