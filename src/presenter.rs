@@ -50,10 +50,15 @@ pub struct TextareaContext {
     pub is_empty: bool,
     /// Joined text of all textarea lines (used for submit / dedent).
     pub text: String,
-    /// Zero-based cursor row inside the textarea.
-    pub cursor_row: usize,
-    /// `true` when the cursor is on the last row of the textarea.
-    pub cursor_row_is_last: bool,
+    /// Zero-based cursor row among the *rendered* (word-wrapped) lines.
+    /// A single logical line longer than the input width wraps, and each
+    /// rendered line counts: only row 0 is the visual top of the field.
+    /// Rows come from the textarea's wrapped screen map, which is only
+    /// populated once the textarea has been rendered; before the first
+    /// render it falls back to one row per logical line.
+    pub cursor_screen_row: usize,
+    /// `true` when the cursor is on the last rendered row.
+    pub screen_row_is_last: bool,
 }
 
 /// Apply one event to `state`, return the effects the Driver must execute.

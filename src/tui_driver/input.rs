@@ -21,11 +21,33 @@ use crate::tui_reducer_state::{
 use ratatui::style::Style;
 use ratatui_textarea::TextArea;
 
+use crate::presenter::TextareaContext;
+
 /// Apply the standard Ylva textarea configuration: word-or-glyph wrapping and
 /// no cursor-line underline decoration.
 pub(super) fn configure_textarea(textarea: &mut TextArea<'_>) {
     textarea.set_wrap_mode(ratatui_textarea::WrapMode::WordOrGlyph);
     textarea.set_cursor_line_style(Style::default());
+}
+
+/// Snapshot of the textarea state the Presenter needs for routing decisions.
+///
+/// The cursor rows come from the textarea's wrapped screen map, so a
+/// one-line draft wider than the input field counts as several rows —
+/// exactly what the renderer draws. The screen map is only meaningful after
+/// a frame has been rendered; before that the map falls back to one row per
+/// logical line, which keeps the empty-input case (the only one that exists
+/// before the first draw) correct.
+pub(super) fn textarea_context(textarea: &TextArea<'_>) -> TextareaContext {
+    let mut last_row_probe = textarea.clone();
+    last_row_probe.move_cursor(ratatui_textarea::CursorMove::Bottom);
+    last_row_probe.move_cursor(ratatui_textarea::CursorMove::End);
+    TextareaContext {
+        is_empty: textarea.lines() == [""],
+        text: textarea.lines().join("\n"),
+        cursor_screen_row: textarea.screen_cursor().row,
+        screen_row_is_last: textarea.screen_cursor().row == last_row_probe.screen_cursor().row,
+    }
 }
 
 /// A plain `ctrl-p` event is what ParentView forwarding uses in contexts
@@ -81,7 +103,6 @@ impl MouseDrag {
             column,
             row,
         ) {
-            state.exit_input_history_browsing(&textarea.lines().join("\n"));
             textarea.cancel_selection();
             *self = Self::default();
         }
@@ -135,6 +156,10 @@ pub(super) fn set_input_text(textarea: &mut TextArea<'_>, text: &str) {
     let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
     *textarea = TextArea::from(lines);
     configure_textarea(textarea);
+    // End of *text*, not end of line: `End` alone stops at the end of the
+    // first logical line, so a multi-line entry would recall with the
+    // cursor mid-text and `↓` would page through it before recalling.
+    textarea.move_cursor(ratatui_textarea::CursorMove::Bottom);
     textarea.move_cursor(ratatui_textarea::CursorMove::End);
 }
 
@@ -259,7 +284,13 @@ fn move_input_cursor_to_mouse(
 }
 
 /// Loads a history entry into the textarea. Returns `true` when a history
-/// entry was loaded.
+/// entry was loaded. `↑` lands the cursor on the visually first rendered
+/// row ("read from the start"); `↓` lands it on the visually last rendered
+/// row ("continue at the end"), so the opposite key recalls again with a
+/// single press. A fresh textarea has no wrapped screen map before its
+/// next render, so `Jump` would resolve in logical coordinates; the
+/// screen-space `Up`/`Down` moves walk from the `End` position to the
+/// requested boundary of the actual rendered rows.
 pub(super) fn load_history_into_textarea(
     direction: HistoryDirection,
     state: &mut AppState,
@@ -268,6 +299,21 @@ pub(super) fn load_history_into_textarea(
     let current = textarea.lines().join("\n");
     if let Some(loaded) = state.navigate_input_message_history(direction, &current) {
         set_input_text(textarea, &loaded);
+        // The fresh textarea starts with the fallback screen map (one row
+        // per logical line). After the next render the wrapped map may have
+        // more rows, but the *logical* bottom still maps to the last
+        // rendered row — so both placements below are render-stable.
+        match direction {
+            HistoryDirection::Up => {
+                textarea.move_cursor(ratatui_textarea::CursorMove::Top);
+                textarea.move_cursor(ratatui_textarea::CursorMove::Head);
+            }
+            // `↓` continues at the end: `set_input_text` already put the
+            // cursor on the last row of the fallback map, which corresponds
+            // to the last logical line — the last rendered row once the
+            // wrapped map is built on the next draw.
+            HistoryDirection::Down => {}
+        }
         true
     } else {
         false

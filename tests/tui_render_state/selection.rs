@@ -208,8 +208,8 @@ fn dragging_across_logo_build_lines_copies_version_and_profile() {
     let textarea_context = TextareaContext {
         is_empty: true,
         text: String::new(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     };
     presenter::update(
         &mut state,
@@ -311,8 +311,8 @@ fn dragging_scrolled_help_popup_line_copies_rendered_text() {
     let textarea_context = TextareaContext {
         is_empty: true,
         text: String::new(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     };
 
     presenter::update(

@@ -56,12 +56,21 @@ impl AppState {
                 Some(self.input_history[self.history_index.expect("just set")].clone())
             }
             HistoryDirection::Down => match self.history_index {
+                None if !self.draft.is_empty() => {
+                    // Idle with a preserved draft: continue from the bottom —
+                    // the draft is the live text, so `↓` has nothing further
+                    // to recall.
+                    None
+                }
                 None => None,
                 Some(index) if index < self.input_history.len() - 1 => {
                     self.history_index = Some(index + 1);
                     Some(self.input_history[index + 1].clone())
                 }
                 Some(_) => {
+                    // Newest entry reached: exit browsing and hand the saved
+                    // draft back (consuming it — a further `↓` at the
+                    // restored draft's bottom has nothing to recall).
                     self.history_index = None;
                     Some(std::mem::take(&mut self.draft))
                 }
@@ -75,5 +84,17 @@ impl AppState {
             self.draft = current_text.to_string();
             self.history_index = None;
         }
+    }
+
+    /// Exit history browsing after a key that keeps the browsed text as the
+    /// live draft while preserving the original saved draft (used by the
+    /// `Effect::ExitBrowsingPreservingDraft` boundary path).
+    pub fn exit_input_history_browsing_preserving_draft(&mut self) {
+        if self.history_index.is_none() {
+            return;
+        }
+        // The browsed text becomes the live draft; the *original* saved
+        // draft is kept so `↓` at the bottom can hand it back once.
+        self.history_index = None;
     }
 }

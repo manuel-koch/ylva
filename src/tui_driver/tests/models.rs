@@ -984,10 +984,7 @@ async fn model_picker_parameter_popup_cycles_reasoning_effort_and_applies_on_ent
     // In the list, left/right move the filter draft's cursor, not the model.
     assert_eq!(
         press(&mut state, KeyCode::Right),
-        vec![
-            Effect::ExitBrowsing,
-            Effect::TextareaKey(key_event(KeyCode::Right))
-        ]
+        vec![Effect::TextareaKey(key_event(KeyCode::Right))]
     );
     assert_eq!(
         state
@@ -1145,8 +1142,8 @@ async fn confirming_a_picked_model_switches_the_engine_and_records_the_change() 
     let ctx = TextareaContext {
         is_empty: true,
         text: String::new(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     };
     let effects = presenter::update(
         &mut state,
@@ -1573,8 +1570,8 @@ async fn gateway_shortcut_after_catalog_failure_applies_enter_without_acknowledg
     let context = TextareaContext {
         is_empty: true,
         text: String::new(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     };
     let first_enter = presenter::update(
         &mut state,
@@ -1706,8 +1703,8 @@ async fn gateway_shortcut_escape_keeps_profile_effort_and_default_reset_applies(
     let context = TextareaContext {
         is_empty: true,
         text: String::new(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     };
     let escape = presenter::update(
         &mut state,

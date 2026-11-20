@@ -167,6 +167,9 @@ pub(super) async fn execute_effects(
             Effect::ExitBrowsing => {
                 state.exit_input_history_browsing(&textarea.lines().join("\n"));
             }
+            Effect::ExitBrowsingPreservingDraft => {
+                state.exit_input_history_browsing_preserving_draft();
+            }
             Effect::PlaceCursorAtMousePos { column, row } => {
                 mouse_drag.place_cursor(state, textarea, column, row);
             }

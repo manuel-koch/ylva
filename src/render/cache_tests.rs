@@ -62,8 +62,8 @@ fn empty_textarea_context() -> crate::TextareaContext {
     crate::TextareaContext {
         is_empty: true,
         text: String::new(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     }
 }
 

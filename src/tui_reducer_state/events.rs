@@ -427,6 +427,10 @@ pub enum Effect {
     },
     /// Exit history browsing mode (driver restores live draft).
     ExitBrowsing,
+    /// Exit history browsing mode while keeping the saved live draft in
+    /// `AppState::draft`. Used for cursor-movement keys that cannot edit
+    /// text, so an accidental recall stays recoverable with `↓`.
+    ExitBrowsingPreservingDraft,
     /// Place the textarea cursor at the given terminal cell coordinates.
     PlaceCursorAtMousePos {
         column: u16,

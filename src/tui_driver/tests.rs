@@ -63,12 +63,7 @@ fn key_event(code: KeyCode) -> crossterm::event::KeyEvent {
 }
 
 fn textarea_ctx_from(textarea: &TextArea<'_>) -> TextareaContext {
-    TextareaContext {
-        is_empty: textarea.lines() == [""],
-        text: textarea.lines().join("\n"),
-        cursor_row: textarea.cursor().0,
-        cursor_row_is_last: textarea.cursor().0 + 1 >= textarea.lines().len().max(1),
-    }
+    crate::tui_driver::textarea_context_for_test(textarea)
 }
 
 #[tokio::test]

@@ -1210,14 +1210,22 @@ for the full mechanics.
   selected profile on the next line. Mouse-dragging across those lines
   copies the selected text to the clipboard. Once the first message is sent,
   the wordmark disappears.
-- **Input history:** `↑` on the first line loads the previous sent message
-  (draft is saved); `↓` restores it; any edit while browsing copies the entry
-  to a fresh draft. History includes explicit user messages from prior
-  root sessions in the same project, ordered oldest to newest, up to the
-  configured `input_history_limit` (default `50`); subagent prompts are
-  excluded, and duplicate prompts are collapsed by exact text with the newest
-  occurrence retained. Recalled messages are loaded verbatim, never collapsed
-  into a placeholder.
+- **Input history:** `↑` on the first rendered line loads the previous sent
+  message (draft is saved); `↓` restores it; any edit while browsing copies
+  the entry to a fresh draft. The trigger follows the *rendered* cursor
+  position, so `↑`/`↓` first move within a word-wrapped draft that spans
+  several screen lines and only recall history from the visually first/last
+  line. A recalled message lands with the cursor on its visually first
+  rendered row after `↑` and its visually last rendered row after `↓`: the
+  same key pressed again continues browsing in the same direction with a
+  single press, while the opposite key first moves inside the recalled
+  message and only recalls in the other direction once the cursor has
+  actually reached its visually last/first rendered row. History includes
+  explicit user messages from prior root sessions in the same project,
+  ordered oldest to newest, up to the configured `input_history_limit`
+  (default `50`); subagent prompts are excluded, and duplicate prompts are
+  collapsed by exact text with the newest occurrence retained. Recalled
+  messages are loaded verbatim, never collapsed into a placeholder.
 - **Line navigation:** `Fn+Left`/`Fn+Right` move the input cursor to the
   start/end of the current line, wrapping to the previous/next line.
 - **Starts empty:** the TUI launches with an empty input box and no auto-sent

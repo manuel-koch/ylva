@@ -774,8 +774,8 @@ mod tests {
                 &crate::presenter::TextareaContext {
                     is_empty: true,
                     text: String::new(),
-                    cursor_row: 0,
-                    cursor_row_is_last: true,
+                    cursor_screen_row: 0,
+                    screen_row_is_last: true,
                 },
             );
             assert_eq!(state.pending_bubble_expansion, None);
@@ -884,8 +884,8 @@ mod tests {
                 &crate::presenter::TextareaContext {
                     is_empty: true,
                     text: String::new(),
-                    cursor_row: 0,
-                    cursor_row_is_last: true,
+                    cursor_screen_row: 0,
+                    screen_row_is_last: true,
                 },
             );
             assert!(effects.is_empty());
@@ -903,8 +903,8 @@ mod tests {
                 &crate::presenter::TextareaContext {
                     is_empty: true,
                     text: String::new(),
-                    cursor_row: 0,
-                    cursor_row_is_last: true,
+                    cursor_screen_row: 0,
+                    screen_row_is_last: true,
                 },
             );
             assert!(effects.is_empty());

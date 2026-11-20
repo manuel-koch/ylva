@@ -19,9 +19,11 @@ use ratatui::Terminal;
 use ratatui_textarea::TextArea;
 
 use crate::agent::AgentLoop;
-use crate::presenter::{self, TextareaContext, TuiEvent};
+use crate::presenter::{self, TuiEvent};
 use crate::render;
 use crate::tui_reducer_state::{AppState, ConfirmKey, DomainEvent, TuiMode};
+
+use super::input::textarea_context;
 
 /// Draw one frame from the driver's current state.
 ///
@@ -54,12 +56,7 @@ where
         presenter::update(
             state,
             TuiEvent::Domain(DomainEvent::BubbleExpansionFeedbackShown),
-            &TextareaContext {
-                is_empty: textarea.lines() == [""],
-                text: textarea.lines().join("\n"),
-                cursor_row: textarea.cursor().0,
-                cursor_row_is_last: textarea.cursor().0 + 1 >= textarea.lines().len().max(1),
-            },
+            &textarea_context(textarea),
         );
     }
     terminal.draw(|frame| {

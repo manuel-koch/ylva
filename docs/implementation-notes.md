@@ -798,6 +798,13 @@ terminal teardown and title restoration keep a fixed order.
   map, not a `textwrap` approximation. The real viewport top is read after
   rendering from an origin cursor clamped with `CursorMove::InViewport` on a
   clone, so recalled/replaced drafts cannot inherit a stale offset.
+- Input-history recall (`↑`/`↓`) keys off the same wrapped screen map: the
+  driver snapshots the cursor's *rendered* row (`screen_cursor().row`) plus a
+  cloned-probe last-row check into `TextareaContext`, because a long one-line
+  draft is one logical row but several rendered ones — a logical-row check
+  made `↑` replace a wrapped draft with a history entry. The screen map only
+  exists after the first frame, but until then the input is empty, so the
+  fallback (one row per logical line) never affects a visible draft.
 - `paste_text` first rejects any paste over `MAX_PASTE_BYTES` (1 MiB) with a
   toast, before dedenting. crossterm buffers the whole bracketed paste before
   emitting the event, so the cap bounds Ylva's copies and blob storage, not

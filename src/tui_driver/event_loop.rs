@@ -33,7 +33,9 @@ use super::favorites::{
     engine_completion_notice, start_favorite_saves, SaveCompletion,
 };
 use super::frame::draw_frame;
-use super::input::{app_action_to_tui_event, configure_textarea, scroll_input_at_mouse, MouseDrag};
+use super::input::{
+    app_action_to_tui_event, configure_textarea, scroll_input_at_mouse, textarea_context, MouseDrag,
+};
 use super::leader::LeaderChord;
 use super::models::{
     abort_pending_model_list, apply_model_list_result, resume_interrupted_model_list,
@@ -51,7 +53,7 @@ use super::updates::{app_state_to_tui_state, prepare_subagent_replay_effects, pr
 use super::{ActionOutcome, ClipboardSink, CHANNEL_CAPACITY, SPINNER_TICK_INTERVAL};
 use crate::agent::{AgentCommand, AgentLoop, UiUpdate};
 use crate::events::AppAction;
-use crate::presenter::{self, TextareaContext, TuiEvent};
+use crate::presenter::{self, TuiEvent};
 use crate::run_outcome::RunOutcome;
 use crate::tui_reducer_state::{
     AppState, DomainEvent, Effect, SlashOverlay, TuiMode, UserMessageState,
@@ -273,12 +275,7 @@ where
             draw_frame(terminal, &mut state, &mut textarea, &agent, mouse_pos)?;
         }
 
-        let textarea_ctx = TextareaContext {
-            is_empty: textarea.lines() == [""],
-            text: textarea.lines().join("\n"),
-            cursor_row: textarea.cursor().0,
-            cursor_row_is_last: textarea.cursor().0 + 1 >= textarea.lines().len().max(1),
-        };
+        let textarea_ctx = textarea_context(&textarea);
 
         select! {
             session_result = session_tasks.receiver.recv() => {

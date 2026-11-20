@@ -70,8 +70,8 @@ conversation. The original draft returns after all approvals are resolved.
 | Left-click row | Agents popup open | Highlight; a second click within 250 ms switches |
 | Mouse wheel | Agents popup open | Scroll popup |
 | Left-click outside popup | Agents popup open | Close popup |
-| `↑` (cursor on first line) | Input focused | Load previous user message; save draft |
-| `↓` (cursor on last line) | Input focused | Load next user message; restore draft at newest |
+| `↑` (cursor on first rendered line) | Input focused | Load previous user message; save draft; cursor on the recalled message's first rendered line |
+| `↓` (cursor on last rendered line) | Input focused | Load next user message; restore draft at newest; cursor on the recalled message's last rendered line |
 | Any edit key while browsing | Input focused | Copy browsed entry to draft; exit browsing mode |
 | `↑` / `↓` | Help popup open | Scroll help popup up / down one line |
 | `←` / `→` | Help popup open | Scroll help popup left / right by 4 columns |

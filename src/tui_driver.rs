@@ -65,6 +65,16 @@ const SPINNER_TICK_INTERVAL: Duration = Duration::from_millis(150);
 /// async loop, and the per-frame `UiUpdate` drain cap.
 const CHANNEL_CAPACITY: usize = 64;
 
+/// Snapshot of the textarea state the Presenter needs for routing decisions,
+/// exposed for the driver test suites (which run inside the crate but cannot
+/// reach `tui_driver::input`'s `pub(super)` items).
+#[cfg(test)]
+pub(crate) fn textarea_context_for_test(
+    textarea: &ratatui_textarea::TextArea<'_>,
+) -> crate::presenter::TextareaContext {
+    input::textarea_context(textarea)
+}
+
 /// Run the TUI event loop against an existing terminal.
 ///
 /// Uses `AppState` internally (the reducer model) and returns a `TuiState`

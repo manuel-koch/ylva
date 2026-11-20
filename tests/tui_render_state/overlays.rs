@@ -78,8 +78,8 @@ fn session_picker_buttons_use_rendered_hit_targets_and_activate_on_click() {
     let textarea = ylva::TextareaContext {
         is_empty: true,
         text: String::new(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     };
     for (width, height) in [(120, 40), (60, 15), (30, 9)] {
         for action in SessionAction::ALL {

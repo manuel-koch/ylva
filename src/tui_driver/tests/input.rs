@@ -16,6 +16,200 @@ use super::super::input::{load_history_into_textarea, paste_text, scroll_input_a
 use super::*;
 use crate::tui_reducer_state::HistoryDirection;
 
+#[test]
+fn recalled_multi_line_entry_lands_on_its_last_row() {
+    // A multi-line recalled entry must have the cursor on the *last* screen
+    // row (fallback map: last logical line) so a `↓` press on it recalls the
+    // next-newer entry instead of paging through the entry itself.
+    use ratatui::backend::TestBackend;
+
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    state.input_history = vec!["line one\nline two\nline three".into()];
+    let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("test terminal created");
+    let registry = crate::ToolRegistry::default();
+
+    // Seed browsing state the way a real recall would: `↑` loads the newest
+    // entry; the intermediate `↓` restores the empty draft; the final `↑`
+    // recalls the same entry again, leaving browsing active (index Some(0))
+    // with the entry in the textarea.
+    assert!(load_history_into_textarea(
+        HistoryDirection::Up,
+        &mut state,
+        &mut textarea
+    ));
+    assert!(load_history_into_textarea(
+        HistoryDirection::Down,
+        &mut state,
+        &mut textarea
+    ));
+    assert!(load_history_into_textarea(
+        HistoryDirection::Up,
+        &mut state,
+        &mut textarea
+    ));
+    assert_eq!(
+        textarea.lines().join("\n"),
+        "line one\nline two\nline three"
+    );
+    // Fallback screen map (pre-render): one row per logical line. `↑` must
+    // land on the first row of that map (logical line 0).
+    assert_eq!(
+        textarea.screen_cursor().row,
+        0,
+        "`↑` recall must land on the first (fallback) screen row"
+    );
+    assert_eq!(textarea.cursor(), ratatui_textarea::DataCursor(0, 0));
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None, &registry);
+        })
+        .expect("draw recalled entry");
+    // After the render the wrapped screen map exists; the cursor is still on
+    // the visually first rendered row.
+    assert_eq!(
+        textarea.screen_cursor().row,
+        0,
+        "`↑` recall must keep the cursor on the first rendered row"
+    );
+}
+
+#[test]
+fn recalled_entry_down_lands_on_last_row() {
+    // `↓` recall must land on the last row of the fallback map (last
+    // logical line), so a following `↓` immediately recalls the next-newer
+    // entry instead of paging through the recalled one.
+    use ratatui::backend::TestBackend;
+
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    state.input_history = vec!["line one\nline two\nline three".into()];
+    let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("test terminal created");
+    let registry = crate::ToolRegistry::default();
+
+    // `↓` recall placement: with a single (multi-line) entry the session
+    // oscillates `↑` entry → `↓` empty draft → `↑` entry. The `↓`-direction
+    // load with a *preserved* draft (here seeded directly on `state`) must
+    // load the draft and land on its last fallback row — the same placement
+    // contract as a normal `↓` recall.
+    assert!(load_history_into_textarea(
+        HistoryDirection::Up,
+        &mut state,
+        &mut textarea
+    ));
+    assert!(load_history_into_textarea(
+        HistoryDirection::Down,
+        &mut state,
+        &mut textarea
+    ));
+    assert!(load_history_into_textarea(
+        HistoryDirection::Up,
+        &mut state,
+        &mut textarea
+    ));
+    // Give the state a preserved draft so the `↓` load has content to hand
+    // back (the empty draft case is covered by the reducer tests).
+    state.draft = "restored\nwrapped draft line\nlast".into();
+    assert!(load_history_into_textarea(
+        HistoryDirection::Down,
+        &mut state,
+        &mut textarea
+    ));
+    assert_eq!(
+        textarea.lines().join("\n"),
+        "restored\nwrapped draft line\nlast"
+    );
+    assert_eq!(
+        textarea.screen_cursor().row,
+        2,
+        "`↓` recall must land on the last (fallback) screen row"
+    );
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None, &registry);
+        })
+        .expect("draw recalled entry");
+}
+
+#[test]
+fn recalled_history_lands_on_the_boundary_row_of_the_direction() {
+    // `↑` must land on the visually first rendered row and `↓` on the
+    // visually last, regardless of how the recalled text wraps — so the
+    // opposite key immediately recalls again with one press.
+    use ratatui::backend::TestBackend;
+
+    let long_line = "word ".repeat(40).trim_end().to_string(); // wraps at width 40
+    let multi_line = format!("short first\n{long_line}\nshort last");
+    let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+    state.input_history = vec![multi_line.clone(), long_line.clone()];
+    let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("test terminal created");
+    let registry = crate::ToolRegistry::default();
+
+    // `↑` recalls the newest entry (the wrapped single line): first row.
+    assert!(load_history_into_textarea(
+        HistoryDirection::Up,
+        &mut state,
+        &mut textarea,
+    ));
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None, &registry);
+        })
+        .expect("recalled frame");
+    assert_eq!(
+        textarea.screen_cursor().row,
+        0,
+        "`↑` must land on the visually first rendered row"
+    );
+    assert_eq!(textarea.lines().join("\n"), long_line);
+
+    // The cursor sits on the first rendered row, so the next `↑` (checked
+    // at the presenter level in the wrapped-draft regression test below)
+    // would re-recall; walking down lands on the last row where `↓`
+    // restores the older draft. Here: `↑` again walks to the older entry
+    // and must land on ITS first rendered row.
+    assert!(load_history_into_textarea(
+        HistoryDirection::Up,
+        &mut state,
+        &mut textarea,
+    ));
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None, &registry);
+        })
+        .expect("older entry frame");
+    assert_eq!(
+        textarea.screen_cursor().row,
+        0,
+        "`↑` must land on the first rendered row of the older entry too"
+    );
+    assert_eq!(textarea.lines().join("\n"), multi_line);
+
+    // `↓` from the first rendered row of the multi-line entry just moves
+    // within it (handled by the presenter routing); forcing the recall via
+    // the driver function with `Down` from the last row must land on the
+    // last rendered row.
+    textarea.move_cursor(ratatui_textarea::CursorMove::Bottom);
+    textarea.move_cursor(ratatui_textarea::CursorMove::End);
+    assert!(load_history_into_textarea(
+        HistoryDirection::Down,
+        &mut state,
+        &mut textarea,
+    ));
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None, &registry);
+        })
+        .expect("down-recalled frame");
+    let last_row = textarea.screen_cursor().row;
+    textarea.move_cursor(ratatui_textarea::CursorMove::Bottom);
+    textarea.move_cursor(ratatui_textarea::CursorMove::End);
+    assert_eq!(
+        last_row,
+        textarea.screen_cursor().row,
+        "`↓` must land on the visually last rendered row"
+    );
+    assert_eq!(textarea.lines().join("\n"), long_line);
+}
+
 #[tokio::test]
 async fn input_mouse_targets_the_visible_last_line() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -116,7 +310,7 @@ async fn input_mouse_targets_the_visible_last_line() {
             );
         }
         assert_eq!(textarea.yank_text(), last_line);
-        assert_eq!(state.history_index, None);
+        assert_eq!(state.history_index, Some(0));
         execute_effects(
             &mut state,
             &mut textarea,
@@ -502,8 +696,8 @@ fn reset_is_selectable_from_the_bare_slash_popup_and_clears_the_conversation() {
         &TextareaContext {
             is_empty: false,
             text: "/".to_string(),
-            cursor_row: 0,
-            cursor_row_is_last: true,
+            cursor_screen_row: 0,
+            screen_row_is_last: true,
         },
     );
     assert_eq!(
@@ -681,8 +875,8 @@ fn command_suggestions_navigate_with_up_and_down_and_tab_completes_the_selection
     let textarea = TextareaContext {
         is_empty: false,
         text: "/".to_string(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     };
 
     let down = presenter::update(
@@ -740,8 +934,8 @@ fn suggestion_selection_survives_the_driver_per_action_recompute() {
     let textarea = TextareaContext {
         is_empty: false,
         text: "/".to_string(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     };
     let highlighted = |state: &AppState| state.selected_slash_command().map(|command| command.name);
 
@@ -780,8 +974,8 @@ fn tab_completes_the_only_matching_command_and_is_normal_input_without_suggestio
         &TextareaContext {
             is_empty: false,
             text: "/re".to_string(),
-            cursor_row: 0,
-            cursor_row_is_last: true,
+            cursor_screen_row: 0,
+            screen_row_is_last: true,
         },
     );
     assert_eq!(completion, vec![Effect::SetInputText("/reset".to_string())]);
@@ -794,8 +988,8 @@ fn tab_completes_the_only_matching_command_and_is_normal_input_without_suggestio
         &TextareaContext {
             is_empty: true,
             text: String::new(),
-            cursor_row: 0,
-            cursor_row_is_last: true,
+            cursor_screen_row: 0,
+            screen_row_is_last: true,
         },
     );
     assert_eq!(
@@ -945,6 +1139,177 @@ fn history_recall_of_a_huge_entry_loads_verbatim_without_marker() {
     ));
     assert_eq!(textarea.lines().join("\n"), huge);
     assert!(state.pasted_blobs.is_empty());
+}
+
+#[tokio::test]
+async fn up_moves_within_a_wrapped_single_line_draft_instead_of_recalling_history() {
+    // Regression: a one-line draft longer than the input width renders as
+    // several wrapped rows but is still one *logical* line. `↑` with the
+    // cursor on the second rendered row used to recall history (the
+    // decision was made from the logical row, always 0), replacing the
+    // draft; `↓` could not restore it afterwards.
+    use ratatui::backend::TestBackend;
+
+    let (mut state, _initial_textarea, _cmd_tx, _cmd_rx) = setup();
+    let mut textarea = TextArea::from(["word ".repeat(40).trim_end().to_string()]);
+    configure_textarea(&mut textarea);
+    state.input_history = vec!["an old prompt".to_string()];
+    let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("test terminal created");
+    let registry = crate::ToolRegistry::default();
+
+    // One frame so the wrapped screen map reflects the real input width.
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None, &registry);
+        })
+        .expect("wrapped draft frame");
+
+    // Cursor on the second rendered row (row 0 is fully occupied).
+    textarea.move_cursor(ratatui_textarea::CursorMove::Down);
+    assert_eq!(
+        textarea.screen_cursor().row,
+        1,
+        "the draft must actually wrap for this test to be meaningful"
+    );
+
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Up))),
+        &textarea_ctx_from(&textarea),
+    );
+    assert_eq!(effects, vec![Effect::TextareaKey(key_event(KeyCode::Up))]);
+    assert_eq!(state.history_index, None, "no history recall");
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &_cmd_tx,
+        effects,
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut PendingRunIds::default(),
+    )
+    .await;
+    assert_eq!(
+        textarea.screen_cursor().row,
+        0,
+        "`↑` must move the cursor to the first rendered row"
+    );
+    assert_eq!(
+        textarea.lines().join("\n"),
+        "word ".repeat(40).trim_end(),
+        "the draft must be untouched"
+    );
+
+    // From the true first rendered row, `↑` recalls history.
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Up))),
+        &textarea_ctx_from(&textarea),
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::LoadHistory {
+            direction: HistoryDirection::Up,
+        }]
+    );
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &_cmd_tx,
+        effects,
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut PendingRunIds::default(),
+    )
+    .await;
+    assert_eq!(state.history_index, Some(0));
+    assert_eq!(textarea.lines().join("\n"), "an old prompt");
+    assert_eq!(state.draft, "word ".repeat(40).trim_end());
+
+    // A cursor-movement key (`←`) keeps browsing active and leaves the
+    // recalled text on screen; only an actual edit exits browsing.
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Left))),
+        &textarea_ctx_from(&textarea),
+    );
+    assert_eq!(effects, vec![Effect::TextareaKey(key_event(KeyCode::Left))]);
+    assert_eq!(state.history_index, Some(0));
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &_cmd_tx,
+        effects,
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut PendingRunIds::default(),
+    )
+    .await;
+    assert_eq!(
+        state.history_index,
+        Some(0),
+        "browsing stays active after a pure cursor move"
+    );
+    assert_eq!(
+        textarea.lines().join("\n"),
+        "an old prompt",
+        "cursor movement inside a recalled entry must leave the recalled text in place"
+    );
+    assert_eq!(
+        state.draft,
+        "word ".repeat(40).trim_end(),
+        "cursor movement must not overwrite the saved draft"
+    );
+}
+
+#[tokio::test]
+async fn down_moves_within_a_wrapped_single_line_draft_instead_of_recalling_history() {
+    // The mirror bug: with the cursor on the *first* rendered row of the
+    // last (single) logical line, `↓` used to recall history although the
+    // cursor is visually at the top of the field.
+    use ratatui::backend::TestBackend;
+
+    let (mut state, _initial_textarea, _cmd_tx, _cmd_rx) = setup();
+    let mut textarea = TextArea::from(["word ".repeat(40).trim_end().to_string()]);
+    configure_textarea(&mut textarea);
+    state.input_history = vec!["an old prompt".to_string()];
+    let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("test terminal created");
+    let registry = crate::ToolRegistry::default();
+
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None, &registry);
+        })
+        .expect("wrapped draft frame");
+    assert_eq!(
+        textarea.screen_cursor().row,
+        0,
+        "the cursor must sit on the first rendered row"
+    );
+
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
+        &textarea_ctx_from(&textarea),
+    );
+    assert_eq!(effects, vec![Effect::TextareaKey(key_event(KeyCode::Down))]);
+    assert_eq!(state.history_index, None, "no history recall");
+    execute_effects(
+        &mut state,
+        &mut textarea,
+        &_cmd_tx,
+        effects,
+        &mut MouseDrag::default(),
+        &mut NoopClipboard,
+        &mut PendingRunIds::default(),
+    )
+    .await;
+    assert_eq!(
+        textarea.screen_cursor().row,
+        1,
+        "`↓` must move the cursor to the next rendered row"
+    );
+    assert_eq!(textarea.lines().join("\n"), "word ".repeat(40).trim_end());
 }
 
 #[test]

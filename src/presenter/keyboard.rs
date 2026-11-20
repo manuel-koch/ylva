@@ -967,7 +967,16 @@ fn handle_key_main(
         KeyCode::Home | KeyCode::End => vec![Effect::TextareaKey(key_event)],
 
         KeyCode::Up => {
-            if textarea.cursor_row == 0 {
+            // Recall only from the visually first *rendered* row: a long
+            // one-line draft wraps, and `↑` must move within it (the
+            // textarea's own cursor handling is screen-row aware) instead
+            // of replacing the draft with a history entry.
+            if textarea.cursor_screen_row == 0 {
+                // While already browsing, the textarea holds a recalled
+                // entry — saving it would overwrite the preserved draft.
+                if state.history_index.is_none() {
+                    state.draft = textarea.text.clone();
+                }
                 vec![Effect::LoadHistory {
                     direction: HistoryDirection::Up,
                 }]
@@ -977,7 +986,9 @@ fn handle_key_main(
         }
 
         KeyCode::Down => {
-            if textarea.cursor_row_is_last {
+            // Mirror image of `↑`: recall only from the visually last
+            // rendered row.
+            if textarea.screen_row_is_last {
                 vec![Effect::LoadHistory {
                     direction: HistoryDirection::Down,
                 }]
@@ -986,8 +997,17 @@ fn handle_key_main(
             }
         }
 
+        // Cursor movement only (no text edit): stays inside the history
+        // browse session; the textarea's own movements keep the wrap-aware
+        // cursor rows. Only an actual text edit exits browsing.
+        KeyCode::Left | KeyCode::Right => vec![Effect::TextareaKey(key_event)],
+
         _ => {
-            // Any edit key while browsing history exits browsing.
+            // Any key that edits the text exits history browsing; pure
+            // cursor-movement keys (Home/End/Left/Right and the Up/Down
+            // in-draft branches) deliberately do not. This also covers
+            // edit keys the Presenter does not special-case (Delete,
+            // Backspace, plain character typing, Tab).
             vec![Effect::ExitBrowsing, Effect::TextareaKey(key_event)]
         }
     }

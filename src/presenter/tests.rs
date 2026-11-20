@@ -40,8 +40,8 @@ fn empty_textarea() -> TextareaContext {
     TextareaContext {
         is_empty: true,
         text: String::new(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     }
 }
 
@@ -49,8 +49,8 @@ fn textarea_with(text: &str) -> TextareaContext {
     TextareaContext {
         is_empty: text.trim().is_empty(),
         text: text.to_string(),
-        cursor_row: 0,
-        cursor_row_is_last: true,
+        cursor_screen_row: 0,
+        screen_row_is_last: true,
     }
 }
 
