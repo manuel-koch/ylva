@@ -17,7 +17,8 @@
 use crate::cli::SessionCommand;
 use crate::exit_code::ExitCode;
 use crate::store::{
-    default_chats_root, project_key, MaintenanceAction, SessionSelection, SessionSummary, Store,
+    default_chats_root, project_key, session_is_live, MaintenanceAction, SessionSelection,
+    SessionSummary, Store,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -25,6 +26,8 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{Date, OffsetDateTime, UtcOffset};
 
+#[cfg(unix)]
+mod export;
 #[cfg(test)]
 mod tests;
 
@@ -60,7 +63,14 @@ pub fn run(
         project_key = %project_key,
         "resolved session store"
     );
-    run_for_project(command, &chats_root, &project_key, output, diagnostics)
+    run_for_project(
+        command,
+        &chats_root,
+        &project_key,
+        &current_directory,
+        output,
+        diagnostics,
+    )
 }
 
 fn write_session_line(
@@ -68,15 +78,29 @@ fn write_session_line(
     depth: usize,
     annotation: &str,
     output: &mut dyn Write,
+    diagnostics: &mut dyn Write,
 ) -> std::io::Result<()> {
     let marker = if depth == 0 {
         String::new()
     } else {
         format!("{}+ ", "  ".repeat(depth - 1))
     };
+    let live_marker = match session_is_live(&session.path, session.session_id) {
+        Ok(true) => " [live]",
+        Ok(false) => "",
+        Err(error) => {
+            let session_id = session.session_id;
+            writeln!(
+                diagnostics,
+                "warning: cannot check whether session '{session_id}' is live: {error}"
+            )?;
+            tracing::warn!(%session_id, %error, "cannot check session liveness");
+            ""
+        }
+    };
     writeln!(
         output,
-        "{} {}{} {}{}",
+        "{} {}{} {}{}{live_marker}",
         session.last_used_at,
         marker,
         session.session_id,
@@ -135,6 +159,7 @@ fn write_session_tree(
                     ""
                 },
                 output,
+                diagnostics,
             )?;
             if let Some(descendants) = subagents.get(&session.session_id) {
                 pending.extend(
@@ -153,10 +178,25 @@ fn run_for_project(
     command: &SessionCommand,
     chats_root: &std::path::Path,
     project_key: &str,
+    #[cfg_attr(not(unix), allow(unused_variables))] launch_directory: &std::path::Path,
     output: &mut dyn Write,
     diagnostics: &mut dyn Write,
 ) -> anyhow::Result<u8> {
     match command {
+        #[cfg(unix)]
+        SessionCommand::Export(options) => export::run(
+            options,
+            chats_root,
+            project_key,
+            launch_directory,
+            output,
+            diagnostics,
+        ),
+        #[cfg(not(unix))]
+        SessionCommand::Export(_) => {
+            writeln!(diagnostics, "error: session export requires Unix")?;
+            Ok(u8::from(ExitCode::UsageError))
+        }
         SessionCommand::List { include_subagents } => {
             let (mut sessions, warnings) =
                 Store::list_sessions_with_diagnostics(chats_root, project_key)?;
@@ -172,16 +212,18 @@ fn run_for_project(
                     .iter()
                     .filter(|session| session.parent_session.is_none())
                 {
-                    write_session_line(session, 0, "", output)?;
+                    write_session_line(session, 0, "", output, diagnostics)?;
                 }
             }
 
             Ok(0)
         }
-        SessionCommand::Delete(selector)
+        SessionCommand::Delete { selector, .. }
         | SessionCommand::Compress(selector)
         | SessionCommand::Decompress(selector) => {
-            let selection = if let Some(before) = &selector.before {
+            let selection = if matches!(command, SessionCommand::Delete { untitled: true, .. }) {
+                SessionSelection::Untitled
+            } else if let Some(before) = &selector.before {
                 SessionSelection::Before(parse_date(before).map_err(anyhow::Error::msg)?)
             } else if selector.all {
                 SessionSelection::All
@@ -189,7 +231,7 @@ fn run_for_project(
                 SessionSelection::Ids(selector.session_ids.clone())
             };
             let action = match command {
-                SessionCommand::Delete(_) => MaintenanceAction::Delete,
+                SessionCommand::Delete { .. } => MaintenanceAction::Delete,
                 SessionCommand::Compress(_) => MaintenanceAction::Compress,
                 _ => MaintenanceAction::Decompress,
             };

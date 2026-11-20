@@ -108,9 +108,10 @@ For one root with multiple IDs, the output directory is that root's bundle.
 For multiple distinct roots, use `session-1/`, `session-2/`, and so on
 under the output directory, in first-requested order. Reserve numbers even
 when no output stages for a root. A path containing
-`{project_key}`, `{session_id}`, or `{format}` is instead a template for each
+`{project_key}`, `{session_id}`, `{session_title}`, or `{format}` is instead a template for each
 root's bundle directory, even if it contains only one transcript; tokens use
-the root's identity. Reject malformed templates as usage errors.
+the root's identity. See the [CLI reference](../cli-options.md#exporting-sessions)
+for title slugging and its privacy implications. Reject malformed templates as usage errors.
 
 Within each bundle, name the root `session.<format>` and each non-root
 transcript `subagent-<number>.<format>`. Assign bundle-local numbers by a
@@ -123,6 +124,7 @@ children do not create output paths or affect stdout selection. All files for a
 bundle are siblings.
 
 `--manifest PATH` optionally writes a [versioned metadata manifest](#machine-readable-records).
+The filename extension is added or replaced with `.json` before preflight.
 The manifest must be outside every actual bundle. It may be a sibling of a
 standalone file or of the bundle directories. Treat the manifest and reports as
 sensitive: source paths, session IDs, and hashes can disclose information
@@ -232,13 +234,10 @@ out of scope.
 
 ### Markdown output example
 
-The [annotated pseudotemplate](export-session-markdown-template.md) describes
-renderer behavior, not a configurable runtime template. The
-[parent](export-session-markdown-example.md.txt) and
-[subagent](export-session-markdown-subagent-example.md.txt) Markdown files are
-the exact expected output for the [source fixture](export-session-markdown-fixture.json).
-They are stored as Markdown text to preserve repeated role headings without
-changing the lint configuration.
+The [annotated pseudotemplate](../export-session-markdown-template.md) describes
+renderer behavior, not a configurable runtime template. See the
+[fixture-backed examples](../cli-options.md#markdown-export-examples) for
+the exact expected output.
 
 #### Rendering rules
 
@@ -414,26 +413,26 @@ reassemble the record before parsing. A deliberately limited page need not
 set the read tool's `truncated` flag.
 
 The manifest's version 1 object contains `version`, `source_home`, `project_key`,
-`selected_ids`, `sessions`, `bundles`, `outputs`, `edges`, and overall
-`status`. A session record identifies one source, its representation, source
-paths, availability, snapshot boundary, source digests, and whether recursive
-discovery was complete, incomplete, or not requested. A bundle record
-identifies its requested root, directory, standalone file or stdout, and
-status. An output record relates a root and source session to its bundle-local
-number (`null` for the root), destination or stdout, publication status,
-content completeness, output digest, scanner version, and omission references
-and counts. Record unavailable or unstaged included members with no destination.
-Publication and completeness are independent: a file may be `published` even
-when records were withheld or a byte-exact raw copy had incomplete subagent
-discovery. Report a definitive output digest only for confirmed file
-publication or a complete, flushed stdout stream. Copies of one sanitized
-JSONL snapshot have equal digests within the invocation; Markdown copies
-can differ because of bundle-local links.
+`launch_directory`, `selected_ids`, `sessions`, `bundles`, `outputs`, `edges`, and overall `status`.
+A session record identifies one source, its representation, source paths, availability, snapshot
+boundary, source digests, and whether recursive discovery was complete, incomplete, or not
+requested. A bundle record identifies its requested root, directory, standalone file or stdout, and
+status. An output record relates a root and source session to its bundle-local number (`null` for
+the root), destination or stdout, publication status, content completeness, output digest, scanner
+version, and omission references and counts. Record unavailable or unstaged included members with no
+destination. Publication and completeness are independent: a file may be `published` even when
+records were withheld or a byte-exact raw copy had incomplete subagent discovery. Report a
+definitive output digest only for confirmed file publication or a complete, flushed stdout stream.
+Copies of one sanitized JSONL snapshot have equal digests within the invocation; Markdown copies can
+differ because of bundle-local links.
 
 Each edge contains the parent UUID, child UUID, source line, and event kind,
 including recognized admissions. Use `null` for unavailable information.
-Do not include transcript text, titles, tasks, arbitrary source keys, or
-scanner findings in the manifest. Record enough snapshot metadata to compare
+A known path is a string if it is UTF-8, or an object with a `unix_bytes_hex`
+field containing the lowercase hex encoding of its exact Unix path bytes.
+Do not include transcript text, title fields, tasks, arbitrary source keys, or
+scanner findings in the manifest. An explicitly requested `{session_title}`
+slug can still appear in a destination path. Record enough snapshot metadata to compare
 the title-independent header separately from the complete-event prefix after
 a title change or plain/archive conversion. The manifest describes transcript
 outcomes; its own publication result is reported on stderr rather than
@@ -463,12 +462,12 @@ fake scanner on a controlled `PATH`. Run the relevant owner-local and
 executable tests and `make lint` before marking each code-bearing step done.
 Do not stage, commit, or merge branches without explicit user consent.
 
-1. [ ] Establish the baseline and implementation boundary. Start with
+1. [x] Establish the baseline and implementation boundary. Start with
    `src/session_command.rs`, `src/cli.rs`, and `src/store/archive.rs`; run
    `cargo test store::tests::archive` and `cargo test --test session_commands`.
    Review the recorded decisions and test-isolation rules in the references
    below before changing code.
-2. [ ] Add a streaming, read-only snapshot/representation reader through the
+2. [x] Add a streaming, read-only snapshot/representation reader through the
    store facade. Pin the chat root and open regular source entries within
    the selected project without following entry symlinks. Capture one fixed
    prefix of an opened plain file; bound the number of handles with private
@@ -481,7 +480,7 @@ Do not stage, commit, or merge branches without explicit user consent.
    mismatches and unreadable headers, maintenance races, appends and title
    replacement, and large snapshots with bounded handles and no whole-file
    buffering. Run `cargo test store::tests::archive`.
-3. [ ] Exercise the real early `session` dispatcher and clap model with a
+3. [x] Exercise the real early `session` dispatcher and clap model with a
    single-session `--no-subagents -f jsonl --raw` slice. Stream stdout and
    produce a standalone file using private staging, final destination
    preflight, and atomic publication. Establish the helpers used by later
@@ -490,7 +489,7 @@ Do not stage, commit, or merge branches without explicit user consent.
    unchanged source files. Keep this slice internal to the implementation
    work until the full CLI contract is ready; never default to raw output.
    Run `cargo test --test session_commands`.
-4. [ ] Build a streaming inventory of explicit roots and, by default, their
+4. [x] Build a streaming inventory of explicit roots and, by default, their
    linked subagents. Follow parent-side `subagent_start`, `subagent_result`,
    and recognized `spawn_subagent` admission records, retaining each source
    line and kind; never infer clone relationships solely from child headers.
@@ -510,7 +509,7 @@ Do not stage, commit, or merge branches without explicit user consent.
    missing and corrupt sources, legacy or malformed delegation records, and
    duplicate keys. Exercise recursive and `--no-subagents` discovery through
    the CLI, including warnings versus failure in byte-exact raw copies.
-5. [ ] Implement local sanitization through TruffleHog's JSON stdin interface
+5. [x] Implement local sanitization through TruffleHog's JSON stdin interface
    with `--no-verification`, `--no-update`, `--no-ignore-tag`, and
    `--fail-on-scan-errors`. Check scanner compatibility before starting work;
    record the version without echoing scanner output. Set a finite deadline
@@ -536,7 +535,7 @@ Do not stage, commit, or merge branches without explicit user consent.
    collisions, generic assignments, media and encoded text/binary, raw bypass,
    and secret-free scanner diagnostics. Test invalid scanner output and timeout
    discarding one source's staged copies while other sources continue.
-6. [ ] Implement streaming Markdown and sanitized JSONL on the captured event
+6. [x] Implement streaming Markdown and sanitized JSONL on the captured event
    stream, reusing the raw JSONL copier for raw output. Use the rendering and
    record rules above, including explicit start anchors and independent
    per-bundle backlinks before publication. Group unambiguous calls with
@@ -544,10 +543,8 @@ Do not stage, commit, or merge branches without explicit user consent.
    results without child files when traversal is disabled. Render oversized
    JSONL records without fragments; raw JSONL remains independent of parsing.
 
-   Use `docs/plans/export-session-markdown-fixture.json` and the expected
-   parent and child in `docs/plans/export-session-markdown-example.md.txt` and
-   `docs/plans/export-session-markdown-subagent-example.md.txt` as a rendering
-   test. Cover clone-specific backlinks, shared and unavailable children,
+   Use the source and expected Markdown under `tests/fixtures/session-export/`
+   as a rendering test. Cover clone-specific backlinks, shared and unavailable children,
    multiple parents and cycles, repeated starts, missing or withheld starts,
    and authored headings that repeat generated start headings. Also cover
    overlapping calls, ambiguous pairing, errors, withheld and missing results,
@@ -561,7 +558,7 @@ Do not stage, commit, or merge branches without explicit user consent.
    terminal controls, malformed lines, a valid unterminated object, media in
    both Markdown modes, large events, CRLF, and incomplete trailing bytes.
    Exercise CLI selection of both formats with and without `--raw`.
-7. [ ] Complete the destination planner and preflight for all output modes.
+7. [x] Complete the destination planner and preflight for all output modes.
    Resolve layout and template syntax from the inventory. After rendering to
    private scratch, preflight only staged transcript destinations and the
    requested manifest outside the bundles. Resolve existing ancestors and
@@ -571,7 +568,7 @@ Do not stage, commit, or merge branches without explicit user consent.
    paths, a staged child with a failed root render, nonempty bundles,
    templates, aliased or nested directories, case/Unicode aliases, permitted
    parent symlinks, chat-store aliases, final symlinks, and stdout selection.
-8. [ ] Complete publication and cooperative interruption for all outputs.
+8. [x] Complete publication and cooperative interruption for all outputs.
    Create private directories after preflight, recheck pinned parents and
    bundle emptiness, and sync owner-only adjacent temporary files before
    atomic publication. Serialize competing Ylva exporters and revalidate
@@ -582,7 +579,9 @@ Do not stage, commit, or merge branches without explicit user consent.
    across filesystems, and late failure without rollback. Verify that created
    directories remain and are reported, unaffected outputs continue, and
    cooperative SIGINT and SIGTERM clean up scratch and stop active scanner work.
-9. [ ] Implement the versioned manifest and stderr reporting from the same
+   The cross-filesystem test uses `/dev/shm` on Linux when it is on a separate
+   device; the macOS verification ran on one writable volume.
+9. [x] Implement the versioned manifest and stderr reporting from the same
    inventory and publication results, without transcript content. Compute
    source and per-output hashes while streaming; associate each duplicate
    output with its root bundle and shared source snapshot. Distinguish
@@ -596,23 +595,22 @@ Do not stage, commit, or merge branches without explicit user consent.
    preflight, including all outputs failing during staging, cooperative
    interruption, and an uncertain manifest.
    Run `cargo test --test session_commands` and the owner-local export tests.
-10. [ ] Update `docs/cli-options.md`, `docs/features.md`, `docs/persistence.md`,
+10. [x] Update `docs/cli-options.md`, `docs/features.md`, `docs/persistence.md`,
     `docs/ideas/session.md`, and `README.md` for the actual CLI, output schema,
     snapshot, safety, and limitations. Keep
-    `docs/plans/export-session-markdown-template.md` and
-    `docs/plans/export-session-markdown-fixture.json`,
-    `docs/plans/export-session-markdown-example.md.txt`, and
-    `docs/plans/export-session-markdown-subagent-example.md.txt` aligned with
-    the accepted output contract and rendering test. Leave
+    `docs/export-session-markdown-template.md` and the fixtures in
+    `tests/fixtures/session-export/` aligned with the accepted output contract
+    and rendering test. Leave
     `docs/ideas/self-improvement.md` to the separate reflection change; its
     reconciliation is not an exporter completion gate.
     Update `docs/implementation-notes.md` only for non-obvious cross-module
     rationale, following its opening guideline. Run `rumdl check` on changed
     Markdown.
-11. [ ] Run `make format lint` and `make test-coverage`; the latter is the
+11. [x] Run `make format lint` and `make test-coverage`; the latter is the
     single mandatory full-suite gate and must retain at least 80% aggregate
     line coverage. Run `make audit` only if `Cargo.toml` or `Cargo.lock`
     changes. Report any failed or unavailable checks.
+    All three commands passed on macOS, with 86.14% aggregate line coverage.
 
 ## Consistency Issues
 

@@ -176,7 +176,15 @@ async fn archive_commands_report_session_actions_without_paths() {
         let mut output = Vec::new();
         let mut diagnostics = Vec::new();
         assert_eq!(
-            run_for_project(&command, &chats_root, &key, &mut output, &mut diagnostics).unwrap(),
+            run_for_project(
+                &command,
+                &chats_root,
+                &key,
+                directory.path(),
+                &mut output,
+                &mut diagnostics
+            )
+            .unwrap(),
             0
         );
         let expected = format!("{expected} {identity}\n");
@@ -201,7 +209,15 @@ async fn pure_orchestration_lists_and_maintains_without_environment_changes() {
         include_subagents: false,
     };
     assert_eq!(
-        run_for_project(&list, &chats_root, &key, &mut output, &mut diagnostics).unwrap(),
+        run_for_project(
+            &list,
+            &chats_root,
+            &key,
+            directory.path(),
+            &mut output,
+            &mut diagnostics
+        )
+        .unwrap(),
         0
     );
     assert!(output.is_empty());
@@ -226,6 +242,7 @@ async fn pure_orchestration_lists_and_maintains_without_environment_changes() {
             &SessionCommand::Compress(selector()),
             &chats_root,
             &key,
+            directory.path(),
             &mut output,
             &mut diagnostics
         )
@@ -238,7 +255,15 @@ async fn pure_orchestration_lists_and_maintains_without_environment_changes() {
     output.clear();
     diagnostics.clear();
     assert_eq!(
-        run_for_project(&list, &chats_root, &key, &mut output, &mut diagnostics).unwrap(),
+        run_for_project(
+            &list,
+            &chats_root,
+            &key,
+            directory.path(),
+            &mut output,
+            &mut diagnostics
+        )
+        .unwrap(),
         0
     );
     assert!(String::from_utf8_lossy(&output).contains(&identity.to_string()));
@@ -247,7 +272,15 @@ async fn pure_orchestration_lists_and_maintains_without_environment_changes() {
         SessionCommand::Decompress(selector()),
     ] {
         assert_eq!(
-            run_for_project(&command, &chats_root, &key, &mut output, &mut diagnostics).unwrap(),
+            run_for_project(
+                &command,
+                &chats_root,
+                &key,
+                directory.path(),
+                &mut output,
+                &mut diagnostics
+            )
+            .unwrap(),
             0
         );
     }
@@ -256,9 +289,13 @@ async fn pure_orchestration_lists_and_maintains_without_environment_changes() {
     output.clear();
     assert_eq!(
         run_for_project(
-            &SessionCommand::Delete(preview),
+            &SessionCommand::Delete {
+                selector: preview,
+                untitled: false,
+            },
             &chats_root,
             &key,
+            directory.path(),
             &mut output,
             &mut diagnostics
         )
@@ -277,9 +314,13 @@ async fn pure_orchestration_lists_and_maintains_without_environment_changes() {
     };
     assert_eq!(
         run_for_project(
-            &SessionCommand::Delete(dated),
+            &SessionCommand::Delete {
+                selector: dated,
+                untitled: false,
+            },
             &chats_root,
             &key,
+            directory.path(),
             &mut output,
             &mut diagnostics
         )
@@ -289,9 +330,13 @@ async fn pure_orchestration_lists_and_maintains_without_environment_changes() {
     output.clear();
     assert_eq!(
         run_for_project(
-            &SessionCommand::Delete(selector()),
+            &SessionCommand::Delete {
+                selector: selector(),
+                untitled: false,
+            },
             &chats_root,
             &key,
+            directory.path(),
             &mut output,
             &mut diagnostics
         )
@@ -313,6 +358,7 @@ async fn pure_orchestration_lists_and_maintains_without_environment_changes() {
             &SessionCommand::Compress(all),
             &chats_root,
             &key,
+            directory.path(),
             &mut output,
             &mut diagnostics
         )

@@ -291,7 +291,9 @@ writes into the file. The lock is released when the session closes. Ylva keeps
 lock files and never deletes them during maintenance. Writing the title does not
 release the lock.
 
-Listing sessions takes no lock.
+Reading transcript summaries takes no lock. On Unix, `ylva session list` checks
+existing identity locks separately using a nonblocking shared lock attempt. It
+releases any acquired lock immediately and never creates lock files.
 
 A per-project lock stops cloning and subagent publication from racing with
 deletion, so nobody can remove a subagent while another session records a
@@ -338,6 +340,12 @@ Reading never decompresses, repairs or migrates files.
 
 Deleting a root session also deletes its subagent transcripts, unless surviving
 sessions or clones still refer to them. Ylva keeps those and reports them.
+`delete --untitled` checks the persisted title in the resolved plain or archived
+header, not whether the transcript contains messages. An omitted title defaults
+to empty; whitespace-only titles also match. Ylva rechecks the title under the
+identity lock before deleting the group. Unreadable headers are not treated as
+untitled.
+
 Deleting a referenced subagent transcript explicitly fails. `cloned_from` is
 history only, so deleting a source never deletes its clones. An open root session
 blocks deletion of its whole group. Independent groups continue when another
@@ -457,8 +465,8 @@ and how an ongoing task is handled.
 ## Listing sessions
 
 Listing returns every session of one project, most recently used first, with the
-UUID as tie-breaker. It reads the full transcripts, takes no lock and changes
-nothing. It reads archives in memory and never restores them. Invalid headers,
+UUID as tie-breaker. It reads the full transcripts without locking them or
+changing anything on disk. It reads archives in memory and never restores them. Invalid headers,
 file representations or non-empty activity timestamps produce diagnostics. Ylva
 never treats such a session as old enough for age-based maintenance.
 
@@ -480,11 +488,133 @@ Listing, title updates, compression, decompression and cloning the source cannot
 A clone starts from its own creation time, so copied historical timestamps never
 make a new clone look older than it is.
 
-The CLI shows the last use and lists the oldest first. It groups included
-subagents beneath their parent. All maintenance `--before` selectors use this
+The CLI shows the last use, lists the oldest first, and marks sessions with a
+held exclusive lock as `[live]` on Unix. It groups included subagents beneath
+their parent. All maintenance `--before` selectors use this
 same time and check it again under the session's lock before they change
 anything. Ylva skips a session or group that you used again and that no longer
 qualifies. See [Session commands](cli-options.md#session-commands).
+
+## Session export snapshots
+
+[`ylva session export`](cli-options.md#exporting-sessions) reads the launch
+project's chat store without taking the active writer's lock or creating
+locks, repairing transcripts, or writing to the source. It resolves the chat
+root but refuses symlinked project directories and symlinked or non-regular
+transcripts and sidecars below it.
+
+For a plain transcript, export reads the header and a fixed byte prefix from
+the same opened file. Appends after the measured boundary are excluded; a
+concurrent title replacement can leave either title in the snapshot. For an
+archive, export validates gzip through EOF and checks its sidecar. When both
+representations exist, their logical content must match. Export retries
+observed archive transitions before reporting an unstable source. Raw JSONL
+can recover plain-only bytes without a readable header if no archive sidecar
+is present, but not when a readable header identifies a different project or
+session.
+
+Export captures each unique source once, not every session at one instant.
+It follows recorded parent-side subagent starts, results, and recognized
+`spawn_subagent` admissions, not the child's `parent_session` header. Cloned
+roots can share a child snapshot, and an admitted but unavailable child still
+reserves its bundle number. Malformed or ambiguous complete records and legacy
+or invalid delegation events make recursive discovery incomplete. Raw JSONL
+still copies them; with `--no-subagents` they are warnings only.
+
+### Sanitized JSONL records
+
+Sanitized `-f jsonl` writes a complete JSON object for each complete source
+line, including a valid final object without a newline. It does not emit a
+record for an unparseable partial tail. For example:
+
+```json
+{"export_version":1,"source":{"session_id":"ed58160a-fc85-4da5-8dfd-10f01a17942e","line":2},"event":{"type":"message","message":{"role":"user","content":"Hello"}},"omissions":[]}
+```
+
+`source.line` is the 1-based original line. `event` contains the sanitized
+object, including unknown types that can be handled safely, or `null` for a
+withheld complete event. Each `omissions` entry has a fixed `reason` and may
+have a `field`, a slash-separated location with only schema-known field names
+and array indices. Reason codes for withheld records or batches are
+`malformed_event`, `duplicate_keys`, `invalid_delegation`, `unsafe_title`,
+`unsafe_structure`, `unmapped_finding`, and `key_collision`. Intentional
+payload omissions use `media` or `encoded_content`. The `incomplete_tail`
+code is used in the manifest, not in an emitted JSONL record.
+
+Ylva redacts mapped findings and common credential assignments locally.
+An unmappable finding or colliding redacted keys can
+withhold a batch; a scanner process or protocol failure, including a timeout,
+discards the affected source's processed output. Remaining sources can
+continue. Scanner findings and stderr are not echoed.
+
+Export uses private scratch files and imposes no aggregate byte limit,
+record-size cutoff, or CLI paging. Available memory and disk still matter.
+When consuming an oversized JSONL record through a bounded reader, read
+through its end in ranges and reassemble before parsing.
+
+### Export manifest version 1
+
+The manifest is one JSON object. A known path is a UTF-8 string or an object
+`{"unix_bytes_hex":"..."}` for non-UTF-8 Unix path bytes. A path that is not
+applicable or unavailable is `null`. Hashes are lowercase hexadecimal SHA-256.
+
+| Top-level field | Meaning |
+| --- | --- |
+| `version` | `1`, the manifest schema version. |
+| `source_home`, `project_key` | Resolved Ylva home and project scope. |
+| `launch_directory` | Canonical directory where the export ran. It is not necessarily the workspace root or the path used to derive `project_key` in a linked Git worktree. |
+| `selected_ids` | Distinct requested UUIDs in argument order. |
+| `sessions` | One source record per captured or attempted UUID. |
+| `bundles` | One layout and publication summary per requested root. |
+| `outputs` | One record per included member in each root's export. |
+| `edges` | Observed parent-side references, even with `--no-subagents`. |
+| `status` | `success`, `failed`, or `interrupted`, for the transcript export, not the manifest's own publication. |
+
+- Each `sessions` entry has `session_id`, `availability` (`available`,
+  `missing`, `unstable`, `corrupt`, `io_error`, or `interrupted`), and
+  `discovery` (`complete`, `incomplete`, or `not_requested`). Missing or
+  incomplete descendants make ancestors' recursive discovery incomplete.
+  `issues` records `line` and `reason`: `incomplete_tail`, `malformed_event`,
+  `duplicate_keys`, `legacy_delegation`, or `invalid_delegation`.
+  A captured source has a `representation` (`plain`, `gzip`, or
+  `plain_and_gzip`), `source_paths` (`plain`, `gzip`, `sidecar`), and `boundary`.
+- Each `bundles` entry has `root_session_id`, `directory`, `destination`,
+  `stdout`, and `status` (`published`, `partial`, `failed`, `unattempted`, or
+  `uncertain`). `destination` and `stdout` describe standalone outputs;
+  `directory` describes a staged bundle.
+- Each `outputs` entry has `root_session_id`, `session_id`, and bundle-local
+  `number` (`null` for a root). `destination` and `stdout` identify the planned
+  target, if staged. `publication_status` is `published`, `failed`,
+  `unattempted`, or `uncertain`. `content_completeness` is `complete`,
+  `incomplete` when content was withheld or a tail omitted, or `null` without
+  staged content. Intentional media and Base64 omissions do not make a copy
+  incomplete. `scanner_version` records the selected scanner for captured
+  sanitized sources and is otherwise `null`. `omission_count` and `omissions`
+  report occurrences by `line`, `reason`, and optional `field`.
+- Each `edges` entry has `parent_session_id`, `child_session_id`, the 1-based
+  `line`, and `kind` (`subagent_start`, `subagent_result`, or
+  `subagent_accepted`). Repeated references remain separate records.
+
+Under `boundary`, `logical_bytes` and `logical_sha256` cover the entire
+captured logical transcript, including a partial tail. `event_prefix_bytes`
+and `event_prefix_sha256` exclude a recognized first-line `meta` header and
+any unparseable trailing fragment, but include malformed newline-terminated
+events and a valid final object without a newline.
+`header_sha256_without_title` hashes the header object after removing only
+`title`, sorting keys recursively, and serializing compact UTF-8; it is `null`
+if there is no unambiguous readable header. Compare the header hash and event
+prefix separately to verify that a title rewrite did not change the captured
+events. A lossless archive conversion does not change the logical digest.
+
+`output_sha256` is `null` unless file publication was confirmed or stdout was
+written and flushed completely. A published output can still contain
+omissions or come from a source with incomplete discovery. Copies of the same
+sanitized JSONL snapshot have equal digests within one invocation; Markdown
+copies can differ because of bundle-local links. The manifest does not record
+titles as fields, transcript text, arbitrary source keys, or scanner findings.
+Destination paths can contain title slugs if you use `{session_title}`. See
+[`session` exit codes](cli-options.md#session-exit-codes) and stderr for the
+manifest's own publication outcome.
 
 ## Durability
 

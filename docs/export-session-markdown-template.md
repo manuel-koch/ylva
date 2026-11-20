@@ -1,16 +1,26 @@
 # Session export Markdown pseudotemplate
 
-This specifies renderer behavior; it is not a configurable runtime template.
-`{{name}}` denotes a value defined in the
-[rendering rules](export-session-plan.md#rendering-rules). `[[...]]` denotes a
-condition or repetition and is not emitted. Other text is generated literally.
+This documents the layout implemented by Ylva's Markdown renderer. It is not
+loaded at runtime and cannot be configured. See the
+[fixture-backed examples](cli-options.md#markdown-export-examples) for exact
+rendered output.
+`{{name}}` denotes a rendered value. `[[...]]` denotes a condition or
+repetition and is not emitted. Other text is generated literally.
 The outer fences are documentation delimiters; fence lengths inside them are
 illustrative.
 
-`{{subagent_reference}}` is the numbered subagent label, optionally linked to
-its bundled transcript. `{{parent_reference}}` and `{{parent_references}}` are
-the bundled parent links described in the rendering rules, including the
-explicit start fragment when one is available.
+`{{heading}}` is the escaped session title on one line, or `Session` if
+empty, missing, or withheld. `{{role}}` is `User`, `Assistant`, or `System`.
+`{{tool_name}}` is an inline code span. `{{call_label}}` is empty unless a
+message has repeated calls to the same tool, in which case each gets a
+number in call order. Results are grouped with calls only when the stored IDs
+make the pairing unambiguous. Asynchronous subagent completion stays in
+source order.
+
+`{{subagent_reference}}` is `Subagent #<number>`, linked to its bundle-local
+transcript when available. `{{parent_reference}}` and `{{parent_references}}`
+are links to unique direct parents in the same bundle, with the root first
+and other parents in bundle-number order, separated by commas.
 
 ````text
 # {{heading}}
@@ -111,11 +121,14 @@ parent, not derived from the heading text.
 
 ## Argument variants
 
-Render `{{arguments}}` recursively using the rules in the plan. The
-`{{argument_key}}` is the escaped key; `{{scalar_value}}` is a scalar or one
-of the specified inline-code markers for null and empty values.
-`{{markdown_value}}` and `{{fenced_value}}` are argument values, and
-`{{fence_language}}` is the literal `bash` or `text` selected by the rules.
+Render `{{arguments}}` recursively. The `{{argument_key}}` is the escaped key;
+`{{scalar_value}}` is a scalar or one of the inline-code markers `` `null` ``,
+`` `""` ``, `` `[]` ``, and `` `{}` `` for null and empty values. Classify
+nonempty strings by tool and top-level field: `bash.command` uses a `bash`
+fence, and `write.content`, `edit.old_string`, and `edit.new_string` use
+`text` fences. `spawn_subagent.task` and `briefing`, `clarify.question` and
+`context`, and `agent_finish.result` and `error` are authored Markdown.
+Other strings, including nested values, render as escaped literal text.
 Values are sanitized unless `--raw` is used. `{{nested_arguments}}` expands
 to the recursively rendered value. Indent every continuation line under its
 enclosing list item.

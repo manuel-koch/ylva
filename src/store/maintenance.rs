@@ -29,6 +29,9 @@ pub enum SessionSelection {
     Ids(Vec<Uuid>),
     Before(OffsetDateTime),
     All,
+    /// Delete roots whose persisted title is missing, empty, or whitespace-only,
+    /// along with their unshared descendants.
+    Untitled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +57,12 @@ impl Store {
         dry_run: bool,
     ) -> Result<MaintenanceReport, StoreError> {
         archive::require_unix()?;
+        if matches!(selection, SessionSelection::Untitled) && action != MaintenanceAction::Delete {
+            return Err(archive::invalid(
+                chats_root,
+                "untitled selection requires deletion",
+            ));
+        }
         if let SessionSelection::Ids(identities) = selection {
             if identities.is_empty() {
                 return Err(archive::invalid(
@@ -117,6 +126,13 @@ impl Store {
                 .values()
                 .filter(|session| {
                     action != MaintenanceAction::Delete || session.parent_session.is_none()
+                })
+                .map(|session| session.session_id)
+                .collect(),
+            SessionSelection::Untitled => sessions
+                .values()
+                .filter(|session| {
+                    session.parent_session.is_none() && session.title.trim().is_empty()
                 })
                 .map(|session| session.session_id)
                 .collect(),
@@ -452,6 +468,15 @@ pub(super) fn process_group(
         let bytes = archive::read_bytes(&path)?;
         let metadata = archive::header(&bytes, &path)?;
         archive::validate_identity(&metadata, &path)?;
+        if matches!(selection, SessionSelection::Untitled)
+            && metadata.parent_session.is_none()
+            && !metadata.title.trim().is_empty()
+        {
+            report
+                .notices
+                .push(format!("skipped {identity}: session now has a title"));
+            return Ok(());
+        }
         if let SessionSelection::Before(before) = selection {
             if action != MaintenanceAction::Delete || metadata.parent_session.is_none() {
                 let last_used_at = super::replay::last_used_at(&bytes, &metadata, &path)?;

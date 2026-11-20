@@ -189,7 +189,7 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: SkillCommand,
     },
-    /// Discover and maintain sessions in the current launch directory
+    /// Discover, maintain, and export sessions in the current launch directory
     Session {
         #[command(subcommand)]
         command: SessionCommand,
@@ -365,11 +365,78 @@ pub enum SessionCommand {
         include_subagents: bool,
     },
     /// Delete selected sessions and unshared descendants
-    Delete(SessionSelector),
+    Delete {
+        #[command(flatten)]
+        selector: SessionSelector,
+        /// Select root sessions whose persisted title is empty or whitespace-only
+        #[arg(long, group = "selector")]
+        untitled: bool,
+    },
     /// Losslessly archive selected transcripts
     Compress(SessionSelector),
     /// Restore selected transcripts to raw JSONL
     Decompress(SessionSelector),
+    /// Export recorded sessions with best-effort secret redaction by default
+    Export(SessionExport),
+}
+
+/// Options for a provider-independent session export.
+#[derive(clap::Args, Debug, PartialEq, Eq)]
+pub struct SessionExport {
+    /// Explicit session UUIDs from the current project's chat store
+    #[arg(value_name = "UUID", required = true, num_args = 1..)]
+    pub session_ids: Vec<Uuid>,
+    /// Export only the explicitly requested transcripts
+    #[arg(long)]
+    pub no_subagents: bool,
+    /// Transcript output format
+    #[arg(short, long, value_enum, default_value = "md")]
+    pub format: ExportFormat,
+    /// Output file, bundle directory, or per-root path template.
+    #[arg(
+        short,
+        long,
+        value_name = "PATH",
+        help = "Output file, bundle directory, or per-root path template.\n\
+                \n\
+                Template placeholders:\n\
+                - {project_key}: Project key\n\
+                - {session_id}: Root session UUID\n\
+                - {session_title}: Path-safe root title (or untitled)\n\
+                - {format}: Export format (md or jsonl)\n\
+                \n\
+                A template always creates a bundle directory per root.\n\
+                A leading ~/ resolves under $HOME, even when quoted.\n\
+                With --raw, title paths may expose unredacted information.\n\
+                Example: -o 'exports/{project_key}/{session_id}'"
+    )]
+    pub output: Option<PathBuf>,
+    /// Write one metadata-only JSON manifest per invocation.
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Write one metadata-only JSON manifest per invocation.\n\
+                The manifest is always JSON, regardless of --format.\n\
+                Choose a path outside all bundles (no template placeholders).\n\
+                A leading ~/ resolves under $HOME, even when quoted.\n\
+                The filename extension is added or replaced with .json."
+    )]
+    pub manifest: Option<PathBuf>,
+    /// Skip secret scanning and redaction (may disclose sensitive data)
+    #[arg(long)]
+    pub raw: bool,
+    /// Replace an unchanged standalone file or manifest
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Representation produced for each transcript.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// Human-readable Markdown.
+    Md,
+    /// Line-oriented JSON records (byte-exact with `--raw`).
+    Jsonl,
 }
 
 #[derive(clap::Args, Debug, PartialEq, Eq)]
