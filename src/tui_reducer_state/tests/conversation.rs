@@ -17,6 +17,103 @@ use crate::agent::{AssistantStatus, Message, UserMessageKind};
 use crate::store::SubagentRunRecord;
 
 #[test]
+fn auto_denied_tool_arrives_collapsed_by_default() {
+    let mut state = AppState::new();
+    let id = Uuid::new_v4();
+    let title_arguments = vec![("path".to_string(), serde_json::json!("file.txt"))];
+
+    state.apply_tool_auto_denied(
+        id,
+        "read".to_string(),
+        title_arguments.clone(),
+        vec![],
+        "Sandbox denied".to_string(),
+        None,
+    );
+
+    assert!(matches!(
+        &state.chat_entries[..],
+        [ChatEntry::ToolBubble { id: bubble_id, name, state, collapsed: true }]
+            if *bubble_id == id && name == "read"
+                && matches!(state.as_ref(), ToolCallState::Denied { error, title_arguments: actual, .. }
+                    if error == "Sandbox denied" && *actual == title_arguments)
+    ));
+}
+
+#[test]
+fn auto_denied_tools_follow_exact_configured_arrival_names() {
+    let mut state = AppState::new();
+    state.tui_config.auto_expand_tool = vec!["read".to_string()];
+    state.tui_config.auto_expand_approval = true;
+    state.conversation.scroll_locked = true;
+
+    for name in ["read", "read_more", "READ"] {
+        state.apply_tool_auto_denied(
+            Uuid::new_v4(),
+            name.to_string(),
+            vec![],
+            vec![],
+            "Denied".to_string(),
+            None,
+        );
+    }
+
+    assert!(matches!(
+        &state.chat_entries[..],
+        [
+            ChatEntry::ToolBubble {
+                collapsed: false,
+                ..
+            },
+            ChatEntry::ToolBubble {
+                collapsed: true,
+                ..
+            },
+            ChatEntry::ToolBubble {
+                collapsed: true,
+                ..
+            }
+        ]
+    ));
+    assert!(state.conversation.scroll_locked);
+    assert!(state.pending_bubble_expansion.is_none());
+    assert!(state.approval_auto_expanded.is_empty());
+}
+
+#[test]
+fn auto_denied_subagent_tools_follow_arrival_policy_in_their_own_transcript() {
+    let mut state = AppState::new();
+    state.tui_config.auto_expand_tool = vec!["edit".to_string()];
+    let run_id = Uuid::new_v4();
+    state.start_subagent_run(SubagentRunInfo {
+        run_id,
+        bubble_id: Uuid::new_v4(),
+        agent_type: "reviewer".to_string(),
+        task: "Review".to_string(),
+        label: "Review".to_string(),
+    });
+
+    for name in ["edit", "write"] {
+        state.apply_tool_auto_denied(
+            Uuid::new_v4(),
+            name.to_string(),
+            vec![],
+            vec![],
+            "Denied".to_string(),
+            Some(run_id),
+        );
+    }
+
+    assert!(state.chat_entries.is_empty());
+    assert!(matches!(
+        &state.subagent_conversations[&run_id].messages[..],
+        [ChatEntry::ToolBubble { name: first, collapsed: false, .. },
+         ChatEntry::ToolBubble { name: second, collapsed: true, .. }]
+            if first == "edit" && second == "write"
+    ));
+}
+
+#[test]
 fn replay_places_the_compaction_marker_at_the_boundary_and_keeps_the_transcript() {
     let messages = vec![
         crate::agent::Message::User {

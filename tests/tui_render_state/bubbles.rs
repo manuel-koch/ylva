@@ -218,6 +218,126 @@ fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
 }
 
 #[tokio::test]
+async fn edit_validation_auto_denial_renders_collapsed_without_replacement_text() {
+    struct EditValidationProvider {
+        requests: AtomicUsize,
+        path: String,
+    }
+
+    impl ylva::Provider for EditValidationProvider {
+        fn name(&self) -> &str {
+            "edit-validation-test"
+        }
+
+        fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst);
+            let path = self.path.clone();
+            Box::pin(async move {
+                let (sender, receiver) = mpsc::channel(2);
+                let event = if request == 0 {
+                    StreamEvent::Delta(ylva::DeltaChunk {
+                        tool_call_index: 0,
+                        tool_call_id: None,
+                        function_name: Some("edit".to_string()),
+                        arguments_fragment: Some(
+                            serde_json::json!({
+                                "path": path,
+                                "mode": "search_replace",
+                                "new_string": "SECRET_REPLACEMENT_PAYLOAD",
+                            })
+                            .to_string(),
+                        ),
+                    })
+                } else {
+                    StreamEvent::Text("agent continued".to_string())
+                };
+                sender.send(event).await?;
+                sender.send(StreamEvent::Done).await?;
+                Ok(receiver)
+            })
+        }
+    }
+
+    let directory = tempfile::Builder::new()
+        .prefix("ylva-")
+        .tempdir()
+        .expect("temporary workspace");
+    let path = directory.path().join("input.txt");
+    std::fs::write(&path, "original content").expect("fixture file");
+    let sandbox = Arc::new(std::sync::RwLock::new(ylva::Sandbox {
+        sandbox_root: directory.path().to_path_buf(),
+    }));
+    let registry = Arc::new(
+        ylva::default_registry(sandbox, ylva::ToolRegistryConfig::default())
+            .expect("valid sandbox fixture"),
+    );
+    let provider = Arc::new(EditValidationProvider {
+        requests: AtomicUsize::new(0),
+        path: path.display().to_string(),
+    });
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, updates) = AgentLoop::new(engine, registry);
+    let (backend, last_buffer, _) = InspectableTestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let (actions, action_receiver) = mpsc::channel(64);
+    let handle = tokio::spawn(async move {
+        tui_driver::run_tui(
+            &mut terminal,
+            agent,
+            updates,
+            Some("edit the file".to_string()),
+            action_receiver,
+            &mut NoopClipboard,
+        )
+        .await
+        .expect("run_tui completed")
+    });
+
+    let frame = wait_for_frame(&last_buffer, |buffer| {
+        let text = rendered_text(buffer);
+        text.contains("agent continued") && text.contains("Idle")
+    })
+    .await;
+    drop(actions);
+    let state = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("TUI shutdown completed")
+        .expect("TUI task joined");
+    let bubble = state
+        .chat_entries
+        .iter()
+        .find(|entry| matches!(entry, ChatEntry::ToolBubble { name, .. } if name == "edit"));
+    assert!(
+        matches!(bubble, Some(ChatEntry::ToolBubble { collapsed: true, state, .. })
+            if matches!(state.as_ref(), ylva::ToolCallState::Denied { error, .. }
+                if error == "`old_string` is required when mode is `search_replace`")),
+        "expected a collapsed validation-denied edit bubble, got {bubble:?}"
+    );
+    let rendered = rendered_text(&frame);
+    assert!(
+        rendered.contains("`old_string` is required when mode is `search_replace`"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("SECRET_REPLACEMENT_PAYLOAD"),
+        "{rendered}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path).expect("fixture file"),
+        "original content"
+    );
+}
+
+#[tokio::test]
 async fn typed_enter_creates_sent_user_bubble_and_assistant() {
     let provider = MockProvider::new(vec!["hello".to_string()], Duration::from_millis(5));
     let (backend, last_buffer, _) = InspectableTestBackend::new(80, 24);

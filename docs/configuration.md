@@ -999,8 +999,12 @@ auto_expand_approval = true
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `auto_expand_tool` | array of strings | Exact, case-sensitive tool names whose bubbles are expanded when they arrive, in the root and in subagent conversations. Default: empty. A name matching no registered tool is a configuration warning (an error with `--strict-config`). `clarify` needs no entry: its bubble always arrives expanded. |
+| `auto_expand_tool` | array of strings | Exact, case-sensitive tool names whose bubbles are expanded when they arrive, in the root and in subagent conversations. Default: empty. A name matching no registered tool is a configuration warning (an error with `--strict-config`). `clarify` needs no entry: its question bubble arrives expanded. |
 | `auto_expand_approval` | boolean | Expand the bubble awaiting user approval while the approval is pending, and collapse it again once the approval resolves (approved, denied, killed or failed). A bubble expanded by `auto_expand_tool` or by hand stays expanded; toggling a bubble by hand during approval keeps the manual state. Default: `false`. |
+
+The arrival rule also applies to calls rejected before execution, including
+argument-validation and sandbox denials. Their error remains visible while
+collapsed.
 
 Auto-expansion never shows the `Expanding…` feedback and never unpins a view
 that follows the bottom of the conversation.

@@ -413,6 +413,7 @@ impl AppState {
         reason: String,
         run_id: Option<Uuid>,
     ) {
+        let collapsed = self.tool_bubble_arrives_collapsed(&name);
         self.target_messages_mut(run_id)
             .push(ChatEntry::ToolBubble {
                 id,
@@ -423,7 +424,7 @@ impl AppState {
                     content_sections,
                     title_arguments,
                 }),
-                collapsed: false,
+                collapsed,
             });
     }
 
