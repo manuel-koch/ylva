@@ -484,13 +484,22 @@ entry, shows nothing.
   (`score: 60–90`). The parameter popup shows the score of the draft effort
   (falling back to `default`), and the selected row's detail area lists the
   full map with the active effort's score.
-- Keys are matched exactly after normalization (applied to catalog names
-  and file keys alike): lowercase; the vendor prefix up to the last `/`, a
-  `:suffix` routing tag, an `@…` suffix, a leading letters-only dotted vendor
-  prefix (`anthropic.claude-…`) and a trailing `-` plus 4, 6 or 8 digits or an
-  ISO date are dropped; `.` and `-` between digits are equal.
-  `gpt-5-mini` never inherits the `gpt-5` entry. If two keys normalize
+- Catalog names and file keys are normalized alike: whitespace is trimmed and
+  names are lowercased; the vendor prefix up to the last `/`, a `:suffix`
+  routing tag, an `@…` suffix, a leading letters-only dotted vendor prefix
+  (`anthropic.claude-…`) and a trailing `-` plus 4, 6 or 8 digits or an ISO
+  date are dropped; `.` and `-` between digits are equal. If two keys normalize
   equally, a warning is logged and the key sorting later wins.
+- Lookup tries the exact normalized catalog name first. If it has no score, it
+  progressively removes one leading hyphen-separated token and tries each
+  remaining suffix, longest first, through the single-token suffix. Each
+  candidate is compared to the full normalized score keys. For example,
+  `databricks-gpt-6-1-sol` tries the exact name, then `gpt-6-1-sol`,
+  `6-1-sol`, `1-sol`, and `sol`. The first matching key wins.
+- This fallback does not remove trailing tokens: `gpt-5-mini` does not inherit
+  a `gpt-5` score. However, a shorter suffix such as `mini` or `sol` can match
+  unrelated models or siblings, assigning an unintended score. Prefer specific
+  keys, including exact names when siblings need distinct scores.
 - The file is read when `/models` populates and cached for 30 minutes within a
   run. A broken file or invalid entry is logged and never blocks the picker;
   with `--strict-config` it is a startup error.

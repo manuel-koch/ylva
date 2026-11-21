@@ -238,8 +238,9 @@ See [configuration](./configuration.md),
   reads the file while rendering. The parsed file lives in a process-level
   cache with the catalog's 30-minute lifetime, keyed by path; startup uses the
   same cache so `--strict-config` validation and the picker share one load.
-- Names are matched exactly on the normalized form; there is deliberately no
-  prefix inheritance, so a sibling model never borrows another's rating.
+- Score lookup strips leading tokens only from the normalized catalog name,
+  not score keys. This retains distinctions in trailing model variants but can
+  assign an unrelated or sibling model's rating when a short suffix matches.
 - The file sits in the Ylva home to stay with the rest of the per-user state.
 
 ## Tool-result wire protocol

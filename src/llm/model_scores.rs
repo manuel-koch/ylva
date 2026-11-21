@@ -108,9 +108,20 @@ pub struct ModelScores {
 }
 
 impl ModelScores {
-    /// The score for a catalog model id, matched exactly on the normalized name.
+    /// The score for a catalog model id, preferring the longest normalized suffix.
     pub fn lookup(&self, model_id: &str) -> Option<&ModelScore> {
-        self.entries.get(&normalize_model_name(model_id))
+        let normalized = normalize_model_name(model_id);
+        let mut candidate = normalized.as_str();
+        loop {
+            if let Some(score) = self.entries.get(candidate) {
+                return Some(score);
+            }
+            let (_, suffix) = candidate.split_once('-')?;
+            if suffix.is_empty() {
+                return None;
+            }
+            candidate = suffix;
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -321,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_is_exact_on_the_normalized_name() {
+    fn lookup_matches_normalized_names_without_removing_trailing_tokens() {
         let load = parse_model_scores("\"anthropic/claude-opus-4.5\" = 90\n\"gpt-5\" = 80.5\n");
         assert!(load.problems.is_empty());
         assert_eq!(
@@ -333,6 +344,99 @@ mod tests {
             "80.5"
         );
         assert_eq!(load.scores.lookup("gpt-5-mini"), None);
+    }
+
+    #[test]
+    fn lookup_prefers_exact_normalized_name_over_matching_suffixes() {
+        let load =
+            parse_model_scores("\"vendor-gpt-6.1-sol\" = 90\n\"gpt-6.1-sol\" = 80\n\"sol\" = 70\n");
+        assert_eq!(
+            load.scores.lookup("Provider/VENDOR-GPT-6-1-SOL@eu"),
+            Some(&ModelScore::Plain(90.0))
+        );
+    }
+
+    #[test]
+    fn lookup_matches_suffix_after_removing_multiple_leading_tokens() {
+        let load = parse_model_scores("\"gpt-6.1-sol\" = 80\n");
+        assert_eq!(
+            load.scores.lookup("provider/region-vendor-gpt-6-1-sol"),
+            Some(&ModelScore::Plain(80.0))
+        );
+    }
+
+    #[test]
+    fn lookup_prefers_longest_matching_suffix() {
+        let load = parse_model_scores("\"gpt-6-1-sol\" = 80\n\"6-1-sol\" = 70\n\"sol\" = 60\n");
+        assert_eq!(
+            load.scores.lookup("provider/region-vendor-gpt-6-1-sol"),
+            Some(&ModelScore::Plain(80.0))
+        );
+    }
+
+    #[test]
+    fn lookup_matches_a_single_token_suffix() {
+        let load = parse_model_scores("sol = 60\n");
+        assert_eq!(
+            load.scores.lookup("provider/region-vendor-sol"),
+            Some(&ModelScore::Plain(60.0))
+        );
+    }
+
+    #[test]
+    fn lookup_does_not_remove_leading_tokens_from_score_keys() {
+        let load = parse_model_scores("\"vendor-gpt-6-1-sol\" = 90\n");
+        assert_eq!(load.scores.lookup("gpt-6-1-sol"), None);
+    }
+
+    #[test]
+    fn lookup_does_not_strip_tokens_from_sibling_score_keys() {
+        let load = parse_model_scores("\"alpha-gpt-6-1-sol\" = 90\n");
+        assert_eq!(load.scores.lookup("beta-gpt-6-1-sol"), None);
+    }
+
+    #[test]
+    fn lookup_allows_a_short_suffix_to_match_different_models() {
+        let load = parse_model_scores("sol = 60\n");
+        assert_eq!(
+            load.scores.lookup("alpha-sol"),
+            Some(&ModelScore::Plain(60.0))
+        );
+        assert_eq!(
+            load.scores.lookup("beta-sol"),
+            Some(&ModelScore::Plain(60.0))
+        );
+    }
+
+    #[test]
+    fn lookup_does_not_match_an_empty_suffix() {
+        let load = parse_model_scores("\"\" = 10\n");
+        assert_eq!(load.scores.lookup("model-"), None);
+    }
+
+    #[test]
+    fn lookup_matches_after_consecutive_hyphens() {
+        let load = parse_model_scores("sol = 60\n");
+        assert_eq!(
+            load.scores.lookup("vendor--sol"),
+            Some(&ModelScore::Plain(60.0))
+        );
+    }
+
+    #[test]
+    fn lookup_matches_reported_edenai_databricks_model() {
+        let load = parse_model_scores("\"gpt-6.1-sol\" = 80\n");
+        assert_eq!(
+            load.scores
+                .lookup("edenai/databricks/databricks-gpt-6-1-sol@eu"),
+            Some(&ModelScore::Plain(80.0))
+        );
+    }
+
+    #[test]
+    fn lookup_returns_none_when_no_suffix_has_a_score() {
+        let load = parse_model_scores("\"gpt-6-1-sol\" = 80\n");
+        assert_eq!(load.scores.lookup("provider/vendor-gpt-6-1-mini"), None);
     }
 
     #[test]

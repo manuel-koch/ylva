@@ -121,6 +121,59 @@ async fn lists_all_connections_once_with_favorites_allowlists_scores_and_blank_s
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn listing_displays_the_most_specific_model_score_suffix() {
+    let server = MockLlmServer::start_ollama_catalog(
+        vec![
+            "provider/VENDOR-GPT-6-1-SOL@eu".into(),
+            "provider/region-gateway-gpt-6-1-sol".into(),
+            "provider/other-sol".into(),
+            "provider/beta-gpt-6-1-mini".into(),
+        ],
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
+    let fixture = Fixture::new();
+    fixture.write_profile(
+        false,
+        "config.toml",
+        &connection("alpha", &server.base_url()),
+    );
+    fs::write(
+        fixture.home.path().join("model-scores.toml"),
+        "\"vendor-gpt-6.1-sol\" = 91\n\
+         \"gpt-6.1-sol\" = { low = 60, high = 80 }\n\
+         sol = 20\n\
+         \"alpha-gpt-6-1-mini\" = 66\n",
+    )
+    .unwrap();
+    let mut command = fixture.command(&["--color", "no", "models"]);
+    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
+        .await
+        .unwrap();
+    assert_code(&output, 0);
+    let text = String::from_utf8(output.stdout).unwrap();
+    for (model, expected) in [
+        ("provider/VENDOR-GPT-6-1-SOL@eu", Some("score: 91")),
+        ("provider/region-gateway-gpt-6-1-sol", Some("score: 60–80")),
+        ("provider/other-sol", Some("score: 20")),
+        ("provider/beta-gpt-6-1-mini", None),
+    ] {
+        let mut lines = text.lines();
+        assert!(
+            lines.any(|line| line.trim() == model),
+            "missing {model}: {text}"
+        );
+        let details = lines.next().expect("model details");
+        match expected {
+            Some(score) => assert!(details.contains(score), "{model}: {details}"),
+            None => assert!(!details.contains("score:"), "{model}: {details}"),
+        }
+    }
+    fixture.assert_read_only();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn all_flag_lists_models_the_allowlist_would_hide() {
     let server = MockLlmServer::start_ollama_catalog(
         vec!["allowed".into(), "forbidden".into()],

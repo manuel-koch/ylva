@@ -2251,6 +2251,59 @@ fn engine_warnings_are_empty_for_advertised_or_unstated_settings() {
 }
 
 #[test]
+fn picker_score_suffix_fallback_displays_the_most_specific_match() {
+    let scores = crate::llm::model_scores::parse_model_scores(
+        "\"vendor-gpt-6.1-sol\" = 91\n\
+         \"gpt-6.1-sol\" = { low = 60, high = 80 }\n\
+         sol = 20\n\
+         \"alpha-gpt-6-1-mini\" = 66\n",
+    );
+    assert!(scores.problems.is_empty());
+    let option = |model_id: &str| crate::llm::ProviderModelOption {
+        context_length_override: None,
+        max_output_tokens_override: None,
+        provider_connection: "connection".to_string(),
+        model: crate::llm::ModelInfo {
+            pricing: None,
+            score: None,
+            id: model_id.to_string(),
+            context_length: None,
+            max_output_tokens: None,
+            reasoning_evidence: crate::llm::ReasoningEvidence::Unknown,
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        },
+        reasoning_effort: None,
+    };
+    let mut models = vec![
+        option("provider/VENDOR-GPT-6-1-SOL@eu"),
+        option("provider/region-gateway-gpt-6-1-sol"),
+        option("provider/other-sol"),
+        option("provider/beta-gpt-6-1-mini"),
+    ];
+    super::super::models::attach_model_scores(&mut models, &scores.scores);
+    for (model, expected) in models.iter().zip([
+        Some("score: 91"),
+        Some("score: 60–80"),
+        Some("score: 20"),
+        None,
+    ]) {
+        let label = crate::tui_reducer_state::model_choice_parts(model);
+        assert_eq!(
+            label
+                .details
+                .iter()
+                .find(|detail| detail.starts_with("score: "))
+                .map(String::as_str),
+            expected,
+            "model {}",
+            model.model.id
+        );
+    }
+}
+
+#[test]
 fn attach_model_scores_matches_normalized_names_and_skips_unmatched_models() {
     let scores = crate::llm::model_scores::parse_model_scores("\"gpt-5\" = 80\n").scores;
     let option = |model_id: &str| crate::llm::ProviderModelOption {
