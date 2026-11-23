@@ -152,6 +152,11 @@ and `..` is applied after them, so `link/..` is judged relative to the
 symlink's target. Path tools can instead use configurable rule lists,
 including the opt-in `cross_filesystem` rule that matches paths on a
 different filesystem (device) than the sandbox root.
+Custom glob rules keep wildcards within one path component and never match
+dot-prefixed components unless the pattern spells the dot; only the bare `**`
+catch-all matches everything, and `auto_denied` globs with other wildcards are
+config errors — see
+[custom glob matching](./configuration.md#sandbox-tool-approval-rules).
 A profile-level `[tools.<name>]` or higher-precedence
 `[agents.<type>.tools.<name>]` explicit `rules` list fully replaces, rather
 than supplements, the lower-tier rules. Omitting `rules` inherits them, even

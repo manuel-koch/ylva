@@ -14,7 +14,7 @@
 
 //! Path expansion, canonicalization, device checks and path approval.
 
-use super::rules::ResolvedRule;
+use super::rules::{path_glob_matches, ResolvedRule};
 use super::{ApprovalCheck, NamedSandboxRule, SandboxContext};
 use std::path::{Path, PathBuf};
 
@@ -506,7 +506,7 @@ impl SandboxContext {
                             pattern,
                             verdict: rule_verdict,
                         } => {
-                            if pattern.matches(&path_str) {
+                            if path_glob_matches(pattern, &path_str) {
                                 verdict = Some(rule_verdict.clone());
                             }
                         }
@@ -548,7 +548,7 @@ impl SandboxContext {
         // evaluated last so they win regardless of configured_rules/the
         // default floor.
         for rule in &self.rules {
-            if rule.pattern.matches(&path_str) {
+            if path_glob_matches(&rule.pattern, &path_str) {
                 verdict = Some(rule.verdict.clone());
             }
         }

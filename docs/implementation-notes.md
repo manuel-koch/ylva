@@ -344,6 +344,11 @@ paths work in path tools and `bash`. See
 - `matches_dot_path` checks every component of the resolved absolute path
   without stripping either root (including hidden launch ancestors and paths
   outside the workspace). Enumeration keeps an explicit dot-path bypass.
+- Path globs go through `path_glob_matches` (`sandbox/rules.rs`), which
+  requires literal separators and literal leading dots. The `glob` crate's `**`
+  then skips dot-prefixed directories too, so the bare `**` pattern is
+  special-cased to match everything: the `--auto-approve-*` catch-all rules and
+  profile catch-alls must keep covering hidden paths.
 - `resolve_device` reads `st_dev` on every check (no cache, so remounts apply
   immediately); a nonexistent target uses its deepest existing canonicalized
   ancestor. No device on non-Unix.

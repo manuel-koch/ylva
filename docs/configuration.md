@@ -1245,6 +1245,84 @@ Each `rules` entry is one of:
 - A **custom glob rule**, `{ pattern = "...", verdict = "...", reason = "..." }`,
   matched against the canonicalized absolute path.
 
+**Custom glob matching.** The same matching applies to `read`, `write`,
+`edit`, `search` and `glob` rules:
+
+- `*`, `?` and `[...]` stay within one path component and never match `/`:
+  `/workspace/*.md` matches `/workspace/notes.md`, not `/workspace/sub/notes.md`.
+- `**` must be a whole path component (`/workspace/.**` is an invalid
+  pattern) and matches nested paths: `/workspace/**/*.md` matches
+  `/workspace/notes.md` and `/workspace/a/b/notes.md`.
+- No wildcard (`*`, `?`, `[...]` or `**`) matches a dot-prefixed component
+  unless the pattern spells its leading dot. `/workspace/*.md` does not match
+  `/workspace/.private.md`, and `/workspace/**/*.md` does not match
+  `/workspace/a/.b/notes.md`.
+- A spelled leading dot matches only that component.
+  `/workspace/.private/**/*.md` matches `/workspace/.private/notes.md` and
+  `/workspace/.private/sub/notes.md`, but not
+  `/workspace/.private/.nested/notes.md` or `/workspace/.private/.secret.md`.
+  `/workspace/.*` matches `/workspace/.env`.
+- Hidden ancestors, inside or outside the workspace, follow the same rule: a
+  wildcard cannot stand in for a hidden directory, so `/etc/*/app.toml` and
+  `/**/app.toml` do not match `/etc/.foo/app.toml`, while the explicit
+  `/etc/.foo/*.toml` does.
+- The bare `**` catch-all (exactly `**`) is the only exception: it matches
+  every path, hidden ones included. Variants such as `/workspace/**` or
+  `**/*` get no exception. The `--auto-approve-*` flags rely on the bare `**`.
+- `auto_denied` globs use the same matching, so a wildcard deny misses nested
+  and hidden paths it does not spell. To deny them, list each form
+  explicitly (e.g. `/workspace/*.secret`, `/workspace/**/*.secret`,
+  `/workspace/**/.*.secret`) or use the `dot_path`/`outside_workspace` named
+  rules.
+- Rule ordering (last match wins), the `dot_path` named rule, `glob`'s
+  `dot_ignore` and the root-only checks for `search` and `glob` are independent
+  of glob matching and unchanged.
+
+Examples (`✓` matches, `✗` does not):
+
+| Pattern                       | Path                            | Match |
+| ----------------------------- | ------------------------------- | ----- |
+| `/workspace/*`                | `/workspace/notes.md`           | ✓     |
+| `/workspace/*`                | `/workspace/sub/notes.md`       | ✗     |
+| `/workspace/*`                | `/workspace/.env`               | ✗     |
+| `/workspace/.*`               | `/workspace/.env`               | ✓     |
+| `/workspace/.*`               | `/workspace/.env/config`        | ✗     |
+| `/workspace/.*/*`             | `/workspace/.env/config`        | ✓     |
+| `/workspace/.env*`            | `/workspace/.env.local`         | ✓     |
+| `/workspace/?.md`             | `/workspace/a.md`               | ✓     |
+| `/workspace/?.md`             | `/workspace/.md`                | ✗     |
+| `/workspace/[a-c].md`         | `/workspace/b.md`               | ✓     |
+| `/workspace/[a-c].md`         | `/workspace/d.md`               | ✗     |
+| `/workspace/**`               | `/workspace/a/b/c.txt`          | ✓     |
+| `/workspace/**`               | `/workspace/a/.b/c.txt`         | ✗     |
+| `/workspace/**/.*/*`          | `/workspace/a/.b/c.txt`         | ✓     |
+| `/workspace/**`               | `/workspace/.env`               | ✗     |
+| `**/*.md`                     | `/workspace/a/notes.md`         | ✓     |
+| `**/*.md`                     | `/workspace/.d/notes.md`        | ✗     |
+| `**/.*/*.md`                  | `/workspace/.d/notes.md`        | ✓     |
+| `**/.*/*.md`                  | `/workspace/a/b/c/.d/notes.md`  | ✓     |
+| `/workspace/src/**/test_*.rs` | `/workspace/src/test_x.rs`      | ✓     |
+| `/workspace/src/**/test_*.rs` | `/workspace/src/a/b/test_x.rs`  | ✓     |
+| `/workspace/src/**/test_*.rs` | `/workspace/src/.git/test_x.rs` | ✗     |
+| `**` (bare catch-all)         | `/workspace/.env`               | ✓     |
+
+**Matching more explicitly.** To widen a rule, add patterns that spell what
+the wildcards skip; rules are independent, so list several:
+
+| Goal                                                          | Pattern                            |
+| ------------------------------------------------------------- | ---------------------------------- |
+| `.md` files one directory down, not deeper                    | `/workspace/*/*.md`                |
+| `.md` files at any depth (including directly in `/workspace`) | `/workspace/**/*.md`               |
+| Dotfiles at any depth in non-hidden directories               | `/workspace/**/.*`                 |
+| Everything below one hidden directory                         | `/workspace/.private/**`           |
+| …including its hidden subdirectories                          | add `/workspace/.private/.*/**`    |
+| Dotfiles inside hidden subdirectories                         | add `/workspace/.private/.*/**/.*` |
+| Every path, hidden ones included                              | the bare `**`                      |
+
+Each extra hidden level needs its own spelled-dot component; there is no
+pattern for "any depth, hidden or not" other than the bare `**`. To deny
+hidden paths wholesale, use the `dot_path` named rule instead of a glob.
+
 `verdict` is one of `"auto_approved"`, `"auto_denied"`, or
 `"user_approval_required"`; `reason` is optional and only used for
 `"auto_denied"`, defaulting to the named rule's built-in policy message (or a

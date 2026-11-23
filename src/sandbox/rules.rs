@@ -39,6 +39,19 @@ pub struct SandboxRule {
     pub pattern: Pattern,
 }
 
+/// Match `path` against a sandbox path glob: `*`, `?` and character classes
+/// do not cross `/`, and wildcards do not match a dot-prefixed component
+/// unless the pattern spells the leading dot. The bare `**` catch-all keeps
+/// matching every path, hidden ones included.
+pub(super) fn path_glob_matches(pattern: &Pattern, path: &str) -> bool {
+    const OPTIONS: glob::MatchOptions = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: true,
+    };
+    pattern.as_str() == "**" || pattern.matches_with(path, OPTIONS)
+}
+
 /// Default reason shown when the built-in (or a configured, reason-less)
 /// `outside_workspace` rule denies a path.
 const OUTSIDE_WORKSPACE_REASON: &str = "Access denied by security policy: path is outside the \

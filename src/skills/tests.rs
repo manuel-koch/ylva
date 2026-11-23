@@ -726,7 +726,12 @@ fn symlinked_files_validate_logical_names_and_broken_roots_and_files_warn() {
             reason: None,
         },
         crate::sandbox::SandboxRuleConfig::PathGlob {
-            pattern: "**/changed".into(),
+            pattern: target
+                .canonicalize()
+                .unwrap()
+                .join("changed")
+                .to_string_lossy()
+                .into_owned(),
             verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
             reason: None,
         },

@@ -1090,3 +1090,198 @@ fn auto_approve_catch_all_wins_over_configured_cross_filesystem_rule() {
         "the catch-all rule must win over a configured cross_filesystem deny"
     );
 }
+
+fn glob_rule_context(pattern: &str, verdict: ApprovalVerdictConfig) -> SandboxContext {
+    SandboxContext::new(make_sandbox(Path::new("/workspace")))
+        .with_configured_rules(vec![SandboxRuleConfig::PathGlob {
+            pattern: pattern.into(),
+            verdict,
+            reason: Some("matched".into()),
+        }])
+        .expect("valid sandbox fixture")
+}
+
+fn assert_glob_matches(pattern: &str, path: &str, expected: bool) {
+    let context = glob_rule_context(pattern, ApprovalVerdictConfig::AutoApproved);
+    let verdict = context.check_path(Path::new(path));
+    assert_eq!(
+        verdict.is_some(),
+        expected,
+        "pattern `{pattern}` vs `{path}`: {verdict:?}"
+    );
+}
+
+#[test]
+fn single_star_does_not_cross_path_separators() {
+    assert_glob_matches("/workspace/*.md", "/workspace/notes.md", true);
+    assert_glob_matches("/workspace/*.md", "/workspace/sub/notes.md", false);
+    assert_glob_matches("/workspace/?.md", "/workspace/a.md", true);
+    assert_glob_matches("/workspace/?.md", "/workspace/a/b.md", false);
+    assert_glob_matches("/workspace/[a-z]*", "/workspace/a/b", false);
+}
+
+#[test]
+fn double_star_matches_nested_paths() {
+    assert_glob_matches("/workspace/**/*.md", "/workspace/a/b/notes.md", true);
+    assert_glob_matches("/workspace/**/*.md", "/workspace/notes.md", true);
+}
+
+#[test]
+fn wildcards_do_not_match_hidden_components() {
+    assert_glob_matches("/workspace/*.md", "/workspace/.private.md", false);
+    assert_glob_matches("/workspace/**/*.md", "/workspace/.private/notes.md", false);
+    assert_glob_matches("/workspace/**/*.md", "/workspace/a/.b/notes.md", false);
+    assert_glob_matches(
+        "/workspace/*/notes.md",
+        "/workspace/.hidden/notes.md",
+        false,
+    );
+}
+
+#[test]
+fn explicit_leading_dot_matches_hidden_components() {
+    let pattern = "/workspace/.private/**/*.md";
+    assert_glob_matches(pattern, "/workspace/.private/notes.md", true);
+    assert_glob_matches(pattern, "/workspace/.private/sub/notes.md", true);
+    assert_glob_matches(pattern, "/workspace/.private/.nested/notes.md", false);
+    assert_glob_matches(pattern, "/workspace/.private/.secret.md", false);
+    assert_glob_matches("/workspace/.*", "/workspace/.env", true);
+}
+
+#[test]
+fn catch_all_rule_still_matches_hidden_paths() {
+    let context =
+        SandboxContext::new(make_sandbox(Path::new("/workspace"))).with_rule(SandboxRule {
+            verdict: ApprovalCheck::AutoApproved,
+            pattern: glob::Pattern::new("**").unwrap(),
+        });
+    for path in [
+        "/workspace/a/b.txt",
+        "/workspace/.env",
+        "/workspace/.d/.e/f",
+    ] {
+        assert_eq!(
+            context.check_path(Path::new(path)),
+            Some(ApprovalCheck::AutoApproved),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn wildcard_deny_globs_follow_the_same_matching_as_other_globs() {
+    let context = glob_rule_context("/workspace/*.secret", ApprovalVerdictConfig::AutoDenied);
+    assert!(matches!(
+        context.check_path(Path::new("/workspace/a.secret")),
+        Some(ApprovalCheck::AutoDenied { .. })
+    ));
+    for path in ["/workspace/sub/a.secret", "/workspace/.a.secret"] {
+        assert_eq!(context.check_path(Path::new(path)), None, "{path}");
+    }
+}
+
+#[test]
+fn wildcards_do_not_match_under_hidden_ancestors_outside_the_workspace() {
+    assert_glob_matches("/**/notes.md", "/elsewhere/.hidden/notes.md", false);
+    assert_glob_matches(
+        "/elsewhere/*/notes.md",
+        "/elsewhere/.hidden/notes.md",
+        false,
+    );
+    assert_glob_matches(
+        "/elsewhere/.hidden/*.md",
+        "/elsewhere/.hidden/notes.md",
+        true,
+    );
+}
+
+#[test]
+fn documented_glob_examples_hold() {
+    for (pattern, path, expected) in [
+        ("/workspace/*", "/workspace/notes.md", true),
+        ("/workspace/*", "/workspace/sub/notes.md", false),
+        ("/workspace/*", "/workspace/.env", false),
+        ("/workspace/.*", "/workspace/.env", true),
+        ("/workspace/.*", "/workspace/.env/config", false),
+        ("/workspace/.env*", "/workspace/.env.local", true),
+        ("/workspace/?.md", "/workspace/a.md", true),
+        ("/workspace/?.md", "/workspace/.md", false),
+        ("/workspace/[a-c].md", "/workspace/b.md", true),
+        ("/workspace/[a-c].md", "/workspace/d.md", false),
+        ("/workspace/**", "/workspace/a/b/c.txt", true),
+        ("/workspace/**", "/workspace/a/.b/c.txt", false),
+        ("/workspace/**", "/workspace/.env", false),
+        ("/workspace/**/*.md", "/workspace/a/b/notes.md", true),
+        ("**/*.md", "/workspace/a/notes.md", true),
+        ("**/*.md", "/workspace/.d/notes.md", false),
+        (
+            "/workspace/src/**/test_*.rs",
+            "/workspace/src/a/test_x.rs",
+            true,
+        ),
+        (
+            "/workspace/src/**/test_*.rs",
+            "/workspace/src/a/b/c/test_x.rs",
+            true,
+        ),
+        (
+            "/workspace/src/**/test_*.rs",
+            "/workspace/src/test_x.rs",
+            true,
+        ),
+        (
+            "/workspace/src/**/test_*.rs",
+            "/workspace/src/.git/test_x.rs",
+            false,
+        ),
+    ] {
+        assert_glob_matches(pattern, path, expected);
+    }
+}
+
+#[test]
+fn documented_alternatives_for_broader_matches_hold() {
+    for (pattern, path, expected) in [
+        ("/workspace/**/.*", "/workspace/a/b/.env", true),
+        ("/workspace/**/.*", "/workspace/.env", true),
+        ("/workspace/**/.*", "/workspace/.d/.env", false),
+        ("/workspace/.*/**", "/workspace/.d/a/b.txt", true),
+        ("/workspace/.*/**", "/workspace/.d/.e/b.txt", false),
+        ("/workspace/.*/**/.*", "/workspace/.d/.env", true),
+        ("/workspace/*/*.md", "/workspace/a/notes.md", true),
+        ("/workspace/*/*.md", "/workspace/a/b/notes.md", false),
+        ("/workspace/**/*.md", "/workspace/notes.md", true),
+        (
+            "/workspace/.private/**",
+            "/workspace/.private/a/b.txt",
+            true,
+        ),
+        (
+            "/workspace/.private/**",
+            "/workspace/.private/.n/b.txt",
+            false,
+        ),
+        (
+            "/workspace/.private/.*/**",
+            "/workspace/.private/.n/b.txt",
+            true,
+        ),
+    ] {
+        assert_glob_matches(pattern, path, expected);
+    }
+}
+
+#[test]
+fn spelled_dot_examples_and_invalid_recursive_component() {
+    assert_glob_matches("/workspace/.*/*", "/workspace/.env/config", true);
+    assert_glob_matches("**/.*.md", "/workspace/.d/notes.md", false);
+    assert_glob_matches("**/.*.md", "/workspace/a/.notes.md", true);
+    assert!(glob::Pattern::new("/workspace/.**").is_err());
+}
+
+#[test]
+fn hidden_directory_segment_examples() {
+    assert_glob_matches("/workspace/**/.*/*", "/workspace/a/.b/c.txt", true);
+    assert_glob_matches("**/.*/*.md", "/workspace/.d/notes.md", true);
+    assert_glob_matches("**/.*/*.md", "/workspace/a/b/c/.d/notes.md", true);
+}
