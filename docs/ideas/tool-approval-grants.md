@@ -13,13 +13,16 @@ use a workspace-local per-profile file; the exact schema is still open.
 1. Keep the existing approve-once and deny actions, including their default
    behavior. Reusable grants require an explicit choice.
 2. Offer a temporary grant or a persistent grant when the requested call has a
-   supported matcher. Otherwise offer only the existing one-time decision.
+   supported matcher. Otherwise offer only the existing one-time decision. A
+   Bash call with several commands gets one row per command (see *Compound
+   calls* below).
 3. Default to the requesting tool and its specific resource. A temporary grant
    defaults to the requesting agent; a persistent grant applies to all agent
    types and roles. The user can explicitly widen the resource, select
    additional compatible tools, or share a temporary grant with more agents.
    Let the user edit the proposed rule; reject an invalid rule or one that
-   does not match the current request, with an explanation.
+   does not match the current request, with an explanation. Lifetime is chosen
+   per grant; a Bash dialog chooses it per row (default temporary).
 4. Preview the exact matcher, affected tools and agents, lifetime, and
    consequences before confirmation. For a persistent grant, also show the
    file to be written, the resolved base and scope for any path matcher, and
@@ -128,6 +131,9 @@ an optional trailing `*` standing for zero or more additional arguments:
 | `foo bar *` | `foo bar`, `foo bar -a` | `foo baz` |
 | `foo -a *` | `foo -a`, `foo -a file` | `foo -b` |
 
+For `date ; pwd ; make foo`, a grant `make foo` matches only the third simple
+command. The others are judged separately, never by one grant for the line.
+
 Match whole argument boundaries, not raw string prefixes: `foo bar *` must not
 match `foo barcode`. The optional wildcard is only a trailing suffix, not an
 arbitrary glob or regular expression. Store the rule as a string, parse it
@@ -138,11 +144,82 @@ This grant syntax differs from existing configured Bash command rules: their
 trailing `*` means exactly one argument and `**` means one or more. Make the
 grant's zero-or-more meaning explicit in the preview and documentation.
 
-Do not grant pipelines, redirects, additional shell commands, command
-substitutions, or other forms whose complete simple-command shape cannot be
-established. In particular, `foo bar *` must not approve `foo bar; rm ...`.
-Unsupported or ambiguous syntax falls back to one-time approval rather than
-guessing. An effective Bash denial still wins.
+A grant never covers a pipeline, redirect, or command list as a whole. `foo bar *`
+must not approve `foo bar; rm ...`. Instead, split a call into its simple
+commands with the existing Bash command extractor and judge each on its own.
+
+#### Compound calls
+
+Show one approval dialog per Bash call with one row per analysable simple
+command that policy does not already cover (for example `date ; pwd ; make foo ;
+make bar` yields four rows). Each row has an editable single-line matcher and a
+three-way selector `off | temporary | persistent` (default `off`). Rows already
+`auto_approved` or already granted are read-only or collapsed into "N already
+allowed". The full command stays visible in the expanded Bash bubble; the dialog
+has no separate "show full command" control.
+
+- Every command must be covered by policy, an existing grant, or a selected
+  row. One effective `auto_denied` command denies the whole call before any
+  dialog; grants cannot override it.
+- Constructs the extractor cannot analyse (subshells, heredocs, command or
+  process substitutions, control flow, non-harmless redirects) get no row. When
+  a call has such parts, show one footnote: "Other parts of this call can only
+  be approved once." Selected rows still create grants for future calls; the
+  unanalysable parts never become grantable and always need the one-time
+  approval. If nothing is analysable, show no checklist and no footnote.
+- Confirming means "run this call and save the selected grants". If every
+  uncovered command has a selected row, the call runs without a separate
+  approve-once. Otherwise it runs once for the remainder. Deny saves nothing. A
+  failed persistent save leaves the approval pending.
+- Each row has its own lifetime. A temporary grant defaults to the requesting
+  agent instance; a persistent grant applies per profile and workspace.
+
+#### Proposing a matcher
+
+Propose the leading tokens verbatim, flags included (`git log --oneline *`,
+`make -j4 foo`), capped at four tokens. Stop at the first token that is
+path-like, quoted, or contains a glob or expansion, and end the proposal with
+the trailing `*`. Ylva has no per-program option grammar, so `-n 5` is not
+understood as a flag plus value; the user edits the proposal as needed. Show
+the matcher on one line, truncated with `…`; reject a matcher that contains a
+newline.
+
+The program token is matched literally as written: `make foo` does not match
+`/usr/bin/make foo` or `./make foo`, and no `PATH` resolution or path
+normalization applies. A program given as a path is grantable only as that
+exact literal path. Environment is not part of the match, nor is the working
+directory; `cd`, `pushd`, `export`, and `source` are non-grantable shell-state
+commands, and the preview warns that the working directory is not matched.
+
+#### Non-grantable rows
+
+Keep a small static table in code (not configuration) of rows that never get a
+grant, even if a user types one:
+
+- Interpreters with inline-code flags: `python`/`python3 -c`, `node -e|-p`,
+  `perl`/`ruby -e`, `php -r`, `sh`/`bash`/`zsh -c`. Do not parse script
+  content. Interpreter-plus-file rows (`python script.py *`) are grantable but
+  marked wider, because the file's content can change later.
+- Wrappers that run another command: `env`, `xargs`, `sudo`, `nohup`, `time`,
+  `timeout`, `find -exec`, `watch`. Do not unwrap them.
+- Destructive programs (`rm`, `dd`, `mkfs`, `chmod`, `chown`, `mv`) with a
+  trailing `*`; exact-argument grants stay allowed.
+- Rows with environment-assignment prefixes (`FOO=1 make foo`) or `$VAR`/`~` in
+  the matched tokens.
+
+#### Editing a matcher
+
+Accept an edited matcher only if it parses as a literal program, literal
+arguments, and an optional trailing `*` (no other glob, regex, or expansion);
+it matches the row's actual command; and its program token is unchanged (a bare
+`*` or wildcard program is rejected). Re-apply the non-grantable table to the
+edited string, so `python script.py` → `python *` is rejected. An edit may
+narrow or widen the grant within the same program (`make foo` → `make *` is
+legitimate); the preview marks a wider matcher as a wider scope. An edit
+changes only the stored grant, never the call that runs now.
+
+Unsupported or ambiguous syntax outside these rules falls back to one-time
+approval rather than guessing. An effective Bash denial still wins.
 
 This matcher is deliberately simpler and potentially broader than the existing
 argument-aware Bash rules. Even one matched program can invoke other programs,
@@ -314,6 +391,10 @@ tool = "bash"
 rule = "git log *"
 
 [[grants]]
+tool = "bash"
+rule = "rm -f build.log"
+
+[[grants]]
 tool = "load_skill"
 name = "planning"
 rule = "./.agents/skills/planning/SKILL.md"
@@ -329,11 +410,10 @@ tool = "web_search"
 tool = "spawn_subagent"
 ```
 
-Here the read rules are relative to the workspace root, the `glob` rule
-matches its traversal root, and `git log *` allows zero or more extra
-arguments. A `load_skill` entry includes both its skill name and source path.
-Persistent entries cover current and future agent types and both roles, which
-the approval preview must make clear.
+Here the read rules are relative to the workspace root, the `glob` rule matches its traversal root,
+`git log *` allows zero or more extra arguments, and `rm -f build.log` allows exactly that command.
+A `load_skill` entry includes both its skill name and source path. Persistent entries cover current
+and future agent types and both roles, which the approval preview must make clear.
 
 Require enough fields to determine the exact scope; missing or invalid fields
 must not broaden it. When workspace grants are enabled, reject malformed files,
@@ -410,9 +490,15 @@ the next root conversation.
   workspaces, literal expansion and glob characters, absolute paths, and
   relative targets that escape the workspace, including through symlinks.
 - Exercise Bash exact and suffix-wildcard matches, argument boundaries, and
-  quoted literal wildcards, plus rejection of pipelines, redirects, multiple
-  commands, and substitutions. An unrepresentable command remains
-  approval-required.
+  quoted literal wildcards. Exercise compound calls: one row per uncovered
+  simple command, every command covered before the call runs, an `auto_denied`
+  command denying the whole call, read-only rows for covered commands, the
+  footnote and approve-once requirement for unanalysable parts, and the
+  confirm action saving grants while running the call. Exercise the
+  non-grantable table (inline-code interpreters, wrappers, destructive
+  wildcards, env prefixes, shell-state commands), literal program matching
+  (`/usr/bin/make`), and edited-matcher validation (program change, non-match,
+  newline, widening). An unrepresentable command remains approval-required.
 - Exercise web origin scheme/host/effective-port matching, different paths and
   queries, backend changes for `web_search`, redirects, explicit denials, and
   private-address checks. A spawn grant must preserve existing spawn limits.
@@ -436,4 +522,7 @@ the next root conversation.
 
 When implementing, update `docs/features.md`, `docs/configuration.md`, and
 `docs/persistence.md`, `docs/cli-options.md`, and the workspace-trust ADR;
-update `docs/keybindings.md` for any new controls.
+update `docs/keybindings.md` for the per-row `off | temporary | persistent`
+selector and matcher editing, and any other new controls. Keep the static
+non-grantable table in one code location, covered by tests, and document it in
+`docs/configuration.md`.
