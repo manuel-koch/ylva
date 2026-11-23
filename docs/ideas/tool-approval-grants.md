@@ -77,10 +77,13 @@ assuming every request with the same verdict is grantable.
 - Store a path matcher as a `rule` glob, not a path plus an
   `include_descendants` flag. Match the entire resolved target path; the
   pattern describes future calls as well as currently existing files.
-- `*` and `?` match within a single path component, `**` spans directories,
-  and character classes use the existing glob syntax. Wildcards do not match a
-  dot-prefixed component unless its leading dot is explicit in the pattern.
-  Automatically generated exact rules must escape literal glob metacharacters.
+- Grant rules use the existing custom-glob matcher documented in
+  [sandbox tool-approval rules](../configuration.md#sandbox-tool-approval-rules):
+  component-aware `*`/`?`/`[...]`, whole-component `**`, and the same
+  dot-component rules. The bare `**` catch-all is an invalid grant rule
+  (variants such as `**/*` stay valid); blanket-everything approval stays with
+  the `--auto-approve-*` flags. Automatically generated exact rules must
+  escape literal glob metacharacters.
 - `read`, `write`, and `edit` match the resolved file path, not offsets,
   contents, or patches. A grant for one tool does not authorize either of the
   other tools unless the user explicitly includes it.
@@ -115,21 +118,20 @@ effective denial still wins.
 
 The relative-path boundary checks the matched target or traversal root, not
 every descendant of a `search` or `glob` traversal. Existing configured sandbox
-path rules are evaluated first and currently use different glob defaults:
-their `*` can cross path separators. The grant matcher must use explicit
-component-aware options rather than silently inheriting those defaults.
+path rules are evaluated first and share the same matcher.
 
 ### Bash
 
 Match a single simple command by its literal command and argument prefix, with
-an optional trailing `*` standing for zero or more additional arguments:
+an optional trailing `*` standing for one or more additional arguments. The
+bare command without the suffix is a distinct, narrower grant:
 
 | Grant | Matches | Does not match |
 | --- | --- | --- |
 | `foo` | `foo` | `foo bar` |
 | `foo bar` | `foo bar` | `foo bar -a` |
-| `foo bar *` | `foo bar`, `foo bar -a` | `foo baz` |
-| `foo -a *` | `foo -a`, `foo -a file` | `foo -b` |
+| `foo bar *` | `foo bar -a`, `foo bar -a -b` | `foo bar`, `foo baz` |
+| `foo -a *` | `foo -a file`, `foo -a file x` | `foo -a`, `foo -b` |
 
 For `date ; pwd ; make foo`, a grant `make foo` matches only the third simple
 command. The others are judged separately, never by one grant for the line.
@@ -140,9 +142,17 @@ arbitrary glob or regular expression. Store the rule as a string, parse it
 without executing it, and preserve quoting so a quoted literal `*` argument is
 distinguishable from the suffix wildcard.
 
-This grant syntax differs from existing configured Bash command rules: their
-trailing `*` means exactly one argument and `**` means one or more. Make the
-grant's zero-or-more meaning explicit in the preview and documentation.
+This grant syntax differs from existing configured Bash command rules: a
+configured trailing `*` means exactly one argument and `**` means one or more,
+while a grant's trailing `*` means one or more arguments and a `**` token is an
+invalid grant matcher. Make the grant's one-or-more meaning explicit in the
+preview and documentation.
+
+As with a configured trailing-`*` command rule, a grant does not satisfy an
+`unquoted_glob` or `unquoted_brace_expansion` verdict: `git log *` does not
+approve `git log *.md`, which stays approval-required. A quoted literal
+argument is covered (`git log -- '*.md'`). Outside the trailing suffix, a grant
+matcher cannot contain an unquoted glob or brace character at all.
 
 A grant never covers a pipeline, redirect, or command list as a whole. `foo bar *`
 must not approve `foo bar; rm ...`. Instead, split a call into its simple
@@ -176,13 +186,15 @@ has no separate "show full command" control.
 
 #### Proposing a matcher
 
-Propose the leading tokens verbatim, flags included (`git log --oneline *`,
+Propose the leading tokens verbatim, flags included (`git log --oneline`,
 `make -j4 foo`), capped at four tokens. Stop at the first token that is
-path-like, quoted, or contains a glob or expansion, and end the proposal with
-the trailing `*`. Ylva has no per-program option grammar, so `-n 5` is not
-understood as a flag plus value; the user edits the proposal as needed. Show
-the matcher on one line, truncated with `…`; reject a matcher that contains a
-newline.
+path-like, quoted, or contains a glob or expansion. Append the trailing `*`
+only when tokens were dropped — by the cap or a stop token — so a short
+all-literal command proposes an exact matcher (`git status`) that also covers
+the row's own command. Ylva has no per-program option grammar, so `-n 5` is
+not understood as a flag plus value; the user edits the proposal as needed.
+Show the matcher on one line, truncated with `…`; reject a matcher that
+contains a newline.
 
 The program token is matched literally as written: `make foo` does not match
 `/usr/bin/make foo` or `./make foo`, and no `PATH` resolution or path
@@ -215,7 +227,9 @@ it matches the row's actual command; and its program token is unchanged (a bare
 `*` or wildcard program is rejected). Re-apply the non-grantable table to the
 edited string, so `python script.py` → `python *` is rejected. An edit may
 narrow or widen the grant within the same program (`make foo` → `make *` is
-legitimate); the preview marks a wider matcher as a wider scope. An edit
+legitimate); the preview marks a wider matcher as a wider scope. A suffix edit
+must still match the row: from `make foo`, `make foo *` is rejected because it
+requires one or more further arguments; widen as `make *` instead. An edit
 changes only the stored grant, never the call that runs now.
 
 Unsupported or ambiguous syntax outside these rules falls back to one-time
@@ -411,7 +425,8 @@ tool = "spawn_subagent"
 ```
 
 Here the read rules are relative to the workspace root, the `glob` rule matches its traversal root,
-`git log *` allows zero or more extra arguments, and `rm -f build.log` allows exactly that command.
+`git log *` allows one or more extra arguments (a bare `git log` needs its own exact rule), and
+`rm -f build.log` allows exactly that command.
 A `load_skill` entry includes both its skill name and source path. Persistent entries cover current
 and future agent types and both roles, which the approval preview must make clear.
 
@@ -488,17 +503,21 @@ the next root conversation.
   descendant-check limitations. Test component-aware `*` versus `**`, explicit
   hidden paths, root-relative paths from a nested launch directory, moved
   workspaces, literal expansion and glob characters, absolute paths, and
-  relative targets that escape the workspace, including through symlinks.
-- Exercise Bash exact and suffix-wildcard matches, argument boundaries, and
-  quoted literal wildcards. Exercise compound calls: one row per uncovered
+  relative targets that escape the workspace, including through symlinks, and
+  reject the bare `**` catch-all as an invalid grant rule.
+- Exercise Bash exact and suffix-wildcard matches, the one-or-more suffix
+  (`make *` does not cover a bare `make`), argument boundaries, quoted literal
+  wildcards, and the `unquoted_glob`/`unquoted_brace_expansion` carve-out.
+  Exercise compound calls: one row per uncovered
   simple command, every command covered before the call runs, an `auto_denied`
   command denying the whole call, read-only rows for covered commands, the
   footnote and approve-once requirement for unanalysable parts, and the
   confirm action saving grants while running the call. Exercise the
   non-grantable table (inline-code interpreters, wrappers, destructive
   wildcards, env prefixes, shell-state commands), literal program matching
-  (`/usr/bin/make`), and edited-matcher validation (program change, non-match,
-  newline, widening). An unrepresentable command remains approval-required.
+  (`/usr/bin/make`), and edited-matcher validation (program change, non-match
+  including a suffix that no longer matches the row, newline, widening). An
+  unrepresentable command remains approval-required.
 - Exercise web origin scheme/host/effective-port matching, different paths and
   queries, backend changes for `web_search`, redirects, explicit denials, and
   private-address checks. A spawn grant must preserve existing spawn limits.
