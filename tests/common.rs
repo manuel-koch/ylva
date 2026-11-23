@@ -29,6 +29,17 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use ylva::{EngineConfig, UiUpdate};
 
+/// Compute the lowercase hexadecimal SHA-256 digest of fixture or output bytes.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let mut hexadecimal = String::new();
+    for byte in Sha256::digest(bytes) {
+        write!(&mut hexadecimal, "{byte:02x}").unwrap();
+    }
+    hexadecimal
+}
+
 /// Spawn the real `ylva` binary in headless mode against a mock provider.
 ///
 /// The child's environment is isolated with an allowlist — `env_clear()`

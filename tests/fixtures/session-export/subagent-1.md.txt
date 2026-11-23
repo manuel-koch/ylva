@@ -1,0 +1,11 @@
+# Verify server port
+
+Parent: [Session](session.md#ylva-start:subagent-1)
+
+## User
+
+Check the configured server port.
+
+## Assistant
+
+The server uses port 8080.

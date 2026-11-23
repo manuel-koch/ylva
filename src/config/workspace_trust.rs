@@ -248,11 +248,7 @@ fn fingerprint(workspace_root: &Path, files: &[PathBuf]) -> Result<String, Works
         hasher.update((contents.len() as u64).to_le_bytes());
         hasher.update(&contents);
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>())
+    Ok(crate::hexadecimal::hex_digest(&hasher.finalize()))
 }
 
 /// Decide whether the workspace's configuration for `profile_name` may be used.

@@ -51,6 +51,8 @@ mod archive;
 mod clone;
 mod error;
 mod event;
+#[cfg(unix)]
+mod export_snapshot;
 mod maintenance;
 mod project_identity;
 mod replay;
@@ -64,8 +66,11 @@ pub use event::{
     now_timestamp, CompactionEffect, CompactionRecord, ModelParameters, SessionMeta, StoreEvent,
     SubagentRunRecord, EVENT_VERSION, SCHEMA_VERSION, TITLE_MAX_CHARS,
 };
+#[cfg(unix)]
+pub use export_snapshot::{ExportCapture, ExportReader, ExportRepresentation, SnapshotError};
 pub use maintenance::{MaintenanceAction, MaintenanceReport, SessionSelection};
 pub use replay::{ModelChangeRecord, SessionState, SessionSummary};
+pub(crate) use session_file::session_is_live;
 pub use subagent::SubagentSessionHeader;
 
 use session_file::{
@@ -103,11 +108,7 @@ pub fn project_key(cwd: &Path) -> String {
     let key_path = project_identity::equivalent_main_worktree_path(&canonical).unwrap_or(canonical);
     let mut hasher = Sha256::new();
     hasher.update(key_path.as_os_str().as_encoded_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
+    crate::hexadecimal::hex_digest(&hasher.finalize())
 }
 
 /// Directory holding every session file of one project.

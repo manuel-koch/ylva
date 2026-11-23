@@ -25,6 +25,7 @@ pub mod context_breakdown;
 pub(crate) mod conversation_render_cache;
 pub(crate) mod events;
 pub(crate) mod exit_code;
+pub(crate) mod hexadecimal;
 pub(crate) mod highlight;
 pub(crate) mod home_relative_path;
 pub(crate) mod http;
@@ -50,8 +51,12 @@ pub(crate) mod slash_command;
 pub mod startup;
 pub(crate) mod stop_signal;
 pub mod store;
+#[cfg(unix)]
+pub(crate) mod strict_json;
 pub mod system_prompt_origins;
 pub(crate) mod theme;
+#[cfg(unix)]
+pub(crate) mod trufflehog;
 pub mod tui_driver;
 pub mod tui_reducer_state;
 pub mod tui_render_state;

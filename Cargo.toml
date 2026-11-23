@@ -64,14 +64,17 @@ serde_ignored = "0.1.14"
 serde-saphyr = "2"
 toml_edit = "0.25.17"
 time = { version = "0.3", features = ["formatting", "macros", "parsing", "local-offset", "large-dates"] }
+tempfile = "3"
 
 [build-dependencies]
 time = { version = "0.3", features = ["formatting", "macros"] }
 
 [dev-dependencies]
 log = "0.4"
-tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.32", features = ["signal", "process", "fs"] }
+icu_casemap = "2"
+icu_normalizer = "2"
+nix = { version = "0.32", features = ["signal", "process", "fs", "dir"] }
+signal-hook = "0.3"

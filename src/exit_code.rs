@@ -27,32 +27,37 @@ pub enum ExitCode {
     /// General execution error, such as a provider or stream failure, or a
     /// partial session-maintenance failure.
     GeneralError = 1,
-    /// Usage or startup error. No run started.
+    /// Usage, startup, or command setup error.
     UsageError = 2,
     /// An approval was required and denied.
     ApprovalDenied = 3,
-    /// The user interrupted the run (SIGINT), following the shell convention `128 + 2`.
+    /// The TUI restored the terminal and exited immediately on SIGHUP.
+    Hangup = 129,
+    /// SIGINT or SIGTERM interrupted the run, using the shell convention `128 + 2`
+    /// for both.
     Interrupted = 130,
 }
 
 impl ExitCode {
     /// Every code, in the order the help epilog lists them.
-    pub const ALL: [ExitCode; 5] = [
+    pub const ALL: [ExitCode; 6] = [
         ExitCode::Success,
         ExitCode::GeneralError,
         ExitCode::UsageError,
         ExitCode::ApprovalDenied,
+        ExitCode::Hangup,
         ExitCode::Interrupted,
     ];
 
     /// Meaning of this code, shown in the `--help` epilog.
     pub const fn description(self) -> &'static str {
         match self {
-            ExitCode::Success => "Successful run",
+            ExitCode::Success => "Success",
             ExitCode::GeneralError => "General execution error",
-            ExitCode::UsageError => "Usage or startup error; no run started",
+            ExitCode::UsageError => "Usage, startup, or command setup error",
             ExitCode::ApprovalDenied => "Approval required but denied",
-            ExitCode::Interrupted => "User interruption (SIGINT)",
+            ExitCode::Hangup => "SIGHUP in the TUI",
+            ExitCode::Interrupted => "User interruption (SIGINT or SIGTERM)",
         }
     }
 }
@@ -82,6 +87,7 @@ mod tests {
         assert_eq!(u8::from(ExitCode::GeneralError), 1);
         assert_eq!(u8::from(ExitCode::UsageError), 2);
         assert_eq!(u8::from(ExitCode::ApprovalDenied), 3);
+        assert_eq!(u8::from(ExitCode::Hangup), 129);
         assert_eq!(u8::from(ExitCode::Interrupted), 130);
     }
 
@@ -90,7 +96,7 @@ mod tests {
         let mut values: Vec<u8> = ExitCode::ALL.iter().map(|code| u8::from(*code)).collect();
         values.sort_unstable();
         values.dedup();
-        assert_eq!(values, vec![0, 1, 2, 3, 130]);
+        assert_eq!(values, vec![0, 1, 2, 3, 129, 130]);
     }
 
     #[test]

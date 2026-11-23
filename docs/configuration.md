@@ -517,7 +517,8 @@ risks and limits.
 ### Managing profiles and shims
 
 `ylva profile` creates, lists, edits, and deletes profile directories. The
-actions, marks, and exit codes are in [profile commands](cli-options.md#profile-commands).
+actions and marks are in [profile commands](cli-options.md#profile-commands).
+See [`profile` exit codes](cli-options.md#profile-exit-codes) for outcomes.
 `profile list` shows the current workspace's profiles and the Ylva home's
 together, in separate groups (workspace first), with home profiles shadowed by the
 workspace marked.

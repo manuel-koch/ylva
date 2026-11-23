@@ -64,21 +64,28 @@ them explicitly, or `--color=yes` to force them even for non-terminal output,
 
 ## Exit codes
 
-Every `ylva` process ends with exactly one of these codes. The table covers chat
-runs in headless and TUI mode, the `ylva session`, `ylva profile`, and `ylva skill`
-subcommands, and immediate TUI termination on SIGHUP. The `--help` epilog lists
-run and subcommand outcomes, generated from the same source.
+These are the exit codes Ylva intentionally returns. The top-level `--help`
+summarizes them. Shell-reported statuses for unhandled signals or failures to
+launch the executable are not Ylva exit codes.
 
-| Code | Meaning | Examples |
-| --- | --- | --- |
-| `0` | Successful run | The response finished, and no error, interruption, or approval denial was recorded in the latest turn. `--help` and `--version` also exit `0`. |
-| `1` | General execution error | A provider or stream failure, a root-level error such as the tool-use iteration cap, an I/O failure while a run is in progress, a partial `ylva session` maintenance failure, or a non-zero exit from the editor run by `ylva profile edit`. |
-| `2` | Usage or startup error; no run started | An unknown flag, a missing flag value, a `--log-file` that cannot be opened, an unresolvable profile or `--agent`, an unknown `--conversation-id`, a failing `init`, or a `ylva profile` refusal such as an invalid name, an existing profile without `--force`, or a broken `config.toml` in scope. |
-| `3` | Approval required but denied | A tool needed approval and was denied. Headless mode cannot ask, so it denies every such call; in the TUI a user denial counts too. The run continues after a denial. |
-| `129` | SIGHUP in the TUI | The TUI restores the terminal and exits immediately. Headless CLI mode does not handle SIGHUP. |
-| `130` | User interruption (SIGINT or SIGTERM) | An external SIGINT or SIGTERM that aborts the run: ctrl-c in headless mode, or a signal to the TUI in any state. `130` is the shell convention `128 + 2`. |
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | General execution error |
+| `2` | Usage, startup, or command setup error |
+| `3` | Approval required but denied |
+| `129` | SIGHUP in the TUI |
+| `130` | User interruption (SIGINT or SIGTERM) |
 
-When several outcomes occur in one run, the highest-precedence one sets the code:
+### Chat exit codes
+
+Chat startup errors such as an unresolvable profile or agent type, an unknown
+`--conversation-id`, or a `--log-file` that cannot be opened return `2`. After
+startup, provider or stream failures, a root-level tool-use iteration cap, and
+other execution errors return `1`. A denied tool approval counts as `3` but
+does not stop the run; headless mode denies approvals it cannot ask for.
+
+When several outcomes occur in one chat run, the highest-precedence one sets the code:
 `130`, then `1`, then `3`, then `0`. A usage or startup error (`2`) ends the
 process before a run starts, so it never competes with them. TUI SIGHUP is an
 immediate exit with code `129`, outside this run-outcome precedence.
@@ -93,7 +100,73 @@ steer joins the running turn. ctrl-c and Esc stop a turn without setting `130`,
 because ctrl-c is also how the TUI quits. An external SIGINT or SIGTERM always sets
 `130` in the TUI, in any state: it quits an idle TUI at once, and it stops a running
 turn (including a live subagent) before quitting. The TUI then restores the
-terminal and prints the resume hint, as on every other TUI exit.
+terminal and prints the resume hint, as on every other TUI exit. Both handled
+signals use `130`, the shell convention `128 + 2` for SIGINT.
+
+### Subcommand exit codes
+
+Invalid CLI arguments return `2` regardless of command. Successful `--help`,
+`help [COMMAND]`, and `--version` requests return `0`.
+
+#### `connect` exit codes
+
+These apply to `copilot`, `edenai`, `ollama`, and `openrouter`.
+
+| Code | Outcome |
+| --- | --- |
+| `0` | Connection setup succeeds. |
+| `2` | Setup fails, including login, configuration, or write failures. |
+
+#### `init` exit codes
+
+| Code | Outcome |
+| --- | --- |
+| `0` | Starter-file setup succeeds. |
+| `2` | Starter-file setup fails. |
+
+#### `models` exit codes
+
+| Code | Outcome |
+| --- | --- |
+| `0` | At least one catalog responds, even if empty, or `--only-engines` lists successfully. |
+| `1` | All catalogs fail, or writing results or catalog diagnostics fails. |
+| `2` | Profile or command setup fails. |
+
+#### `profile` exit codes
+
+| Code | Outcome |
+| --- | --- |
+| `0` | The operation succeeds, including an empty `list`. |
+| `1` | The editor launched by `edit` exits unsuccessfully. |
+| `2` | The operation is refused or fails with an I/O error, including failure to start the editor. `shims` also returns this code on non-Unix platforms. |
+
+#### `session` exit codes
+
+| Command | Code | Outcome |
+| --- | --- | --- |
+| `list` | `0` | Listing succeeds, including an empty project or per-transcript warnings. |
+| `list` | `2` | Listing fails. |
+| `delete`, `compress`, `decompress` | `0` | Success, including no-ops and successful dry runs. |
+| `delete`, `compress`, `decompress` | `1` | One or more targets or groups fail. |
+| `delete`, `compress`, `decompress` | `2` | Invalid selector, unknown explicit ID, or command-level failure. |
+| `export` | `0` | Success. Intentional media or Base64 omissions and incomplete-tail warnings do not by themselves fail an export. |
+| `export` | `1` | A source is unavailable, discovery is incomplete, content is withheld, or execution fails. Independent outputs can still succeed. |
+| `export` | `2` | Invalid arguments or layout, scanner setup failure, unsupported platform, or a destination conflict found in preflight. No transcript or manifest is published. |
+| `export` | `130` | SIGINT or SIGTERM interrupts export. Work stops and any active scanner is reaped. |
+
+#### `skill` exit codes
+
+| Code | Outcome |
+| --- | --- |
+| `0` | `list` succeeds, including an empty result or discovery warnings. |
+| `2` | `list` fails. |
+
+#### `trust` exit codes
+
+| Code | Outcome |
+| --- | --- |
+| `0` | Trust or revocation succeeds. |
+| `2` | Workspace resolution or the operation fails. |
 
 ## Skill commands
 
@@ -244,17 +317,135 @@ All external/configured text and diagnostics are terminal-safe single-line text
 before intentional styling; sensitive credentials/endpoint details are not exposed.
 Model names render in bold when colors are enabled.
 
-Exit codes: `0` when at least one queried connection answered, including an
-empty catalog; partial failures produce stderr warnings naming failed connections.
-`1` means every connection failed or a runtime output/diagnostic write failed;
-`2` means a usage or startup error. The command makes no profile, favorite or
-selection writes and opens no session.
+Partial failures produce stderr warnings naming failed connections. The command
+makes no profile, favorite or selection writes and opens no session. See
+[`models` exit codes](#models-exit-codes).
 
 See [configuration](configuration.md#top-level-profile-fields) for how provider
 connections and their model policies are configured, and
 [`/models`](features.md#slash-commands) for the in-session picker.
 
 ## Session commands
+
+Session commands run before profile loading, workspace trust checks, or
+model-provider initialization and do not read prompt input from stdin.
+
+### Exporting sessions
+
+`ylva session export [OPTIONS] <UUID>...` reads active or inactive transcripts
+from the same project as `ylva session list`, including sessions shared by
+linked git worktrees. It accepts explicit root or subagent UUIDs, not `--all`
+or `--before`. Recorded subagents are included recursively by default.
+`--no-subagents` exports only the explicit UUIDs; it does not filter out
+parent-side calls or results. Repeated UUID arguments are deduplicated.
+
+Export is read-only and does not take the session's writer lock. It warns on
+stderr that exports of active sessions or subagents may be partial: each
+snapshot includes only what was saved when that transcript was captured.
+Parent and subagent snapshots may be taken at different times, and subagents
+not yet recorded in the parent snapshot may be absent. The warning does not
+mean Ylva detected an active session and does not change the exit status.
+
+Set `session_id` to a UUID from the listing. For example:
+
+```shell
+ylva session export --no-subagents "$session_id"
+ylva session export -f jsonl -o 'exports/{session_id}' --manifest manifest.json "$session_id"
+ylva session export --no-subagents -f jsonl --raw -o recovery.jsonl "$session_id"
+```
+
+`-f`/`--format` accepts `md` (the default) or `jsonl`. By default both formats
+are sanitized. Install a trusted local
+[TruffleHog](https://github.com/trufflesecurity/trufflehog#installation)
+executable separately. `trufflehog --version` should report its version, and
+the executable must be on an absolute `PATH` entry and not writable by group
+or others. Ylva checks the JSON stdin interface at startup, uses the same
+executable throughout, disables verification, updates and ignore tags, and
+treats scan errors as failures. Ylva never installs the scanner or falls back
+to raw export. Review sanitized exports before sharing; no scanner can prove
+that a transcript is free of secrets.
+
+`--raw` skips scanning and redaction, needs no scanner, and warns on stderr.
+Only raw JSONL copies the captured logical bytes exactly, including any
+incomplete tail. Both Markdown modes omit typed media; sanitized formats
+also omit known Base64 `write` and `read` payloads and previews, even when
+they encode text. Markdown groups unambiguous call/result pairs and links
+bundled parents and children. Its text may contain active HTML, links, or
+remote images; use a trusted viewer with those features disabled.
+
+`-o`/`--output PATH` determines the layout after discovery:
+
+- A leading `~/` resolves under `$HOME`, even when quoted. This requires an
+  absolute `HOME`.
+- For one unique included UUID, omit `-o` for stdout or use `-o FILE`.
+- For multiple included UUIDs, including unavailable children, `-o` is
+  required. With one root, `-o DIR` names its bundle. With multiple roots,
+  `DIR/session-1/`, `DIR/session-2/`, and so on follow the first appearance of
+  each requested UUID.
+- A path containing `{project_key}`, `{session_id}`, `{session_title}`, or `{format}`
+  is a template for each root's bundle directory, even with one transcript.
+  Quote the template to pass it literally to Ylva. `{format}` is `md` or `jsonl`.
+- `{session_title}` uses the root's title from the captured transcript, after
+  redaction unless `--raw` is set. It uses up to 64 lowercase ASCII letters,
+  digits and hyphens, replacing runs of other characters with one hyphen and
+  trimming leading and trailing separators. Missing, withheld, and unusable
+  titles become `untitled`. Use `-o 'exports/{session_title}-{session_id}'`
+  to avoid collisions between equal slugs. Even sanitized title slugs can
+  reveal private information in paths, stderr, and the manifest; `--raw`
+  does not redact the title at all.
+- Each bundle has `session.<format>` and available
+  `subagent-<number>.<format>` files. Children are numbered breadth-first in
+  parent-event order. Missing children reserve their numbers, and shared
+  children get one copy per referring bundle.
+
+`--manifest PATH` writes one [versioned metadata report](persistence.md#export-manifest-version-1)
+for the entire invocation, not one per session. The report is always JSON,
+regardless of `--format`. Choose a path outside all bundles. A leading `~/`
+resolves under an absolute `$HOME`, even when quoted, but `--output`
+placeholders are not expanded in `--manifest`. Ylva adds or replaces the
+filename extension with `.json` before checking destinations. The report
+contains paths, UUIDs and hashes, but no transcript content. Treat it as
+sensitive. Diagnostics and publication reports go to stderr and abbreviate
+paths under the user's home directory with `~`. Manifest paths are unchanged.
+
+Ylva stages file exports privately, then checks the staged destinations and
+the requested manifest before publishing any output. In stdout mode it checks
+the manifest before writing payload bytes. Every actual bundle must be new or
+empty. `--force` permits replacing only an unchanged standalone file or
+manifest; it does not permit overwriting a nonempty bundle. Ylva resolves
+parent directory aliases and rejects final symlinks, non-regular file
+destinations, and paths inside the chat store. It creates private files and
+missing directories and publishes each file separately. Late failures leave
+earlier outputs and created directories in place. These checks cover only
+paths opened by the exporter, not shell redirects or the global `--log-file`
+path. Keep those disjoint from source and export paths.
+
+See [`session` exit codes](#session-exit-codes).
+
+After successful preflight Ylva attempts the manifest even if all transcripts
+failed to stage or a later interruption stopped publication. An earlier
+interruption produces no manifest. Stderr is authoritative for the manifest's
+own outcome. An `uncertain` file may already exist, and a failed stdout write
+may leave a partial payload. File publication is not a transaction and does
+not protect against every race with external writers.
+
+See [export snapshots](persistence.md#session-export-snapshots) for source
+guarantees and the JSONL record format.
+
+#### Markdown export examples
+
+The [parent](../tests/fixtures/session-export/session.md.txt) and
+[subagent](../tests/fixtures/session-export/subagent-1.md.txt) samples are
+the exact Markdown output tested against the
+[source transcripts](../tests/fixtures/session-export/transcripts.json).
+The `.txt` suffix preserves the exported Markdown as test data, including
+repeated role headings. In a real bundle the files are named `session.md`
+and `subagent-1.md`.
+
+The [Markdown pseudotemplate](export-session-markdown-template.md) documents
+the renderer's layout; it is not a runtime configuration file.
+
+### Listing and maintenance
 
 `ylva session list [--include-subagents]` lists every session for the canonicalized
 launch directory as `<timestamp> <session-id> <title>`. The timestamp is last-use
@@ -263,6 +454,10 @@ when no later timestamp exists. Resuming records a new startup event; committing
 messages and other timestamped activity advances last use. Listing, title
 rewrites, source cloning, and maintenance do not advance it. Titles are rendered
 on one safe line. By default only roots are shown, least recently used first.
+
+On Unix, a row ends with `[live]` if an exclusive session lock was held when
+checked. This means the session can be open and idle, not necessarily generating
+a response. The marker also applies to subagents shown with `--include-subagents`.
 
 With `--include-subagents`, subagents appear immediately below their stored
 parent, with a `+` marker after the timestamp and two additional spaces per deeper
@@ -286,12 +481,14 @@ or start a conversation.
 
 `ylva session delete`, `ylva session compress`, and `ylva session decompress`
 require exactly one selector: one or more positional UUIDs, `--before <date>`,
-or `--all`. Selectors act on the current project's sessions, which includes
-those launched from other git worktrees of the same repository. Examples:
+`--all`, or `--untitled` (delete only). Selectors act on the current project's
+sessions, which includes those launched from other git worktrees of the same
+repository. Examples:
 
 ```shell
 ylva session delete <uuid> <uuid> --dry-run
 ylva session delete --before 2026-01-01
+ylva session delete --untitled --dry-run
 ylva session compress --all
 ylva session decompress --before 2026-01-01T12:00:00+02:00
 ```
@@ -305,6 +502,9 @@ recent-session limit or cross-project option. Bulk compression/decompression
 includes subagent transcripts; bulk deletion selects roots and unshared
 descendants. Shared descendants referenced by surviving roots/clones are kept
 and reported, and explicit deletion of a referenced subagent is refused.
+`--untitled` applies to plain and archived root sessions with a missing, empty,
+or whitespace-only title. Ylva checks the title again under the identity lock
+and skips the deletion group if a selected root has acquired a title.
 
 `--dry-run` previews the selected operation without changing files, directories,
 or creating locks. Deletion prints one `would delete <uuid>` line per selected
@@ -313,8 +513,8 @@ sessions as `would compress <uuid>` or `would uncompress <uuid>`, respectively,
 without listing storage files. Active writers are refused even in previews. Without
 `--dry-run`, a valid selector executes; no `--yes` flag is required. Unknown
 explicit IDs fail before any target changes. Independent targets/groups
-continue after runtime failures with diagnostics on stderr and exit with the
-general-error code `1` (see [exit codes](#exit-codes)). No-ops print
+continue after runtime failures with diagnostics on stderr. See
+[`session` exit codes](#session-exit-codes). No-ops print
 `already compressed <uuid>` or `already uncompressed <uuid>`,
 including in previews.
 
@@ -409,10 +609,8 @@ ylva profile shims --workspace
   shims directory to `PATH` as that hint shows; for per-workspace setup,
   see [configuration](configuration.md#managing-profiles-and-shims).
 
-Exit codes for `profile`: `0` on success, including an empty `list`; `1` when
-the editor exits non-zero; `2` for every refusal and I/O failure. On non-Unix
-platforms, `profile shims` exits `2`, and `create`, `edit`, and `delete` skip
-shim work.
+On non-Unix platforms, `profile shims` is unavailable, and `create`, `edit`, and
+`delete` skip shim work. See [`profile` exit codes](#profile-exit-codes).
 
 ### Shims
 

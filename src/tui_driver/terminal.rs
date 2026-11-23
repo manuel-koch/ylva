@@ -182,9 +182,6 @@ fn install_restoring_panic_hook() {
     }));
 }
 
-/// Exit code for termination by SIGHUP (128 + signal number 1).
-const SIGHUP_EXIT_CODE: i32 = 129;
-
 /// On SIGHUP restore the terminal and exit immediately. SIGHUP is not a stop
 /// request, so it bypasses the graceful stop path. Must run inside a Tokio
 /// runtime.
@@ -193,7 +190,7 @@ fn install_hangup_restore() -> io::Result<()> {
     tokio::spawn(async move {
         if hangup.recv().await.is_some() {
             restore_terminal();
-            std::process::exit(SIGHUP_EXIT_CODE);
+            std::process::exit(i32::from(u8::from(crate::ExitCode::Hangup)));
         }
     });
     Ok(())

@@ -14,6 +14,136 @@
 
 use super::*;
 use crate::store::{archive, session_file, MaintenanceAction, SessionSelection};
+use std::io::{Read, Seek, Write};
+
+#[tokio::test]
+async fn export_snapshot_freezes_the_open_file_across_append_and_title_replacement() {
+    let (directory, chats_root, identity, path, original) = fixture().await;
+    let reader = Store::export_reader(&chats_root, &project_key(directory.path())).unwrap();
+    let mut spool = tempfile::tempfile().unwrap();
+    let checks = std::cell::Cell::new(0);
+    reader
+        .capture(identity, &mut spool, &|| {
+            if checks.replace(checks.get() + 1) == 1 {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b"appended past the captured boundary")
+                    .unwrap();
+                let replacement = path.with_extension("replacement");
+                std::fs::write(&replacement, original.repeat(2)).unwrap();
+                std::fs::rename(replacement, &path).unwrap();
+            }
+            false
+        })
+        .unwrap();
+    let mut captured = Vec::new();
+    spool.rewind().unwrap();
+    spool.read_to_end(&mut captured).unwrap();
+    assert_eq!(captured, original);
+}
+
+#[tokio::test]
+async fn export_snapshot_validates_both_representations_and_sidecars() {
+    let (directory, chats_root, identity, path, original) = fixture().await;
+    let reader = Store::export_reader(&chats_root, &project_key(directory.path())).unwrap();
+    let mut spool = tempfile::tempfile().unwrap();
+    archive::compress_locked(&path).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    assert_eq!(
+        reader
+            .capture(identity, &mut spool, &|| false)
+            .unwrap()
+            .representation,
+        crate::store::ExportRepresentation::PlainAndGzip
+    );
+    std::fs::write(&path, b"divergent").unwrap();
+    assert!(matches!(
+        reader.capture(identity, &mut spool, &|| false),
+        Err(crate::store::SnapshotError::Corrupt(_))
+    ));
+    std::fs::remove_file(&path).unwrap();
+    let archive_path = archive::archive_path(&path);
+    let gzip = std::fs::read(&archive_path).unwrap();
+    std::fs::write(&archive_path, &gzip[..gzip.len() - 3]).unwrap();
+    assert!(reader.capture(identity, &mut spool, &|| false).is_err());
+    std::fs::write(&archive_path, gzip).unwrap();
+    std::fs::write(archive::metadata_path(&path), b"bad").unwrap();
+    assert!(reader.capture(identity, &mut spool, &|| false).is_err());
+}
+
+#[tokio::test]
+async fn export_snapshot_retries_an_observed_archive_transition() {
+    let (directory, chats_root, identity, path, original) = fixture().await;
+    let reader = Store::export_reader(&chats_root, &project_key(directory.path())).unwrap();
+    let mut spool = tempfile::tempfile().unwrap();
+    let checks = std::cell::Cell::new(0);
+    assert_eq!(
+        reader
+            .capture(identity, &mut spool, &|| {
+                if checks.replace(checks.get() + 1) == 1 {
+                    archive::compress_locked(&path).unwrap();
+                }
+                false
+            })
+            .unwrap()
+            .representation,
+        crate::store::ExportRepresentation::Gzip
+    );
+    let mut captured = Vec::new();
+    spool.rewind().unwrap();
+    spool.read_to_end(&mut captured).unwrap();
+    assert_eq!(captured, original);
+}
+
+#[test]
+fn export_snapshot_recovers_a_plain_file_but_refuses_known_identity_mismatch_and_symlinks() {
+    let directory = tempfile::tempdir().unwrap();
+    let chats_root = directory.path().join("chats");
+    let identity = Uuid::new_v4();
+    let key = project_key(directory.path());
+    let path = session_path(&chats_root, &key, identity);
+    let project = path.parent().unwrap();
+    std::fs::create_dir_all(project).unwrap();
+    let reader = Store::export_reader(&chats_root, &key).unwrap();
+    let mut spool = tempfile::tempfile().unwrap();
+    std::fs::write(&path, b"broken header\nunknown event\r\npartial").unwrap();
+    assert!(reader.capture(identity, &mut spool, &|| false).is_ok());
+    std::fs::write(&path, br#"{"type":"meta","project_key":"different"}"#).unwrap();
+    assert!(reader.capture(identity, &mut spool, &|| false).is_err());
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(directory.path().join("absent"), &path).unwrap();
+    assert!(reader.capture(identity, &mut spool, &|| false).is_err());
+    let relocated = chats_root.join("relocated");
+    std::fs::rename(project, &relocated).unwrap();
+    std::os::unix::fs::symlink(relocated, project).unwrap();
+    assert!(Store::export_reader(&chats_root, &key).is_err());
+}
+
+#[test]
+fn export_snapshot_copies_a_large_prefix_through_reusable_chunks() {
+    let directory = tempfile::tempdir().unwrap();
+    let chats_root = directory.path().join("chats");
+    let identity = Uuid::new_v4();
+    let key = project_key(directory.path());
+    let path = session_path(&chats_root, &key, identity);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut source = std::fs::File::create(path).unwrap();
+    let chunk = b"{\"type\":\"unknown\"}\r\n".repeat(4096);
+    for _ in 0..256 {
+        source.write_all(&chunk).unwrap();
+    }
+    let reader = Store::export_reader(&chats_root, &key).unwrap();
+    let mut spool = tempfile::tempfile().unwrap();
+    reader.capture(identity, &mut spool, &|| false).unwrap();
+    let mut read = vec![0; chunk.len()];
+    for _ in 0..256 {
+        spool.read_exact(&mut read).unwrap();
+        assert_eq!(read, chunk);
+    }
+    assert_eq!(spool.read(&mut read).unwrap(), 0);
+}
 
 pub(super) async fn fixture() -> (tempfile::TempDir, PathBuf, Uuid, PathBuf, Vec<u8>) {
     let directory = tempfile::tempdir().unwrap();

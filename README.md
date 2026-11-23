@@ -65,6 +65,23 @@ Provider setup:
 > GitHub can suspend Copilot access for abuse or excessive requests. Use it at
 > your own risk; see [provider notes](docs/provider-notes.md#copilot).
 
+## Export a session
+
+From the project directory, use `ylva session list` to find the UUID you want.
+Install [TruffleHog](https://github.com/trufflesecurity/trufflehog#installation)
+separately and put it on an absolute `PATH` entry for sanitized exports.
+Replace `<UUID>` with the UUID from the listing before running:
+
+```shell
+ylva session export --no-subagents -o session.md <UUID>
+```
+
+Export does not need a model provider and does not change the stored session.
+Use `-f jsonl` for machine-readable output, or leave out `--no-subagents` and
+use a [bundle directory template](docs/cli-options.md#exporting-sessions) to include
+recorded subagents. Review exports before sharing: sanitization can miss
+secrets, and Markdown can contain active HTML, links, or remote images.
+
 ## Safety and data
 
 - **Approvals are policy checks, not isolation.** The tool-approval "sandbox"
@@ -157,6 +174,7 @@ Ylva is highly customizable to adapt to user needs.
   - [x] Per-agent tool-use iteration limit (`max_tool_iterations`)
   - [x] Session listing and explicit deletion with dry-run previews
   - [x] Manual lossless archival/restoration, including archived resume and clone
+  - [x] Read-only transcript export in Markdown or JSONL, with optional subagent bundles
 - [x] TUI drill-in view to inspect a spawned subagent's own conversation
 - [x] Slash commands in TUI
   - [x] `/models` to switch named engines or provider-catalog models
