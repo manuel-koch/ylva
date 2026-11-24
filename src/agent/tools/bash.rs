@@ -274,6 +274,53 @@ impl Tool for BashTool {
         }
     }
 
+    /// One statement per top-level statement of the command, each with its
+    /// own policy verdict, so grants can cover the uncovered ones one by one.
+    fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {
+        use crate::grants::{CommandStatement, CommandSubject, CommandToken, GrantSubjects};
+        use crate::sandbox::bash_command_extractor::{
+            token_has_unquoted_brace_expansion, token_has_unquoted_glob,
+        };
+        use crate::sandbox::StatementAnalysis;
+
+        let command = arguments
+            .get("command")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let Some(statements) = self.sandbox_context.analyse_command_statements(command) else {
+            return GrantSubjects::NotGrantable;
+        };
+        GrantSubjects::Commands(
+            statements
+                .into_iter()
+                .map(|statement| match statement {
+                    StatementAnalysis::Unanalysable => CommandStatement::Unanalysable,
+                    StatementAnalysis::Command { extracted, verdict } => {
+                        CommandStatement::Command {
+                            command: CommandSubject {
+                                tokens: extracted
+                                    .argv
+                                    .iter()
+                                    .map(|token| {
+                                        CommandToken::new(token.text.clone(), token.quoted)
+                                    })
+                                    .collect(),
+                                has_unquoted_expansion: extracted.argv.iter().any(|token| {
+                                    token_has_unquoted_glob(token)
+                                        || token_has_unquoted_brace_expansion(token)
+                                        || token.unquoted_text.starts_with('~')
+                                }),
+                                has_variable_assignment_prefix: extracted
+                                    .has_variable_assignment_prefix,
+                            },
+                            policy_approved: verdict == Some(ApprovalCheck::AutoApproved),
+                        }
+                    }
+                })
+                .collect(),
+        )
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         self.non_default_arguments(arguments)
             .into_iter()

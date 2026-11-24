@@ -1,5 +1,9 @@
 # Reusable tool-approval grants
 
+> Implemented as a minimal grant dialog; see [features](../features.md#tool-approval-grants)
+> and [configuration](../configuration.md#tool-approval-grants). Rule editing, the tool
+> checklist and the per-row selector are not implemented.
+
 Offer user-owned grants for similar tool calls when a tool requests approval.
 This is a standalone feature: it does not depend on self-improvement, a
 particular skill, or changes to `clarify`.

@@ -22,6 +22,7 @@ mod bubbles;
 mod chat;
 mod elapsed;
 mod footer;
+mod grant_dialog;
 mod help;
 mod overlays;
 mod status_popup;
@@ -53,8 +54,10 @@ use chat::{
 };
 use footer::{
     agents_popup_footer_hints, draw_approval_prompt, draw_normal_footer, footer_keybinding_hints,
-    help_popup_footer_hints, status_popup_footer_hints, APPROVAL_PROMPT_HEIGHT,
+    grant_dialog_too_small_footer_hints, help_popup_footer_hints, status_popup_footer_hints,
+    APPROVAL_PROMPT_HEIGHT,
 };
+use grant_dialog::draw_grant_dialog;
 use help::draw_help_popup;
 use overlays::{draw_clarify_banner, draw_clarify_buttons, draw_slash_overlay, draw_toast};
 use status_popup::draw_status_popup;
@@ -125,6 +128,8 @@ pub(crate) fn maximum_panel_content_height(input_area: Rect) -> u16 {
 pub struct ButtonAreas {
     pub approve: Rect,
     pub deny: Rect,
+    /// Opens the grant dialog. Zero-sized for the clarify banner.
+    pub grant: Rect,
     /// Zero-sized unless the prompt belongs to another conversation.
     pub go_to_agent: Rect,
 }
@@ -699,7 +704,11 @@ fn draw_internal(
     let footer_source = conversation
         .as_ref()
         .map(|conversation| conversation.source);
-    let footer_hints = if state.status_popup.snapshot.is_some() {
+    let grant_dialog_too_small =
+        state.grant_dialog.is_some() && grant_dialog::grant_dialog_required_height() > area.height;
+    let footer_hints = if grant_dialog_too_small {
+        std::borrow::Cow::Borrowed(grant_dialog_too_small_footer_hints())
+    } else if state.status_popup.snapshot.is_some() {
         std::borrow::Cow::Borrowed(status_popup_footer_hints())
     } else if state.agents_popup.show {
         std::borrow::Cow::Borrowed(agents_popup_footer_hints())
@@ -740,6 +749,9 @@ fn draw_internal(
     }
     if state.status_popup.snapshot.is_some() {
         draw_status_popup(frame, state);
+    }
+    if state.grant_dialog.is_some() {
+        draw_grant_dialog(frame, state, mouse_pos);
     }
 
     // Dismiss any toast whose display window has elapsed, then render it.

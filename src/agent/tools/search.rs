@@ -179,6 +179,15 @@ impl Tool for SearchTool {
         }
     }
 
+    fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {
+        match arguments.get("path").and_then(|value| value.as_str()) {
+            Some(path) if !path.is_empty() => {
+                super::path_grant_subjects(&self.sandbox_context, path)
+            }
+            _ => crate::grants::GrantSubjects::NotGrantable,
+        }
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         self.non_default_arguments(arguments)
             .into_iter()

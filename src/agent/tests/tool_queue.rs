@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::agent::tool_queue::evaluate_call_approval;
 
 #[test]
 fn unknown_only_batch_counts_once_and_respects_iteration_cap() {
@@ -816,5 +817,220 @@ fn only_the_first_six_calls_of_a_response_are_executed() {
         assert_eq!(starts, 6, "the first six calls are executed");
         drop(agent_loop);
         handle.abort();
+    });
+}
+
+fn write_call_registry(
+    grant_state: Option<crate::grants::SharedGrantState>,
+) -> (Arc<ToolRegistry>, Box<dyn tools::ToolCall>) {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool::new(
+        SandboxContext::new(test_sandbox()),
+    )));
+    registry.register(Arc::new(tools::clarify::ClarifyTool));
+    let registry = Arc::new(registry.with_grant_state(grant_state));
+    let call = registry
+        .create_call(
+            "write",
+            Uuid::new_v4(),
+            serde_json::json!({"path": "Cargo.toml", "content": "ignored"}),
+        )
+        .expect("write tool registered");
+    (registry, call)
+}
+
+fn grant_state_for_current_directory() -> crate::grants::SharedGrantState {
+    Arc::new(crate::grants::GrantState::new(
+        std::fs::canonicalize(std::env::current_dir().expect("cwd")).expect("canonical cwd"),
+    ))
+}
+
+#[test]
+fn grant_turns_user_approval_required_into_auto_approved_only_for_the_granted_call() {
+    let grant_state = grant_state_for_current_directory();
+    let (registry, call) = write_call_registry(Some(Arc::clone(&grant_state)));
+    assert!(matches!(
+        evaluate_call_approval(&registry, call.as_ref()),
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    ));
+
+    let other = crate::grants::Grant::from_stored(
+        crate::grants::GrantTool::Write,
+        None,
+        Some("./README.md"),
+    )
+    .expect("valid grant");
+    grant_state.add_temporary(other);
+    assert!(matches!(
+        evaluate_call_approval(&registry, call.as_ref()),
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    ));
+
+    let matching = crate::grants::Grant::from_stored(
+        crate::grants::GrantTool::Write,
+        None,
+        Some("./Cargo.toml"),
+    )
+    .expect("valid grant");
+    grant_state.add_temporary(matching);
+    assert!(matches!(
+        evaluate_call_approval(&registry, call.as_ref()),
+        crate::sandbox::ApprovalCheck::AutoApproved
+    ));
+}
+
+#[test]
+fn grants_never_cover_clarify_or_apply_without_grant_state() {
+    let grant_state = grant_state_for_current_directory();
+    grant_state.add_temporary(
+        crate::grants::Grant::from_stored(
+            crate::grants::GrantTool::Write,
+            None,
+            Some("./Cargo.toml"),
+        )
+        .expect("valid grant"),
+    );
+    let (registry, call) = write_call_registry(None);
+    assert!(matches!(
+        evaluate_call_approval(&registry, call.as_ref()),
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    ));
+
+    let (registry, _) = write_call_registry(Some(grant_state));
+    let clarify = registry
+        .create_call(
+            "clarify",
+            Uuid::new_v4(),
+            serde_json::json!({"question": "?"}),
+        )
+        .expect("clarify registered");
+    assert!(matches!(
+        evaluate_call_approval(&registry, clarify.as_ref()),
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    ));
+}
+
+#[test]
+fn granting_a_pending_bash_call_runs_it_and_covers_the_next_identical_call() {
+    crate::test_support::run_locked(async {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_received = Arc::new(tokio::sync::Notify::new());
+        let release_read = Arc::new(tokio::sync::Notify::new());
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(ToolResultTrackingProvider {
+                requests: Arc::clone(&requests),
+                request_received: Arc::clone(&request_received),
+                reproduce_unknown_tool_overlap: true,
+            }),
+            EngineConfig {
+                provider_connection: "tool-result-tracking".to_string(),
+                model: "test-model".to_string(),
+                max_output_tokens: None,
+                temperature: None,
+                context_length: None,
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+                compact_target_ratio: 0.4,
+                soft_compaction_threshold: 0.5,
+                hard_compaction_threshold: 0.8,
+            },
+        ));
+        let mut registry =
+            tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                .expect("valid sandbox fixture");
+        registry.register(Arc::new(GatedReadTool {
+            inner: tools::read::ReadTool::new(SandboxContext::new(test_sandbox())),
+            release: Arc::clone(&release_read),
+        }));
+        let registry = registry.with_grant_state(Some(grant_state_for_current_directory()));
+        let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, Arc::new(registry));
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt("Run the tools.".to_string()))
+            .await;
+        request_received.notified().await;
+        let mut premature_follow_up = false;
+        let bash_id = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match ui_rx.recv().await.expect("agent channel stays open") {
+                    UiUpdate::ToolStart { name, .. } if name == "read" => {
+                        premature_follow_up = tokio::time::timeout(
+                            Duration::from_millis(100),
+                            request_received.notified(),
+                        )
+                        .await
+                        .is_ok();
+                        if !premature_follow_up {
+                            release_read.notify_one();
+                        }
+                    }
+                    UiUpdate::ToolPending { id, name, .. } if name == "bash" => break id,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("bash approval arrives");
+        if premature_follow_up {
+            release_read.notify_one();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !matches!(ui_rx.recv().await, Some(UiUpdate::StreamDone)) {}
+            })
+            .await
+            .expect("premature stream finishes while bash awaits approval");
+        }
+        agent_loop
+            .send_command(AgentCommand::RequestGrantPreview { id: bash_id })
+            .await;
+        let preview = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(UiUpdate::GrantPreview { preview, .. }) = ui_rx.recv().await {
+                    break preview;
+                }
+            }
+        })
+        .await
+        .expect("preview arrives");
+        assert_eq!(preview.id, bash_id);
+        assert_eq!(preview.refusal, None);
+        assert_eq!(preview.rules.len(), 1);
+        assert!(
+            preview.rules[0].starts_with("bash '"),
+            "{:?}",
+            preview.rules
+        );
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("ylva trust")));
+        agent_loop
+            .send_command(AgentCommand::GrantAndApprove {
+                id: bash_id,
+                lifetime: crate::grants::GrantLifetime::Temporary,
+            })
+            .await;
+        let mut notice = None;
+        let completed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match ui_rx.recv().await {
+                    Some(UiUpdate::Notice { text, .. }) => notice = Some(text),
+                    Some(UiUpdate::ToolDone { id, .. }) if id == bash_id => break,
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        })
+        .await
+        .is_ok();
+        drop(agent_loop);
+        let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+        assert!(completed, "a granted bash call must execute");
+        let notice = notice.expect("the grant is announced");
+        assert!(
+            notice.contains("printf regression-approved"),
+            "unexpected notice: {notice}"
+        );
+        let _ = requests;
     });
 }

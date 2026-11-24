@@ -87,6 +87,18 @@ pub enum AgentCommand {
         id: Uuid,
         reason: String,
     },
+    /// Create reusable grants covering the pending call `id`, then approve it
+    /// like `ApproveTool`. When the call cannot be granted or saving fails,
+    /// the agent publishes a notice and the call stays pending.
+    GrantAndApprove {
+        id: Uuid,
+        lifetime: crate::grants::GrantLifetime,
+    },
+    /// Ask what a grant for the pending call `id` would contain; answered
+    /// with `UiUpdate::GrantPreview`. Nothing is created.
+    RequestGrantPreview {
+        id: Uuid,
+    },
     AnswerClarify(String),
     /// Abort the pending clarify call without an answer.
     /// The agent records a tool error and continues, so the LLM can react.
@@ -141,6 +153,8 @@ pub(super) fn agent_command_name(command: &AgentCommand) -> &'static str {
         AgentCommand::Stop { .. } => "stop",
         AgentCommand::ApproveTool { .. } => "approve_tool",
         AgentCommand::DenyTool { .. } => "deny_tool",
+        AgentCommand::GrantAndApprove { .. } => "grant_and_approve",
+        AgentCommand::RequestGrantPreview { .. } => "request_grant_preview",
         AgentCommand::AnswerClarify(_) => "answer_clarify",
         AgentCommand::AbortClarify => "abort_clarify",
         AgentCommand::ForSubagent { .. } => "for_subagent",
@@ -184,6 +198,27 @@ pub(super) fn log_agent_command(
                 has_stream,
                 has_tool,
                 tool_call_id = %id,
+                "agent command received"
+            );
+        }
+        AgentCommand::RequestGrantPreview { id } => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                tool_call_id = %id,
+                "agent command received"
+            );
+        }
+        AgentCommand::GrantAndApprove { id, lifetime } => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                tool_call_id = %id,
+                lifetime = lifetime.label(),
                 "agent command received"
             );
         }
@@ -292,6 +327,20 @@ pub enum AgentEvent {
         id: Uuid,
         name: String,
     },
+}
+
+/// What a grant for one pending tool call would contain, for the grant dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantPreview {
+    pub id: Uuid,
+    /// One line per proposed rule, e.g. `bash 'make test'`.
+    pub rules: Vec<String>,
+    /// Why nothing can be granted; the call can only be approved once.
+    pub refusal: Option<String>,
+    /// Consequences to read before confirming.
+    pub warnings: Vec<String>,
+    /// Why a persistent grant cannot be saved, if it cannot.
+    pub persistent_unavailable: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,6 +471,11 @@ pub enum UiUpdate {
     /// `AgentCommand::RecordModelChanged` took effect: the next request is the
     /// first the switched engine serves. Root loop only.
     ModelChangeApplied,
+    /// Answer to `AgentCommand::RequestGrantPreview`.
+    GrantPreview {
+        preview: GrantPreview,
+        run_id: Option<Uuid>,
+    },
     /// All previously queued steers have been injected into the LLM context.
     SteerApplied {
         /// See `UiUpdate::SteerQueued::run_id`.

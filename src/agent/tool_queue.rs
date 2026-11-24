@@ -367,27 +367,7 @@ pub(super) async fn advance_tool_queue(
                         continue;
                     }
                 }
-                let approval = {
-                    let _span = tracing::debug_span!(
-                        "needs_approval",
-                        tool = %front.call.name(),
-                        tool_call_id = %front.call.id(),
-                    )
-                    .entered();
-                    // Validate arguments against the tool's input schema first.
-                    // Structurally invalid calls are denied immediately without an approval
-                    // prompt, for all tools uniformly.
-                    let validation = registry
-                        .get(front.call.name())
-                        .map(|tool| tool.validate_args(front.call.arguments()));
-                    match validation {
-                        Some(Err(reason)) => crate::sandbox::ApprovalCheck::AutoDenied { reason },
-                        _ => registry
-                            .get(front.call.name())
-                            .map(|tool| tool.needs_approval(front.call.arguments()))
-                            .unwrap_or(crate::sandbox::ApprovalCheck::UserApprovalRequired),
-                    }
-                };
+                let approval = evaluate_call_approval(&registry, front.call.as_ref());
                 match approval {
                     crate::sandbox::ApprovalCheck::AutoApproved
                         if front.call.name() == tools::spawn_subagent::SpawnSubagentTool::NAME =>
@@ -519,6 +499,70 @@ pub(super) async fn advance_tool_queue(
                     }
                 }
             }
+        }
+    }
+}
+
+/// The full approval verdict for a queued call: schema validation, sandbox
+/// policy, then reusable grants (which only satisfy an ordinary
+/// `UserApprovalRequired`).
+pub(super) fn evaluate_call_approval(
+    registry: &ToolRegistry,
+    call: &dyn tools::ToolCall,
+) -> crate::sandbox::ApprovalCheck {
+    let approval = {
+        let _span = tracing::debug_span!(
+            "needs_approval",
+            tool = %call.name(),
+            tool_call_id = %call.id(),
+        )
+        .entered();
+        // Structurally invalid calls are denied immediately without an
+        // approval prompt, for all tools uniformly.
+        let validation = registry
+            .get(call.name())
+            .map(|tool| tool.validate_args(call.arguments()));
+        match validation {
+            Some(Err(reason)) => crate::sandbox::ApprovalCheck::AutoDenied { reason },
+            _ => registry
+                .get(call.name())
+                .map(|tool| tool.needs_approval(call.arguments()))
+                .unwrap_or(crate::sandbox::ApprovalCheck::UserApprovalRequired),
+        }
+    };
+    apply_grants(registry, call, approval)
+}
+
+/// Turn an ordinary `UserApprovalRequired` verdict into `AutoApproved` when a
+/// grant covers the call. Every other verdict passes through unchanged, so a
+/// grant can never override a denial.
+fn apply_grants(
+    registry: &ToolRegistry,
+    call: &dyn tools::ToolCall,
+    approval: crate::sandbox::ApprovalCheck,
+) -> crate::sandbox::ApprovalCheck {
+    if !matches!(
+        approval,
+        crate::sandbox::ApprovalCheck::UserApprovalRequired
+    ) {
+        return approval;
+    }
+    match registry.grant_decision(call.name(), call.arguments()) {
+        crate::grants::GrantDecision::NotCovered => approval,
+        crate::grants::GrantDecision::Covered(references) => {
+            tracing::info!(
+                tool = %call.name(),
+                tool_call_id = %call.id(),
+                decision_source = "grant",
+                grants = %references
+                    .iter()
+                    .map(|reference| reference.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                parent_verdict = "user_approval_required",
+                "tool approved by grant"
+            );
+            crate::sandbox::ApprovalCheck::AutoApproved
         }
     }
 }

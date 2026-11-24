@@ -192,6 +192,7 @@ pub(super) fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent
         UiUpdate::ToolError { .. }
         | UiUpdate::ToolAutoDenied { .. }
         | UiUpdate::Notice { .. }
+        | UiUpdate::GrantPreview { .. }
         | UiUpdate::OutputTruncated { .. } => None,
     }
 }
@@ -311,6 +312,10 @@ pub(super) async fn process_one_update(
         state.push_notice_to(*run_id, text.clone());
         return ActionOutcome::Continue;
     }
+    if let UiUpdate::GrantPreview { preview, .. } = update {
+        state.open_grant_dialog(preview.clone());
+        return ActionOutcome::Continue;
+    }
     if matches!(update, UiUpdate::ModelChangeApplied) {
         state.apply_staged_model_notice();
         return ActionOutcome::Continue;
@@ -366,7 +371,11 @@ pub(super) fn app_state_to_tui_state(app: AppState) -> TuiState {
     let has_subagents = !app.subagent_conversations.is_empty();
     let agents_popup = crate::render::agents_popup_render_state(&app);
     let status_popup = crate::render::status_popup_render_state(&app);
+    let grant_dialog = app.visible_grant_dialog().cloned();
+    let grant_dialog_layout = app.layout.grant_dialog;
     TuiState {
+        grant_dialog,
+        grant_dialog_layout,
         compacting: false,
         display_metadata: app.display_metadata,
         parent_agent_mode: agent_mode,

@@ -28,7 +28,7 @@
 //! unconditional built-in floor: `outside_workspace` → `UserApprovalRequired`
 //! and `dot_path` → `UserApprovalRequired`.
 
-mod bash_command_extractor;
+pub(crate) mod bash_command_extractor;
 pub(crate) mod network_target_pattern;
 
 use std::path::PathBuf;
@@ -40,7 +40,9 @@ mod network;
 mod path;
 mod rules;
 
+pub(crate) use command::StatementAnalysis;
 pub use path::{expand_path_tokens, to_relative_path};
+pub(crate) use rules::path_glob_matches;
 #[cfg(test)]
 pub(crate) use rules::ApprovalVerdictConfig;
 use rules::ResolvedRule;

@@ -47,6 +47,20 @@ with `ylva trust`. For each workspace path it maps every approved profile name t
 a fingerprint of the workspace files the approval covers. See
 [workspace trust](configuration.md#workspace-trust).
 
+### Workspace grants file
+
+`<workspace-root>/.ylva/profiles/<profile>/grants.toml` stores persistent
+[tool-approval grants](configuration.md#tool-approval-grants) as `[[grants]]`
+entries with `tool` and, depending on the tool, `rule` and `name`. Saving
+appends one entry and preserves existing comments and formatting. A save is
+refused when the file changed on disk since it was loaded (nothing is
+overwritten), when it would be created inside the Ylva home, or when the file is
+malformed. A new file is created with mode `0600`; a missing workspace `.ylva`
+directory is created and reported. The file is part of the workspace trust
+fingerprint, so a saved grant requires `ylva trust` before the next start.
+If the write fails after the entry may have been published, the error says the
+grant applies only after restart and trust.
+
 ### Version check cache
 
 `~/.ylva/version-check.toml` (mode `0600`, written atomically) caches the

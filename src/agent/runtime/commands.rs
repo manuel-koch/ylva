@@ -16,6 +16,149 @@ use super::*;
 use crate::agent::protocol::agent_command_name;
 
 impl RunState {
+    /// A grant added while this loop waits for approval may now cover the
+    /// call at the front of its queue. Re-run the policy check and, only when
+    /// the call is auto-approved, resolve it exactly like a user approval.
+    /// Calls that still need a human keep their existing prompt.
+    pub(super) async fn approve_pending_front_if_granted(&mut self) {
+        let Some(front) = self.pending_tools.front() else {
+            return;
+        };
+        let id = front.call.id();
+        let approval = tool_queue::evaluate_call_approval(&self.registry, front.call.as_ref());
+        if matches!(approval, crate::sandbox::ApprovalCheck::AutoApproved) {
+            let _ = self
+                .handle_command(Some(AgentCommand::ApproveTool { id }))
+                .await;
+        }
+    }
+
+    /// The grants proposed for the pending `call` and the state that holds them.
+    fn proposed_grants(
+        &self,
+        pending: &PendingTool,
+    ) -> Result<(Vec<crate::grants::Grant>, &crate::grants::SharedGrantState), String> {
+        use crate::grants::{propose_grants, GrantTool};
+        let grant_state = self
+            .registry
+            .grant_state()
+            .ok_or("grants are not available in this run")?;
+        let name = pending.call.name();
+        let tool = self.registry.get(name).ok_or("unknown tool")?;
+        let grant_tool = GrantTool::from_name(name)
+            .filter(|_| !tool.requires_human_interaction())
+            .ok_or("this tool cannot be granted; approve it once")?;
+        let grants = propose_grants(
+            grant_tool,
+            &tool.grant_subjects(pending.call.arguments()),
+            grant_state.workspace_root(),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok((grants, grant_state))
+    }
+
+    /// Publishes what a grant for the pending front call `id` would contain,
+    /// without creating anything.
+    async fn publish_grant_preview(&mut self, id: uuid::Uuid) {
+        let Some(front) = self
+            .pending_tools
+            .front()
+            .filter(|front| front.call.id() == id)
+        else {
+            return;
+        };
+        let mut preview = crate::agent::GrantPreview {
+            id,
+            rules: Vec::new(),
+            refusal: None,
+            warnings: Vec::new(),
+            persistent_unavailable: None,
+        };
+        match self.proposed_grants(front) {
+            Ok((grants, grant_state)) => {
+                preview.rules = grants.iter().map(crate::grants::describe_grant).collect();
+                preview.warnings = crate::grants::grant_warnings(
+                    &grants,
+                    grant_state.marker_to_create().as_deref(),
+                );
+                preview.persistent_unavailable = grant_state.persistence_unavailable();
+            }
+            Err(reason) => preview.refusal = Some(reason),
+        }
+        let _ = self
+            .ui_tx
+            .send(UiUpdate::GrantPreview {
+                preview,
+                run_id: self.own_run_id,
+            })
+            .await;
+    }
+
+    /// Creates the grants proposed for the pending front call `id` and returns
+    /// the approval to run. Returns `None` after publishing a notice when the
+    /// call is not the front call, cannot be granted, or saving failed; the
+    /// call then stays pending.
+    async fn grant_pending_call(
+        &mut self,
+        id: uuid::Uuid,
+        lifetime: crate::grants::GrantLifetime,
+    ) -> Option<AgentCommand> {
+        use crate::grants::GrantLifetime;
+        let front = self.pending_tools.front()?;
+        if self.mode != AgentMode::ToolPending || front.call.id() != id {
+            return None;
+        }
+        let outcome = (|| -> Result<String, String> {
+            let (grants, grant_state) = self.proposed_grants(front)?;
+            let mut summary = Vec::new();
+            for grant in grants {
+                summary.push(crate::grants::describe_grant(&grant));
+                match lifetime {
+                    GrantLifetime::Temporary => grant_state.add_temporary(grant),
+                    GrantLifetime::Persistent => {
+                        grant_state
+                            .add_persistent(grant)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+            Ok(summary.join(", "))
+        })();
+        let text = match outcome {
+            Ok(summary) if lifetime == GrantLifetime::Persistent => format!(
+                "Saved grant {summary} to grants.toml. The changed file needs `ylva trust` \
+                 before the next start."
+            ),
+            Ok(summary) => format!("Granted {summary} until the conversation is cleared."),
+            Err(reason) => {
+                let _ = self
+                    .ui_tx
+                    .send(UiUpdate::Notice {
+                        text: format!("No grant created: {reason}"),
+                        run_id: self.own_run_id,
+                    })
+                    .await;
+                return None;
+            }
+        };
+        let _ = self
+            .ui_tx
+            .send(UiUpdate::Notice {
+                text,
+                run_id: self.own_run_id,
+            })
+            .await;
+        Some(AgentCommand::ApproveTool { id })
+    }
+
+    /// Temporary grants belong to the running conversation: a cleared or
+    /// replaced root conversation starts without them.
+    fn clear_temporary_grants(&self) {
+        if let Some(grant_state) = self.registry.grant_state() {
+            grant_state.clear_temporary();
+        }
+    }
+
     async fn reset_compaction(&mut self) {
         let manual_pending = self.compaction.trigger() == compaction::CompactionTrigger::Manual
             && self.compaction.summary_pending();
@@ -109,6 +252,15 @@ impl RunState {
                 .await;
             return LoopControl::PollAgain;
         }
+        let cmd = match cmd {
+            AgentCommand::GrantAndApprove { id, lifetime } => {
+                match self.grant_pending_call(id, lifetime).await {
+                    Some(approval) => approval,
+                    None => return LoopControl::PollAgain,
+                }
+            }
+            other => other,
+        };
         match cmd {
             AgentCommand::PrepareSessionSwitch { reply } => {
                 let accepted = self.session_switch_quiescent();
@@ -125,6 +277,7 @@ impl RunState {
             }
             AgentCommand::Shutdown => {
                 if self.session_switch_frozen && self.session_switch_quiescent() {
+                    self.clear_temporary_grants();
                     return LoopControl::Finished;
                 }
                 tracing::warn!("shutdown rejected without a quiescent session replacement barrier");
@@ -213,6 +366,11 @@ impl RunState {
                         })
                         .await;
                 }
+            }
+            // Rewritten into `ApproveTool` (or dropped) before this match.
+            AgentCommand::GrantAndApprove { .. } => {}
+            AgentCommand::RequestGrantPreview { id } => {
+                self.publish_grant_preview(id).await;
             }
             AgentCommand::ApproveTool { id } => {
                 // Only valid in `ToolPending`; ignored otherwise.
@@ -616,6 +774,7 @@ impl RunState {
             }
             AgentCommand::ClearContext => {
                 self.request_waiting_for_startup_checks = false;
+                self.clear_temporary_grants();
                 // Interrupt whatever was in flight before
                 // swapping in `fresh_context`, mirroring
                 // `AgentCommand::Stop`'s cleanup — otherwise

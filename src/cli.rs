@@ -73,6 +73,12 @@ pub struct Cli {
     #[arg(long, value_name = "name", value_parser = parse_profile_name)]
     pub profile: Option<String>,
 
+    /// Do not load or save the workspace profile's persistent tool-approval
+    /// grants (`.ylva/profiles/<profile>/grants.toml`) for this run;
+    /// temporary grants still work
+    #[arg(long)]
+    pub no_workspace_grants: bool,
+
     /// Write logs to this file (logging is off without it)
     #[arg(
         long,

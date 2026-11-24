@@ -476,6 +476,7 @@ fn subagent_logs_and_transcripts_use_the_replacement_parent_session() {
                 engine,
                 "main".into(),
                 None,
+                None,
             );
             *current_store.lock().unwrap() = Some(replacement.clone());
             manager.manager.set_store(Some(replacement.clone()));
@@ -827,6 +828,7 @@ fn run_subagent_sends_unstructured_finish_result_when_finish_never_called() {
             None,
             None,
             None,
+            None,
         )
         .expect("subagent should construct successfully");
 
@@ -919,6 +921,7 @@ fn run_subagent_reports_stream_error_as_failure_instead_of_unstructured_result()
             &profile,
             "default",
             Role::Subagent(subagent_role_config),
+            None,
             None,
             None,
             None,

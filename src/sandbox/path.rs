@@ -356,6 +356,36 @@ impl SandboxContext {
         self.check_path_with_dot_path_access(path, false)
     }
 
+    /// The absolute path the policy judges for `path`: relative paths are
+    /// anchored at the sandbox root and symlinks are resolved physically.
+    /// Grants match on this value so they judge exactly what the sandbox did.
+    pub fn resolve_path(&self, path: &Path) -> PathBuf {
+        let sandbox_root = self.canonical_sandbox_root();
+        let requested = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            sandbox_root.join(path)
+        };
+        Self::canonicalize_best_effort(&std::path::absolute(&requested).unwrap_or(requested))
+    }
+
+    /// The workspace root the `outside_workspace` rule compares against: the
+    /// workspace discovered from the sandbox root, else the sandbox root.
+    pub fn workspace_root(&self) -> PathBuf {
+        let sandbox_root = self.canonical_sandbox_root();
+        crate::config::layered::discover_workspace_root(&sandbox_root).unwrap_or(sandbox_root)
+    }
+
+    fn canonical_sandbox_root(&self) -> PathBuf {
+        let sandbox_root = self
+            .sandbox
+            .read()
+            .expect("sandbox lock poisoned")
+            .sandbox_root
+            .clone();
+        std::fs::canonicalize(&sandbox_root).unwrap_or(sandbox_root)
+    }
+
     /// Evaluate an already-canonical snapshot identity without reopening or
     /// following a source path that may have changed since discovery.
     pub fn check_snapshot_path(&self, path: &Path) -> Option<ApprovalCheck> {

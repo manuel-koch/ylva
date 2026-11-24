@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::ToolAttachment;
+use crate::grants::GrantSubjects;
 use crate::llm::ToolSchema;
 use crate::sandbox::ApprovalCheck;
 
@@ -506,6 +507,22 @@ pub trait Tool: Send + Sync {
         ApprovalCheck::UserApprovalRequired
     }
 
+    /// Whether a call of this tool is a mandatory interaction with the human
+    /// (e.g. `clarify`) rather than an ordinary approval. A grant never
+    /// satisfies such a call. Defaults to `false`.
+    fn requires_human_interaction(&self) -> bool {
+        false
+    }
+
+    /// Describes `arguments` to the grant evaluator: what a reusable grant
+    /// would be matched against. Must judge the same resolved value as
+    /// [`needs_approval`](Self::needs_approval). Defaults to
+    /// [`GrantSubjects::NotGrantable`], so only tools that opt in can be
+    /// covered by a grant.
+    fn grant_subjects(&self, _arguments: &Value) -> GrantSubjects {
+        GrantSubjects::NotGrantable
+    }
+
     /// Whether an argument value equals the tool's semantic default, so a host
     /// can suppress it from an invocation summary. Defaults to `false`; tools
     /// override for optional arguments (e.g. `read`'s `mode: null`,
@@ -589,6 +606,17 @@ pub trait Tool: Send + Sync {
     fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall>;
 }
 
+/// Grant subject for a path-judging tool: the path the sandbox policy
+/// resolves for `path`.
+pub(crate) fn path_grant_subjects(
+    sandbox_context: &crate::sandbox::SandboxContext,
+    path: &str,
+) -> GrantSubjects {
+    GrantSubjects::Single(crate::grants::GrantSubject::Path(
+        sandbox_context.resolve_path(std::path::Path::new(path)),
+    ))
+}
+
 /// Central store of every tool the agent may invoke.
 ///
 /// [`ToolRegistry::schemas`] returns every registered schema. Agent
@@ -596,11 +624,39 @@ pub trait Tool: Send + Sync {
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    /// Shared by the root conversation and its subagents; `None` disables grants.
+    grant_state: Option<crate::grants::SharedGrantState>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         ToolRegistry::default()
+    }
+
+    pub fn with_grant_state(
+        mut self,
+        grant_state: Option<crate::grants::SharedGrantState>,
+    ) -> Self {
+        self.grant_state = grant_state;
+        self
+    }
+
+    pub fn grant_state(&self) -> Option<&crate::grants::SharedGrantState> {
+        self.grant_state.as_ref()
+    }
+
+    /// Whether a reusable grant covers this call. Only meaningful for calls
+    /// whose policy verdict is `UserApprovalRequired`; tools that demand human
+    /// interaction are never covered.
+    pub fn grant_decision(&self, name: &str, arguments: &Value) -> crate::grants::GrantDecision {
+        use crate::grants::GrantDecision;
+        let (Some(grant_state), Some(tool)) = (&self.grant_state, self.get(name)) else {
+            return GrantDecision::NotCovered;
+        };
+        if tool.requires_human_interaction() {
+            return GrantDecision::NotCovered;
+        }
+        grant_state.evaluate(name, &tool.grant_subjects(arguments))
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {

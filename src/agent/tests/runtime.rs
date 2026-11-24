@@ -399,6 +399,12 @@ fn agent_command_dispatch_logs_every_command_variant() {
             .send_command(AgentCommand::ApproveTool { id: tool_call_id })
             .await;
         agent_loop
+            .send_command(AgentCommand::GrantAndApprove {
+                id: tool_call_id,
+                lifetime: crate::grants::GrantLifetime::Temporary,
+            })
+            .await;
+        agent_loop
             .send_command(AgentCommand::DenyTool {
                 id: tool_call_id,
                 reason: "private denial reason".to_string(),
@@ -438,6 +444,7 @@ fn agent_command_dispatch_logs_every_command_variant() {
     for command_name in [
         "prompt",
         "approve_tool",
+        "grant_and_approve",
         "deny_tool",
         "answer_clarify",
         "abort_clarify",
@@ -453,7 +460,7 @@ fn agent_command_dispatch_logs_every_command_variant() {
     }
     assert_eq!(
         log.matches("agent command received").count(),
-        9,
+        10,
         "each command should produce exactly one receipt event: {log}"
     );
     assert!(

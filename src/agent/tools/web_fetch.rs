@@ -179,6 +179,16 @@ impl Tool for WebFetchTool {
             .unwrap_or(ApprovalCheck::UserApprovalRequired)
     }
 
+    fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {
+        arguments
+            .get("url")
+            .and_then(|value| value.as_str())
+            .and_then(crate::grants::OriginRule::origin_of)
+            .map_or(crate::grants::GrantSubjects::NotGrantable, |origin| {
+                crate::grants::GrantSubjects::Single(crate::grants::GrantSubject::Origin(origin))
+            })
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         self.non_default_arguments(arguments)
             .into_iter()

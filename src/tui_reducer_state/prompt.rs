@@ -34,6 +34,8 @@ pub const PROMPT_DEFERRAL_CAP: Duration = Duration::from_secs(10);
 pub enum PromptButton {
     Approve,
     Deny,
+    /// Opens the grant dialog for similar calls.
+    Grant,
     ClarifyOk,
     ClarifyCancel,
     /// Switches to the conversation the visible prompt belongs to.
@@ -152,11 +154,15 @@ impl AppState {
     }
 
     /// Moves button focus to the next (or previous) button of the visible
-    /// prompt: none → first → second → go-to-agent (when offered) → first ….
+    /// prompt: none → first → … → last → go-to-agent (when offered) → first ….
     /// A no-op without a prompt.
     pub(crate) fn cycle_prompt_button(&mut self, backwards: bool) {
         let mut buttons = if matches!(self.focus, Focus::ToolApproval { .. }) {
-            vec![PromptButton::Approve, PromptButton::Deny]
+            vec![
+                PromptButton::Approve,
+                PromptButton::Deny,
+                PromptButton::Grant,
+            ]
         } else if matches!(self.mode, TuiMode::ClarifyPending { .. }) {
             vec![PromptButton::ClarifyOk, PromptButton::ClarifyCancel]
         } else {
@@ -183,7 +189,9 @@ impl AppState {
         let approval = matches!(self.focus, Focus::ToolApproval { .. });
         let clarify = matches!(self.mode, TuiMode::ClarifyPending { .. });
         match button {
-            PromptButton::Approve | PromptButton::Deny if approval => Some(button),
+            PromptButton::Approve | PromptButton::Deny | PromptButton::Grant if approval => {
+                Some(button)
+            }
             PromptButton::ClarifyOk | PromptButton::ClarifyCancel if clarify && !approval => {
                 Some(button)
             }

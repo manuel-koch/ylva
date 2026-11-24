@@ -25,6 +25,7 @@ pub mod context_breakdown;
 pub(crate) mod conversation_render_cache;
 pub(crate) mod events;
 pub(crate) mod exit_code;
+pub mod grants;
 pub(crate) mod hexadecimal;
 pub(crate) mod highlight;
 pub(crate) mod home_relative_path;

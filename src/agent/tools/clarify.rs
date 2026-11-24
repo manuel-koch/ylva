@@ -139,6 +139,10 @@ impl Tool for ClarifyTool {
         ApprovalCheck::UserApprovalRequired
     }
 
+    fn requires_human_interaction(&self) -> bool {
+        true
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         self.non_default_arguments(arguments)
             .into_iter()

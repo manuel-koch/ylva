@@ -143,6 +143,7 @@ pub(crate) fn covered_files(
     for path in [
         profile_directory.join(PROFILE_CONFIG_FILE_NAME),
         profile_directory.join(PROFILE_ENV_FILE_NAME),
+        profile_directory.join(crate::grants::GRANTS_FILE_NAME),
     ] {
         if path.exists() {
             files.push(path);
@@ -187,7 +188,7 @@ fn normalized_contents(path: &Path, contents: Vec<u8>) -> Vec<u8> {
         return contents;
     };
     let normalized = match file_name {
-        PROFILE_CONFIG_FILE_NAME => normalize_toml(&contents),
+        PROFILE_CONFIG_FILE_NAME | crate::grants::GRANTS_FILE_NAME => normalize_toml(&contents),
         PROFILE_ENV_FILE_NAME => normalize_dotenv(&contents),
         _ => None,
     };
@@ -413,6 +414,24 @@ mod tests {
         write(
             &fixture.workspace.join(".ylva/profiles/work/.env"),
             "OLLAMA_BASE_URL=http://evil\n",
+        );
+        assert_eq!(status(&fixture), WorkspaceTrust::Changed);
+    }
+
+    #[test]
+    fn grants_file_is_covered_and_formatting_only_edits_keep_trust() {
+        let fixture = fixture();
+        let grants = fixture.workspace.join(".ylva/profiles/work/grants.toml");
+        write(&grants, "[[grants]]\ntool = \"web_search\"\n");
+        assert_eq!(status(&fixture), WorkspaceTrust::Untrusted);
+        trust_workspace(&fixture.home, &fixture.workspace, "work").expect("trust");
+
+        write(&grants, "# note\n[[grants]]\ntool   = \"web_search\"\n");
+        assert_eq!(status(&fixture), WorkspaceTrust::Trusted);
+
+        write(
+            &grants,
+            "[[grants]]\ntool = \"web_search\"\n[[grants]]\ntool = \"spawn_subagent\"\n",
         );
         assert_eq!(status(&fixture), WorkspaceTrust::Changed);
     }

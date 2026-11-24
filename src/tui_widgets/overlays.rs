@@ -1192,6 +1192,7 @@ pub(super) fn draw_clarify_buttons(
     ButtonAreas {
         approve: ok_area,
         deny: cancel_area,
+        grant: Rect::default(),
         go_to_agent: if offers_go_to_agent {
             go_to_area
         } else {

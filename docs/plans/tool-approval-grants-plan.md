@@ -190,79 +190,83 @@ file in place, so progress is resumable. Work TDD, in order; every committed cha
 implementation, tests and its documentation. Consent rules in `AGENTS.md` apply (no commits
 without user consent).
 
-1. [ ] Re-read the grilling decisions in Implementation Hints and confirm none are stale.
-2. [ ] Check ADRs: confirm the trust extension is consistent with
+1. [x] Re-read the grilling decisions in Implementation Hints and confirm none are stale.
+2. [x] Check ADRs: confirm the trust extension is consistent with
    `docs/architecture-design-records/0003-trust-workspace-configuration-by-content-hash.md`;
    write a new ADR (use the `architecture-decision-record` skill) for "grants are separate from
    sandbox rules and never override effective denials / mandatory interaction", recording the
    grants-only profile directory and trust coverage decision.
-3. [ ] Add a `grants` module (`src/grants.rs` + `src/grants/*.rs`, file-per-module, license header,
+3. [x] Add a `grants` module (`src/grants.rs` + `src/grants/*.rs`, file-per-module, license header,
    re-export through `src/lib.rs`) with the domain types: `GrantTool`, `GrantRule` (per-tool
    matcher), `Grant` (+ lifetime/scope), `GrantReference` (non-sensitive id for logs).
-4. [ ] TDD path matcher: grant-rule validation (reject bare `**`, newline, `~`/env use as
+4. [x] TDD path matcher: grant-rule validation (reject bare `**`, newline, `~`/env use as
    expansion), exact-rule generation with metacharacter escaping, workspace-relative vs absolute
    form, matching via `sandbox::rules::path_glob_matches` (expose as `pub(crate)` if needed),
    root-relative resolution, escape rejection incl. symlinks. Cover `read`/`write`/`edit`/
    `search`/`glob`/`load_skill`.
-5. [ ] TDD Bash matcher: parser for grant strings (literal program/args, trailing `*`, quoting
+5. [x] TDD Bash matcher: parser for grant strings (literal program/args, trailing `*`, quoting
    preserved, `**` rejected), matching against extractor output, `unquoted_glob`/
    `unquoted_brace_expansion` carve-out, non-grantable static table, matcher proposal (4-token cap,
    stop tokens), edited-matcher validation (program unchanged, matches row, no newline,
    re-apply table, suffix-must-match rule), "wider" classification.
-6. [ ] TDD web/spawn matchers: `web_fetch` origin (scheme, host, effective port), `web_search` and
+6. [x] TDD web/spawn matchers: `web_fetch` origin (scheme, host, effective port), `web_search` and
    `spawn_subagent` tool-only grants.
-7. [ ] Add a tool-facing hook (e.g. `Tool::grant_subject(arguments) -> GrantSubjects` in
+7. [x] Add a tool-facing hook (e.g. `Tool::grant_subject(arguments) -> GrantSubjects` in
    `src/agent/tools.rs`, default "none") and implement it per tool in `src/agent/tools/{read,
    write,edit,search,glob,bash,web_fetch,web_search,spawn_subagent}.rs` and the skill tool, reusing
    each tool's existing path resolution so grants judge the same value as policy. For Bash return
    one subject per simple command with per-command verdicts (reuse `sandbox/command.rs`
    `check_command` and `bash_command_extractor`); mark `clarify` as mandatory-interaction.
-8. [ ] Introduce a distinction between ordinary approval-required and mandatory interaction
+8. [x] Introduce a distinction between ordinary approval-required and mandatory interaction
    (`clarify` today) via a `Tool::requires_human_interaction()` hook so the evaluator never treats
    the latter as grantable; no new `ApprovalCheck` variant.
-9. [ ] Persistent store: `grants.toml` serde model (`deny_unknown_fields`), load + validate with
+9. [x] Persistent store: `grants.toml` serde model (`deny_unknown_fields`), load + validate with
    clear errors, serialize preserving unrelated entries/comments (use `toml_edit`-style
    `toml_edit`, already a dependency), snapshot compare
    for external edits, serialized saves, atomic owner-only publish via
    `private_fs::replace_file`/`create_private_dir_all`, marker-creation + Ylva-home refusal logic,
    failure reporting incl. uncertain publication.
-10. [ ] Extend workspace trust (`src/config/workspace_trust.rs::covered_files`) to include the
+10. [x] Extend workspace trust (`src/config/workspace_trust.rs::covered_files`) to include the
         selected profile's `grants.toml`; verify malformed content still fingerprints
         (`normalized_contents` fallback); verify grants-only workspace works; update
         `workspace_trust_notice` text if needed. Ensure a save that adds a grant does not re-record
         trust.
-11. [ ] Profile layering: allow a workspace profile dir containing only `grants.toml` without
+11. [x] Profile layering: allow a workspace profile dir containing only `grants.toml` without
         shadowing the home profile or creating a shim; `ylva profile list` labels it grants-only;
         workspace profile delete (incl. dry-run) reports `grants.toml` removal
         (`src/profile_command.rs`, `src/profile_shim.rs`, `src/config/layered.rs`).
-12. [ ] CLI: add `--no-workspace-grants` in `src/cli.rs`; thread it through startup to grant
+12. [x] CLI: add `--no-workspace-grants` in `src/cli.rs`; thread it through startup to grant
     loading (skip load/validate after trust check) and to the dialog (disable persistent option
     with explanation).
-13. [ ] Runtime state: shared grant state (`Arc`) created with the root and handed to subagent
+13. [x] Runtime state: shared grant state (`Arc`) created with the root and handed to subagent
     loops (`src/agent_factory.rs`, `src/agent/subagent_manager.rs`), holding temporary grants
     plus a generation counter bumped on every grant change; clear on session switch, `/clear`,
     exit; not persisted/restored on resume/clone.
-14. [ ] Evaluator: in `src/agent/tool_queue.rs` (after `needs_approval`, before emitting
+14. [x] Evaluator: in `src/agent/tool_queue.rs` (after `needs_approval`, before emitting
         `ToolPending`) and in the headless path (`src/cli_driver/run.rs`) consult grants for
         `UserApprovalRequired` only; all simple commands of a Bash call must be covered by
         policy/grants; auto-approved-by-grant calls take the same path as `AutoApproved` (including
         the `spawn_subagent` branch); no UI marker; structured log with decision source, grant
         reference, parent verdict (no raw payloads).
-15. [ ] Re-evaluation: when grants change, each agent loop in `ToolPending` observes the generation
+15. [x] Re-evaluation: when grants change, each agent loop in `ToolPending` observes the generation
     counter change and re-runs its queue check (no new command routing), re-verifies policy before
     dispatch, remove stale approval prompts, never revive cancelled or interrupt running calls.
-16. [ ] TUI approval dialog (`src/presenter/keyboard.rs`, `mouse.rs`, `domain.rs`,
-    `src/tui_reducer_state/*`, `src/tui_render_state.rs`, `src/tui_widgets.rs`, `src/events.rs`):
-    keep Approve/Deny and add a "Grant…" button opening a second modal (rule editor, tool
-    checklist, lifetime, preview with all required warnings, Confirm/Back); Bash shows per-row
-    checklist with selector and footnote, "N already allowed"; validation errors, save
-    failure/conflict behavior (refuse overwrite on external edit, leave approval pending, offer
-    once/temporary/retry-with-reload), marker-creation offer.
-    New `Effect`s for save + apply grants. Update keybindings.
-17. [ ] Integration tests in `tests/` (grant-file trust, headless with persistent grants, flag
+16. [x] TUI approval dialog (`src/presenter/keyboard.rs`, `mouse.rs`, `domain.rs`,
+        `src/tui_reducer_state/*`, `src/tui_render_state.rs`, `src/tui_widgets.rs`,
+        `src/events.rs`): keep Approve/Deny and add a "Grant…" button opening a second modal (rule
+        editor, tool checklist, lifetime, preview with all required warnings, Confirm/Back); Bash
+        shows per-row checklist with selector and footnote, "N already allowed"; validation errors,
+        save failure/conflict behavior (refuse overwrite on external edit, leave approval pending,
+        offer once/temporary/retry-with-reload), marker-creation offer. New `Effect`s for save +
+        apply grants. Update keybindings. *Delivered as a minimal modal:* one always-visible
+        *Grant…* button opens a second page with the read-only proposed rules, the lifetime choice,
+        notes (the warnings above, marker creation included) and Grant/Back. Not delivered: rule
+        editing, tool checklist, per-row selector and the once/temporary/retry offer after a save
+        failure (the prompt just stays pending with a notice).
+17. [x] Integration tests in `tests/` (grant-file trust, headless with persistent grants, flag
     behavior, subagent coverage) following `docs/development-workflow.md` and
     `docs/known-test-issues.md` (tracing/cwd caveats); keep the coverage threshold.
-18. [ ] Documentation (same commit as the code): `docs/features.md` (feature),
+18. [x] Documentation (same commit as the code): `docs/features.md` (feature),
         `docs/configuration.md` (grants section next to *Sandbox (tool-approval rules)*,
         *Workspace trust*, *Managing profiles and shims*; Bash `*` semantic difference),
         `docs/cli-options.md` (`--no-workspace-grants`, profile list/delete output, trust note),
@@ -272,8 +276,19 @@ without user consent).
         Persistent grant), new ADR from step 2, and mark `docs/ideas/tool-approval-grants.md` as
         implemented/point to the feature docs (ask before removing). Run `rumdl fmt` + `rumdl check`
         on touched Markdown.
-19. [ ] Verify: `make format lint`, `make test-coverage`; `make audit` if `Cargo.toml`/`Cargo.lock`
+19. [x] Verify: `make format lint`, `make test-coverage`; `make audit` if `Cargo.toml`/`Cargo.lock`
     changed.
+20. [ ] Grant dialog: tool checklist (grant for a subset of the proposed tools) and, for Bash,
+    a per-row selector with footnote and "N already allowed" (extends the minimal modal of step 16;
+    update `docs/features.md`, `docs/keybindings.md`).
+21. [ ] Grant dialog: rule editing (edit a proposed rule in place, validate with the rule parsers,
+    show validation errors, keep Grant disabled while invalid); apply the edited rules in the agent
+    (`GrantAndApprove` carries them, the agent re-validates, never trusts UI text blindly);
+    update `docs/features.md`, `docs/keybindings.md`, `docs/implementation-notes.md`.
+22. [ ] Save failure/conflict recovery: after a refused or failed persistent save, offer once /
+    temporary / retry-with-reload instead of only leaving the prompt pending with a notice.
+23. [ ] Tests for steps 20–22 (presenter, widget, agent e2e) and verify:
+    `make format lint`, `make test-coverage`, `rumdl check .`.
 
 ## Proposed Improvements
 

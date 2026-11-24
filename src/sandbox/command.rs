@@ -19,6 +19,15 @@ use super::{
     bash_command_extractor, command_arguments, ApprovalCheck, NamedSandboxRule, SandboxContext,
 };
 
+/// One statement of a `bash` call with its own policy verdict.
+pub(crate) enum StatementAnalysis {
+    Command {
+        extracted: bash_command_extractor::ExtractedCommand,
+        verdict: Option<ApprovalCheck>,
+    },
+    Unanalysable,
+}
+
 impl SandboxContext {
     /// Check whether `command` is allowed by the sandbox.
     ///
@@ -110,6 +119,32 @@ impl SandboxContext {
         );
 
         verdict
+    }
+
+    /// Judge every top-level statement of `command` separately, for grant
+    /// evaluation. `None` when the script does not parse. A command the
+    /// policy has no opinion on is reported with `None` (it needs approval).
+    pub(crate) fn analyse_command_statements(
+        &self,
+        command: &str,
+    ) -> Option<Vec<StatementAnalysis>> {
+        match bash_command_extractor::extract(command) {
+            bash_command_extractor::ExtractionResult::ParseFailed => None,
+            bash_command_extractor::ExtractionResult::Statements(statements) => Some(
+                statements
+                    .into_iter()
+                    .map(|statement| match statement {
+                        bash_command_extractor::ExtractedStatement::Command(extracted) => {
+                            let verdict = self.evaluate_command(&extracted);
+                            StatementAnalysis::Command { extracted, verdict }
+                        }
+                        bash_command_extractor::ExtractedStatement::Unanalysable => {
+                            StatementAnalysis::Unanalysable
+                        }
+                    })
+                    .collect(),
+            ),
+        }
     }
 
     /// Rank an [`ApprovalCheck`] for worst-case combination:

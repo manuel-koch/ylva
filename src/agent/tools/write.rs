@@ -319,6 +319,13 @@ impl Tool for WriteTool {
         approval
     }
 
+    fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {
+        match require_string_arg(arguments, "path") {
+            Ok(path) => super::path_grant_subjects(&self.sandbox_context, path),
+            Err(_) => crate::grants::GrantSubjects::NotGrantable,
+        }
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         self.non_default_arguments(arguments)
             .into_iter()

@@ -55,6 +55,8 @@ const SESSION_PICKER_PENDING_FOOTER_HINTS: &[FooterHint] = &[
 pub(super) struct FooterHint {
     key: Option<&'static str>,
     description: &'static str,
+    /// Drawn in bold red instead of the muted hint style.
+    alert: bool,
 }
 
 impl FooterHint {
@@ -62,6 +64,7 @@ impl FooterHint {
         Self {
             key: Some(key),
             description,
+            alert: false,
         }
     }
 
@@ -69,6 +72,15 @@ impl FooterHint {
         Self {
             key: None,
             description,
+            alert: false,
+        }
+    }
+
+    const fn alert(description: &'static str) -> Self {
+        Self {
+            key: None,
+            description,
+            alert: true,
         }
     }
 }
@@ -282,6 +294,14 @@ fn base_footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'sta
             }
         }
     }
+}
+
+/// Shown instead of the keybinding hints while the grant dialog does not fit.
+pub(super) fn grant_dialog_too_small_footer_hints() -> &'static [FooterHint] {
+    const HINTS: &[FooterHint] = &[FooterHint::alert(
+        "Terminal too short for grant dialog (esc: back)",
+    )];
+    HINTS
 }
 
 pub(super) fn agents_popup_footer_hints() -> &'static [FooterHint] {
@@ -851,7 +871,14 @@ fn draw_footer_hints(
                 spans.push(Span::styled(" ", normal_style));
             }
         }
-        spans.push(Span::styled(hint.description, normal_style));
+        let style = if hint.alert {
+            Style::default()
+                .fg(deny_background_color())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            normal_style
+        };
+        spans.push(Span::styled(hint.description, style));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), hints_area);
@@ -962,10 +989,7 @@ pub(super) fn draw_approval_prompt(
     // Enter); typed text never changes what a bare Enter does.
     let approve_focused = state.prompt_button_focus == Some(PromptButton::Approve);
     let deny_focused = state.prompt_button_focus == Some(PromptButton::Deny);
-    let approve_label = " [ ✓ Approve ] ";
-    let deny_label = " [ ✗ Deny ] ";
-    let approve_width = approve_label.chars().count() as u16;
-    let deny_width = deny_label.chars().count() as u16;
+    let grant_focused = state.prompt_button_focus == Some(PromptButton::Grant);
     let [title_area, controls_area] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
     draw_footer_status(frame, title_area, &title, approval_title_color());
     // Indent buttons by 1 char so they align with the leading space of the
@@ -974,21 +998,41 @@ pub(super) fn draw_approval_prompt(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(1), Constraint::Fill(1)])
         .areas(controls_area);
+    // The three core buttons are always drawn; a terminal too narrow for the
+    // decorated labels gets compact ones, and below that they are clipped.
+    let decorated = [" [ ✓ Approve ] ", " [ ✗ Deny ] ", " [ ✓ Grant… ] "];
+    let compact = ["[Approve]", "[Deny]", "[Grant…]"];
+    let width_of = |label: &str| label.chars().count() as u16;
+    let decorated_total = decorated.iter().map(|label| width_of(label)).sum::<u16>() + 2 * 2;
+    let (labels, gap) = if decorated_total <= buttons_area.width {
+        (decorated, 2)
+    } else {
+        (compact, 1)
+    };
+    let mut next_x = buttons_area.x;
+    let mut place = |label: &str, limit: u16| -> Rect {
+        let start = next_x.min(limit);
+        let width = width_of(label).min(limit - start);
+        next_x = start + width + gap;
+        Rect::new(start, buttons_area.y, width, 1)
+    };
+    let approve_area = place(labels[0], buttons_area.right());
+    let deny_area = place(labels[1], buttons_area.right());
+    let grant_area = place(labels[2], buttons_area.right());
+    let approve_label = labels[0];
+    let deny_label = labels[1];
+    let grant_label = labels[2];
+    // Go to agent is optional: it is left out when it does not fit whole.
     let go_to_width = if state.prompt_offers_go_to_agent {
         GO_TO_AGENT_LABEL.chars().count() as u16
     } else {
         0
     };
-    let [approve_area, _, deny_area, _, go_to_area] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(approve_width),
-            Constraint::Length(2),
-            Constraint::Length(deny_width),
-            Constraint::Length(if go_to_width > 0 { 2 } else { 0 }),
-            Constraint::Length(go_to_width),
-        ])
-        .areas(buttons_area);
+    let go_to_area = if go_to_width > 0 && next_x + go_to_width <= buttons_area.right() {
+        Rect::new(next_x, buttons_area.y, go_to_width, 1)
+    } else {
+        Rect::default()
+    };
 
     let pointer = mouse_pos.map(|(col, row)| ratatui::layout::Position::new(col, row));
     let approve_hovered = pointer.is_some_and(|pos| approve_area.contains(pos));
@@ -1015,6 +1059,16 @@ pub(super) fn draw_approval_prompt(
         Paragraph::new(Line::styled(deny_label, deny_style)).alignment(Alignment::Left),
         deny_area,
     );
+    let grant_style = button_style(
+        approve_background_color(),
+        approve_hover_background_color(),
+        pointer.is_some_and(|pos| grant_area.contains(pos)),
+        grant_focused,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(grant_label, grant_style)).alignment(Alignment::Left),
+        grant_area,
+    );
 
     if state.prompt_offers_go_to_agent {
         draw_go_to_agent_button(
@@ -1028,6 +1082,7 @@ pub(super) fn draw_approval_prompt(
     ButtonAreas {
         approve: approve_area,
         deny: deny_area,
+        grant: grant_area,
         go_to_agent: if state.prompt_offers_go_to_agent {
             go_to_area
         } else {

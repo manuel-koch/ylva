@@ -175,6 +175,8 @@ The approval covers, for the selected profile:
 
 - `<workspace-root>/.ylva/profiles/<profile-name>/config.toml`
 - `<workspace-root>/.ylva/profiles/<profile-name>/.env`
+- `<workspace-root>/.ylva/profiles/<profile-name>/grants.toml` (comments and
+  formatting do not count; see [tool-approval grants](#tool-approval-grants))
 - every file below `<workspace-root>/.ylva/agents/`
 
 Review those files, then run `ylva trust` (with `--profile <name>` for a
@@ -1163,6 +1165,61 @@ by a `network_private_address` rule, see
 [Private and reserved addresses](#private-and-reserved-addresses-network_private_address).
 
 When `[web_fetch]` is absent, its backend defaults to `"native"`.
+
+## Tool-approval grants
+
+Grants are reusable approvals created from the approval footer (see
+[features](features.md#tool-approval-grants)). They only satisfy ordinary
+approval requests and never override sandbox denials
+([ADR-0005](architecture-design-records/0005-keep-tool-approval-grants-separate-from-sandbox-rules.md)).
+Persistent grants live in
+`<workspace-root>/.ylva/profiles/<profile-name>/grants.toml`; a malformed file
+is a startup error, and `--no-workspace-grants` skips loading and saving it.
+Ylva refuses to create the file inside the Ylva home. New files are mode `0600`.
+Add the file to `.gitignore` yourself if it should stay private.
+
+```toml
+[[grants]]
+tool = "bash"
+rule = "cargo test *"
+
+[[grants]]
+tool = "write"
+rule = "./notes/todo.md"
+
+[[grants]]
+tool = "web_fetch"
+rule = "https://docs.example:443"
+
+[[grants]]
+tool = "load_skill"
+name = "release"
+rule = "./.ylva/skills/release/SKILL.md"
+
+[[grants]]
+tool = "web_search"
+```
+
+- `read`, `write`, `edit`, `search`, `glob`: `rule` is a path glob matched
+  against the resolved path; `./` anchors it at the workspace root.
+- `load_skill`: `name` plus a path `rule` for the instruction source.
+- `web_fetch`: `rule` is `scheme://host:port` of the first URL; redirects can
+  reach other public origins, while deny and private-address checks still apply
+  to every hop.
+- `web_search`, `spawn_subagent`: no `rule` or `name`.
+- `bash`: `rule` is one simple command, program and arguments matched
+  literally by whole argument (`make test` does not match `make tests`).
+  A trailing `*` matches **one or more** further arguments, unlike configured
+  [`bash` command rules](#bash-command-rules) where a trailing `*` matches
+  exactly one. `**` is invalid. Every simple command of a call must be allowed
+  by policy or a grant; unquoted globs, brace expansion, variable-assignment
+  prefixes and unanalysable constructs are never covered. Interpreters with
+  inline code (`python -c`, `node -e`, `sh -c`, …), wrappers (`env`, `sudo`,
+  `xargs`, …) and destructive programs with a trailing `*` are rejected.
+  The working directory and environment are not matched.
+
+Because grants match the call and not the file content, a `write` or `edit`
+grant permits any later content change at that path.
 
 ## Sandbox (tool-approval rules)
 

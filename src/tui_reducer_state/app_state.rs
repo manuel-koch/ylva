@@ -143,6 +143,9 @@ pub struct AppState {
     // ── status popup ────────────────────────────────────────────────────────
     pub status_popup: StatusPopupState,
 
+    /// Second page of the tool-approval prompt, shown over it.
+    pub grant_dialog: Option<GrantDialogState>,
+
     // ── clarify banner ───────────────────────────────────────────────────────
     pub clarify_banner_state: ClarifyBannerState,
 
@@ -357,6 +360,7 @@ impl AppState {
             agents_popup: AgentsPopupState::default(),
 
             status_popup: StatusPopupState::default(),
+            grant_dialog: None,
 
             clarify_banner_state: ClarifyBannerState::default(),
 

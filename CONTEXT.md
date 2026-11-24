@@ -166,6 +166,19 @@ and the host's approval capability.
 The filesystem boundary that governs which paths tools may access and when user
 approval is required.
 
+**Grant**: A user-owned, reusable approval for similar future calls of one tool. A grant only
+satisfies an ordinary approval request; it never overrides a denial, a schema error or a tool that
+needs a human answer, and it does not change sandbox rules
+([ADR-0005](docs/architecture-design-records/0005-keep-tool-approval-grants-separate-from-sandbox-rules.md)).
+
+**Temporary grant**:
+A grant kept in memory, shared by the root conversation and its subagents until
+the conversation is cleared or replaced, or Ylva exits.
+
+**Persistent grant**:
+A grant stored in the workspace profile's `grants.toml`. It is covered by
+workspace trust.
+
 **Token estimate**:
 An approximate token count produced locally with `tiktoken-rs` `cl100k_base`.
 The compaction budget estimates the model view and active tool definitions;

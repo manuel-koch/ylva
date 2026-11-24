@@ -63,8 +63,8 @@ pub use message::{
 };
 use protocol::log_agent_command;
 pub use protocol::{
-    AgentCommand, AgentEvent, AgentMode, ContextUsageSource, DeltaChunk, StatusSnapshot,
-    StreamEvent, UiUpdate,
+    AgentCommand, AgentEvent, AgentMode, ContextUsageSource, DeltaChunk, GrantPreview,
+    StatusSnapshot, StreamEvent, UiUpdate,
 };
 pub use status_timeline::StatusTimelineEntry;
 

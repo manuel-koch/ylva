@@ -269,6 +269,40 @@ fn approval_prompt_offers_go_to_agent_button_only_for_other_conversations() {
     }
 }
 
+#[test]
+fn approval_prompt_always_keeps_the_grant_button_even_on_tiny_terminals() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    for width in [80u16, 45, 40, 30, 26, 20] {
+        let state = TuiState::new();
+        let mut terminal = Terminal::new(TestBackend::new(width, 2)).expect("terminal");
+        let mut areas = None;
+        terminal
+            .draw(|frame| {
+                areas = Some(draw_approval_prompt(
+                    frame,
+                    frame.area(),
+                    &state,
+                    "bash",
+                    false,
+                    None,
+                ));
+            })
+            .expect("draw");
+        let areas = areas.expect("button areas");
+        assert!(!areas.grant.is_empty(), "width {width}");
+        assert!(areas.grant.x >= areas.deny.right(), "width {width}");
+        if width >= 26 {
+            let row: String = (0..width)
+                .map(|x| terminal.backend().buffer()[(x, 1)].symbol().to_string())
+                .collect();
+            assert!(row.contains("Grant…"), "width {width}: {row:?}");
+            assert!(row.contains("Approve") && row.contains("Deny"), "{row:?}");
+        }
+    }
+}
+
 fn display_with_config_modified(config_modified: bool) -> TuiState {
     TuiState {
         engine_display: crate::llm::engine::EngineDisplayInfo {

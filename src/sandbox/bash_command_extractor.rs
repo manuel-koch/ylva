@@ -83,7 +83,7 @@ use tree_sitter::{Node, Parser};
 
 /// A single extracted argv token (either the command name or one argument).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ArgvToken {
+pub(crate) struct ArgvToken {
     /// The token's literal (dequoted) text.
     pub text: String,
     /// Whether the token was entirely quoted (`"..."`/`'...'`) in source.
@@ -101,7 +101,7 @@ const QUOTED_PIECE_PLACEHOLDER: char = 'q';
 
 /// One statically-extracted `command` node, ready for rule evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(super) struct ExtractedCommand {
+pub(crate) struct ExtractedCommand {
     /// Argv tokens, index 0 is the command name.
     pub argv: Vec<ArgvToken>,
     /// Whether this command has one or more leading `variable_assignment`
@@ -115,7 +115,7 @@ pub(super) struct ExtractedCommand {
 
 /// One top-level statement extracted from a script.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ExtractedStatement {
+pub(crate) enum ExtractedStatement {
     /// A fully-analysable `command` node.
     Command(ExtractedCommand),
     /// A statement containing a node type outside the fixed scanning scope
@@ -126,7 +126,7 @@ pub(super) enum ExtractedStatement {
 
 /// The result of extracting a whole `command` script.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ExtractionResult {
+pub(crate) enum ExtractionResult {
     /// The script did not parse at all (e.g. a syntax error); no per-command
     /// verdicts can be produced.
     ParseFailed,
@@ -135,7 +135,7 @@ pub(super) enum ExtractionResult {
 }
 
 /// Parse `source` as a bash script and extract its top-level statements.
-pub(super) fn extract(source: &str) -> ExtractionResult {
+pub(crate) fn extract(source: &str) -> ExtractionResult {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_bash::LANGUAGE.into())
@@ -414,7 +414,7 @@ fn extract_argv_token(node: Node, source: &str) -> Option<ArgvToken> {
 
 /// Unquoted glob metacharacters: `*`, `?`, or a `[...]` bracket expression,
 /// judged on the token's unquoted pieces only.
-pub(super) fn token_has_unquoted_glob(token: &ArgvToken) -> bool {
+pub(crate) fn token_has_unquoted_glob(token: &ArgvToken) -> bool {
     token.unquoted_text.contains(['*', '?', '['])
 }
 
@@ -423,7 +423,7 @@ static UNQUOTED_BRACE_EXPANSION_PATTERN: LazyLock<Regex> =
 
 /// Unquoted brace expansion (`{a,b}`), judged on the token's unquoted pieces
 /// only.
-pub(super) fn token_has_unquoted_brace_expansion(token: &ArgvToken) -> bool {
+pub(crate) fn token_has_unquoted_brace_expansion(token: &ArgvToken) -> bool {
     UNQUOTED_BRACE_EXPANSION_PATTERN.is_match(&token.unquoted_text)
 }
 

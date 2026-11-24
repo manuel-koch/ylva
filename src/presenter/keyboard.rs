@@ -42,6 +42,9 @@ pub(super) fn route_keyboard(
         Focus::HelpPopup => keyboard_help(state, event),
         Focus::AgentsPopup => keyboard_agents_popup(state, event),
         Focus::StatusPopup => keyboard_status_popup(state, event),
+        Focus::ToolApproval { .. } if state.visible_grant_dialog().is_some() => {
+            keyboard_grant_dialog(state, event)
+        }
         Focus::ToolApproval { .. } => keyboard_approval(state, event, textarea),
         Focus::MainInput => keyboard_main(state, event, textarea),
     }
@@ -206,6 +209,52 @@ fn is_focus_cycle_key(key_event: &crossterm::event::KeyEvent) -> Option<bool> {
     }
 }
 
+/// Keys of the grant dialog: arrows pick the lifetime, Tab moves between the
+/// buttons, Enter activates the focused button and Esc goes back.
+fn keyboard_grant_dialog(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
+    match event {
+        InputEvent::Escape | InputEvent::CtrlC => {
+            state.close_grant_dialog();
+            vec![]
+        }
+        InputEvent::StopSignal => handle_stop_signal(state),
+        InputEvent::KeyInput(key_event) if is_focus_cycle_key(&key_event).is_some() => {
+            state.toggle_grant_dialog_button();
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if is_activation_key(&key_event) => {
+            state.activate_grant_dialog_button()
+        }
+        InputEvent::KeyInput(key_event) => {
+            match key_event.code {
+                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
+                    state.toggle_grant_lifetime();
+                }
+                KeyCode::PageUp | KeyCode::PageDown => {
+                    let page =
+                        state.layout.grant_dialog.body_rows.saturating_sub(1).max(1) as isize;
+                    state.scroll_grant_dialog(if key_event.code == KeyCode::PageUp {
+                        -page
+                    } else {
+                        page
+                    });
+                }
+                KeyCode::Home => state.scroll_grant_dialog(isize::MIN),
+                KeyCode::End => state.scroll_grant_dialog(isize::MAX),
+                KeyCode::Char('t') => {
+                    state.select_grant_lifetime(crate::grants::GrantLifetime::Temporary)
+                }
+                KeyCode::Char('p') => {
+                    state.select_grant_lifetime(crate::grants::GrantLifetime::Persistent)
+                }
+                _ => {}
+            }
+            vec![]
+        }
+        _ => vec![],
+    }
+}
+
 fn keyboard_approval(
     state: &mut AppState,
     event: InputEvent,
@@ -247,6 +296,7 @@ fn keyboard_approval(
                         Effect::RestoreSlashOverlay,
                     ]
                 }
+                Some(PromptButton::Grant) => vec![Effect::RequestGrantPreview { id: tool_id }],
                 Some(PromptButton::Deny) => {
                     state.focus = Focus::MainInput;
                     vec![

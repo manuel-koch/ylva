@@ -905,6 +905,151 @@ fn escape_while_tool_approval_only_drops_button_focus() {
     assert!(matches!(state.focus, Focus::ToolApproval { .. }));
 }
 
+fn grant_preview(id: Uuid) -> crate::agent::GrantPreview {
+    crate::agent::GrantPreview {
+        id,
+        rules: vec!["bash 'make test'".to_string()],
+        refusal: None,
+        warnings: Vec::new(),
+        persistent_unavailable: None,
+    }
+}
+
+fn state_with_grant_dialog(
+    preview_for: impl FnOnce(Uuid) -> crate::agent::GrantPreview,
+) -> (AppState, Uuid) {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    state.focus = Focus::ToolApproval {
+        tool_id,
+        tool_name: "bash".to_string(),
+    };
+    state.open_grant_dialog(preview_for(tool_id));
+    (state, tool_id)
+}
+
+fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
+    update(
+        state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(code))),
+        &empty_textarea(),
+    )
+}
+
+#[test]
+fn the_grant_button_requests_a_preview_and_keeps_the_prompt() {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    state.focus = Focus::ToolApproval {
+        tool_id,
+        tool_name: "bash".to_string(),
+    };
+    state.prompt_button_focus = Some(PromptButton::Grant);
+    let effects = press(&mut state, KeyCode::Enter);
+    assert_eq!(effects, vec![Effect::RequestGrantPreview { id: tool_id }]);
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+    assert!(state.grant_dialog.is_none());
+}
+
+#[test]
+fn the_grant_dialog_confirms_the_selected_lifetime() {
+    use crate::grants::GrantLifetime;
+    let (mut state, tool_id) = state_with_grant_dialog(grant_preview);
+    assert!(press(&mut state, KeyCode::Right).is_empty());
+    let effects = press(&mut state, KeyCode::Enter);
+    assert_eq!(
+        effects,
+        vec![Effect::GrantTool {
+            id: tool_id,
+            lifetime: GrantLifetime::Persistent
+        }]
+    );
+    assert!(state.grant_dialog.is_none());
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+}
+
+#[test]
+fn the_grant_dialog_goes_back_without_resolving_the_prompt() {
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    press(&mut state, KeyCode::Tab);
+    assert!(press(&mut state, KeyCode::Enter).is_empty());
+    assert!(state.grant_dialog.is_none());
+
+    state.open_grant_dialog(grant_preview(match &state.focus {
+        Focus::ToolApproval { tool_id, .. } => *tool_id,
+        _ => unreachable!(),
+    }));
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::Escape),
+        &empty_textarea(),
+    );
+    assert!(effects.is_empty());
+    assert!(state.grant_dialog.is_none());
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+}
+
+#[test]
+fn the_grant_dialog_refuses_what_cannot_be_granted() {
+    let (mut state, _) = state_with_grant_dialog(|id| crate::agent::GrantPreview {
+        refusal: Some("this call cannot be granted".to_string()),
+        ..grant_preview(id)
+    });
+    assert!(press(&mut state, KeyCode::Enter).is_empty());
+    assert!(state.grant_dialog.is_some());
+
+    let (mut state, _) = state_with_grant_dialog(|id| crate::agent::GrantPreview {
+        persistent_unavailable: Some("no profile directory".to_string()),
+        ..grant_preview(id)
+    });
+    press(&mut state, KeyCode::Char('p'));
+    press(&mut state, KeyCode::Right);
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().lifetime,
+        crate::grants::GrantLifetime::Temporary
+    );
+    assert_eq!(press(&mut state, KeyCode::Enter).len(), 1);
+}
+
+#[test]
+fn the_grant_dialog_scrolls_within_the_drawn_content() {
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    state.layout.grant_dialog.maximum_scroll = 3;
+    state.layout.grant_dialog.body_rows = 4;
+    press(&mut state, KeyCode::PageDown);
+    assert_eq!(state.grant_dialog.as_ref().unwrap().scroll_offset, 3);
+    state.scroll_grant_dialog(-1);
+    assert_eq!(state.grant_dialog.as_ref().unwrap().scroll_offset, 2);
+    press(&mut state, KeyCode::Home);
+    assert_eq!(state.grant_dialog.as_ref().unwrap().scroll_offset, 0);
+    press(&mut state, KeyCode::End);
+    assert_eq!(state.grant_dialog.as_ref().unwrap().scroll_offset, 3);
+}
+
+#[test]
+fn ctrl_c_in_the_grant_dialog_goes_back_without_quitting() {
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::CtrlC),
+        &empty_textarea(),
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(state.grant_dialog.is_none());
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+}
+
+#[test]
+fn a_grant_dialog_for_another_prompt_is_not_opened() {
+    let mut state = AppState::new();
+    state.focus = Focus::ToolApproval {
+        tool_id: Uuid::new_v4(),
+        tool_name: "bash".to_string(),
+    };
+    state.open_grant_dialog(grant_preview(Uuid::new_v4()));
+    assert!(state.grant_dialog.is_none());
+}
+
 #[test]
 fn escape_while_busy_empty_input_triggers_confirm() {
     let mut state = AppState::new();
@@ -1106,6 +1251,8 @@ fn tab_cycles_approval_buttons_and_enter_activates_the_focused_one() {
     assert_eq!(state.prompt_button_focus, Some(PromptButton::Approve));
     update(&mut state, tab.clone(), &empty_textarea());
     assert_eq!(state.prompt_button_focus, Some(PromptButton::Deny));
+    update(&mut state, tab.clone(), &empty_textarea());
+    assert_eq!(state.prompt_button_focus, Some(PromptButton::Grant));
     update(&mut state, tab, &empty_textarea());
     assert_eq!(state.prompt_button_focus, Some(PromptButton::Approve));
 
@@ -1461,6 +1608,7 @@ fn go_to_agent_button_is_offered_and_switches_to_the_prompt_owner() {
     for expected in [
         PromptButton::Approve,
         PromptButton::Deny,
+        PromptButton::Grant,
         PromptButton::GoToAgent,
     ] {
         update(&mut state, tab.clone(), &empty_textarea());
@@ -1495,9 +1643,9 @@ fn go_to_agent_button_is_not_offered_while_viewing_the_prompt_owner() {
         tool_name: "bash".to_string(),
     };
     let tab = TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab)));
-    update(&mut state, tab.clone(), &empty_textarea());
-    update(&mut state, tab.clone(), &empty_textarea());
-    update(&mut state, tab, &empty_textarea());
+    for _ in 0..4 {
+        update(&mut state, tab.clone(), &empty_textarea());
+    }
     assert_eq!(state.prompt_button_focus, Some(PromptButton::Approve));
 }
 

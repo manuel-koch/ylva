@@ -68,6 +68,17 @@ pub(super) fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effe
     effects
 }
 
+/// A tool that starts while its approval prompt is still focused was approved
+/// without the user (a grant added elsewhere covered it): drop the stale
+/// prompt and move on to the next queued one.
+fn release_approval_resolved_by_grant(state: &mut AppState, tool_id: uuid::Uuid) {
+    if matches!(state.focus, Focus::ToolApproval { tool_id: focused_id, .. } if focused_id == tool_id)
+    {
+        state.focus = Focus::MainInput;
+        state.resolve_possible_interactive_pause(tool_id);
+    }
+}
+
 /// Handles subagent lifecycle/configuration events ahead of the mode-specific
 /// dispatch; every other event falls through unchanged to the per-`TuiMode`
 /// handlers.
@@ -354,6 +365,7 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 title_arguments,
                 run_id,
             );
+            release_approval_resolved_by_grant(state, id);
             vec![]
         }
         DomainEvent::ToolProgress {
@@ -498,6 +510,7 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 title_arguments,
                 run_id,
             );
+            release_approval_resolved_by_grant(state, id);
             vec![]
         }
         DomainEvent::ToolProgress {
@@ -630,6 +643,7 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 title_arguments,
                 run_id,
             );
+            release_approval_resolved_by_grant(state, id);
             vec![]
         }
         DomainEvent::ToolProgress {
@@ -826,6 +840,7 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 title_arguments,
                 run_id,
             );
+            release_approval_resolved_by_grant(state, id);
             vec![]
         }
         DomainEvent::ToolProgress {

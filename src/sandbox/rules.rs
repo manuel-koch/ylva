@@ -43,7 +43,7 @@ pub struct SandboxRule {
 /// do not cross `/`, and wildcards do not match a dot-prefixed component
 /// unless the pattern spells the leading dot. The bare `**` catch-all keeps
 /// matching every path, hidden ones included.
-pub(super) fn path_glob_matches(pattern: &Pattern, path: &str) -> bool {
+pub(crate) fn path_glob_matches(pattern: &Pattern, path: &str) -> bool {
     const OPTIONS: glob::MatchOptions = glob::MatchOptions {
         case_sensitive: true,
         require_literal_separator: true,

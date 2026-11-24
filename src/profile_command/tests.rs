@@ -1076,3 +1076,34 @@ fn shell_launcher_passes_the_path_as_an_argument() {
     assert!(succeeded);
     assert!(!failed);
 }
+
+#[test]
+fn grants_only_profile_is_labelled_and_delete_reports_grants_file() {
+    let temporary_directory = tempfile::tempdir().expect("tempdir");
+    let scope = home_test_scope(temporary_directory.path());
+    write_file(
+        &profile_directory(&scope, "work").join(crate::grants::GRANTS_FILE_NAME),
+        "[[grants]]\ntool = \"web_search\"\n",
+    );
+
+    let listed = execute_quietly(&list_command(false), &scope);
+    assert!(
+        listed.output.trim_end().ends_with("(grants only)"),
+        "{}",
+        listed.output
+    );
+
+    let dry_run = execute_quietly(&delete_command("work", false, true), &scope);
+    assert!(
+        dry_run.output.contains("(including grants.toml)"),
+        "{}",
+        dry_run.output
+    );
+    let deleted = execute_quietly(&delete_command("work", false, false), &scope);
+    assert!(
+        deleted.output.contains("(including grants.toml)"),
+        "{}",
+        deleted.output
+    );
+    assert!(!profile_directory(&scope, "work").exists());
+}

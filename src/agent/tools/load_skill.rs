@@ -160,6 +160,16 @@ impl Tool for LoadSkillTool {
             Err(reason) => ApprovalCheck::AutoDenied { reason },
         }
     }
+    fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {
+        match self.selected_skill(arguments) {
+            Ok(skill) => crate::grants::GrantSubjects::Single(crate::grants::GrantSubject::Skill {
+                name: skill.name.clone(),
+                source: skill.source.canonical_path.clone(),
+            }),
+            Err(_) => crate::grants::GrantSubjects::NotGrantable,
+        }
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         arguments
             .as_object()

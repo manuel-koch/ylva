@@ -44,7 +44,13 @@ conversation. The original draft returns after all approvals are resolved.
 | `ctrl-c` (×2, same key, ≤ 2 s) | Help popup open | Quit when idle; interrupt and quit while busy |
 | Left-click inside popup | Help popup open | No effect (stays open) |
 | Left-click outside popup | Help popup open | Close popup |
-| `tab` / `shift-tab` | Approval sub-mode | Move focus between the Approve and Deny buttons, plus the *Go to agent* button when the approval belongs to another conversation than the viewed one (none focused initially) |
+| `tab` / `shift-tab` | Approval sub-mode | Move focus between the Approve, Deny and Grant… buttons, plus the *Go to agent* button when the approval belongs to another conversation than the viewed one (none focused initially) |
+| `enter` / left-click *Grant…* | Approval sub-mode | Open the grant dialog for similar calls |
+| `←` `→` `↑` `↓` / `t` `p` / click a lifetime | Grant dialog | Choose *Temporary* or *Persistent* |
+| `pgup` `pgdn` `home` `end` / mouse wheel | Grant dialog | Scroll the dialog body when it does not fit the terminal |
+| `tab` / `shift-tab` | Grant dialog | Move focus between *Grant* and *Back* |
+| `enter` / left-click *Grant* | Grant dialog | Approve the tool and create the grant; the prompt stays if the call cannot be granted or saving fails |
+| `esc` / `ctrl-c` / left-click *Back* or outside | Grant dialog | Return to the approval prompt |
 | `enter` | Approval sub-mode, Approve focused | Approve the tool; text in the input field is left untouched |
 | `enter` | Approval sub-mode, Deny focused | Deny the tool with the input text as the reason, then clear the field |
 | `enter` | Approval sub-mode, no button focused | No effect (typed text never changes what a bare `enter` does) |

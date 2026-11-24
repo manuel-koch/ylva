@@ -457,6 +457,8 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         },
         agents_popup: agents_popup_render_state(state),
         status_popup: status_popup_render_state(state),
+        grant_dialog: state.visible_grant_dialog().cloned(),
+        grant_dialog_layout: state.layout.grant_dialog,
         clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
             pending_clarify: if let crate::tui_reducer_state::TuiMode::ClarifyPending {
                 question,
@@ -564,16 +566,19 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.layout.status_popup.content_area = rendered.status_popup.content_area;
     state.status_popup.scroll_offset = rendered.status_popup.scroll_offset;
     state.status_popup.rendered_lines = rendered.status_popup.rendered_lines;
+    state.layout.grant_dialog = rendered.grant_dialog_layout;
     state.layout.help_popup.rect = rendered.help_popup.help_popup_rect;
     state.layout.help_popup.content_area = rendered.help_popup.help_content_area;
     state.layout.slash_overlay = rendered.slash_overlay_layout;
     if let Some(buttons) = button_areas {
         state.layout.approve_button = buttons.approve;
         state.layout.deny_button = buttons.deny;
+        state.layout.grant_button = buttons.grant;
         state.layout.go_to_agent_button = buttons.go_to_agent;
     } else {
         state.layout.approve_button = ratatui::layout::Rect::default();
         state.layout.deny_button = ratatui::layout::Rect::default();
+        state.layout.grant_button = ratatui::layout::Rect::default();
         state.layout.go_to_agent_button = rendered.clarify_banner_state.go_to_agent_button;
     }
     state.layout.clarify_ok_button = rendered.clarify_banner_state.ok_button;

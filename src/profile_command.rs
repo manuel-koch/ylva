@@ -45,6 +45,7 @@ const USAGE_ERROR: u8 = ExitCode::UsageError as u8;
 const IMPLICIT_DEFAULT_MARK: &str = "(implicit default)";
 const INVALID_NAME_MARK: &str = "(invalid name)";
 const NO_CONFIG_MARK: &str = "(no config.toml)";
+const GRANTS_ONLY_MARK: &str = "(grants only)";
 const INVALID_CONFIG_MARK: &str = "(invalid config)";
 
 /// Where a profile command reads and writes profile directories and shims.
@@ -370,7 +371,14 @@ fn list_marks(profiles_root: &Path, name: &str) -> Vec<&'static str> {
     }
     let config_path = profile_config_path(profiles_root, name);
     if !config_path.exists() {
-        marks.push(NO_CONFIG_MARK);
+        let grants_path = profiles_root
+            .join(name)
+            .join(crate::grants::GRANTS_FILE_NAME);
+        marks.push(if grants_path.is_file() {
+            GRANTS_ONLY_MARK
+        } else {
+            NO_CONFIG_MARK
+        });
     } else if config_problem(&config_path).is_some() {
         marks.push(INVALID_CONFIG_MARK);
     }
@@ -484,14 +492,28 @@ fn delete(
         return refuse(diagnostics, &format!("{error:#}; nothing was deleted"));
     }
     let display_directory = display_path(&profile_directory);
+    let grants_note = if profile_directory
+        .join(crate::grants::GRANTS_FILE_NAME)
+        .is_file()
+    {
+        format!(" (including {})", crate::grants::GRANTS_FILE_NAME)
+    } else {
+        String::new()
+    };
     if dry_run {
-        writeln!(output, "would delete {name:?} at {display_directory}")?;
+        writeln!(
+            output,
+            "would delete {name:?} at {display_directory}{grants_note}"
+        )?;
         return Ok(SUCCESS);
     }
     std::fs::remove_dir_all(&profile_directory)?;
     let shim_plan = plan_shims(&shim_directories, None)?;
     apply_shim_plan(&shim_directories, &shim_plan)?;
-    writeln!(output, "Deleted profile {name:?} at {display_directory}")?;
+    writeln!(
+        output,
+        "Deleted profile {name:?} at {display_directory}{grants_note}"
+    )?;
     report_removed_shims(output, &shim_plan)?;
     Ok(SUCCESS)
 }

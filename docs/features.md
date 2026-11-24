@@ -1423,10 +1423,45 @@ for scope, environment, and `PATH` setup.
 
 ### Workspace configuration trust
 
-Workspace profile configuration (`config.toml`, `.env`, `.ylva/agents/**`) blocks
+Workspace profile configuration (`config.toml`, `.env`, `grants.toml`, `.ylva/agents/**`) blocks
 startup until `ylva trust` approved its exact content; edits revoke the
 approval. See [workspace trust](configuration.md#workspace-trust)
 and the [trust command](cli-options.md#trust-command).
+
+### Tool-approval grants
+
+When a tool call needs approval, the TUI footer offers a *Grant…* button next to *Approve* and
+*Deny*. It is always shown; on a terminal too narrow for the decorated labels the three buttons use
+compact labels. *Grant…* opens a second page showing the proposed rules (read-only), a lifetime
+choice (*Temporary* or *Persistent*), notes about the consequences (file-modifying tools, trailing
+`*`, wider rules, environment and working directory not matched, the `.ylva` directory a save would
+create, the need for `ylva trust`) and *Grant* / *Back*. The page scrolls (mouse wheel,
+`pgup`/`pgdn`/`home`/`end`) when it does not fit, with a scrollbar and pinned buttons. On a terminal
+under 7 rows the dialog is not drawn and the footer shows a bold red hint (`esc` still goes back).
+*Grant* approves the pending call and creates the narrowest grant covering it: the exact resolved
+path (`read`, `write`, `edit`, `search`, `glob`), the skill name and source (`load_skill`), the
+scheme, host and port (`web_fetch`), the tool itself (`web_search`, `spawn_subagent`), or one rule
+per simple command of a `bash` call. A notice shows what was granted. A call that cannot be granted
+(for example `python -c`, a pipeline with a subshell or a destructive wildcard) shows the reason on
+the second page and can only be approved once. A grant that fails to save leaves the approval
+pending and reports a notice.
+
+- *Temporary* grants are in memory: in memory, shared by the root conversation
+  and its subagents until `/clear` or a session switch.
+- *Persistent* grants are appended to `<workspace-root>/.ylva/profiles/<profile>/grants.toml`
+  and loaded at the next start (disable with `--no-workspace-grants`). Saving
+  changes a trusted file, so run `ylva trust` before the next start.
+- Grants only satisfy ordinary approval requests. Denials, schema errors and
+  `clarify` are never covered. Headless mode runs covered calls and still denies
+  the rest.
+- A grant added while an approval is pending releases every pending call it
+  covers, also in other conversations.
+
+The grant dialog with an editable rule, tool checklist and preview described in
+the plan is not implemented; grants are created from the proposed rule. Edit
+`grants.toml` to widen or narrow a rule. See
+[grant configuration](configuration.md#tool-approval-grants) for the file
+format and matching rules.
 
 ### Layered global persona and initialization
 

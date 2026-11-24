@@ -120,3 +120,61 @@ fn revoke_withdraws_the_trust() {
 
     assert!(fixture.run_prompt().contains("is not trusted"));
 }
+
+fn write_grants(fixture: &Fixture, contents: &str) {
+    fs::write(
+        fixture
+            .workspace
+            .path()
+            .join(".ylva/profiles/default/grants.toml"),
+        contents,
+    )
+    .expect("write grants");
+}
+
+const BASH_GRANT: &str = "[[grants]]\ntool = \"bash\"\nrule = \"make test\"\n";
+
+#[test]
+fn a_changed_grants_file_needs_trust_again_but_comment_edits_do_not() {
+    let fixture = Fixture::new();
+    write_grants(&fixture, BASH_GRANT);
+    assert!(fixture.run(&["trust"]).status.success());
+    assert!(
+        fixture.run_prompt().contains("references engine 'missing'"),
+        "a trusted grants file must not block startup"
+    );
+
+    write_grants(&fixture, &format!("# why\n{BASH_GRANT}"));
+    assert!(!fixture.run_prompt().contains("is not trusted"));
+
+    write_grants(
+        &fixture,
+        &format!("{BASH_GRANT}\n[[grants]]\ntool = \"web_search\"\n"),
+    );
+    let stderr = fixture.run_prompt();
+    assert!(
+        stderr.contains("is not trusted") && stderr.contains("changed since it was trusted"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_malformed_grants_file_is_a_startup_error_unless_workspace_grants_are_disabled() {
+    let fixture = Fixture::new();
+    write_grants(
+        &fixture,
+        "[[grants]]\ntool = \"bash\"\nrule = \"python -c *\"\n",
+    );
+    assert!(fixture.run(&["trust"]).status.success());
+
+    let stderr = fixture.run_prompt();
+    assert!(stderr.contains("grants.toml"), "{stderr}");
+    assert!(!stderr.contains("references engine 'missing'"), "{stderr}");
+
+    let output = fixture.run(&["--no-tui", "--no-workspace-grants", "--prompt", "hi"]);
+    assert!(
+        stderr_of(&output).contains("references engine 'missing'"),
+        "{}",
+        stderr_of(&output)
+    );
+}

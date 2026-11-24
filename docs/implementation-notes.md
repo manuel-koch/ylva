@@ -673,6 +673,27 @@ See [persistence](./persistence.md) for on-disk contracts.
   place and are reused as read-only history. `--clone` requires
   `--conversation-id` (clap `requires`).
 
+## Tool-approval grants
+
+- Grants are evaluated in `evaluate_call_approval` after the sandbox verdict,
+  so they can only turn `UserApprovalRequired` into approval. Each tool
+  describes its call as grant subjects; the same resolved value is judged by
+  `needs_approval` and by the grant, so the two cannot disagree.
+- One `GrantState` is shared by the root loop and every subagent through the
+  factory and tool registry. Its generation counter is a `watch` channel: a
+  loop waiting in `ToolPending` re-evaluates its front call and approves it
+  through the normal `ApproveTool` path, and the presenter drops a stale approval
+  prompt when the call starts.
+- The grant dialog is a sub-state of the approval prompt (`AppState::grant_dialog`),
+  not a `Focus`. *Grant…* sends `RequestGrantPreview`; the agent answers with
+  `UiUpdate::GrantPreview`, since only it holds the tool objects. *Grant* sends
+  `GrantAndApprove`; the agent, not the UI, derives the grant again from the
+  pending call so tools stay the only judges of their arguments. The TUI keeps
+  the prompt until the call starts, so a refused or failed grant leaves it
+  pending. The footer never drops *Grant…*: narrow terminals get compact labels.
+- `grants.toml` is trust-covered and compared as parsed TOML; saving changes the
+  fingerprint on purpose so a hostile edit cannot ride along.
+
 ## Subagent delegation internals
 
 - `spawn_subagent` returns the tool's single admission result; the terminal

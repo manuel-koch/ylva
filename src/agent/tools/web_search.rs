@@ -209,6 +209,10 @@ impl Tool for WebSearchTool {
             .unwrap_or(ApprovalCheck::UserApprovalRequired)
     }
 
+    fn grant_subjects(&self, _arguments: &Value) -> crate::grants::GrantSubjects {
+        crate::grants::GrantSubjects::Single(crate::grants::GrantSubject::Unconditional)
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         self.non_default_arguments(arguments)
             .into_iter()
