@@ -166,6 +166,13 @@ and the host's approval capability.
 The filesystem boundary that governs which paths tools may access and when user
 approval is required.
 
+**Tool approval trail**:
+Linked diagnostic events that explain why a tool call was automatically
+approved, automatically denied, or required user approval. The **approval
+verdict** is the result of the policy check; the **disposition** is how a
+pending request was resolved, for example by the user or a matching grant.
+See [Tool approval trail](docs/logging.md#tool-approval-trail) for log details.
+
 **Grant**: A user-owned, reusable approval for similar future calls of one tool. A grant only
 satisfies an ordinary approval request; it never overrides a denial, a schema error or a tool that
 needs a human answer, and it does not change sandbox rules
