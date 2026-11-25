@@ -138,6 +138,9 @@ themed_colors! {
     approve_background_color(Color::Green, Color::Green);
     deny_hover_background_color(Color::LightRed, Color::LightRed);
     deny_background_color(Color::Red, Color::Red);
+    /// Navigation-only buttons (`[ ← Back ]`, `[ ⇢ Go to agent ]`): neither confirm nor discard.
+    navigation_background_color(Color::Rgb(110, 160, 255), Color::Rgb(30, 80, 200));
+    navigation_hover_background_color(Color::Rgb(160, 195, 255), Color::Rgb(100, 140, 235));
 }
 
 // Queued and steered messages keep separate roles even while they currently

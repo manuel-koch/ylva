@@ -24,7 +24,7 @@ use crate::agent::AgentMode;
 use crate::theme::{
     approval_title_color, approve_background_color, approve_hover_background_color,
     button_text_color, deny_background_color, deny_hover_background_color, footer_status_color,
-    muted_text_color, overlay_selection_color,
+    muted_text_color, navigation_background_color, navigation_hover_background_color,
 };
 use crate::tui_reducer_state::{
     ActiveSubagentCounts, ChatEntry, ParameterField, PromptButton, SlashOverlay, ToolCallState,
@@ -952,8 +952,8 @@ pub(super) fn draw_go_to_agent_button(
     is_hovered: bool,
 ) {
     let style = button_style(
-        approval_title_color(),
-        overlay_selection_color(),
+        navigation_background_color(),
+        navigation_hover_background_color(),
         is_hovered,
         is_focused,
     );

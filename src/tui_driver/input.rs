@@ -140,7 +140,7 @@ impl MouseDrag {
             textarea.copy();
             let yanked = textarea.yank_text();
             if !yanked.is_empty() && clipboard.write_text(yanked) {
-                state.set_toast("Copied to clipboard");
+                state.set_toast("✓ Copied to clipboard");
             }
         }
         *self = Self::default();

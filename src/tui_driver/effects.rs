@@ -208,7 +208,7 @@ pub(super) async fn execute_effects(
             }
             Effect::CopyToClipboard(text) => {
                 if clipboard.write_text(text) {
-                    state.set_toast("Copied to clipboard");
+                    state.set_toast("✓ Copied to clipboard");
                 }
             }
             // Slash-command effects need the engine, which this function

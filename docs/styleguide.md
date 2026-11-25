@@ -25,6 +25,7 @@ This table lists the colors that carry UX/UI meaning in dialogs and pages; it is
 | Tool bubble frame | `tool_bubble_border_color` | Borders of tool bubbles |
 | Dialog frame | `popup_border_color` | Border of dialogs |
 | Positive/negative buttons | `approve_background_color`, `deny_background_color` | Confirm and Deny buttons |
+| Navigation buttons | `navigation_background_color`, `navigation_hover_background_color` | Buttons that only move to another view (`[ ← Back ]`, `[ ⇢ Go to agent ]`) |
 | Chat error line | `error_color` | Errors that are part of the conversation transcript |
 
 Rules:
@@ -32,7 +33,10 @@ Rules:
 - Color never carries meaning alone; a glyph or wording repeats it.
 - Problems inside dialogs and pickers use `warning_color`, not `error_color`.
 - In dialogs and pickers secondary text is muted, not dimmed or underlined. Transcript elements
-  (thinking and tool bubbles, chat) may use `Modifier::DIM`.
+  (thinking and tool bubbles, chat) may use `Modifier::DIM`, and tool bubbles underline their
+  section labels (`Arguments:`, `Result:`, `User answered:`). Underline marks labels only, never
+  values or interactive text.
+- The clarify banner is a transcript element, not a dialog: it may use `Modifier::DIM`.
 
 ## Glyphs
 
@@ -86,6 +90,9 @@ Rules:
 - Mouse: a click on a row focuses it and, for cyclable values, cycles it; a double-click on text
   marked with `✎` starts editing it; a click on a button activates it. Everything on the keyboard is
   reachable with the pointer and vice versa.
+- Exception: the approval and clarify prompts. There `esc` only removes button focus (clarify also
+  clears the input) and never decides; `ctrl-c` denies the tool or aborts the clarify. A stray `esc`
+  must not approve, deny or abort pending work.
 - Every key is listed in [keybindings](./keybindings.md) in the same commit.
 
 ## Dialogs and pages
@@ -124,8 +131,13 @@ Rules:
   lines.
 - `tab` reaches buttons, `enter` or a click activates them, `esc` is the back action.
 - A button that denies or discards something with consequences (such as cancelling a question,
-  which gives no answer) is labelled with `✗` and uses `deny_background_color`; `←` is only for
-  leaving without consequence.
+  which gives no answer, or deleting a session) is labelled with `✗` and uses
+  `deny_background_color`; `←` is only for leaving without consequence.
+- A button that only navigates (back to the previous view, to another conversation) is neither
+  confirm nor discard: it uses `navigation_background_color` and
+  `navigation_hover_background_color` instead of the approve or deny colors, with the same hover and
+  focus styles.
+- Roles by color: approve = confirm, deny = discard or abort, navigation = move.
 
 ## Multi-value cycle input
 

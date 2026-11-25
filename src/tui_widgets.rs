@@ -40,8 +40,8 @@ use crate::conversation_render_cache::ConversationRenderCache;
 use crate::markdown::render_markdown;
 use crate::saturating_cast::saturating_u16;
 use crate::theme::{
-    chat_selection_bg, deny_background_color, deny_hover_background_color, input_border_color,
-    muted_text_color, separator_line_color, subagent_view_header_bg_color,
+    chat_selection_bg, input_border_color, muted_text_color, navigation_background_color,
+    navigation_hover_background_color, separator_line_color, subagent_view_header_bg_color,
     subagent_view_separator_color, user_message_bg_color,
 };
 use crate::tui_reducer_state::BubbleExpansionTarget;
@@ -475,8 +475,8 @@ fn draw_internal(
             back_button_area.contains(ratatui::layout::Position::new(column, row))
         });
         let back_style = footer::button_style(
-            deny_background_color(),
-            deny_hover_background_color(),
+            navigation_background_color(),
+            navigation_hover_background_color(),
             back_hovered,
             false,
         );

@@ -1,6 +1,7 @@
 # Ylva agent-harness keybindings
 
-Reference for Ylva's TUI keybindings.
+Reference for Ylva's TUI keybindings. Dialog and picker key behavior follows the
+[styleguide](./styleguide.md#keyboard).
 
 Footer hints render each keybinding in bold and its action in normal text.
 Multiple hints are separated by ` · `, for example:

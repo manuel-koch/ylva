@@ -44,8 +44,8 @@ use super::footer::{
 use super::ButtonAreas;
 
 const SESSION_RESUME_BUTTON_LABEL: &str = " [ ✓ Resume ] ";
-const SESSION_CLONE_BUTTON_LABEL: &str = " [ Clone ] ";
-const SESSION_DELETE_BUTTON_LABEL: &str = " [ Delete ] ";
+const SESSION_CLONE_BUTTON_LABEL: &str = " [ ✓ Clone ] ";
+const SESSION_DELETE_BUTTON_LABEL: &str = " [ ✗ Delete ] ";
 const SESSION_ACTION_BUTTON_GAP: &str = "  ";
 /// A `/models` list row with the model name (the model ID after its last `/`)
 /// in bold. The name is searched only within the identity part of the row;
@@ -1139,7 +1139,7 @@ pub(super) fn draw_clarify_buttons(
     offers_go_to_agent: bool,
     mouse_pos: Option<(u16, u16)>,
 ) -> ButtonAreas {
-    let ok_label = " [ ✓ OK ] ";
+    let ok_label = " [ ✓ Answer ] ";
     let cancel_label = " [ ✗ Cancel ] ";
     let ok_width = saturating_u16(ok_label.chars().count());
     let cancel_width = saturating_u16(cancel_label.chars().count());

@@ -1162,7 +1162,7 @@ for the full mechanics.
   while you are typing is queued instead of shown, so a keystroke cannot answer
   it. It appears after 1.5 s without keystrokes, or at the latest 10 s after
   the typing burst began. The footer shows `⏳ N prompt(s) waiting (finish
-  typing)` meanwhile. Clarify prompts use `[ ✓ OK ]  [ ✗ Cancel ]` buttons with
+  typing)` meanwhile. Clarify prompts use `[ ✓ Answer ]  [ ✗ Cancel ]` buttons with
   the same focus rules. When you view another conversation than the prompt's
   owner, a `[ ⇢ Go to agent ]` button (click, or `tab` then `enter`) switches
   to it; the prompt stays pending.
@@ -1336,7 +1336,7 @@ for the full mechanics.
   and is replaced by the final duration with millisecond precision on completion
   (`1m30s` from one minute on).
 - **Toast notifications:** transient messages appear in the bottom-right
-  corner (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
+  corner (e.g., `"✓ Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
   track at the end of the list (and the top at the start). Left-clicking its
   top/bottom arrow jumps to the start/end; clicking the track jumps to the
@@ -1428,6 +1428,8 @@ approval. See [workspace trust](configuration.md#workspace-trust)
 and the [trust command](cli-options.md#trust-command).
 
 ### Tool-approval grants
+
+The grant dialog follows the [styleguide](./styleguide.md).
 
 When a tool call needs approval, the TUI footer offers a *Grant…* button next to *Approve* and
 *Deny*. It is always shown; on a terminal too narrow for the decorated labels the three buttons use
@@ -1578,8 +1580,9 @@ empty titles display `Untitled`.
 Browsing is allowed while busy, but activation requires root work, queued
 steers, queued/running subagents, and running/pending compaction to be quiescent.
 
-The popup title is `Sessions`; the *Resume* and *Clone* buttons are green and the *Delete*
-button is red.
+The popup title is `Sessions`; the *Resume* and *Clone* buttons are green (`[ ✓ Resume ]`,
+`[ ✓ Clone ]`) and the *Delete* button is red (`[ ✗ Delete ]`); see the
+[styleguide](./styleguide.md#buttons).
 The focused button is filled; hovering another button lightens it but never takes the focus away.
 Keybinding hints appear only in the TUI footer. The popup shows status or errors only when relevant,
 without repeating footer controls. Each open focuses **Resume**. `Tab`/`Shift-Tab` move button focus

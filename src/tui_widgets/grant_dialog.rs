@@ -23,8 +23,8 @@ use ratatui::Frame;
 
 use crate::theme::{
     approve_background_color, approve_hover_background_color, chat_scrollbar_color, content_color,
-    deny_background_color, deny_hover_background_color, muted_text_color, popup_border_color,
-    popup_heading_color, tool_bubble_foreground_color, warning_color,
+    muted_text_color, navigation_background_color, navigation_hover_background_color,
+    popup_border_color, popup_heading_color, tool_bubble_foreground_color, warning_color,
 };
 use crate::tui_reducer_state::{
     GrantDialogFocus, GrantDialogLayout, GrantDialogState, GrantRowSelection, GREATER_VALUE_GLYPH,
@@ -492,8 +492,8 @@ fn draw_buttons(
         Style::default().fg(muted_text_color())
     };
     let back_style = button_style(
-        deny_background_color(),
-        deny_hover_background_color(),
+        navigation_background_color(),
+        navigation_hover_background_color(),
         hovered(back),
         dialog.focused == GrantDialogFocus::Back,
     );
