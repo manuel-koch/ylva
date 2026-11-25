@@ -7,7 +7,8 @@ If a change needs a deviation, update this guide in the same commit and say why.
 
 Colors are named functions in `src/theme.rs` (resolved per theme at draw time).
 
-Never hard-code a color or cache one across a theme change.
+Never hard-code a color or cache one across a theme change. The only exemption is the colors
+of syntax-highlighted code, which come from the highlighter theme.
 
 ## Colors
 
@@ -30,7 +31,8 @@ Rules:
 
 - Color never carries meaning alone; a glyph or wording repeats it.
 - Problems inside dialogs and pickers use `warning_color`, not `error_color`.
-- Secondary text is muted, not dimmed or underlined.
+- In dialogs and pickers secondary text is muted, not dimmed or underlined. Transcript elements
+  (thinking and tool bubbles, chat) may use `Modifier::DIM`.
 
 ## Glyphs
 
@@ -39,18 +41,21 @@ Rules:
 | `▸` | Focused or selected row in a list, form page or dialog |
 | `◂` `▸` around a value | The value cycles with `←`/`→` (`SMALLER_VALUE_GLYPH`, `GREATER_VALUE_GLYPH`) |
 | `✎` | The text next to it is editable (`enter` or double-click starts editing) |
-| `✗` | A problem line (validation error, failure), in `warning_color` |
+| `✗` | A problem line or hint (validation error, failure, warning, rejected action), in `warning_color` or, in the transcript, `error_color`; also the label glyph of a negative action button (`[ ✗ Cancel ]`) |
 | `•` | A note (muted) |
 | ` · ` | Separator between entries on one line (footer hints and status, e.g. `cost · usage`) |
 | `✓` | Confirming action label (`[ ✓ Grant ]`, `[ ✓ Apply ]`) |
 | `←` | Back or leaving action label (`[ ← Back ]`) |
+| `⇢` | Action label that moves to another conversation (`[ ⇢ Go to agent ]`) |
+| `●` | The current or active item, in `active_model_color` (the viewed agent in the agents popup) |
 
 ## Focus and highlight
 
 - Every slash overlay (command suggestions, `/session`, `/models` list, parameter popup and save
   page), the agents popup and every dialog highlight the focused row by foreground only: bold
   `content_color`, unfocused rows in their normal or `muted_text_color` text. They never use a
-  background for a row.
+  background or reverse video for the focus highlight of a row. Hover feedback of buttons and
+  value-cycle glyphs is a separate state and does use a background.
 - Exactly one element has the focus. The focused row carries the marker glyph.
 - Hover and focus are two separate states, and the most recent input wins: a pointer move onto a
   widget shows its hover style and a `tab` / `shift-tab` moves the focus and clears the hover, even
@@ -118,6 +123,9 @@ Rules:
 - A disabled button is muted and not clickable; the reason is visible in the notes or problem
   lines.
 - `tab` reaches buttons, `enter` or a click activates them, `esc` is the back action.
+- A button that denies or discards something with consequences (such as cancelling a question,
+  which gives no answer) is labelled with `✗` and uses `deny_background_color`; `←` is only for
+  leaving without consequence.
 
 ## Multi-value cycle input
 
@@ -153,6 +161,19 @@ Rules:
 - Wheel, `pgup`, `pgdn`, `home` and `end` scroll.
 - Pinned parts (buttons, headers) never scroll away.
 
+## Toasts, footer and selection
+
+- A toast is a one-line framed message at the bottom right in `toast_fg_color` on
+  `toast_bg_color`; this background is the exception to the foreground-only rule. A confirmation
+  starts with `✓`, a rejected action with `✗` (`✗ Paste rejected: …`).
+- The footer shows keybinding hints, separated by ` · `. An alert hint (such as a terminal that
+  is too small for a dialog) starts with `✗` and is bold in `deny_background_color`.
+- Text selection (chat, clarify banner) is drawn with a background (`chat_selection_bg`, the
+  banner's own selection color); selected text keeps its foreground. Selection is not a focus
+  highlight.
+- Every error or warning hint, in dialogs, the transcript, the footer and toasts, carries `✗`
+  and states what is wrong and what to do.
+
 ## Wording
 
 - Labels are short lowercase nouns for values (e.g. `one-time`, `temporary`, `persistent`) and
@@ -175,3 +196,5 @@ The CLI follows the TUI's vocabulary and problem style:
 - Use the same words for the same concepts (grant scopes, engine, profile).
 - A problem states what is wrong and what to do, in one sentence.
 - Never rely on color alone, and keep output readable when piped.
+- Problem lines on stderr start with `error:` or `warning:` instead of `✗`, so they stay greppable
+  when piped.

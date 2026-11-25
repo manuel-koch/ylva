@@ -484,8 +484,9 @@ impl AppState {
     /// Confirms the selected rows. The dialog stays open until the agent
     /// approves the call (the prompt then goes away) or reports why nothing
     /// was created. Does nothing when the selection cannot be confirmed.
-    /// `reload_snapshot` accepts a reviewed external edit of `grants.toml`.
-    pub fn confirm_grant_dialog(&mut self, reload_snapshot: bool) -> Vec<Effect> {
+    /// After a reported external edit of `grants.toml` the confirmation retries
+    /// with the file as it is now.
+    pub fn confirm_grant_dialog(&mut self) -> Vec<Effect> {
         if !self
             .visible_grant_dialog()
             .is_some_and(GrantDialogState::can_confirm)
@@ -495,6 +496,10 @@ impl AppState {
         let Some(dialog) = self.grant_dialog.as_mut() else {
             return vec![];
         };
+        let reload_snapshot = dialog
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.reloadable);
         dialog.awaiting_answer = true;
         dialog.failure = None;
         vec![Effect::GrantTool {
@@ -504,24 +509,10 @@ impl AppState {
         }]
     }
 
-    /// Retries after an external edit of `grants.toml` was reported.
-    pub fn retry_grant_with_reload(&mut self) -> Vec<Effect> {
-        let reloadable = self
-            .grant_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.failure.as_ref())
-            .is_some_and(|failure| failure.reloadable);
-        if reloadable {
-            self.confirm_grant_dialog(true)
-        } else {
-            vec![]
-        }
-    }
-
     /// Activates the keyboard-focused element.
     pub fn activate_grant_dialog_focus(&mut self) -> Vec<Effect> {
         match self.grant_dialog.as_ref().map(|dialog| dialog.focused) {
-            Some(GrantDialogFocus::Confirm) => self.confirm_grant_dialog(false),
+            Some(GrantDialogFocus::Confirm) => self.confirm_grant_dialog(),
             Some(GrantDialogFocus::Back) => {
                 self.close_grant_dialog();
                 vec![]

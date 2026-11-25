@@ -129,7 +129,7 @@ fn detail_text_and_color(
     let lines = model_picker_detail_lines(overlay, display, 120, 5);
     let line = lines
         .iter()
-        .find(|line| line.to_string().starts_with("Compaction"))
+        .find(|line| line.to_string().contains("Compaction"))
         .expect("compaction detail line");
     let text = line
         .spans
@@ -214,8 +214,9 @@ fn draft_window_matching_explicit_compaction_engine_clears_mismatch_highlight() 
     let display = engine_display(explicit_compaction_engine);
 
     let mismatching = picker_overlay(None);
-    let (_, mismatch_color) = detail_text_and_color(&mismatching, &display);
+    let (mismatch_text, mismatch_color) = detail_text_and_color(&mismatching, &display);
     assert_eq!(mismatch_color, Some(warning_color()));
+    assert!(mismatch_text.starts_with("✗ Compaction"), "{mismatch_text}");
 
     let matching = picker_overlay(Some(context_length_draft(0, 128 * KB, true)));
     let (text, matching_color) = detail_text_and_color(&matching, &display);
@@ -574,4 +575,27 @@ fn session_buttons_are_muted_unless_the_list_is_loaded_and_not_empty() {
 
     picker.phase = SessionPickerPhase::Deleting;
     assert!(all_muted(&picker, None));
+}
+
+#[test]
+fn toast_shows_confirmation_glyph_unless_message_is_a_problem() {
+    let render = |message: &str| {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| draw_toast(frame, frame.area(), message))
+            .expect("draw toast");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    let confirmation = render("Copied to clipboard");
+    assert!(confirmation.contains("✓ Copied to clipboard"));
+    let problem = render("✗ Paste rejected");
+    assert!(problem.contains("✗ Paste rejected"));
+    assert!(!problem.contains('✓'));
 }

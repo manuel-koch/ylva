@@ -943,7 +943,7 @@ fn click_grant_dialog(state: &mut AppState, column: u16, row: u16) -> Vec<Effect
     let position = (column, row).into();
     let layout = state.layout.grant_dialog.clone();
     if layout.confirm_button.contains(position) {
-        return state.confirm_grant_dialog(false);
+        return state.confirm_grant_dialog();
     }
     if layout.back_button.contains(position) || !layout.rect.contains(position) {
         state.close_grant_dialog();

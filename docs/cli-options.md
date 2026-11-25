@@ -207,8 +207,8 @@ Counts use the TUI footer's compact decimal notation: `~950`, `~1.2K`,
 or `~1.2M`. These are tokens, not bytes.
 
 `ylva skill list --color=auto|yes|no` uses the global CLI color policy, with
-`auto` as the default. Supported terminal output renders skill names in bold
-and labels underlined; redirected output, `TERM=dumb`, and `NO_COLOR` remain
+`auto` as the default. Supported terminal output renders skill names in bold;
+redirected output, `TERM=dumb`, and `NO_COLOR` remain
 plain in auto mode. `yes` forces ANSI styling, and `no` disables it.
 The flag may also precede `skill`.
 

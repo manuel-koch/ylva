@@ -299,7 +299,7 @@ fn base_footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'sta
 /// Shown instead of the keybinding hints while the grant dialog does not fit.
 pub(super) fn grant_dialog_too_small_footer_hints() -> &'static [FooterHint] {
     const HINTS: &[FooterHint] = &[FooterHint::alert(
-        "Terminal too short for grant dialog (esc: back)",
+        "✗ Terminal too short for grant dialog (esc: back)",
     )];
     HINTS
 }

@@ -50,7 +50,6 @@ conversation. The original draft returns after all approvals are resolved.
 | `tab` / `shift-tab` | Grant dialog | Cycle focus: first row → *Grant* → *Back* |
 | `←` `→` / `space` / click a row | Grant dialog | Cycle the focused row's selector (`one-time`, `temporary`, `persistent`) |
 | `enter` on a row / double-click its rule (✎) | Grant dialog | Edit the row's rule: type at the caret, `←` `→` `home` `end` move it, `backspace` / `delete` remove, `ctrl-u` clears, `enter` keeps, `esc` restores; a single click on the rule only focuses the row |
-| `r` | Grant dialog | After a reported change of `grants.toml`: retry with the file as it is now |
 | `pgup` `pgdn` `home` `end` / mouse wheel | Grant dialog | Scroll the dialog body when it does not fit the terminal |
 | `enter` / left-click *Grant* | Grant dialog | Approve the tool and create the selected grants; the dialog stays open with the reason if nothing could be created |
 | `esc` / `ctrl-c` / left-click *Back* or outside | Grant dialog | Return to the approval prompt |

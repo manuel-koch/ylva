@@ -212,7 +212,7 @@ fn is_focus_cycle_key(key_event: &crossterm::event::KeyEvent) -> Option<bool> {
 /// Keys of the grant dialog. While a rule is edited, typing edits it, ←/→/Home/End
 /// move the caret, Enter keeps it and Esc restores it. Otherwise ↑/↓ move the focus over the rows,
 /// Tab cycles the first row and the buttons, ←/→ or Space change the focused
-/// row's selection, Enter edits the focused rule, `r` retries after a reported external edit,
+/// row's selection, Enter edits the focused rule,
 /// Enter on a button activates it and Esc goes back.
 fn keyboard_grant_dialog(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
     let editing = state
@@ -279,7 +279,6 @@ fn keyboard_grant_dialog(state: &mut AppState, event: InputEvent) -> Vec<Effect>
                 }
                 KeyCode::Home => state.scroll_grant_dialog(isize::MIN),
                 KeyCode::End => state.scroll_grant_dialog(isize::MAX),
-                KeyCode::Char('r') => return state.retry_grant_with_reload(),
                 _ => {}
             }
             vec![]

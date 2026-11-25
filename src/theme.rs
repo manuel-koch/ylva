@@ -128,7 +128,6 @@ themed_colors! {
 
     // Selection and approval-control palette.
     list_text_color(Color::Gray, Color::Rgb(95, 95, 95));
-    list_border_color(Color::Cyan, LIGHT_TEAL);
     /// Foreground of the `/models` row for the model currently serving the conversation.
     active_model_color(Color::Green, Color::Rgb(0, 140, 40));
     overlay_selection_color(Color::Yellow, LIGHT_AMBER);

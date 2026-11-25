@@ -1173,7 +1173,7 @@ fn an_edited_rule_is_validated_and_restored_on_cancel() {
 }
 
 #[test]
-fn a_failed_grant_offers_retry_with_reload_or_changed_rows() {
+fn confirming_after_a_failed_grant_retries_reloading_only_for_a_changed_file() {
     use crate::grants::GrantScope::Persistent;
     let (mut state, tool_id) = state_with_grant_dialog(grant_preview);
     for row in 0..2 {
@@ -1186,14 +1186,21 @@ fn a_failed_grant_offers_retry_with_reload_or_changed_rows() {
     let dialog = state.grant_dialog.as_ref().unwrap();
     assert!(!dialog.awaiting_answer);
     assert!(dialog.failure.is_some());
-    let effects = press(&mut state, KeyCode::Char('r'));
+    let effects = press(&mut state, KeyCode::Enter);
     assert!(matches!(
         effects.as_slice(),
         [Effect::GrantTool { reload_snapshot: true, requests, .. }]
             if requests.iter().all(|request| request.scope == Persistent)
     ));
     state.grant_dialog_failed(tool_id, "disk full".to_string(), false);
-    assert!(press(&mut state, KeyCode::Char('r')).is_empty());
+    assert!(matches!(
+        press(&mut state, KeyCode::Enter).as_slice(),
+        [Effect::GrantTool {
+            reload_snapshot: false,
+            ..
+        }]
+    ));
+    state.grant_dialog_failed(tool_id, "disk full".to_string(), false);
     for row in 0..2 {
         state.focus_grant_row(row);
         press(&mut state, KeyCode::Left);

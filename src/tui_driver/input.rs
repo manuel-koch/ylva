@@ -170,7 +170,7 @@ pub(super) const MAX_PASTE_BYTES: usize = 1024 * 1024;
 pub(super) fn paste_text(state: &mut AppState, textarea: &mut TextArea<'_>, text: &str) {
     if text.len() > MAX_PASTE_BYTES {
         state.set_toast(format!(
-            "Paste rejected: larger than {} MB",
+            "✗ Paste rejected: larger than {} MB",
             MAX_PASTE_BYTES / (1024 * 1024)
         ));
         return;

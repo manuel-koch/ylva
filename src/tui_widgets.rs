@@ -40,8 +40,9 @@ use crate::conversation_render_cache::ConversationRenderCache;
 use crate::markdown::render_markdown;
 use crate::saturating_cast::saturating_u16;
 use crate::theme::{
-    chat_selection_bg, input_border_color, muted_text_color, separator_line_color,
-    subagent_view_header_bg_color, subagent_view_separator_color, user_message_bg_color,
+    chat_selection_bg, deny_background_color, deny_hover_background_color, input_border_color,
+    muted_text_color, separator_line_color, subagent_view_header_bg_color,
+    subagent_view_separator_color, user_message_bg_color,
 };
 use crate::tui_reducer_state::BubbleExpansionTarget;
 use crate::tui_reducer_state::ChatEntry;
@@ -473,10 +474,12 @@ fn draw_internal(
         let back_hovered = mouse_pos.is_some_and(|(column, row)| {
             back_button_area.contains(ratatui::layout::Position::new(column, row))
         });
-        let mut back_style = Style::default().add_modifier(Modifier::BOLD);
-        if back_hovered {
-            back_style = back_style.add_modifier(Modifier::REVERSED);
-        }
+        let back_style = footer::button_style(
+            deny_background_color(),
+            deny_hover_background_color(),
+            back_hovered,
+            false,
+        );
         frame.render_widget(
             Paragraph::new(Span::styled(back_label, back_style)),
             back_button_area,

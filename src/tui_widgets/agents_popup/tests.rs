@@ -99,7 +99,21 @@ fn missing_elapsed_shows_dash_and_hitboxes_are_recorded() {
     state.agents_popup.selected_index = 1;
     let text = draw(&mut state, 80, 20);
     assert!(text.contains(NO_DURATION));
-    assert!(text.contains(CURRENT_MARKER));
+    let marked: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("replayed"))
+        .collect();
+    assert_eq!(marked.len(), 1);
+    assert!(
+        marked[0].contains(&format!("{FOCUS_MARKER}{CURRENT_MARKER} ")),
+        "{:?}",
+        marked[0]
+    );
+    let unmarked: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("queued job"))
+        .collect();
+    assert!(!unmarked[0].contains(FOCUS_MARKER) && !unmarked[0].contains(CURRENT_MARKER));
     assert_eq!(state.agents_popup.row_hitboxes.len(), 2);
     assert_eq!(state.agents_popup.visible_rows, 2);
 }

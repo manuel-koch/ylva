@@ -154,7 +154,7 @@ impl App for TuiApp {
             .expect("clone notice mutex")
             .iter()
         {
-            eprintln!("Clone created but not activated: {clone_id}");
+            eprintln!("warning: Clone created but not activated: {clone_id}");
         }
         for report in favorite_shutdown_reports
             .lock()

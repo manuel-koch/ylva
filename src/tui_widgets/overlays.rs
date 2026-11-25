@@ -26,8 +26,8 @@ use crate::theme::{
     active_model_color, approve_background_color, approve_hover_background_color,
     chat_scrollbar_color, clarify_banner_fg_color, clarify_banner_scroll_indicator_color,
     clarify_banner_selection_fg_color, content_color, deny_background_color,
-    deny_hover_background_color, list_border_color, list_text_color, muted_text_color,
-    overlay_selection_color, toast_bg_color, toast_fg_color, warning_color,
+    deny_hover_background_color, list_text_color, muted_text_color, overlay_selection_color,
+    popup_border_color, popup_heading_color, toast_bg_color, toast_fg_color, warning_color,
 };
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, model_picker_row_is_details,
@@ -43,7 +43,7 @@ use super::footer::{
 };
 use super::ButtonAreas;
 
-const SESSION_RESUME_BUTTON_LABEL: &str = " [ Resume ] ";
+const SESSION_RESUME_BUTTON_LABEL: &str = " [ ✓ Resume ] ";
 const SESSION_CLONE_BUTTON_LABEL: &str = " [ Clone ] ";
 const SESSION_DELETE_BUTTON_LABEL: &str = " [ Delete ] ";
 const SESSION_ACTION_BUTTON_GAP: &str = "  ";
@@ -461,11 +461,11 @@ pub(super) fn draw_slash_overlay(
                         content_width.saturating_sub(MODEL_PICKER_HEADER_INDENT.chars().count()),
                     );
                     let header_style = Style::default()
-                        .fg(muted_text_color())
+                        .fg(popup_heading_color())
                         .add_modifier(Modifier::BOLD);
                     return Line::from(vec![
                         Span::styled(MODEL_PICKER_HEADER_INDENT, header_style),
-                        Span::styled(header_text, header_style.add_modifier(Modifier::UNDERLINED)),
+                        Span::styled(header_text, header_style),
                     ]);
                 }
                 PickerRow::Entry(entry_index) => *entry_index,
@@ -731,8 +731,8 @@ pub(super) fn draw_slash_overlay(
     frame.render_widget(Clear, panel_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(list_border_color()))
-        .title(title);
+        .border_style(Style::default().fg(popup_border_color()))
+        .title(format!(" {title} "));
     let inner_area = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -838,7 +838,7 @@ pub(super) fn draw_slash_overlay(
 
 /// Screen rects of the Resume, Clone and Delete buttons in the button row.
 fn session_button_areas(row_area: Rect) -> [Rect; 3] {
-    let gap = SESSION_ACTION_BUTTON_GAP.len() as u16;
+    let gap = SESSION_ACTION_BUTTON_GAP.chars().count() as u16;
     let mut offset = 0u16;
     [
         SESSION_RESUME_BUTTON_LABEL,
@@ -846,7 +846,7 @@ fn session_button_areas(row_area: Rect) -> [Rect; 3] {
         SESSION_DELETE_BUTTON_LABEL,
     ]
     .map(|label| {
-        let width = label.len() as u16;
+        let width = label.chars().count() as u16;
         let area = Rect::new(
             row_area.x.saturating_add(offset),
             row_area.y,
@@ -1092,7 +1092,8 @@ fn model_picker_detail_lines(
             };
             Line::styled(
                 format!(
-                    "Compaction uses {provider_connection}/{model}, context: {}",
+                    "{}Compaction uses {provider_connection}/{model}, context: {}",
+                    if mismatch { "✗ " } else { "" },
                     crate::llm::token_estimate::format_token_estimate(context_length)
                 ),
                 Style::default().fg(color),
@@ -1412,7 +1413,11 @@ fn banner_line_with_selection(
 /// The popup is one line of text between its border rows and includes
 /// horizontal padding around the message.
 pub(super) fn draw_toast(frame: &mut Frame, area: Rect, message: &str) {
-    let content = format!(" ✓ {message} ");
+    let content = if message.starts_with('✗') {
+        format!(" {message} ")
+    } else {
+        format!(" ✓ {message} ")
+    };
     let popup_width = saturating_u16(content.chars().count().saturating_add(2)).min(area.width);
     let popup_height = 3u16;
     let x = area.x + area.width.saturating_sub(popup_width + 1);

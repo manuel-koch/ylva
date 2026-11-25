@@ -238,18 +238,10 @@ fn skill_list_color_modes_style_names_and_labels_without_styling_values() {
         let output = String::from_utf8(output.stdout).unwrap();
         if mode == "yes" {
             assert!(output.contains("\x1b[1mexample"));
-            assert!(output.contains("\x1b[4mDescription:"));
-            assert!(output.contains("\x1b[4mSource:"));
-            assert!(output.contains("\x1b[4mBody tokens:"));
+            assert!(!output.contains("\x1b[4m"));
             assert!(output.contains(" ~1\n"));
             assert!(output.contains(" Instructions\n"));
-            assert_eq!(
-                output
-                    .replace("\x1b[1m", "")
-                    .replace("\x1b[4m", "")
-                    .replace("\x1b[0m", ""),
-                plain,
-            );
+            assert_eq!(output.replace("\x1b[1m", "").replace("\x1b[0m", ""), plain,);
         } else {
             assert_eq!(output, plain);
         }

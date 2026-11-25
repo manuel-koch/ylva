@@ -475,22 +475,22 @@ favorite models and the remaining raw `provider_connection/model` catalog entrie
 membership is an exact, case-sensitive provider-connection preference saved with ctrl-f from the
 highlighted row in either the list or parameter popup; it does not switch the model or alter
 parameter drafts. Favorites not currently returned by discovery remain configured but are hidden.
-Groups are introduced by non-selectable, underlined `Engines`, `Favorites` and `Models` headers;
-favorites are marked with `⚑`, and model names stay aligned with or without it. Favorites keep their
-configured order within each connection. Partial catalog outages retain available choices and add a
-notice naming failed connections; total outages continue to show available named-engine shortcuts.
-Selecting a shortcut activates that exact engine's current Engine runtime settings, even when
-another engine uses the same connection and model. A raw catalog entry keeps provider-based routing:
-it changes the active engine for its connection, or the deterministic representative engine for
-another connection. Engine rows whose settings the connection's catalog does not advertise get extra
-detail segments and render in the theme's orange warning colour; they stay selectable. The picker
-title shows the number of rows, as `(visible/total)` while the filter hides some.
-`model not in catalog` replaces all other warnings when the catalog lacks the model; otherwise
-`context not advertised` and `max output not advertised` mean the configured value exceeds the
-catalog's limit, and `reasoning not advertised` means the configured effort is rejected by the
+Groups are introduced by non-selectable `Engines`, `Favorites` and `Models` headings (bold, in the
+popup heading color); favorites are marked with `⚑`, and model names stay aligned with or without
+it. Favorites keep their configured order within each connection. Partial catalog outages retain
+available choices and add a notice naming failed connections; total outages continue to show
+available named-engine shortcuts. Selecting a shortcut activates that exact engine's current Engine
+runtime settings, even when another engine uses the same connection and model. A raw catalog entry
+keeps provider-based routing: it changes the active engine for its connection, or the deterministic
+representative engine for another connection. Engine rows whose settings the connection's catalog
+does not advertise get extra detail segments and render in the theme's orange warning colour; they
+stay selectable. The picker title shows the number of rows, as `(visible/total)` while the filter
+hides some. `model not in catalog` replaces all other warnings when the catalog lacks the model;
+otherwise `context not advertised` and `max output not advertised` mean the configured value exceeds
+the catalog's limit, and `reasoning not advertised` means the configured effort is rejected by the
 provider's reasoning policy (efforts accepted as unverified keep their `(unverified)` label
 instead). Nothing is flagged for a limit the catalog does not state. The same warnings appear as an
-orange `⚠️` transcript notice
+orange `✗` transcript notice
 (`Engine '<name>' has settings the provider catalog does not advertise: …`) after applying a named
 engine and once shortly after startup when a named engine is active; an unreachable catalog produces
 no warning. The startup check also covers an explicit `utility_engine`, an explicit compaction
@@ -1177,12 +1177,11 @@ for the full mechanics.
   behavior. An external
   SIGINT or SIGTERM skips the double-press: an idle TUI quits at once, and a
   running turn is stopped before the TUI quits with exit code `130`.
-- **Agents popup (`ctrl-x a` or `/agents`):** a modal tree of the root
-  conversation and the session's subagent runs, one level deep (`├─`/`└─`).
-  Order: root, running (oldest first), queued, finished (newest first;
-  replayed runs last). Each agent is one line: a marker for the viewed
-  conversation, the elided label, then the status, the tool-call count and the
-  elapsed time flush right, three spaces apart.
+- **Agents popup (`ctrl-x a` or `/agents`):** a modal tree of the root conversation and the
+  session's subagent runs, one level deep (`├─`/`└─`). Order: root, running (oldest first), queued,
+  finished (newest first; replayed runs last). Each agent is one line: the focus marker `▸` on the
+  selected row, the marker `●` on the viewed conversation, the elided label, then the status, the
+  tool-call count and the elapsed time flush right, three spaces apart.
   - **Label:** the root row shows the session title once generated, else
     `Root (main conversation)`.
   - **Status:** `running`, `queued`, `success`, `error`, `cancelled`, or
@@ -1461,9 +1460,9 @@ call are not covered; the call itself still runs once as approved.
 
 If creating the grants fails (a rejected rule, a save refused, `grants.toml` changed behind Ylva's
 back), the dialog stays open and shows the reason: *Grant* retries (after changing the rows if
-wanted), `r` retries after reloading a `grants.toml` that changed on disk (only offered for that
-failure; the reviewed content is kept, the grants found in it stay inactive in this run), and *Back*
-returns to the prompt to approve once. The approval stays pending throughout.
+wanted; after a `grants.toml` that changed on disk it reloads the file first, the reviewed content
+is kept and the grants found in it stay inactive in this run), and *Back* returns to the prompt to
+approve once. The approval stays pending throughout.
 
 - *Temporary* grants are in memory: in memory, shared by the root conversation
   and its subagents until `/clear` or a session switch.
@@ -1604,7 +1603,7 @@ Missing types, locked/missing/invalid sources, and preparation failures are
 explicit errors, not fresh-session fallbacks. Resume hydrates without
 duplicating messages; Clone uses the existing [clone contract](persistence.md#clone-contract).
 A clone durably created before cancellation or activation failure is retained
-and reported as `Clone created but not activated: <id>`, including after
+and reported as `warning: Clone created but not activated: <id>` on stderr, including after
 terminal restoration on quit.
 
 `/compact` is not offered in the slash suggestions of a subagent view; typing

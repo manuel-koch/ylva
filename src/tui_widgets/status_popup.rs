@@ -592,7 +592,7 @@ pub(super) fn draw_status_popup(frame: &mut Frame, state: &mut TuiState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(popup_border_color()))
-        .title(" Status")
+        .title(" Status ")
         .title_alignment(Alignment::Left)
         .padding(Padding::uniform(1));
     let inner = block.inner(popup);

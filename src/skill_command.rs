@@ -27,7 +27,7 @@ use crate::skills::{terminal_safe, SkillCatalog};
 /// Presentation settings, independent of process terminal/environment detection.
 #[derive(Debug, Clone, Copy)]
 pub struct SkillListOptions {
-    /// Emit ANSI bold names and underlined labels when enabled.
+    /// Emit ANSI bold names when enabled.
     pub color: bool,
     /// Total output columns available for wrapping descriptions.
     pub width: usize,
@@ -136,7 +136,7 @@ pub fn list_with_options(
         let width = options.width.saturating_sub(content_indent).max(1);
         for (line_index, line) in textwrap::wrap(&description, width).iter().enumerate() {
             if line_index == 0 {
-                write_field(output, DESCRIPTION_LABEL, line, options)?;
+                write_field(output, DESCRIPTION_LABEL, line)?;
             } else if line.is_empty() {
                 writeln!(output)?;
             } else {
@@ -147,7 +147,6 @@ pub fn list_with_options(
             output,
             SOURCE_LABEL,
             &terminal_safe(&display_path(&skill.source.canonical_path)),
-            options,
         )?;
         write_field(
             output,
@@ -156,14 +155,12 @@ pub fn list_with_options(
                 "~{}",
                 format_token_estimate(TokenEstimator::Tiktoken.estimate_tokens(&skill.body))
             ),
-            options,
         )?;
         for source in &skill.shadowed {
             write_field(
                 output,
                 SHADOWED_LABEL,
                 &terminal_safe(&display_path(&source.canonical_path)),
-                options,
             )?;
         }
         if with_duplicates {
@@ -173,39 +170,19 @@ pub fn list_with_options(
                 } else {
                     &source.canonical_path
                 };
-                write_field(
-                    output,
-                    DUPLICATE_LABEL,
-                    &terminal_safe(&display_path(path)),
-                    options,
-                )?;
+                write_field(output, DUPLICATE_LABEL, &terminal_safe(&display_path(path)))?;
             }
         }
     }
     Ok(())
 }
 
-fn write_field(
-    output: &mut dyn Write,
-    label: &str,
-    value: &str,
-    options: SkillListOptions,
-) -> io::Result<()> {
+fn write_field(output: &mut dyn Write, label: &str, value: &str) -> io::Result<()> {
     let label_width = label_width();
-    let padding = label_width.saturating_sub(label.len());
-    if options.color {
-        writeln!(
-            output,
-            "{FIELD_INDENTATION}{}{:padding$}{FIELD_VALUE_SEPARATOR}{value}",
-            label.underlined(),
-            ""
-        )
-    } else {
-        writeln!(
-            output,
-            "{FIELD_INDENTATION}{label:<label_width$}{FIELD_VALUE_SEPARATOR}{value}"
-        )
-    }
+    writeln!(
+        output,
+        "{FIELD_INDENTATION}{label:<label_width$}{FIELD_VALUE_SEPARATOR}{value}"
+    )
 }
 
 pub fn run(
@@ -246,30 +223,16 @@ mod tests {
             SHADOWED_LABEL,
             DUPLICATE_LABEL,
         ];
-        for color in [false, true] {
-            for label in labels {
-                let mut output = Vec::new();
-                write_field(
-                    &mut output,
-                    label,
-                    "value",
-                    SkillListOptions {
-                        color,
-                        ..SkillListOptions::default()
-                    },
-                )
-                .unwrap();
-                let output = String::from_utf8(output)
-                    .unwrap()
-                    .replace("\x1b[4m", "")
-                    .replace("\x1b[0m", "");
-                let value_column = output.find("value").expect("field value");
-                let label_columns =
-                    value_column - FIELD_INDENTATION.len() - FIELD_VALUE_SEPARATOR.len();
-                assert_eq!(label_columns, label_width());
-                assert!(labels.iter().all(|other| label_columns >= other.len()));
-                assert!(labels.iter().any(|other| label_columns == other.len()));
-            }
+        for label in labels {
+            let mut output = Vec::new();
+            write_field(&mut output, label, "value").unwrap();
+            let output = String::from_utf8(output).unwrap();
+            let value_column = output.find("value").expect("field value");
+            let label_columns =
+                value_column - FIELD_INDENTATION.len() - FIELD_VALUE_SEPARATOR.len();
+            assert_eq!(label_columns, label_width());
+            assert!(labels.iter().all(|other| label_columns >= other.len()));
+            assert!(labels.iter().any(|other| label_columns == other.len()));
         }
     }
 }

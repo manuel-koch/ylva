@@ -118,11 +118,6 @@ fn build_sections(dialog: &GrantDialogState, text_width: usize) -> Sections {
                 } else {
                     Style::default().fg(content_color())
                 };
-                let value_style = if focused {
-                    base.add_modifier(Modifier::REVERSED)
-                } else {
-                    base
-                };
                 let tool_style = Style::default()
                     .fg(tool_bubble_foreground_color())
                     .add_modifier(if focused {
@@ -135,7 +130,7 @@ fn build_sections(dialog: &GrantDialogState, text_width: usize) -> Sections {
                     Span::styled(row.draft.tool.name().to_string(), tool_style),
                     Span::styled(format!("{name}  "), base),
                     Span::styled(format!("{SMALLER_VALUE_GLYPH} "), base),
-                    Span::styled(format!("{:<10}", row.selection.label()), value_style),
+                    Span::styled(format!("{:<10}", row.selection.label()), base),
                     Span::styled(format!(" {GREATER_VALUE_GLYPH}"), base),
                 ];
                 rules.push(Line::from(spans));
@@ -253,11 +248,11 @@ fn build_sections(dialog: &GrantDialogState, text_width: usize) -> Sections {
             scopes.extend(
                 crate::text_wrap::indented(
                     &format!("Persistent unavailable: {reason}"),
-                    "  ",
+                    "  ✗ ",
                     text_width,
                 )
                 .into_iter()
-                .map(muted),
+                .map(|line| Line::styled(line, Style::default().fg(warning_color()))),
             );
         }
     }
@@ -274,7 +269,7 @@ fn build_sections(dialog: &GrantDialogState, text_width: usize) -> Sections {
             .map(|line| Line::styled(line, Style::default().fg(warning_color()))),
         );
         let hint = if failure.reloadable {
-            "Press r to retry with the file as it is now, change the rows, or go Back \
+            "Grant again to retry with the file as it is now, change the rows, or go Back \
              to approve once."
         } else {
             "Fix or change the rows and retry, or go Back to approve once."
@@ -731,7 +726,7 @@ mod tests {
         assert!(text.contains("Invalid:"), "{text}");
         assert!(text.contains("one-time"), "{text}");
         assert!(text.contains("Nothing was created: file changed"), "{text}");
-        assert!(text.contains("Press r"), "{text}");
+        assert!(text.contains("Grant again to retry"), "{text}");
     }
 
     #[test]

@@ -33,10 +33,11 @@ use super::chat::render_chat_scrollbar;
 use super::elapsed::format_elapsed;
 use super::maximum_panel_content_height;
 
-const MARKER_COLUMN_WIDTH: usize = 2;
+const MARKER_COLUMN_WIDTH: usize = 3;
 const STATUS_DURATION_GAP: &str = "   ";
 const AWAITING_INPUT_TEXT: &str = "waiting for user input";
-const CURRENT_MARKER: &str = "▶ ";
+const FOCUS_MARKER: &str = "▸";
+const CURRENT_MARKER: &str = "●";
 const NO_DURATION: &str = "–";
 const TOOL_COUNT_SUFFIX: &str = " tools";
 const MINIMUM_LABEL_WIDTH: usize = 4;
@@ -136,7 +137,8 @@ fn row_line(
         )
     );
     let label_padding = label_width.saturating_sub(Line::from(label.as_str()).width());
-    let marker = if row.is_current { CURRENT_MARKER } else { "  " };
+    let focus_marker = if selected { FOCUS_MARKER } else { " " };
+    let current_marker = if row.is_current { CURRENT_MARKER } else { " " };
 
     let base_style = match row.status {
         AgentRowStatus::Queued => Style::default().fg(muted_text_color()),
@@ -160,7 +162,16 @@ fn row_line(
     };
 
     Line::from(vec![
-        Span::styled(marker.to_string(), base_style.add_modifier(Modifier::BOLD)),
+        Span::styled(
+            focus_marker.to_string(),
+            base_style.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{current_marker} "),
+            Style::default()
+                .fg(active_model_color())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("{label}{}", " ".repeat(label_padding)), base_style),
         Span::styled(
             if trailing_width == 0 {
@@ -224,7 +235,7 @@ pub(super) fn draw_agents_popup(frame: &mut Frame, state: &mut TuiState, input_a
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(popup_border_color()))
-        .title(" Agents")
+        .title(" Agents ")
         .title_alignment(Alignment::Left);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);

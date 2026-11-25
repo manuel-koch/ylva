@@ -262,7 +262,7 @@ pub(super) fn build_entry(
             {
                 layout.rows.push(Line::styled(
                     if index == 0 {
-                        format!("  ⚠️  {wrapped}")
+                        format!("  ✗   {wrapped}")
                     } else {
                         format!("      {wrapped}")
                     },
@@ -290,7 +290,7 @@ pub(super) fn build_entry(
             {
                 layout.rows.push(Line::styled(
                     if index == 0 {
-                        format!("  ⚠️  {wrapped}")
+                        format!("  ✗   {wrapped}")
                     } else {
                         format!("      {wrapped}")
                     },
@@ -300,7 +300,7 @@ pub(super) fn build_entry(
         }
         ChatEntry::Notice { text } | ChatEntry::WarningNotice { text } => {
             let (marker, color) = if matches!(entry, ChatEntry::WarningNotice { .. }) {
-                ("⚠️", warning_color())
+                ("✗", warning_color())
             } else {
                 ("ⓘ", notice_color())
             };

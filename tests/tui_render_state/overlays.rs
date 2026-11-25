@@ -39,7 +39,10 @@ fn session_picker_renders_actions_timestamps_and_elided_titles_on_small_terminal
             assert!(!text.contains("[ ]"), "{text}");
             assert!(text.contains("2026-01-01"), "{text}");
             let layout = state.layout.slash_overlay;
-            assert_eq!(layout.resume_action.width, " [ Resume ] ".len() as u16);
+            assert_eq!(
+                layout.resume_action.width,
+                " [ ✓ Resume ] ".chars().count() as u16
+            );
             assert_eq!(layout.clone_action.width, " [ Clone ] ".len() as u16);
             assert_ne!(
                 buffer[(layout.resume_action.x, layout.resume_action.y)].bg,
