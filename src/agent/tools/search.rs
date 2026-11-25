@@ -29,7 +29,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{Tool, ToolCall, DEFAULT_TOOL_TIMEOUT_SECS};
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 
 /// Maximum number of whole output lines in the combined search output. Lines
 /// beyond this cap are discarded; the result's `metadata()` will carry
@@ -104,6 +104,8 @@ pub struct SearchTool {
 
 impl SearchTool {
     pub const NAME: &'static str = "search";
+    const DEFAULT_APPROVAL_RULE: &'static str = "search.default";
+    const IMPLICIT_SCOPE_RULE: &'static str = "search.implicit_scope";
 
     pub fn new(sandbox_context: SandboxContext) -> Self {
         SearchTool {
@@ -151,23 +153,26 @@ impl Tool for SearchTool {
             Some(path_str) if !path_str.is_empty() => {
                 let sandbox_verdict = self.sandbox_context.check_path(Path::new(path_str));
                 let approval = match sandbox_verdict {
-                    None => ApprovalCheck::AutoApproved,
+                    None => ApprovalCheck::tool(
+                        ApprovalVerdict::AutoApproved,
+                        Self::DEFAULT_APPROVAL_RULE,
+                    ),
                     Some(verdict) => verdict,
                 };
                 tracing::debug!(
                     tool = "search",
                     path = path_str,
-                    sandbox = match &approval {
-                        ApprovalCheck::AutoApproved => "abstain→auto-approved",
-                        ApprovalCheck::AutoDenied { .. } => "auto-denied",
-                        ApprovalCheck::UserApprovalRequired => "user-approval-required",
+                    sandbox = match &approval.verdict {
+                        ApprovalVerdict::AutoApproved => "abstain→auto-approved",
+                        ApprovalVerdict::AutoDenied { .. } => "auto-denied",
+                        ApprovalVerdict::UserApprovalRequired => "user-approval-required",
                     },
                     "tool approval decision"
                 );
                 approval
             }
             // No explicit path → defaults to cwd (inside workspace) → auto-approved.
-            _ => ApprovalCheck::AutoApproved,
+            _ => ApprovalCheck::tool(ApprovalVerdict::AutoApproved, Self::IMPLICIT_SCOPE_RULE),
         }
     }
 

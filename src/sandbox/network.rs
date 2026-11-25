@@ -16,7 +16,7 @@
 
 use super::network_target_pattern::NetworkTargetPattern;
 use super::rules::ResolvedRule;
-use super::{ApprovalCheck, NamedSandboxRule, SandboxContext};
+use super::{ApprovalCheck, ApprovalVerdict, DecisionMaker, NamedSandboxRule, SandboxContext};
 
 /// Opaque match target for the rules appended to a network tool's context
 /// (e.g. `--auto-approve-web-search`'s `**` catch-all). Network calls have
@@ -52,7 +52,7 @@ impl SandboxContext {
         // No `[tools.web_search]`/`[tools.web_fetch]` config → no floor; the
         // tool's own default (`UserApprovalRequired`) applies on abstention.
         if let Some(configured) = &self.configured_rules {
-            for rule in configured {
+            for (rule, origin) in configured {
                 match rule {
                     ResolvedRule::Named {
                         rule: named,
@@ -60,7 +60,11 @@ impl SandboxContext {
                         target: rule_target,
                     } => {
                         if Self::evaluate_network_named_rule(*named, rule_target.as_ref(), target) {
-                            verdict = Some(rule_verdict.clone());
+                            verdict = Some(ApprovalCheck::new(
+                                rule_verdict.clone(),
+                                DecisionMaker::NetworkSandbox,
+                                origin.clone(),
+                            ));
                         }
                     }
                     // Path/command rules under a network tool table are
@@ -73,18 +77,22 @@ impl SandboxContext {
 
         // Appended rules (e.g. `--auto-approve-web-search`'s catch-all).
         // Always evaluated last so they win regardless of configured rules.
-        for rule in &self.rules {
+        for (rule, origin) in &self.rules {
             if rule.pattern.matches(NETWORK_REQUEST_MATCH_KEY) {
-                verdict = Some(rule.verdict.clone());
+                verdict = Some(ApprovalCheck::new(
+                    rule.verdict.clone(),
+                    DecisionMaker::NetworkSandbox,
+                    origin.clone(),
+                ));
             }
         }
 
         tracing::debug!(
-            sandbox_verdict = match &verdict {
+            sandbox_verdict = match verdict.as_ref().map(|check| &check.verdict) {
                 None => "abstain".to_string(),
-                Some(ApprovalCheck::AutoApproved) => "auto-approved".to_string(),
-                Some(ApprovalCheck::AutoDenied { reason }) => format!("auto-denied: {reason}"),
-                Some(ApprovalCheck::UserApprovalRequired) => "user-approval-required".to_string(),
+                Some(ApprovalVerdict::AutoApproved) => "auto-approved".to_string(),
+                Some(ApprovalVerdict::AutoDenied { reason }) => format!("auto-denied: {reason}"),
+                Some(ApprovalVerdict::UserApprovalRequired) => "user-approval-required".to_string(),
             },
             "sandbox check_network_request"
         );
@@ -99,7 +107,7 @@ impl SandboxContext {
     /// Appended rules (the `--auto-approve-web-fetch` catch-all) never grant it.
     pub fn check_private_address(&self, target: &str) -> bool {
         let mut allowed = false;
-        for rule in self.configured_rules.iter().flatten() {
+        for (rule, _) in self.configured_rules.iter().flatten() {
             if let ResolvedRule::Named {
                 rule: NamedSandboxRule::NetworkPrivateAddress,
                 verdict,
@@ -110,7 +118,7 @@ impl SandboxContext {
                     .as_ref()
                     .is_none_or(|pattern| pattern.matches(target))
                 {
-                    allowed = matches!(verdict, ApprovalCheck::AutoApproved);
+                    allowed = matches!(verdict, ApprovalVerdict::AutoApproved);
                 }
             }
         }

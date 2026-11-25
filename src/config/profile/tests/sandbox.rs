@@ -215,6 +215,62 @@ rules = [{ pattern = "**", verdict = "auto_approved" }]
     assert!(profile.tools["load_skill"].rules.as_ref().unwrap()[0].is_path_tool_only());
 }
 #[test]
+fn effective_rule_sources_follow_layer_and_rule_list_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let profiles = temp.path().join("profiles");
+    let workspace = temp.path().join("workspace");
+    let source = r#"
+[tools.bash]
+rules = [{ command = ["echo", "**"], verdict = "auto_approved" }]
+[agents.reviewer.tools.bash]
+rules = [{ command = ["echo", "**"], verdict = "auto_denied" }]
+[agents.empty.tools.bash]
+rules = []
+"#;
+    write_profile_config(&profiles, "test", source);
+    for (workspace_root, layer) in [
+        (None, ConfigLayer::Home),
+        (Some(workspace.as_path()), ConfigLayer::Workspace),
+    ] {
+        if workspace_root.is_some() {
+            write_profile_config(&workspace.join(".ylva/profiles"), "test", source);
+        }
+        let profile = ProfileConfig::load_with_environment_at_workspace_root(
+            &profiles,
+            "test",
+            &HashMap::new(),
+            workspace_root,
+        )
+        .unwrap();
+        let source_for = |agent| {
+            profile
+                .effective_tool_rule_config(agent, "bash")
+                .unwrap()
+                .rule_source
+                .as_ref()
+        };
+        assert_eq!(
+            source_for(None),
+            Some(&crate::sandbox::RuleListSource::Profile {
+                layer,
+                agent_type: None,
+            })
+        );
+        assert_eq!(
+            source_for(Some("reviewer")),
+            Some(&crate::sandbox::RuleListSource::Profile {
+                layer,
+                agent_type: Some("reviewer".into()),
+            })
+        );
+        assert!(profile
+            .effective_tool_rules(Some("empty"), "bash")
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[test]
 fn tool_sandbox_rules_table_loads_named_and_glob_rules() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_profile_config(

@@ -89,7 +89,11 @@ impl Tool for TestTool {
         &["field"]
     }
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
-        ApprovalCheck::AutoApproved
+        ApprovalCheck::new(
+            ApprovalVerdict::AutoApproved,
+            crate::DecisionMaker::Tool,
+            crate::RuleOrigin::Programmatic,
+        )
     }
     fn timeout_secs(&self) -> u64 {
         5

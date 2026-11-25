@@ -32,7 +32,7 @@ use uuid::Uuid;
 use super::{
     ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
-use crate::sandbox::ApprovalCheck;
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict};
 use crate::subagent_manager::{FinishResult, FinishResultOrigin, STATUS_FAILURE};
 
 /// The status a subagent reports for its own run.
@@ -108,6 +108,7 @@ pub struct AgentFinishTool {
 
 impl AgentFinishTool {
     pub const NAME: &'static str = "agent_finish";
+    const ALWAYS_APPROVE_RULE: &'static str = "agent_finish.always";
 
     pub fn new(config: AgentFinishToolConfig) -> Self {
         AgentFinishTool { config }
@@ -150,7 +151,7 @@ impl Tool for AgentFinishTool {
     }
 
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
-        ApprovalCheck::AutoApproved
+        ApprovalCheck::tool(ApprovalVerdict::AutoApproved, Self::ALWAYS_APPROVE_RULE)
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
@@ -334,7 +335,7 @@ mod tests {
     fn needs_approval_is_auto_approved() {
         let tool = AgentFinishTool::new(test_config());
         let approval = tool.needs_approval(&serde_json::json!({"status": "success"}));
-        assert_eq!(approval, ApprovalCheck::AutoApproved);
+        assert_eq!(approval.verdict, ApprovalVerdict::AutoApproved);
     }
 
     #[test]

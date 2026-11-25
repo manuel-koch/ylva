@@ -50,8 +50,8 @@ fn sandbox_rule_config_path_glob_variant_parses_from_toml() {
         } => {
             assert_eq!(pattern, "**/*.secret");
             assert_eq!(
-                verdict.to_approval_check(reason.as_deref(), "fallback"),
-                ApprovalCheck::AutoDenied {
+                verdict.to_verdict(reason.as_deref(), "fallback"),
+                ApprovalVerdict::AutoDenied {
                     reason: "no secrets".to_string()
                 }
             );
@@ -129,8 +129,8 @@ fn has_misplaced_command_glob_wildcard_abstains_on_non_command_glob_rules() {
 fn approval_verdict_config_auto_denied_defaults_reason_when_omitted() {
     let parsed = ApprovalVerdictConfig::AutoDenied;
     assert_eq!(
-        parsed.to_approval_check(None, "default reason"),
-        ApprovalCheck::AutoDenied {
+        parsed.to_verdict(None, "default reason"),
+        ApprovalVerdict::AutoDenied {
             reason: "default reason".to_string()
         }
     );

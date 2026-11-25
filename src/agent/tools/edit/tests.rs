@@ -403,8 +403,8 @@ fn edit_tool_needs_approval_missing_path() {
     let tool = EditTool::default();
     let args = serde_json::json!({});
     assert!(matches!(
-        tool.needs_approval(&args),
-        crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        tool.needs_approval(&args).verdict,
+        crate::sandbox::ApprovalVerdict::AutoDenied { .. }
     ));
 }
 
@@ -413,8 +413,8 @@ fn edit_tool_needs_approval_empty_path() {
     let tool = EditTool::default();
     let args = serde_json::json!({ "path": "" });
     assert!(matches!(
-        tool.needs_approval(&args),
-        crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        tool.needs_approval(&args).verdict,
+        crate::sandbox::ApprovalVerdict::AutoDenied { .. }
     ));
 }
 
@@ -427,8 +427,8 @@ fn edit_tool_needs_approval_valid_path_requires_user_approval() {
         "new_string": "bar",
     });
     assert!(matches!(
-        tool.needs_approval(&args),
-        crate::sandbox::ApprovalCheck::UserApprovalRequired
+        tool.needs_approval(&args).verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
     ));
 }
 

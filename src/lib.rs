@@ -17,6 +17,7 @@ pub(crate) mod agent_factory;
 pub(crate) mod app;
 pub(crate) mod bounded_buffer;
 pub(crate) mod build_info;
+pub(crate) mod byte_size;
 pub(crate) mod cli;
 pub mod cli_driver;
 pub mod config;
@@ -35,6 +36,7 @@ pub mod llm;
 pub mod logging;
 pub(crate) mod markdown;
 pub mod models_command;
+pub(crate) mod path_expansion;
 pub mod presenter;
 pub(crate) mod private_fs;
 pub mod profile_command;
@@ -55,6 +57,8 @@ pub mod store;
 #[cfg(unix)]
 pub(crate) mod strict_json;
 pub mod system_prompt_origins;
+pub(crate) mod terminal_text;
+pub(crate) mod text_normalization;
 pub(crate) mod text_wrap;
 pub(crate) mod theme;
 #[cfg(unix)]
@@ -141,7 +145,10 @@ pub use llm::{
 };
 pub use models_command::{load_profile_for_listing, run_with_options, ModelsListOptions};
 pub use presenter::{TextareaContext, TuiEvent};
-pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext, SandboxRuleError};
+pub use sandbox::{
+    ApprovalCheck, ApprovalVerdict, DecisionMaker, RuleOrigin, Sandbox, SandboxContext,
+    SandboxRuleError,
+};
 pub use slash_command::{
     parse_slash_command, parse_slash_command_invocation, slash_command_suggestions, SlashCommand,
     SlashCommandInfo, SlashCommandInvocation, SLASH_COMMANDS,

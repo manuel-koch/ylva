@@ -18,10 +18,11 @@ use super::network_target_pattern::NetworkTargetPattern;
 use super::{bash_command_extractor, command_arguments};
 use glob::Pattern;
 use serde::Deserialize;
+use std::sync::Arc;
 
-/// The verdict from a sandbox approval check.
+/// The policy verdict, independent of how it was reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApprovalCheck {
+pub enum ApprovalVerdict {
     /// The tool call may proceed without asking the user.
     AutoApproved,
     /// The tool call must be rejected automatically; show `reason` to the user/model.
@@ -30,11 +31,114 @@ pub enum ApprovalCheck {
     UserApprovalRequired,
 }
 
+/// The component responsible for a policy check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionMaker {
+    PathSandbox,
+    BashSandbox,
+    NetworkSandbox,
+    Tool,
+    Registry,
+    Schema,
+    SkillPolicy,
+}
+
+/// The source of a decision, without rule contents or tool inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleOrigin {
+    BuiltIn(&'static str),
+    CliFlag(&'static str),
+    Configured {
+        source: Arc<RuleListSource>,
+        tool: String,
+        index: usize,
+    },
+    ProgrammaticRule(usize),
+    Programmatic,
+}
+
+/// Where an explicitly configured rule list was defined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleListSource {
+    Profile {
+        layer: crate::config::layered::ConfigLayer,
+        agent_type: Option<String>,
+    },
+    AgentTypeFile {
+        scope: &'static str,
+        agent_type: String,
+        format: &'static str,
+    },
+}
+
+/// A rule list and, when loaded from disk, its source.
+#[derive(Debug, Clone, Default)]
+pub struct ToolRuleList {
+    pub(crate) rules: Vec<SandboxRuleConfig>,
+    pub(crate) source: Option<RuleListSource>,
+}
+
+impl From<Vec<SandboxRuleConfig>> for ToolRuleList {
+    fn from(rules: Vec<SandboxRuleConfig>) -> Self {
+        Self {
+            rules,
+            source: None,
+        }
+    }
+}
+
+/// An effective policy verdict and the causal trail that led to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalCheck {
+    pub verdict: ApprovalVerdict,
+    pub decision_maker: DecisionMaker,
+    pub rule_origin: RuleOrigin,
+    pub parent: Option<Box<ApprovalCheck>>,
+}
+
+impl ApprovalCheck {
+    const MISSING_TOOL_RULE: &'static str = "registry.missing_tool";
+
+    /// Issue a check with no causal predecessor.
+    pub fn new(
+        verdict: ApprovalVerdict,
+        decision_maker: DecisionMaker,
+        rule_origin: RuleOrigin,
+    ) -> Self {
+        Self {
+            verdict,
+            decision_maker,
+            rule_origin,
+            parent: None,
+        }
+    }
+
+    pub(crate) fn builtin(
+        verdict: ApprovalVerdict,
+        decision_maker: DecisionMaker,
+        rule: &'static str,
+    ) -> Self {
+        Self::new(verdict, decision_maker, RuleOrigin::BuiltIn(rule))
+    }
+
+    pub(crate) fn tool(verdict: ApprovalVerdict, rule: &'static str) -> Self {
+        Self::builtin(verdict, DecisionMaker::Tool, rule)
+    }
+
+    pub(crate) fn missing_tool() -> Self {
+        Self::builtin(
+            ApprovalVerdict::UserApprovalRequired,
+            DecisionMaker::Registry,
+            Self::MISSING_TOOL_RULE,
+        )
+    }
+}
+
 /// A single rule in the sandbox rule list.
 #[derive(Debug, Clone)]
 pub struct SandboxRule {
     /// The verdict this rule produces when matched.
-    pub verdict: ApprovalCheck,
+    pub verdict: ApprovalVerdict,
     /// Glob pattern matched against the canonicalized absolute path.
     pub pattern: Pattern,
 }
@@ -174,10 +278,10 @@ pub enum NamedSandboxRule {
     NetworkPrivateAddress,
 }
 
-/// The serde-friendly counterpart of [`ApprovalCheck`]'s variants, without
+/// The serde-friendly counterpart of [`ApprovalVerdict`]'s variants, without
 /// the `AutoDenied` variant's mandatory `reason` field (carried as a
 /// sibling `reason` field on [`SandboxRuleConfig`] instead, so it can
-/// default per-rule via [`SandboxRuleConfig::to_approval_check`]).
+/// default per rule).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalVerdictConfig {
@@ -187,15 +291,15 @@ pub enum ApprovalVerdictConfig {
 }
 
 impl ApprovalVerdictConfig {
-    /// Convert into an [`ApprovalCheck`], falling back to `default_reason`
+    /// Convert into an [`ApprovalVerdict`], falling back to `default_reason`
     /// when `reason` is `None` for an `AutoDenied` verdict.
-    fn to_approval_check(&self, reason: Option<&str>, default_reason: &str) -> ApprovalCheck {
+    fn to_verdict(&self, reason: Option<&str>, default_reason: &str) -> ApprovalVerdict {
         match self {
-            ApprovalVerdictConfig::AutoApproved => ApprovalCheck::AutoApproved,
-            ApprovalVerdictConfig::AutoDenied => ApprovalCheck::AutoDenied {
+            ApprovalVerdictConfig::AutoApproved => ApprovalVerdict::AutoApproved,
+            ApprovalVerdictConfig::AutoDenied => ApprovalVerdict::AutoDenied {
                 reason: reason.unwrap_or(default_reason).to_string(),
             },
-            ApprovalVerdictConfig::UserApprovalRequired => ApprovalCheck::UserApprovalRequired,
+            ApprovalVerdictConfig::UserApprovalRequired => ApprovalVerdict::UserApprovalRequired,
         }
     }
 }
@@ -555,7 +659,7 @@ impl SandboxRuleConfig {
 pub(super) enum ResolvedRule {
     Named {
         rule: NamedSandboxRule,
-        verdict: ApprovalCheck,
+        verdict: ApprovalVerdict,
         /// Compiled [`NetworkTargetPattern`] for
         /// [`NamedSandboxRule::NetworkRequest`]: `None` matches every request
         /// target.
@@ -563,12 +667,12 @@ pub(super) enum ResolvedRule {
     },
     PathGlob {
         pattern: Pattern,
-        verdict: ApprovalCheck,
+        verdict: ApprovalVerdict,
     },
     CommandGlob {
         command: CommandGlobPattern,
         conditions: Option<ArgumentConditions>,
-        verdict: ApprovalCheck,
+        verdict: ApprovalVerdict,
     },
 }
 
@@ -740,7 +844,7 @@ impl ResolvedRule {
                 };
                 ResolvedRule::Named {
                     rule,
-                    verdict: verdict.to_approval_check(reason.as_deref(), default_reason),
+                    verdict: verdict.to_verdict(reason.as_deref(), default_reason),
                     target: target
                         .map(|pattern| NetworkTargetPattern::parse(&pattern))
                         .transpose()
@@ -755,7 +859,7 @@ impl ResolvedRule {
                 reason,
             } => ResolvedRule::PathGlob {
                 pattern: Pattern::new(&pattern)?,
-                verdict: verdict.to_approval_check(reason.as_deref(), CONFIGURED_PATH_GLOB_REASON),
+                verdict: verdict.to_verdict(reason.as_deref(), CONFIGURED_PATH_GLOB_REASON),
             },
             SandboxRuleConfig::CommandGlob {
                 command,
@@ -772,8 +876,7 @@ impl ResolvedRule {
                     allowed_scripts,
                 )?,
                 command: CommandGlobPattern::from_tokens(&command),
-                verdict: verdict
-                    .to_approval_check(reason.as_deref(), CONFIGURED_COMMAND_GLOB_REASON),
+                verdict: verdict.to_verdict(reason.as_deref(), CONFIGURED_COMMAND_GLOB_REASON),
             },
         })
     }

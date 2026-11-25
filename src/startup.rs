@@ -305,8 +305,8 @@ pub fn run(
                 .with_allowed_tools(DEFAULT_TUI_TOOLS)
                 .with_routed_roots();
         }
-        for tool in cli.auto_approve_tools() {
-            factory = factory.with_auto_approve(tool);
+        for (tool, origin) in cli.auto_approve_overrides() {
+            factory = factory.with_auto_approve_origin(tool, origin);
         }
         factory = factory
             .with_grant_state(Arc::clone(&grant_state))

@@ -60,13 +60,17 @@ fn configured_targetless_network_request_rule_applies_to_every_call() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_network_request("https://docs.rs/anything"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_network_request("https://docs.rs/anything")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "a rule without target matches every call — there is no target to inspect"
     );
     assert_eq!(
-        context.check_network_request("http://example.com:8080"),
-        Some(ApprovalCheck::AutoApproved)
+        context
+            .check_network_request("http://example.com:8080")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
 }
 
@@ -79,13 +83,19 @@ fn configured_network_request_last_match_wins() {
             network_request_rule(ApprovalVerdictConfig::AutoDenied, Some("disabled"), None),
         ])
         .expect("valid sandbox fixture");
+    let winner = context.check_network_request(CALL_TARGET).unwrap();
     assert_eq!(
-        context.check_network_request(CALL_TARGET),
-        Some(ApprovalCheck::AutoDenied {
+        winner.verdict,
+        ApprovalVerdict::AutoDenied {
             reason: "disabled".to_string()
-        }),
+        },
         "rule lists are ordinary last-match-wins for network tools"
     );
+    assert_eq!(
+        winner.rule_origin,
+        super::super::RuleOrigin::ProgrammaticRule(1)
+    );
+    assert!(winner.parent.is_none());
 }
 
 #[test]
@@ -99,8 +109,10 @@ fn reasonless_network_request_deny_uses_the_default_reason() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_network_request(CALL_TARGET),
-        Some(ApprovalCheck::AutoDenied {
+        context
+            .check_network_request(CALL_TARGET)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied {
             reason: NETWORK_REQUEST_REASON.to_string()
         })
     );
@@ -119,12 +131,14 @@ fn auto_approve_catch_all_wins_over_configured_network_deny() {
         )])
         .expect("valid sandbox fixture")
         .with_rule(SandboxRule {
-            verdict: ApprovalCheck::AutoApproved,
+            verdict: ApprovalVerdict::AutoApproved,
             pattern: glob::Pattern::new("**").unwrap(),
         });
     assert_eq!(
-        context.check_network_request(CALL_TARGET),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_network_request(CALL_TARGET)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "the CLI catch-all must win regardless of [tools.web_search] config"
     );
 }
@@ -172,8 +186,10 @@ fn targeted_network_request_rule_matches_only_its_target() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_network_request("https://docs.rs"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_network_request("https://docs.rs")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "an exact scheme://host target matches"
     );
     assert_eq!(
@@ -199,8 +215,10 @@ fn targeted_network_request_rule_supports_wildcard_globs() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_network_request("https://api.example.com"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_network_request("https://api.example.com")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "a host wildcard matches"
     );
     assert_eq!(
@@ -222,12 +240,16 @@ fn targeted_network_request_rule_supports_wildcard_globs() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        any_depth.check_network_request("https://api.example.com"),
-        Some(ApprovalCheck::AutoApproved)
+        any_depth
+            .check_network_request("https://api.example.com")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(
-        any_depth.check_network_request("https://a.b.example.com"),
-        Some(ApprovalCheck::AutoApproved),
+        any_depth
+            .check_network_request("https://a.b.example.com")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "`**` matches subdomains of any depth"
     );
     assert_eq!(
@@ -244,12 +266,16 @@ fn targeted_network_request_rule_supports_wildcard_globs() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        any_scheme.check_network_request("http://host"),
-        Some(ApprovalCheck::AutoApproved)
+        any_scheme
+            .check_network_request("http://host")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(
-        any_scheme.check_network_request("https://host"),
-        Some(ApprovalCheck::AutoApproved)
+        any_scheme
+            .check_network_request("https://host")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(any_scheme.check_network_request("https://other"), None);
 }
@@ -265,8 +291,10 @@ fn targeted_network_request_rule_matches_effective_ports() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_network_request("https://github.com:443"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_network_request("https://github.com:443")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "an explicitly spelled default port matches an absent port"
     );
     assert_eq!(
@@ -283,8 +311,10 @@ fn targeted_network_request_rule_matches_effective_ports() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        explicit_default.check_network_request("https://github.com"),
-        Some(ApprovalCheck::AutoApproved),
+        explicit_default
+            .check_network_request("https://github.com")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "the default-port spelling matches the bare key too"
     );
 
@@ -296,13 +326,17 @@ fn targeted_network_request_rule_matches_effective_ports() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        any_port.check_network_request("https://github.com:8443"),
-        Some(ApprovalCheck::AutoApproved),
+        any_port
+            .check_network_request("https://github.com:8443")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "`:*` matches any port"
     );
     assert_eq!(
-        any_port.check_network_request("https://github.com"),
-        Some(ApprovalCheck::AutoApproved),
+        any_port
+            .check_network_request("https://github.com")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "`:*` matches keys without an explicit port too"
     );
 }
@@ -318,8 +352,10 @@ fn targeted_network_request_rule_defaults_a_schemeless_target_to_https() {
         )])
         .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_network_request("https://github.com"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_network_request("https://github.com")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "a schemeless target means https"
     );
     assert_eq!(
@@ -364,15 +400,19 @@ fn targeted_network_request_rules_follow_last_match_wins() {
         ])
         .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_network_request("https://docs.rs"),
-        Some(ApprovalCheck::AutoDenied {
+        context
+            .check_network_request("https://docs.rs")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied {
             reason: "https only".to_string()
         }),
         "the later matching rule wins"
     );
     assert_eq!(
-        context.check_network_request("http://docs.rs"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_network_request("http://docs.rs")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "only the earlier rule matches this target"
     );
 }
@@ -390,12 +430,14 @@ fn catch_all_wins_over_a_matching_target_rule() {
         )])
         .expect("valid sandbox fixture");
     let context = context.with_rule(SandboxRule {
-        verdict: ApprovalCheck::AutoApproved,
+        verdict: ApprovalVerdict::AutoApproved,
         pattern: glob::Pattern::new("**").unwrap(),
     });
     assert_eq!(
-        context.check_network_request("https://docs.rs"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_network_request("https://docs.rs")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "the CLI catch-all must win regardless of a matching target rule"
     );
 }
@@ -493,7 +535,7 @@ fn private_address_rule_does_not_affect_network_request_and_the_cli_flag_does_no
     assert_eq!(context.check_network_request("http://localhost"), None);
 
     let flagged = context_with(Vec::new()).with_rule(SandboxRule {
-        verdict: ApprovalCheck::AutoApproved,
+        verdict: ApprovalVerdict::AutoApproved,
         pattern: glob::Pattern::new("**").unwrap(),
     });
     assert!(!flagged.check_private_address("http://localhost"));

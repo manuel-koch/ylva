@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -22,7 +22,8 @@ use tracing::Instrument;
 use crate::agent::tools::agent_finish::AgentFinishToolConfig;
 use crate::agent::tools::spawn_subagent::AgentTypeInfo;
 use crate::agent::tools::{
-    default_registry, AutoApproveTool, ToolRegistryConfig, DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
+    default_registry_with_overrides, AutoApproveTool, ToolRegistryConfig, DEFAULT_CLI_TOOLS,
+    DEFAULT_TUI_TOOLS,
 };
 use crate::agent::{AgentLoop, Context, Message, Role, SubagentRoleConfig, UiUpdate};
 use crate::config::ProfileConfig;
@@ -53,7 +54,7 @@ pub struct AgentFactory {
     /// The set of tools whose approval prompt is bypassed (auto-approved)
     /// without user confirmation. Intended for automated / e2e testing where
     /// no human is present to approve.
-    auto_approve: HashSet<AutoApproveTool>,
+    auto_approve: HashMap<AutoApproveTool, crate::RuleOrigin>,
     /// Explicit list of tool names to register. Defaults to [`DEFAULT_CLI_TOOLS`].
     allowed_tools: Vec<String>,
     /// Session store handed to every `Role::Root` agent this factory builds,
@@ -111,7 +112,7 @@ impl AgentFactory {
             skills: SkillRuntime::default(),
             engines: Arc::new(std::sync::RwLock::new(engines)),
             routed_roots: false,
-            auto_approve: HashSet::new(),
+            auto_approve: HashMap::new(),
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             store: None,
             system_prompt: None,
@@ -407,8 +408,16 @@ impl AgentFactory {
     }
 
     /// Enable automatic approval of the given tool's calls (no user prompt).
-    pub fn with_auto_approve(mut self, tool: AutoApproveTool) -> Self {
-        self.auto_approve.insert(tool);
+    pub fn with_auto_approve(self, tool: AutoApproveTool) -> Self {
+        self.with_auto_approve_origin(tool, crate::RuleOrigin::Programmatic)
+    }
+
+    pub(crate) fn with_auto_approve_origin(
+        mut self,
+        tool: AutoApproveTool,
+        origin: crate::RuleOrigin,
+    ) -> Self {
+        self.auto_approve.insert(tool, origin);
         self
     }
 
@@ -472,7 +481,7 @@ impl AgentFactory {
         engines: &HashMap<String, Arc<dyn Engine>>,
         routed_roots: bool,
         allowed_tools: &[String],
-        auto_approve: &HashSet<AutoApproveTool>,
+        auto_approve: &HashMap<AutoApproveTool, crate::RuleOrigin>,
         profile: &ProfileConfig,
         agent_type: &str,
         role: Role,
@@ -561,16 +570,18 @@ impl AgentFactory {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .filter_map(|tool_name| {
-                let rules = profile.effective_tool_rules(Some(agent_type), tool_name)?;
-                Some((tool_name.clone(), rules.to_vec()))
+                let rules = profile
+                    .effective_tool_rule_config(Some(agent_type), tool_name)?
+                    .rule_list()?;
+                Some((tool_name.clone(), rules))
             })
             .collect();
         let registry = Arc::new(
-            default_registry(
+            default_registry_with_overrides(
                 sandbox,
                 ToolRegistryConfig {
                     skills: callable_skills.clone(),
-                    auto_approve: auto_approve.clone(),
+                    auto_approve: Default::default(),
                     allowed_tools: configured_allowed_tools,
                     include_spawn_subagent: can_spawn,
                     spawn_agent_types,
@@ -588,6 +599,7 @@ impl AgentFactory {
                     web_search: profile.web_search.clone(),
                     web_fetch: profile.web_fetch.clone(),
                 },
+                auto_approve,
             )?
             .with_grant_state(grant_state.clone()),
         );
@@ -730,7 +742,7 @@ impl AgentFactory {
         skills: SkillRuntime,
         engines: HashMap<String, Arc<dyn Engine>>,
         allowed_tools: Vec<String>,
-        auto_approve: HashSet<AutoApproveTool>,
+        auto_approve: HashMap<AutoApproveTool, crate::RuleOrigin>,
         profile: ProfileConfig,
         parent_store: Arc<std::sync::Mutex<Option<Store>>>,
         parent_engine: Arc<dyn Engine>,

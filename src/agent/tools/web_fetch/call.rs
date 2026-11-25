@@ -17,13 +17,13 @@
 use std::time::Duration;
 
 use serde_json::Value;
-use tracing::Instrument;
 
 use super::super::backends::web_fetch::{network_target, HopPolicy, WebFetchError};
 use super::super::{Tool, ToolCall, ToolCallResult, ToolError};
 use super::result::WebFetchResult;
 use super::{WebFetchInputArgs, WebFetchTool};
-use crate::sandbox::ApprovalCheck;
+use crate::agent::approval_trail::{self, Phase};
+use crate::sandbox::ApprovalVerdict;
 
 /// Map a [`WebFetchError`] to the tool's [`ToolError`]. `TooLarge` gets
 /// `read`'s explicit-size whole-file wording (naming the URL, the size, and
@@ -96,61 +96,60 @@ impl ToolCall for WebFetchCall {
     fn run(
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
-        let serialized = serde_json::to_string(&self.raw_arguments).unwrap_or_default();
-        let span = tracing::info_span!("tool_args", args = %serialized);
-        Box::pin(
-            async move {
-                let WebFetchCall {
-                    raw_arguments,
-                    tool,
-                    runtime_output_token_limit,
-                    ..
-                } = *self;
-                let args = serde_json::from_value::<WebFetchInputArgs>(raw_arguments).map_err(
-                    |error| {
-                        ToolError::failed(WebFetchTool::NAME, format!("invalid arguments: {error}"))
-                    },
-                )?;
-                // Scheme allowlist before any request (also the approval
-                // match-key source in `needs_approval`).
-                network_target(&args.url)
-                    .map_err(|error| web_fetch_tool_error(&args.url, error))?;
-                let outer_timeout = Duration::from_secs(tool.timeout_secs);
-                // Redirect hops are never prompted for; only an explicit
-                // `deny` rule refuses a hop, and private addresses need a
-                // `network_private_address` rule.
-                let deny = |target: &str| match tool.sandbox_context.check_network_request(target) {
-                    Some(ApprovalCheck::AutoDenied { reason }) => Some(reason),
-                    _ => None,
-                };
-                let allow_private_address =
-                    |target: &str| tool.sandbox_context.check_private_address(target);
-                let policy = HopPolicy {
-                    deny: &deny,
-                    allow_private_address: &allow_private_address,
-                };
-                let response =
-                    tokio::time::timeout(outer_timeout, tool.backend.fetch(&args.url, policy))
-                        .await
-                        .map_err(|_| {
-                            ToolError::failed(
-                                WebFetchTool::NAME,
-                                format!(
-                                    "web fetch of '{}' timed out after {} seconds",
-                                    args.url, tool.timeout_secs
-                                ),
-                            )
-                        })?
-                        .map_err(|error| web_fetch_tool_error(&args.url, error))?;
-                let mut result = WebFetchResult::new(args.url, response);
-                if let Some(max_output_tokens) = runtime_output_token_limit {
-                    result
-                        .fit_to_token_budget(max_output_tokens)
-                        .map_err(|message| ToolError::failed(WebFetchTool::NAME, message))?;
+        // A span containing arguments would also expose them in hop trail records.
+        Box::pin(async move {
+            let WebFetchCall {
+                id,
+                raw_arguments,
+                tool,
+                runtime_output_token_limit,
+                ..
+            } = *self;
+            let args =
+                serde_json::from_value::<WebFetchInputArgs>(raw_arguments).map_err(|error| {
+                    ToolError::failed(WebFetchTool::NAME, format!("invalid arguments: {error}"))
+                })?;
+            // Scheme allowlist before any request (also the approval
+            // match-key source in `needs_approval`).
+            network_target(&args.url).map_err(|error| web_fetch_tool_error(&args.url, error))?;
+            let outer_timeout = Duration::from_secs(tool.timeout_secs);
+            // Redirect hops are never prompted for; only an explicit
+            // `deny` rule refuses a hop, and private addresses need a
+            // `network_private_address` rule.
+            let deny = |target: &str| {
+                let check = tool.sandbox_context.check_network_request(target)?;
+                approval_trail::check(WebFetchTool::NAME, id, &check, Phase::NetworkHop, None);
+                match check.verdict {
+                    ApprovalVerdict::AutoDenied { reason } => Some(reason),
+                    ApprovalVerdict::AutoApproved | ApprovalVerdict::UserApprovalRequired => None,
                 }
-                Ok(Box::new(result) as Box<dyn ToolCallResult>)
+            };
+            let allow_private_address =
+                |target: &str| tool.sandbox_context.check_private_address(target);
+            let policy = HopPolicy {
+                deny: &deny,
+                allow_private_address: &allow_private_address,
+            };
+            let response =
+                tokio::time::timeout(outer_timeout, tool.backend.fetch(&args.url, policy))
+                    .await
+                    .map_err(|_| {
+                        ToolError::failed(
+                            WebFetchTool::NAME,
+                            format!(
+                                "web fetch of '{}' timed out after {} seconds",
+                                args.url, tool.timeout_secs
+                            ),
+                        )
+                    })?
+                    .map_err(|error| web_fetch_tool_error(&args.url, error))?;
+            let mut result = WebFetchResult::new(args.url, response);
+            if let Some(max_output_tokens) = runtime_output_token_limit {
+                result
+                    .fit_to_token_budget(max_output_tokens)
+                    .map_err(|message| ToolError::failed(WebFetchTool::NAME, message))?;
             }
-            .instrument(span),
-        )
+            Ok(Box::new(result) as Box<dyn ToolCallResult>)
+        })
     }
 }

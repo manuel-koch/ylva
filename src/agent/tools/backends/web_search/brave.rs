@@ -43,6 +43,7 @@ use serde::Deserialize;
 
 use super::{WebSearchBackend, WebSearchError, WebSearchHit, WEB_SEARCH_MAX_RESULT_LIMIT};
 use crate::http::OUTBOUND_USER_AGENT;
+use crate::text_normalization::collapse_whitespace;
 
 /// Name of the authentication header carrying the Brave subscription token.
 const SUBSCRIPTION_TOKEN_HEADER: &str = "X-Subscription-Token";
@@ -278,12 +279,12 @@ fn parse_brave_results(body: &[u8], limit: usize) -> Result<Vec<WebSearchHit>, W
     let hits = results
         .iter()
         .filter_map(|result| {
-            let title = normalize_whitespace(&result.title);
+            let title = collapse_whitespace(&result.title);
             let url = result.url.trim();
             if title.is_empty() || url.is_empty() {
                 return None;
             }
-            let snippet = normalize_whitespace(result.description.as_deref().unwrap_or_default());
+            let snippet = collapse_whitespace(result.description.as_deref().unwrap_or_default());
             Some(WebSearchHit {
                 title,
                 url: url.to_string(),
@@ -319,13 +320,6 @@ fn status_error(status: u16, body: &[u8]) -> WebSearchError {
 /// blank.
 fn non_blank(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-/// Collapse every run of whitespace into a single space and trim the ends, so
-/// Brave-provided text (titles, descriptions) is single-line and
-/// comparison-stable.
-fn normalize_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

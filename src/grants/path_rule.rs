@@ -26,7 +26,8 @@ use std::path::Path;
 use glob::Pattern;
 
 use super::GrantError;
-use crate::sandbox::{expand_path_tokens, path_glob_matches};
+use crate::path_expansion::expand_path_tokens;
+use crate::sandbox::path_glob_matches;
 
 /// A validated path rule.
 #[derive(Debug, Clone, PartialEq, Eq)]

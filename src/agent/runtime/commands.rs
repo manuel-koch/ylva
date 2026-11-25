@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use super::*;
+use crate::agent::approval_trail::{self, Disposition, Phase, RecordId};
 use crate::agent::protocol::agent_command_name;
+use crate::grants::GrantReference;
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict};
 
 impl RunState {
     /// A grant added while this loop waits for approval may now cover the
@@ -21,16 +24,168 @@ impl RunState {
     /// the call is auto-approved, resolve it exactly like a user approval.
     /// Calls that still need a human keep their existing prompt.
     pub(super) async fn approve_pending_front_if_granted(&mut self) {
-        let Some(front) = self.pending_tools.front() else {
+        let Some(front) = self
+            .pending_tools
+            .front()
+            .filter(|front| front.published_approval.is_some())
+        else {
             return;
         };
         let id = front.call.id();
         let approval = tool_queue::evaluate_call_approval(&self.registry, front.call.as_ref());
-        if matches!(approval, crate::sandbox::ApprovalCheck::AutoApproved) {
+        let parent = Self::record_approval_recheck(front, &approval.check, Phase::GrantRecheck);
+        if let Some(references) = approval.grants {
             let _ = self
-                .handle_command(Some(AgentCommand::ApproveTool { id }))
+                .approve_pending_tool(id, Disposition::GrantMatch, parent, &references)
+                .await;
+        } else if approval.check.verdict == ApprovalVerdict::AutoApproved {
+            let _ = self
+                .approve_pending_tool(id, Disposition::RecheckApproved, parent, &[])
                 .await;
         }
+    }
+
+    fn pending_front(&self, id: Uuid) -> Option<&PendingTool> {
+        self.pending_tools.front().filter(|pending| {
+            self.mode == AgentMode::ToolPending
+                && pending.call.id() == id
+                && pending.published_approval.is_some()
+        })
+    }
+
+    fn record_approval_recheck(
+        pending: &PendingTool,
+        check: &ApprovalCheck,
+        phase: Phase,
+    ) -> Option<RecordId> {
+        approval_trail::check(
+            pending.call.name(),
+            pending.call.id(),
+            check,
+            phase,
+            pending.approval_parent(),
+        )
+    }
+
+    async fn approve_pending_tool(
+        &mut self,
+        id: Uuid,
+        disposition: Disposition,
+        parent: Option<RecordId>,
+        grants: &[GrantReference],
+    ) -> LoopControl {
+        let Some(front) = self.pending_front(id) else {
+            return LoopControl::CheckCompletion;
+        };
+        let allowance = tool_output_token_limit(
+            front.call.name(),
+            &self.context,
+            &self.registry.schemas(),
+            self.engine.effective_context_length(),
+            &queued_tool_names(&self.pending_tools, 1),
+        );
+        if allowance.is_some_and(|tokens| tokens < MINIMUM_USEFUL_RESULT_TOKENS) {
+            self.advance_tool_queue(true).await;
+            return LoopControl::PollAgain;
+        }
+        let pending = self.pending_tools.pop_front().expect("checked front");
+        approval_trail::disposition(
+            pending.call.as_ref(),
+            disposition,
+            parent.or_else(|| pending.approval_parent()),
+            grants,
+        );
+        if pending.call.name() == tools::spawn_subagent::SpawnSubagentTool::NAME {
+            resolve_spawn_subagent(
+                pending,
+                &mut self.subagent_manager,
+                &mut self.context,
+                &self.ui_tx,
+                &mut self.spawn_content_sections,
+            )
+            .await;
+            self.advance_tool_queue(true).await;
+        } else {
+            let name = pending.call.name().to_string();
+            let call_id = pending.call.id();
+            let arguments = pending.call.arguments().clone();
+            let content_sections = pending.call.pending_content_sections();
+            let title_arguments = pending.call.title_arguments();
+            self.current_tool_cancel = Some(PendingTool::execute(
+                pending,
+                self.agent_tx.clone(),
+                self.generation,
+                allowance,
+            ));
+            let _ = self
+                .ui_tx
+                .send(UiUpdate::ToolStart {
+                    name,
+                    id: call_id,
+                    arguments,
+                    content_sections,
+                    title_arguments,
+                    run_id: self.own_run_id,
+                })
+                .await;
+        }
+        LoopControl::CheckCompletion
+    }
+
+    async fn deny_pending_tool(
+        &mut self,
+        id: Uuid,
+        reason: &str,
+        disposition: Disposition,
+        parent: Option<RecordId>,
+    ) {
+        if self.pending_front(id).is_none() {
+            return;
+        }
+        let denied = self.pending_tools.pop_front().expect("checked front");
+        approval_trail::disposition(
+            denied.call.as_ref(),
+            disposition,
+            parent.or_else(|| denied.approval_parent()),
+            &[],
+        );
+        let name = denied.call.name().to_string();
+        let call_id = denied.call.id();
+        let denied_content_sections = denied.call.pending_content_sections();
+        let mut error = format!("Tool '{name}' was denied by the user");
+        if !reason.is_empty() {
+            error.push_str(&format!(
+                ". Here is their reason for the denial:\n\n{reason}"
+            ));
+        }
+        self.context.push_tool_error(
+            call_id,
+            name.clone(),
+            error.clone(),
+            None,
+            false,
+            std::time::Duration::ZERO,
+            denied_content_sections.clone(),
+        );
+        // Keep the model-facing denial protocol the same for all hosts.
+        if !reason.is_empty() {
+            self.context.push_implicit_user(format!(
+                "I denied the '{name}' tool call \
+                 ( tool_call_id={call_id} ). \
+                 Here is my reason for the denial:\n\n{reason}"
+            ));
+        }
+        let _ = self
+            .ui_tx
+            .send(UiUpdate::ToolError {
+                id: call_id,
+                error,
+                duration: std::time::Duration::ZERO,
+                content_sections: denied_content_sections,
+                run_id: self.own_run_id,
+            })
+            .await;
+        self.advance_tool_queue(true).await;
     }
 
     /// The grant context of the pending `call`: its tool, subjects and the
@@ -131,19 +286,14 @@ impl RunState {
         id: uuid::Uuid,
         requests: Vec<crate::grants::GrantRequest>,
         reload_snapshot: bool,
-    ) -> Option<AgentCommand> {
+    ) -> Option<Vec<GrantReference>> {
         use crate::grants::{GrantScope, GrantStoreError};
-        let front = self
-            .pending_tools
-            .front()
-            .filter(|front| front.call.id() == id);
-        let outcome = (|| -> Result<String, (String, bool)> {
-            let front = front
-                .filter(|_| self.mode == AgentMode::ToolPending)
-                .ok_or((
-                    "the call is no longer waiting for approval".to_string(),
-                    false,
-                ))?;
+        let front = self.pending_front(id);
+        let outcome = (|| -> Result<_, (String, bool)> {
+            let front = front.ok_or((
+                "the call is no longer waiting for approval".to_string(),
+                false,
+            ))?;
             let (tool, subjects, grant_state) =
                 self.grant_context(front).map_err(|e| (e, false))?;
             if requests.is_empty() {
@@ -220,10 +370,14 @@ impl RunState {
                     describe(GrantScope::Temporary)
                 ));
             }
-            Ok(texts.join(" "))
+            let references = validated
+                .iter()
+                .map(|(grant, scope)| grant.reference(*scope))
+                .collect();
+            Ok((texts.join(" "), references))
         })();
         match outcome {
-            Ok(text) => {
+            Ok((text, references)) => {
                 let _ = self
                     .ui_tx
                     .send(UiUpdate::Notice {
@@ -231,7 +385,7 @@ impl RunState {
                         run_id: self.own_run_id,
                     })
                     .await;
-                Some(AgentCommand::ApproveTool { id })
+                Some(references)
             }
             Err((reason, reloadable)) => {
                 let _ = self
@@ -356,18 +510,20 @@ impl RunState {
                 .await;
             return LoopControl::PollAgain;
         }
-        let cmd = match cmd {
+        match cmd {
             AgentCommand::GrantAndApprove {
                 id,
                 requests,
                 reload_snapshot,
-            } => match self.grant_pending_call(id, requests, reload_snapshot).await {
-                Some(approval) => approval,
-                None => return LoopControl::PollAgain,
-            },
-            other => other,
-        };
-        match cmd {
+            } => {
+                let Some(references) = self.grant_pending_call(id, requests, reload_snapshot).await
+                else {
+                    return LoopControl::PollAgain;
+                };
+                return self
+                    .approve_pending_tool(id, Disposition::HumanGrant, None, &references)
+                    .await;
+            }
             AgentCommand::PrepareSessionSwitch { reply } => {
                 let accepted = self.session_switch_quiescent();
                 if accepted {
@@ -473,129 +629,42 @@ impl RunState {
                         .await;
                 }
             }
-            // Rewritten into `ApproveTool` (or dropped) before this match.
-            AgentCommand::GrantAndApprove { .. } => {}
             AgentCommand::RequestGrantPreview { id } => {
                 self.publish_grant_preview(id).await;
             }
             AgentCommand::ApproveTool { id } => {
-                // Only valid in `ToolPending`; ignored otherwise.
-                let is_front = self.mode == AgentMode::ToolPending
-                    && self
-                        .pending_tools
-                        .front()
-                        .is_some_and(|pending| pending.call.id() == id);
-                if is_front {
-                    let allowance = tool_output_token_limit(
-                        self.pending_tools
-                            .front()
-                            .expect("checked front")
-                            .call
-                            .name(),
-                        &self.context,
-                        &self.registry.schemas(),
-                        self.engine.effective_context_length(),
-                        &queued_tool_names(&self.pending_tools, 1),
-                    );
-                    if allowance.is_some_and(|tokens| tokens < MINIMUM_USEFUL_RESULT_TOKENS) {
-                        self.advance_tool_queue(true).await;
-                        return LoopControl::PollAgain;
-                    }
-                    let pending = self.pending_tools.pop_front().expect("checked front");
-                    if pending.call.name() == tools::spawn_subagent::SpawnSubagentTool::NAME {
-                        resolve_spawn_subagent(
-                            pending,
-                            &mut self.subagent_manager,
-                            &mut self.context,
-                            &self.ui_tx,
-                            &mut self.spawn_content_sections,
-                        )
-                        .await;
-                        self.advance_tool_queue(true).await;
-                    } else {
-                        let name = pending.call.name().to_string();
-                        let call_id = pending.call.id();
-                        let arguments = pending.call.arguments().clone();
-                        let content_sections = pending.call.pending_content_sections();
-                        let title_arguments = pending.call.title_arguments();
-                        tracing::info!(tool = %name, tool_call_id = %call_id, "tool approved");
-                        let max_output_tokens = tool_output_token_limit(
-                            &name,
-                            &self.context,
-                            &self.registry.schemas(),
-                            self.engine.effective_context_length(),
-                            &queued_tool_names(&self.pending_tools, 0),
-                        );
-                        self.current_tool_cancel = Some(PendingTool::execute(
-                            pending,
-                            self.agent_tx.clone(),
-                            self.generation,
-                            max_output_tokens,
-                        ));
-                        let _ = self
-                            .ui_tx
-                            .send(UiUpdate::ToolStart {
-                                name: name.clone(),
-                                id: call_id,
-                                arguments: arguments.clone(),
-                                content_sections,
-                                title_arguments,
-                                run_id: self.own_run_id,
-                            })
-                            .await;
-                    }
-                }
+                return self
+                    .approve_pending_tool(id, Disposition::ApproveOnce, None, &[])
+                    .await;
             }
             AgentCommand::DenyTool { id, reason } => {
-                // Only valid in `ToolPending`; ignored otherwise.
-                let is_front = self.mode == AgentMode::ToolPending
-                    && self
-                        .pending_tools
-                        .front()
-                        .is_some_and(|pending| pending.call.id() == id);
-                if is_front {
-                    let denied = self.pending_tools.pop_front().expect("checked front");
-                    let name = denied.call.name().to_string();
-                    let call_id = denied.call.id();
-                    let denied_content_sections = denied.call.pending_content_sections();
-                    tracing::info!(tool = %name, tool_call_id = %call_id, "tool denied");
-                    let mut error = format!("Tool '{name}' was denied by the user");
-                    if !reason.is_empty() {
-                        error.push_str(&format!(
-                            ". Here is their reason for the denial:\n\n{reason}"
-                        ));
+                self.deny_pending_tool(id, &reason, Disposition::HumanDeny, None)
+                    .await;
+            }
+            AgentCommand::ResolveCliTool { id, check } => {
+                let Some(front) = self.pending_front(id) else {
+                    return LoopControl::CheckCompletion;
+                };
+                let parent = Self::record_approval_recheck(front, &check, Phase::CliRecheck);
+                match &check.verdict {
+                    ApprovalVerdict::AutoApproved => {
+                        return self
+                            .approve_pending_tool(id, Disposition::CliPolicyApproved, parent, &[])
+                            .await;
                     }
-                    self.context.push_tool_error(
-                        call_id,
-                        name.clone(),
-                        error.clone(),
-                        None,
-                        false,
-                        std::time::Duration::ZERO,
-                        denied_content_sections.clone(),
-                    );
-                    // When the user supplied a reason, also push a
-                    // `user` role message so the model reads the
-                    // correction through the authoritative instruction
-                    // channel rather than just the tool-error envelope.
-                    if !reason.is_empty() {
-                        self.context.push_implicit_user(format!(
-                            "I denied the '{name}' tool call \
-                                                 ( tool_call_id={call_id} ). \
-                                                 Here is my reason for the denial:\n\n{reason}"
-                        ));
+                    ApprovalVerdict::AutoDenied { reason } => {
+                        self.deny_pending_tool(id, reason, Disposition::CliPolicyDenied, parent)
+                            .await;
                     }
-                    let _ = self
-                        .ui_tx
-                        .send(UiUpdate::ToolError {
-                            id: call_id,
-                            error,
-                            duration: std::time::Duration::ZERO,
-                            content_sections: denied_content_sections,
-                            run_id: self.own_run_id,
-                        })
+                    ApprovalVerdict::UserApprovalRequired => {
+                        self.deny_pending_tool(
+                            id,
+                            crate::agent::CLI_APPROVAL_UNAVAILABLE_REASON,
+                            Disposition::CliUnavailable,
+                            parent,
+                        )
                         .await;
-                    self.advance_tool_queue(true).await;
+                    }
                 }
             }
             AgentCommand::AnswerClarify(answer) => {

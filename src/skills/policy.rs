@@ -18,9 +18,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use crate::config::ProfileConfig;
-use crate::sandbox::{ApprovalCheck, Sandbox, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, DecisionMaker, Sandbox, SandboxContext};
 
 use super::{Skill, SkillCatalog};
+
+const DEFAULT_SKILL_CATALOG_RULE: &str = "skill_catalog.default";
 
 #[derive(Debug, Clone)]
 pub struct CallableSkill {
@@ -87,10 +89,16 @@ impl CallableSkills {
             }
             let approval = context
                 .check_snapshot_path(&skill.source.canonical_path)
-                .unwrap_or(ApprovalCheck::AutoApproved);
-            let unavailable = match &approval {
-                ApprovalCheck::AutoDenied { reason } => Some(reason.as_str()),
-                ApprovalCheck::UserApprovalRequired if !interactive => {
+                .unwrap_or_else(|| {
+                    ApprovalCheck::builtin(
+                        ApprovalVerdict::AutoApproved,
+                        DecisionMaker::SkillPolicy,
+                        DEFAULT_SKILL_CATALOG_RULE,
+                    )
+                });
+            let unavailable = match &approval.verdict {
+                ApprovalVerdict::AutoDenied { reason } => Some(reason.as_str()),
+                ApprovalVerdict::UserApprovalRequired if !interactive => {
                     Some("requires interactive approval in headless mode")
                 }
                 _ => None,
@@ -106,7 +114,7 @@ impl CallableSkills {
                 name.clone(),
                 CallableSkill {
                     skill: skill.clone(),
-                    requires_approval: approval == ApprovalCheck::UserApprovalRequired,
+                    requires_approval: approval.verdict == ApprovalVerdict::UserApprovalRequired,
                 },
             );
         }
@@ -144,8 +152,8 @@ pub fn loader_context(
     agent_type: &str,
 ) -> Result<SandboxContext, crate::sandbox::SandboxRuleError> {
     let rules = profile
-        .effective_tool_rules(Some(agent_type), "load_skill")
-        .unwrap_or_default()
-        .to_vec();
-    SandboxContext::new(sandbox).with_tool_rules("load_skill", rules)
+        .effective_tool_rule_config(Some(agent_type), "load_skill")
+        .and_then(crate::config::ToolConfig::rule_list)
+        .unwrap_or_default();
+    SandboxContext::new(sandbox).with_tool_rule_list("load_skill", rules)
 }

@@ -88,6 +88,21 @@ after `/clear`, new work uses the replacement ID. Subagent spans additionally
 identify their run and parent session, including completion and transcript
 persistence. No new prompt, credential, or conversation-body fields are logged.
 
+With a logfile and `--log-level info`, text and JSON logs include `tool approval
+trail` events. These show which rule or fallback decided a tool call and, when
+a pending request is resolved, what happened next: a human approved once,
+denied, or saved a grant; an existing grant covered the call; or the headless
+CLI could not ask. A recheck has its own phase and record ID. Use the
+`tool_call_id` and session or subagent span to group records, then match
+`parent_id` to `record_id` within the same process to follow the decision.
+See [sandbox configuration](./configuration.md#sandbox-tool-approval-rules)
+for how to read rule locators.
+
+The trail omits tool arguments, raw rule and grant text, absolute paths, URLs,
+credentials, and free-form denial reasons. It uses opaque grant references
+and does not record grant previews or `clarify` exchanges. This guarantee
+applies to the trail records, not to other diagnostics in the logfile.
+
 When a logfile is enabled, user-visible provider/stream failures, tool
 failures, and fatal startup errors are also emitted through `tracing`. Fatal
 startup paths flush the non-blocking logfile before exiting. A provider stream

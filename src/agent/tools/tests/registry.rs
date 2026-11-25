@@ -15,6 +15,27 @@
 use super::*;
 
 #[test]
+fn tool_check_identifies_the_default_after_sandbox_abstention() {
+    let sandbox = Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+    let registry = default_registry(sandbox, ToolRegistryConfig::default()).unwrap();
+    let check = registry
+        .get("bash")
+        .unwrap()
+        .needs_approval(&serde_json::json!({"command": "echo hello"}));
+
+    assert_eq!(
+        check.verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
+    );
+    assert_eq!(check.decision_maker, crate::sandbox::DecisionMaker::Tool);
+    assert_eq!(
+        check.rule_origin,
+        crate::sandbox::RuleOrigin::BuiltIn("bash.default")
+    );
+    assert!(check.parent.is_none());
+}
+
+#[test]
 fn conditional_rules_are_wired_and_cli_override_requires_valid_policy() {
     let sandbox = Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::with_root(
         "/workspace".into(),
@@ -34,24 +55,26 @@ rules = [{ command = ["sort", "**"], only_arguments = ["-n"], verdict = "auto_ap
     let registry = default_registry(
         sandbox.clone(),
         configuration(
-            rules.rules.clone().unwrap(),
+            rules.rules.clone().unwrap().into(),
             std::collections::HashSet::new(),
         ),
     )
     .unwrap();
     let tool = registry.get("bash").unwrap();
     assert_eq!(
-        tool.needs_approval(&serde_json::json!({"command":"sort -n file"})),
-        ApprovalCheck::AutoApproved
+        tool.needs_approval(&serde_json::json!({"command":"sort -n file"}))
+            .verdict,
+        ApprovalVerdict::AutoApproved
     );
     assert_eq!(
-        tool.needs_approval(&serde_json::json!({"command":"sort -o output file"})),
-        ApprovalCheck::UserApprovalRequired
+        tool.needs_approval(&serde_json::json!({"command":"sort -o output file"}))
+            .verdict,
+        ApprovalVerdict::UserApprovalRequired
     );
     let registry = default_registry(
         sandbox.clone(),
         configuration(
-            rules.rules.unwrap(),
+            rules.rules.unwrap().into(),
             std::collections::HashSet::from([AutoApproveTool::Bash]),
         ),
     )
@@ -60,8 +83,9 @@ rules = [{ command = ["sort", "**"], only_arguments = ["-n"], verdict = "auto_ap
         registry
             .get("bash")
             .unwrap()
-            .needs_approval(&serde_json::json!({"command":"sort -o output file"})),
-        ApprovalCheck::AutoApproved
+            .needs_approval(&serde_json::json!({"command":"sort -o output file"}))
+            .verdict,
+        ApprovalVerdict::AutoApproved
     );
     let malformed: crate::config::ToolConfig = toml::from_str(
         r#"
@@ -76,7 +100,7 @@ rules = [
         default_registry(
             sandbox,
             configuration(
-                malformed.rules.unwrap(),
+                malformed.rules.unwrap().into(),
                 std::collections::HashSet::from([AutoApproveTool::Bash])
             )
         )
@@ -174,7 +198,8 @@ fn auto_approve_web_fetch_wins_over_configured_deny_rule() {
             verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
             reason: Some("disabled by policy".to_string()),
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -190,8 +215,10 @@ fn auto_approve_web_fetch_wins_over_configured_deny_rule() {
         .get(web_fetch::WebFetchTool::NAME)
         .expect("web_fetch tool");
     assert_eq!(
-        web_fetch_tool.needs_approval(&serde_json::json!({ "url": "https://docs.rs/" })),
-        ApprovalCheck::AutoApproved,
+        web_fetch_tool
+            .needs_approval(&serde_json::json!({ "url": "https://docs.rs/" }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "--auto-approve-web-fetch's catch-all rule must win over a configured deny rule"
     );
 }
@@ -207,7 +234,8 @@ fn configured_web_fetch_target_rule_applies_through_default_registry() {
             verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
             reason: None,
             target: Some("https://docs.rs".to_string()),
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -222,13 +250,17 @@ fn configured_web_fetch_target_rule_applies_through_default_registry() {
         .get(web_fetch::WebFetchTool::NAME)
         .expect("web_fetch tool");
     assert_eq!(
-        web_fetch_tool.needs_approval(&serde_json::json!({ "url": "https://docs.rs/htmd/" })),
-        ApprovalCheck::AutoApproved,
+        web_fetch_tool
+            .needs_approval(&serde_json::json!({ "url": "https://docs.rs/htmd/" }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "a matching target rule must resolve through default_registry"
     );
     assert_eq!(
-        web_fetch_tool.needs_approval(&serde_json::json!({ "url": "https://example.com/" })),
-        ApprovalCheck::UserApprovalRequired,
+        web_fetch_tool
+            .needs_approval(&serde_json::json!({ "url": "https://example.com/" }))
+            .verdict,
+        ApprovalVerdict::UserApprovalRequired,
         "a non-matching target must abstain"
     );
 }
@@ -270,7 +302,8 @@ fn auto_approve_web_search_wins_over_configured_deny_rule() {
             verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
             reason: Some("disabled by policy".to_string()),
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -286,8 +319,10 @@ fn auto_approve_web_search_wins_over_configured_deny_rule() {
         .get(web_search::WebSearchTool::NAME)
         .expect("web_search tool");
     assert_eq!(
-        web_search_tool.needs_approval(&serde_json::json!({ "terms": "query" })),
-        ApprovalCheck::AutoApproved,
+        web_search_tool
+            .needs_approval(&serde_json::json!({ "terms": "query" }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "--auto-approve-web-search's catch-all rule must win over a configured deny rule"
     );
 }
@@ -303,7 +338,8 @@ fn configured_web_search_rule_applies_through_default_registry() {
             verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
             reason: None,
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -318,8 +354,8 @@ fn configured_web_search_rule_applies_through_default_registry() {
         .get(web_search::WebSearchTool::NAME)
         .expect("web_search tool");
     assert_eq!(
-            web_search_tool.needs_approval(&serde_json::json!({ "terms": "query" })),
-            ApprovalCheck::AutoApproved,
+            web_search_tool.needs_approval(&serde_json::json!({ "terms": "query" })).verdict,
+            ApprovalVerdict::AutoApproved,
             "[tools.web_search]'s configured network_request rule must resolve through default_registry"
         );
 }
@@ -349,7 +385,8 @@ fn brave_target_scoped_rule_matches_the_brave_endpoint_only() {
                 verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
                 reason: None,
                 target: Some(target.to_string()),
-            }],
+            }]
+            .into(),
         );
         tool_sandbox_rules
     };
@@ -370,8 +407,10 @@ fn brave_target_scoped_rule_matches_the_brave_endpoint_only() {
         .get(web_search::WebSearchTool::NAME)
         .expect("web_search tool");
     assert_eq!(
-        web_search_tool.needs_approval(&serde_json::json!({ "terms": "query" })),
-        ApprovalCheck::AutoApproved,
+        web_search_tool
+            .needs_approval(&serde_json::json!({ "terms": "query" }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "the brave network_target must match a rule targeting https://api.search.brave.com"
     );
 
@@ -380,8 +419,10 @@ fn brave_target_scoped_rule_matches_the_brave_endpoint_only() {
         .get(web_search::WebSearchTool::NAME)
         .expect("web_search tool");
     assert_eq!(
-        other_web_search_tool.needs_approval(&serde_json::json!({ "terms": "query" })),
-        ApprovalCheck::UserApprovalRequired,
+        other_web_search_tool
+            .needs_approval(&serde_json::json!({ "terms": "query" }))
+            .verdict,
+        ApprovalVerdict::UserApprovalRequired,
         "a rule for another authority must not match the brave endpoint"
     );
 }
@@ -422,7 +463,8 @@ fn default_registry_wires_configured_rules_per_tool_only() {
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -437,8 +479,10 @@ fn default_registry_wires_configured_rules_per_tool_only() {
 
     let read_tool = registry.get(read::ReadTool::NAME).expect("read tool");
     assert_eq!(
-        read_tool.needs_approval(&serde_json::json!({ "path": dot_path })),
-        ApprovalCheck::AutoApproved,
+        read_tool
+            .needs_approval(&serde_json::json!({ "path": dot_path }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "read's [tools.read] config replaces the default floor's \
              dot_path verdict"
     );
@@ -447,8 +491,10 @@ fn default_registry_wires_configured_rules_per_tool_only() {
     // default floor (dot_path -> user approval required).
     let write_tool = registry.get(write::WriteTool::NAME).expect("write tool");
     assert_eq!(
-        write_tool.needs_approval(&serde_json::json!({ "path": dot_path, "content": "x" })),
-        ApprovalCheck::UserApprovalRequired
+        write_tool
+            .needs_approval(&serde_json::json!({ "path": dot_path, "content": "x" }))
+            .verdict,
+        ApprovalVerdict::UserApprovalRequired
     );
 }
 
@@ -468,7 +514,8 @@ fn auto_approve_write_wins_over_configured_deny_rule() {
             verdict: ApprovalVerdictConfig::AutoDenied,
             reason: None,
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -483,8 +530,10 @@ fn auto_approve_write_wins_over_configured_deny_rule() {
     let dot_path = temp.path().join(".env").to_string_lossy().to_string();
     let write_tool = registry.get(write::WriteTool::NAME).expect("write tool");
     assert_eq!(
-        write_tool.needs_approval(&serde_json::json!({ "path": dot_path, "content": "x" })),
-        ApprovalCheck::AutoApproved,
+        write_tool
+            .needs_approval(&serde_json::json!({ "path": dot_path, "content": "x" }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "--auto-approve-write's catch-all rule must still win over a configured deny rule"
     );
 }
@@ -505,7 +554,8 @@ fn auto_approve_bash_wins_over_configured_deny_rule() {
             verdict: ApprovalVerdictConfig::AutoDenied,
             reason: None,
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -519,8 +569,10 @@ fn auto_approve_bash_wins_over_configured_deny_rule() {
 
     let bash_tool = registry.get(bash::BashTool::NAME).expect("bash tool");
     assert_eq!(
-        bash_tool.needs_approval(&serde_json::json!({ "command": "sleep 10 &" })),
-        ApprovalCheck::AutoApproved,
+        bash_tool
+            .needs_approval(&serde_json::json!({ "command": "sleep 10 &" }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "--auto-approve-bash's catch-all rule must still win over a configured deny rule"
     );
 }
@@ -541,7 +593,8 @@ fn auto_approve_read_wins_over_configured_deny_rule() {
             verdict: ApprovalVerdictConfig::AutoDenied,
             reason: None,
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -556,8 +609,10 @@ fn auto_approve_read_wins_over_configured_deny_rule() {
     let dot_path = temp.path().join(".env").to_string_lossy().to_string();
     let read_tool = registry.get(read::ReadTool::NAME).expect("read tool");
     assert_eq!(
-        read_tool.needs_approval(&serde_json::json!({ "path": dot_path })),
-        ApprovalCheck::AutoApproved,
+        read_tool
+            .needs_approval(&serde_json::json!({ "path": dot_path }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "--auto-approve-read's catch-all rule must still win over a configured deny rule"
     );
 }
@@ -578,7 +633,8 @@ fn auto_approve_glob_wins_over_configured_deny_rule() {
             verdict: ApprovalVerdictConfig::AutoDenied,
             reason: None,
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -599,8 +655,10 @@ fn auto_approve_glob_wins_over_configured_deny_rule() {
         .to_string();
     let glob_tool = registry.get(glob::GlobTool::NAME).expect("glob tool");
     assert_eq!(
-        glob_tool.needs_approval(&serde_json::json!({ "pattern": "*", "path": outside })),
-        ApprovalCheck::AutoApproved,
+        glob_tool
+            .needs_approval(&serde_json::json!({ "pattern": "*", "path": outside }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "--auto-approve-glob's catch-all rule must still win over a configured deny rule"
     );
 }
@@ -621,7 +679,8 @@ fn auto_approve_search_wins_over_configured_deny_rule() {
             verdict: ApprovalVerdictConfig::AutoDenied,
             reason: None,
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -642,8 +701,10 @@ fn auto_approve_search_wins_over_configured_deny_rule() {
         .to_string();
     let search_tool = registry.get(search::SearchTool::NAME).expect("search tool");
     assert_eq!(
-        search_tool.needs_approval(&serde_json::json!({ "pattern": "foo", "path": outside })),
-        ApprovalCheck::AutoApproved,
+        search_tool
+            .needs_approval(&serde_json::json!({ "pattern": "foo", "path": outside }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "--auto-approve-search's catch-all rule must still win over a configured deny rule"
     );
 }
@@ -666,7 +727,8 @@ fn default_registry_wires_configured_command_glob_rules_for_bash() {
             command: vec!["git".to_string(), "status".to_string()],
             verdict: ApprovalVerdictConfig::AutoApproved,
             reason: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -679,16 +741,20 @@ fn default_registry_wires_configured_command_glob_rules_for_bash() {
 
     let bash_tool = registry.get(bash::BashTool::NAME).expect("bash tool");
     assert_eq!(
-        bash_tool.needs_approval(&serde_json::json!({ "command": "git status" })),
-        ApprovalCheck::AutoApproved,
+        bash_tool
+            .needs_approval(&serde_json::json!({ "command": "git status" }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "[tools.bash]'s configured CommandGlob rule must resolve through default_registry"
     );
     // A different command not matched by the configured rule falls back
     // to the (now fully-replaced, empty-otherwise) configured list, which
     // abstains -> the tool's own conservative default (UserApprovalRequired).
     assert_eq!(
-        bash_tool.needs_approval(&serde_json::json!({ "command": "git log" })),
-        ApprovalCheck::UserApprovalRequired,
+        bash_tool
+            .needs_approval(&serde_json::json!({ "command": "git log" }))
+            .verdict,
+        ApprovalVerdict::UserApprovalRequired,
         "[tools.bash]'s configured rules fully replace the default floor"
     );
 }
@@ -710,7 +776,8 @@ fn default_registry_wires_cross_filesystem_rule_for_read() {
             verdict: ApprovalVerdictConfig::UserApprovalRequired,
             reason: None,
             target: None,
-        }],
+        }]
+        .into(),
     );
     let registry = default_registry(
         sandbox,
@@ -723,8 +790,10 @@ fn default_registry_wires_cross_filesystem_rule_for_read() {
 
     let read_tool = registry.get(read::ReadTool::NAME).expect("read tool");
     assert_eq!(
-        read_tool.needs_approval(&serde_json::json!({ "path": "/dev/null" })),
-        ApprovalCheck::UserApprovalRequired,
+        read_tool
+            .needs_approval(&serde_json::json!({ "path": "/dev/null" }))
+            .verdict,
+        ApprovalVerdict::UserApprovalRequired,
         "read's configured cross_filesystem rule must surface through default_registry"
     );
 
@@ -733,8 +802,10 @@ fn default_registry_wires_cross_filesystem_rule_for_read() {
     // and read auto-approves its own abstention.
     let same_device_path = temp.path().join("notes.txt").to_string_lossy().to_string();
     assert_eq!(
-        read_tool.needs_approval(&serde_json::json!({ "path": same_device_path })),
-        ApprovalCheck::AutoApproved,
+        read_tool
+            .needs_approval(&serde_json::json!({ "path": same_device_path }))
+            .verdict,
+        ApprovalVerdict::AutoApproved,
         "a same-device path must not match cross_filesystem"
     );
 }
@@ -859,7 +930,7 @@ fn write_tool_always_needs_user_approval() {
     let write_tool = write::WriteTool::default();
     let args = serde_json::json!({ "path": "src/main.rs", "content": "hello" });
     assert!(matches!(
-        write_tool.needs_approval(&args),
-        ApprovalCheck::UserApprovalRequired
+        write_tool.needs_approval(&args).verdict,
+        ApprovalVerdict::UserApprovalRequired
     ));
 }

@@ -15,8 +15,8 @@
 //! Inline styles, words and display-width aware wrapping helpers.
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 
+use crate::terminal_text::terminal_display_width;
 use crate::theme::inline_code_fg;
 
 /// The inline formatting in effect for a run of text: bold/italic modifiers
@@ -61,36 +61,6 @@ pub(super) struct TableWord {
     pub(super) text: String,
     pub(super) style: InlineStyle,
     pub(super) space_before: bool,
-}
-
-pub(super) fn terminal_display_width(text: &str) -> usize {
-    Line::from(text).width()
-}
-
-/// The part of `text` drawn between display columns `start_column` (inclusive)
-/// and `end_column` (exclusive). A wide character belongs to the selection when
-/// its first cell is inside; zero-width characters follow the character they
-/// attach to.
-pub(crate) fn slice_by_display_columns(
-    text: &str,
-    start_column: usize,
-    end_column: usize,
-) -> String {
-    let mut column = 0;
-    let mut included = start_column == 0 && end_column > 0;
-    let mut slice = String::new();
-    for character in text.chars() {
-        let mut buffer = [0; 4];
-        let width = Span::raw(&*character.encode_utf8(&mut buffer)).width();
-        if width > 0 {
-            included = column >= start_column && column < end_column;
-            column += width;
-        }
-        if included {
-            slice.push(character);
-        }
-    }
-    slice
 }
 
 /// Splits `text` on whitespace into [`Word`]s, appending them to `buffer`.

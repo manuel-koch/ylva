@@ -26,6 +26,7 @@ use futures::future::BoxFuture;
 
 use super::{WebSearchBackend, WebSearchError, WebSearchHit};
 use crate::http::OUTBOUND_USER_AGENT;
+use crate::text_normalization::collapse_whitespace;
 
 // ── DuckDuckGo HTML backend ───────────────────────────────────────────────────
 
@@ -215,14 +216,14 @@ fn parse_duckduckgo_results(html: &str, limit: usize) -> Result<Vec<WebSearchHit
             continue;
         };
         let href = link.attr("href").unwrap_or_default();
-        let title = normalize_whitespace(&link.text().collect::<String>());
+        let title = collapse_whitespace(&link.text().collect::<String>());
         if title.is_empty() || href.is_empty() {
             continue;
         }
         let snippet = result
             .select(&snippet_selector)
             .next()
-            .map(|snippet| normalize_whitespace(&snippet.text().collect::<String>()))
+            .map(|snippet| collapse_whitespace(&snippet.text().collect::<String>()))
             .unwrap_or_default();
         hits.push(WebSearchHit {
             title,
@@ -275,12 +276,6 @@ fn resolve_result_url(href: &str) -> String {
         }
     }
     absolute
-}
-
-/// Collapse every run of whitespace into a single space and trim the ends, so
-/// markup-derived text (titles, snippets) is single-line and comparison-stable.
-fn normalize_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

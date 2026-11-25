@@ -74,7 +74,8 @@ use super::{
     validate_args_with_schema, ContentSection, FileEncoding, Section, Tool, ToolAttachment,
     ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::byte_size::{format_kibibytes, format_mebibytes};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 
 pub(crate) const MEDIA_TYPE_IMAGE_PNG: &str = "image/png";
 const MEDIA_TYPE_IMAGE_JPEG: &str = "image/jpeg";
@@ -120,23 +121,19 @@ pub const READ_MEDIA_MAX_BYTES: usize = 8 * 1024 * 1024;
 fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ApprovalCheck> {
     match args.get(key).and_then(|v| v.as_str()) {
         Some(value) if !value.is_empty() => Ok(value),
-        Some(_) => Err(ApprovalCheck::AutoDenied {
-            reason: format!("Required argument '{key}' must not be empty"),
-        }),
-        None => Err(ApprovalCheck::AutoDenied {
-            reason: format!("Required argument '{key}' is missing or not a string"),
-        }),
+        Some(_) => Err(ApprovalCheck::tool(
+            ApprovalVerdict::AutoDenied {
+                reason: format!("Required argument '{key}' must not be empty"),
+            },
+            ReadTool::EMPTY_ARGUMENT_RULE,
+        )),
+        None => Err(ApprovalCheck::tool(
+            ApprovalVerdict::AutoDenied {
+                reason: format!("Required argument '{key}' is missing or not a string"),
+            },
+            ReadTool::ARGUMENT_TYPE_RULE,
+        )),
     }
-}
-
-/// Format a byte count as a human-readable KiB value.
-fn format_kibibytes(bytes: usize) -> String {
-    format!("{} KiB", bytes / 1024)
-}
-
-/// Format a byte count as a human-readable MiB value.
-fn format_mebibytes(bytes: usize) -> String {
-    format!("{} MiB", bytes / (1024 * 1024))
 }
 
 /// The unit that `ReadFileArgs::offset`/`limit` count when `mode` is set
@@ -466,6 +463,9 @@ pub struct ReadTool {
 
 impl ReadTool {
     pub const NAME: &'static str = "read";
+    const DEFAULT_APPROVAL_RULE: &'static str = "read.default";
+    const EMPTY_ARGUMENT_RULE: &'static str = "read.empty_argument";
+    const ARGUMENT_TYPE_RULE: &'static str = "read.argument_type";
 
     pub fn new(sandbox_context: SandboxContext) -> Self {
         ReadTool {
@@ -541,16 +541,16 @@ impl Tool for ReadTool {
             .sandbox_context
             .check_path(std::path::Path::new(path_str));
         let approval = match sandbox_verdict {
-            None => ApprovalCheck::AutoApproved,
+            None => ApprovalCheck::tool(ApprovalVerdict::AutoApproved, Self::DEFAULT_APPROVAL_RULE),
             Some(verdict) => verdict,
         };
         tracing::debug!(
             tool = "read",
             path = path_str,
-            sandbox = match &approval {
-                ApprovalCheck::AutoApproved => "abstain→auto-approved",
-                ApprovalCheck::AutoDenied { .. } => "auto-denied",
-                ApprovalCheck::UserApprovalRequired => "user-approval-required",
+            sandbox = match &approval.verdict {
+                ApprovalVerdict::AutoApproved => "abstain→auto-approved",
+                ApprovalVerdict::AutoDenied { .. } => "auto-denied",
+                ApprovalVerdict::UserApprovalRequired => "user-approval-required",
             },
             "tool approval decision"
         );

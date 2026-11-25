@@ -30,18 +30,24 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{Tool, ToolCall, DEFAULT_TOOL_TIMEOUT_SECS};
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 use traversal::pattern_root;
 
 fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ApprovalCheck> {
     match args.get(key).and_then(|v| v.as_str()) {
         Some(value) if !value.is_empty() => Ok(value),
-        Some(_) => Err(ApprovalCheck::AutoDenied {
-            reason: format!("Required argument '{key}' must not be empty"),
-        }),
-        None => Err(ApprovalCheck::AutoDenied {
-            reason: format!("Required argument '{key}' is missing or not a string"),
-        }),
+        Some(_) => Err(ApprovalCheck::tool(
+            ApprovalVerdict::AutoDenied {
+                reason: format!("Required argument '{key}' must not be empty"),
+            },
+            GlobTool::EMPTY_ARGUMENT_RULE,
+        )),
+        None => Err(ApprovalCheck::tool(
+            ApprovalVerdict::AutoDenied {
+                reason: format!("Required argument '{key}' is missing or not a string"),
+            },
+            GlobTool::ARGUMENT_TYPE_RULE,
+        )),
     }
 }
 
@@ -104,6 +110,9 @@ pub struct GlobTool {
 
 impl GlobTool {
     pub const NAME: &'static str = "glob";
+    const DEFAULT_APPROVAL_RULE: &'static str = "glob.default";
+    const EMPTY_ARGUMENT_RULE: &'static str = "glob.empty_argument";
+    const ARGUMENT_TYPE_RULE: &'static str = "glob.argument_type";
 
     pub fn new(sandbox_context: SandboxContext) -> Self {
         GlobTool {
@@ -178,17 +187,17 @@ impl Tool for GlobTool {
             .sandbox_context
             .check_path_allowing_dot_paths(std::path::Path::new(&root));
         let approval = match sandbox_verdict {
-            None => ApprovalCheck::AutoApproved,
+            None => ApprovalCheck::tool(ApprovalVerdict::AutoApproved, Self::DEFAULT_APPROVAL_RULE),
             Some(verdict) => verdict,
         };
         tracing::debug!(
             tool = "glob",
             pattern = pattern_str,
             root = root,
-            sandbox = match &approval {
-                ApprovalCheck::AutoApproved => "abstain→auto-approved",
-                ApprovalCheck::AutoDenied { .. } => "auto-denied",
-                ApprovalCheck::UserApprovalRequired => "user-approval-required",
+            sandbox = match &approval.verdict {
+                ApprovalVerdict::AutoApproved => "abstain→auto-approved",
+                ApprovalVerdict::AutoDenied { .. } => "auto-denied",
+                ApprovalVerdict::UserApprovalRequired => "user-approval-required",
             },
             "tool approval decision"
         );

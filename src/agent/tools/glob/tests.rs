@@ -108,12 +108,13 @@ fn glob_tool_with_timeout_constructor() {
 fn glob_tool_missing_pattern_is_auto_denied() {
     let tool = GlobTool::default();
     assert!(matches!(
-        tool.needs_approval(&serde_json::json!({})),
-        crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        tool.needs_approval(&serde_json::json!({})).verdict,
+        crate::sandbox::ApprovalVerdict::AutoDenied { .. }
     ));
     assert!(matches!(
-        tool.needs_approval(&serde_json::json!({ "pattern": "" })),
-        crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        tool.needs_approval(&serde_json::json!({ "pattern": "" }))
+            .verdict,
+        crate::sandbox::ApprovalVerdict::AutoDenied { .. }
     ));
 }
 
@@ -478,8 +479,8 @@ fn glob_needs_approval_auto_approves_inside_workspace() {
     let tool = GlobTool::default();
     let args = serde_json::json!({ "pattern": "src/**/*.rs" });
     assert!(matches!(
-        tool.needs_approval(&args),
-        ApprovalCheck::AutoApproved
+        tool.needs_approval(&args).verdict,
+        ApprovalVerdict::AutoApproved
     ));
 }
 
@@ -488,8 +489,8 @@ fn glob_needs_approval_allows_dot_paths_inside_workspace() {
     let tool = GlobTool::default();
     let args = serde_json::json!({ "pattern": format!("{}/**/*", crate::GIT_ENTRY_NAME) });
     assert!(matches!(
-        tool.needs_approval(&args),
-        ApprovalCheck::AutoApproved
+        tool.needs_approval(&args).verdict,
+        ApprovalVerdict::AutoApproved
     ));
 }
 
@@ -507,8 +508,8 @@ fn glob_tool_symlink_parent_traversal_requires_user_approval() {
     let tool = GlobTool::new(context);
 
     assert_eq!(
-        tool.needs_approval(&serde_json::json!({ "pattern": format!("{}/link/../**/*", workspace.path().display()) })),
-        ApprovalCheck::UserApprovalRequired,
+        tool.needs_approval(&serde_json::json!({ "pattern": format!("{}/link/../**/*", workspace.path().display()) })).verdict,
+        ApprovalVerdict::UserApprovalRequired,
         "`link/..` leaves the workspace and must not be judged lexically"
     );
 }
@@ -518,8 +519,8 @@ fn glob_needs_approval_outside_workspace_requires_user_approval() {
     let tool = GlobTool::default();
     let args = serde_json::json!({ "pattern": "/tmp/**" });
     assert!(matches!(
-        tool.needs_approval(&args),
-        ApprovalCheck::UserApprovalRequired
+        tool.needs_approval(&args).verdict,
+        ApprovalVerdict::UserApprovalRequired
     ));
 }
 

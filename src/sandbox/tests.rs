@@ -29,8 +29,10 @@ fn context_clones_observe_the_same_updated_sandbox_root() {
     let second_path = second_workspace.join("new-file.txt");
     assert_eq!(context.check_path(&first_path), None);
     assert_eq!(
-        other_context.check_path(&second_path),
-        Some(ApprovalCheck::UserApprovalRequired)
+        other_context
+            .check_path(&second_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
 
     sandbox.write().expect("sandbox writable").sandbox_root =
@@ -38,8 +40,10 @@ fn context_clones_observe_the_same_updated_sandbox_root() {
     for current_context in [&context, &other_context] {
         assert_eq!(current_context.check_path(&second_path), None);
         assert_eq!(
-            current_context.check_path(&first_path),
-            Some(ApprovalCheck::UserApprovalRequired)
+            current_context
+                .check_path(&first_path)
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::UserApprovalRequired)
         );
     }
 }
@@ -72,24 +76,30 @@ fn rule_replacement_preserves_appended_precedence_across_policy_owners() {
         ])
         .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_path(Path::new(".env")),
-        Some(ApprovalCheck::AutoDenied {
+        context
+            .check_path(Path::new(".env"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied {
             reason: "dot path".to_string(),
         })
     );
     assert_eq!(
-        context.check_command("git status"),
-        Some(ApprovalCheck::AutoApproved)
+        context
+            .check_command("git status")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(context.check_command("echo hello"), None);
     assert_eq!(
-        context.check_network_request("https://docs.rs"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_network_request("https://docs.rs")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
     assert_eq!(context.check_network_request("https://example.com"), None);
 
     let appended_context = context.clone().with_rule(SandboxRule {
-        verdict: ApprovalCheck::AutoApproved,
+        verdict: ApprovalVerdict::AutoApproved,
         pattern: glob::Pattern::new("**").expect("catch-all pattern"),
     });
     let replaced_context = appended_context
@@ -115,20 +125,28 @@ fn rule_replacement_preserves_appended_precedence_across_policy_owners() {
         ])
         .expect("valid sandbox fixture");
     assert_eq!(
-        replaced_context.check_path(Path::new(".env")),
-        Some(ApprovalCheck::AutoApproved)
+        replaced_context
+            .check_path(Path::new(".env"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(
-        replaced_context.check_command("echo hello &"),
-        Some(ApprovalCheck::AutoApproved)
+        replaced_context
+            .check_command("echo hello &")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(
-        replaced_context.check_network_request("https://docs.rs"),
-        Some(ApprovalCheck::AutoApproved)
+        replaced_context
+            .check_network_request("https://docs.rs")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(
-        context.check_network_request("https://docs.rs"),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context
+            .check_network_request("https://docs.rs")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "replacing the clone's rules must not change the original context"
     );
 }

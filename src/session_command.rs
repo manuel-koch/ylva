@@ -20,6 +20,7 @@ use crate::store::{
     default_chats_root, project_key, session_is_live, MaintenanceAction, SessionSelection,
     SessionSummary, Store,
 };
+use crate::text_normalization::single_line_display;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use time::format_description::well_known::Rfc3339;
@@ -104,7 +105,7 @@ fn write_session_line(
         session.last_used_at,
         marker,
         session.session_id,
-        crate::app::single_line(&session.title),
+        single_line_display(&session.title),
         annotation
     )
 }

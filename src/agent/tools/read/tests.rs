@@ -59,8 +59,8 @@ fn read_tool_auto_approves_workspace_path_and_has_default_timeout() {
     // Phase 6.0: reads inside the workspace are auto-approved by the sandbox;
     // the cwd is the workspace root in tests, so "src/main.rs" is in-workspace.
     assert!(matches!(
-        tool.needs_approval(&args),
-        crate::sandbox::ApprovalCheck::AutoApproved
+        tool.needs_approval(&args).verdict,
+        crate::sandbox::ApprovalVerdict::AutoApproved
     ));
     assert_eq!(tool.timeout_secs(), DEFAULT_TOOL_TIMEOUT_SECS);
 }
@@ -69,16 +69,18 @@ fn read_tool_auto_approves_workspace_path_and_has_default_timeout() {
 fn read_tool_missing_path_is_auto_denied() {
     let tool = ReadTool::default();
     assert!(matches!(
-        tool.needs_approval(&serde_json::json!({})),
-        crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        tool.needs_approval(&serde_json::json!({})).verdict,
+        crate::sandbox::ApprovalVerdict::AutoDenied { .. }
     ));
     assert!(matches!(
-        tool.needs_approval(&serde_json::json!({ "path": "" })),
-        crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        tool.needs_approval(&serde_json::json!({ "path": "" }))
+            .verdict,
+        crate::sandbox::ApprovalVerdict::AutoDenied { .. }
     ));
     assert!(matches!(
-        tool.needs_approval(&serde_json::json!({ "path": 42 })),
-        crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        tool.needs_approval(&serde_json::json!({ "path": 42 }))
+            .verdict,
+        crate::sandbox::ApprovalVerdict::AutoDenied { .. }
     ));
 }
 
@@ -101,8 +103,9 @@ fn read_tool_cross_filesystem_rule_requires_user_approval_for_cross_device_path(
     let tool = ReadTool::new(context);
 
     assert_eq!(
-        tool.needs_approval(&serde_json::json!({ "path": "/dev/null" })),
-        ApprovalCheck::UserApprovalRequired,
+        tool.needs_approval(&serde_json::json!({ "path": "/dev/null" }))
+            .verdict,
+        ApprovalVerdict::UserApprovalRequired,
         "a cross-device path under a configured cross_filesystem rule must \
          require user approval"
     );
@@ -111,8 +114,9 @@ fn read_tool_cross_filesystem_rule_requires_user_approval_for_cross_device_path(
     assert_eq!(
         tool.needs_approval(&serde_json::json!({
             "path": same_device_path.to_string_lossy()
-        })),
-        ApprovalCheck::AutoApproved,
+        }))
+        .verdict,
+        ApprovalVerdict::AutoApproved,
         "a same-device path does not match, so read auto-approves its \
          sandbox abstention"
     );
@@ -306,8 +310,8 @@ fn read_tool_symlink_parent_traversal_requires_user_approval() {
     let tool = ReadTool::new(context);
 
     assert_eq!(
-        tool.needs_approval(&serde_json::json!({ "path": workspace.path().join("link/../secret.txt").display().to_string() })),
-        ApprovalCheck::UserApprovalRequired,
+        tool.needs_approval(&serde_json::json!({ "path": workspace.path().join("link/../secret.txt").display().to_string() })).verdict,
+        ApprovalVerdict::UserApprovalRequired,
         "`link/..` leaves the workspace and must not be judged lexically"
     );
 }

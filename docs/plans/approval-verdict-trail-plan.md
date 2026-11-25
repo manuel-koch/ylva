@@ -43,29 +43,33 @@ Start with `src/sandbox/rules.rs` and run the existing precedence baseline:
 Write each behavior regression before making it pass. After verifying each step, immediately change
 its `[ ]` to `[x]` in this file so work is resumable.
 
-1. [ ] Separate the verdict from its provenance in `src/sandbox/rules.rs`. Give `ApprovalCheck` a
+1. [x] Separate the verdict from its provenance in `src/sandbox/rules.rs`. Give `ApprovalCheck` a
    typed verdict (including the existing denial reason), a stable component identifier, a typed
    origin, and an optional owned prior check. Require an explicit origin at construction; do not
-   silently fill omissions with a default. Keep `Option<ApprovalCheck>` as the sandbox's abstention
-   contract and make comparisons that control execution explicitly verdict-only. Migrate producers
+   silently fill omissions with a default. Declare built-in rule identifiers as named constants in
+   the owning tool or component, including single-use identifiers. Keep `Option<ApprovalCheck>` as
+   the sandbox's abstention contract and make comparisons that control execution explicitly
+   verdict-only. Migrate producers
    and consumers together, including the library re-exports in `src/sandbox.rs` and `src/lib.rs`,
    `Tool::needs_approval` and its implementations, `src/skills/policy.rs`, and test doubles. Cover
    schema rejection, validation inside tools, registry fallback, built-in tool verdicts, and tool
    defaults after sandbox abstention. Preserve all verdicts and error messages. Give `clarify`'s
    internal routing sentinel provenance for completeness, but do not emit it as a trail record.
    Verify with `cargo test --lib agent::tools`.
-2. [ ] Carry effective rule identity from CLI/profile resolution to evaluation. In `src/cli.rs`,
+2. [x] Carry effective rule identity from CLI/profile resolution to evaluation. In `src/cli.rs`,
    `src/startup.rs`, `src/config/profile.rs`, `src/agent_factory.rs`, `src/agent/tools.rs`, and
    `src/sandbox.rs`, attach the origin to the actual compiled or appended rule, not to the result
    after the fact. Retain the winning config layer and whether the rule list came from
    `tools.<tool>.rules` or `agents.<type>.tools.<tool>.rules`, and enumerate the original configured
-   entries before compilation. A configured empty list replaces its fallback; it does not invent a
-   configured rule. Cover per-tool flags (including spawn's direct flag path), built-in rules and
-   tool-added rules; do not call a programmatically supplied rule a CLI flag or file-backed rule.
+   entries before compilation. Preserve standalone agent-type TOML or Markdown rule sources when
+   inline overrides do not replace them. A configured empty list replaces its fallback; it does
+   not invent a configured rule. Cover per-tool flags (including spawn's direct flag path),
+   built-in rules and tool-added rules; do not call a programmatically supplied rule a CLI flag or
+   file-backed rule.
    Test workspace/home selection, agent versus profile lists, an empty override, and a CLI override
    over a configured match. Run `cargo test --lib config::profile`,
    `cargo test --lib agent_factory`, and `cargo test --lib sandbox`.
-3. [ ] Propagate the winning check through the path, Bash, and network evaluators in
+3. [x] Propagate the winning check through the path, Bash, and network evaluators in
    `src/sandbox/{path,command,network}.rs` and their tool wrappers. Pass through unchanged checks
    rather than wrapping them redundantly; identify the combiner when it creates a new result.
    Preserve last-match precedence, Bash worst-verdict ranking and tie-breaking, abstention and
@@ -74,7 +78,7 @@ its `[ ]` to `[x]` in this file so work is resumable.
    unmatched or unanalysable statements. An independent override reports its own origin, not a
    displaced rule as its parent. Extend `cargo test --lib sandbox` with cases that assert the exact
    winner and parent while also checking the unchanged verdict and reason.
-4. [ ] Carry the effective check through the actual approval lifecycle in
+4. [x] Carry the effective check through the actual approval lifecycle in
    `src/agent/tool_queue.rs` and `src/agent/runtime{.rs,/commands.rs}`. Keep the published pending
    check associated with the front call as long as it is pending and discard it when the call
    leaves the queue. Return grant coverage as a separate outcome with its references and policy
@@ -87,7 +91,7 @@ its `[ ]` to `[x]` in this file so work is resumable.
    of inferring it from a reason string or attributing it to a human. Verify the grant, pending
    queue and command behavior with `cargo test --lib agent::tests::tool_queue` and
    `cargo test --test cli_exit_codes`.
-5. [ ] Emit the trail using the existing `tracing` facade. Use a single safe projection for the
+5. [x] Emit the trail using the existing `tracing` facade. Use a single safe projection for the
    structured `INFO` records: outcome, decision maker, rule locator, tool/call correlation, a
    record identifier, and an optional parent identifier that resolves in the same log. Scope
    records to the existing session/subagent and tool spans where available; distinguish multiple
@@ -98,7 +102,7 @@ its `[ ]` to `[x]` in this file so work is resumable.
    `web_fetch` hop denial callback; distinguish a hop's policy verdict from the enforcement
    callback's deny-only interpretation, with no request target in the event. Do not log checks from
    previews or make the low-level evaluator emit a trail on every invocation.
-6. [ ] Verify the log contract end to end. In owner-local agent/runtime tests, capture text and
+6. [x] Verify the log contract end to end. In owner-local agent/runtime tests, capture text and
    JSON and assert that trail records are emitted at `INFO`. In the CLI fixture, verify with
    `--log-level info`. Assert that a configured winner and a CLI override can be identified,
    a pending check can be joined to its final disposition, and a subagent or live recheck is
@@ -108,7 +112,7 @@ its `[ ]` to `[x]` in this file so work is resumable.
    `clarify` produce no trail events. Verify unchanged tool execution, UI updates, and CLI outcomes
    through the existing fixtures. Use the tracing isolation workaround in
    [`docs/known-test-issues.md`](../known-test-issues.md#tracing-subscriber-isolation-in-tests).
-7. [ ] Update [`docs/features.md`](../features.md#logging) with the opt-in `INFO` behavior,
+7. [x] Update [`docs/features.md`](../features.md#logging) with the opt-in `INFO` behavior,
    correlation and privacy limits;
    [`docs/configuration.md`](../configuration.md#sandbox-tool-approval-rules) with how a logged
    locator maps to the winning configured rule; and
@@ -117,7 +121,7 @@ its `[ ]` to `[x]` in this file so work is resumable.
    inventories out of the implementation notes. Do not change the ADRs, persistence docs,
    CLI options, or TUI styleguide: those contracts do not change. Run `rumdl check` on the updated
    documentation.
-8. [ ] Run `make format lint` and `make test-coverage`, the single mandatory full test gate. Run
+8. [x] Run `make format lint` and `make test-coverage`, the single mandatory full test gate. Run
    `make audit` only if a dependency manifest or lockfile changed. Confirm that there are no
    unrelated diffs, and that logs can explain the same approvals and denials without changing
    session data, user interaction, or tool execution.

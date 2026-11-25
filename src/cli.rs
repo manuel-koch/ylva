@@ -27,8 +27,8 @@ use uuid::Uuid;
 use crate::agent::tools::AutoApproveTool;
 use crate::config::is_valid_profile_name;
 use crate::logging::{LogConfig, LogFormat};
+use crate::path_expansion::expand_path_tokens;
 use crate::profile_shim::is_valid_shim_name;
-use crate::sandbox::expand_path_tokens;
 
 /// Color policy for CLI status lines and skill listings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,6 +521,25 @@ impl Cli {
             tools.push(AutoApproveTool::Spawn);
         }
         tools
+    }
+
+    pub(crate) fn auto_approve_overrides(
+        &self,
+    ) -> impl Iterator<Item = (AutoApproveTool, crate::RuleOrigin)> {
+        self.auto_approve_tools().into_iter().map(|tool| {
+            let flag = match tool {
+                AutoApproveTool::Read => "--auto-approve-read",
+                AutoApproveTool::Write => "--auto-approve-write",
+                AutoApproveTool::Glob => "--auto-approve-glob",
+                AutoApproveTool::Bash => "--auto-approve-bash",
+                AutoApproveTool::Search => "--auto-approve-search",
+                AutoApproveTool::Edit => "--auto-approve-edit",
+                AutoApproveTool::WebSearch => "--auto-approve-web-search",
+                AutoApproveTool::WebFetch => "--auto-approve-web-fetch",
+                AutoApproveTool::Spawn => "--auto-approve-spawn",
+            };
+            (tool, crate::RuleOrigin::CliFlag(flag))
+        })
     }
 }
 

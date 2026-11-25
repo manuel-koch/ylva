@@ -70,6 +70,7 @@ use crate::ylva_home::{ylva_home, YLVA_DIR_NAME, YLVA_HOME_ENVIRONMENT_VARIABLE}
 use super::soul::{load_soul_with_layer, LoadedSoul};
 use super::ConfigError;
 use crate::system_prompt_origins::{PromptOrigin, SystemPromptOrigins};
+use crate::text_normalization::strip_byte_order_mark;
 
 /// The code-owned allowlist of trusted instruction file names, in the order
 /// they are composed within one directory: `CLAUDE.md` first, `AGENTS.md`
@@ -359,11 +360,6 @@ fn read_trusted_file(path: &Path, scope: &InstructionScope) -> Result<Option<Str
         source,
     })?;
     Ok(Some(strip_byte_order_mark(&contents).to_string()))
-}
-
-/// Drop one leading UTF-8 byte-order mark, if present.
-fn strip_byte_order_mark(contents: &str) -> &str {
-    contents.strip_prefix('\u{feff}').unwrap_or(contents)
 }
 
 /// Compose the root system prompt: the resolved global SOUL (unchanged, no

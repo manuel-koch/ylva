@@ -16,6 +16,10 @@ use super::{AssembledToolCall, ToolAttachment};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+pub(crate) const CLI_APPROVAL_UNAVAILABLE_REASON: &str =
+    "tool requires approval, not supported in CLI mode";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
     Idle,
@@ -86,6 +90,11 @@ pub enum AgentCommand {
     DenyTool {
         id: Uuid,
         reason: String,
+    },
+    /// Resolve a request headlessly using the CLI's actual registry recheck.
+    ResolveCliTool {
+        id: Uuid,
+        check: crate::ApprovalCheck,
     },
     /// Create reusable grants covering the pending call `id`, then approve it
     /// like `ApproveTool`. When the call cannot be granted or saving fails,
@@ -158,6 +167,7 @@ pub(super) fn agent_command_name(command: &AgentCommand) -> &'static str {
         AgentCommand::Stop { .. } => "stop",
         AgentCommand::ApproveTool { .. } => "approve_tool",
         AgentCommand::DenyTool { .. } => "deny_tool",
+        AgentCommand::ResolveCliTool { .. } => "resolve_cli_tool",
         AgentCommand::GrantAndApprove { .. } => "grant_and_approve",
         AgentCommand::RequestGrantPreview { .. } => "request_grant_preview",
         AgentCommand::AnswerClarify(_) => "answer_clarify",
@@ -196,7 +206,7 @@ pub(super) fn log_agent_command(
                 "agent command received"
             );
         }
-        AgentCommand::ApproveTool { id } => {
+        AgentCommand::ApproveTool { id } | AgentCommand::ResolveCliTool { id, .. } => {
             tracing::debug!(
                 command = command_name,
                 ?mode,

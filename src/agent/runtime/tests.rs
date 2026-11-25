@@ -65,9 +65,9 @@ fn complete_delivery_rechecks_live_allowance_and_queued_sharing() {
         let tool = tools::read::ReadTool::new(crate::SandboxContext::new(Arc::new(
             std::sync::RwLock::new(crate::Sandbox::new()),
         )));
-        state.pending_tools.push_back(PendingTool {
-            call: tool.create_call(Uuid::new_v4(), serde_json::json!({"path":"unused"})),
-        });
+        state.pending_tools.push_back(PendingTool::new(
+            tool.create_call(Uuid::new_v4(), serde_json::json!({"path":"unused"})),
+        ));
         assert!(
             matches!(state.enforce_complete_delivery(result_event(id, "load_skill", text.clone(), true)), AgentEvent::ToolError { id: error_id, .. } if id == error_id)
         );
@@ -245,6 +245,186 @@ fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
         },
         ui_rx,
     )
+}
+
+#[test]
+fn grant_rechecks_link_to_the_published_subagent_request_without_reprompting() {
+    let run_id = Uuid::new_v4();
+    let call_id = Uuid::new_v4();
+    let log = crate::test_support::capture_logs_with_format(
+        crate::logging::LogFormat::Json,
+        async {
+            approval_trail::prime_trail_capture();
+            let scope = tracing::info_span!("subagent", run_id = %run_id);
+            async {
+            let (mut state, mut updates) = run_state();
+            state.execution_span = tracing::Span::current();
+            state.own_run_id = Some(run_id);
+            let sandbox = Arc::new(std::sync::RwLock::new(crate::Sandbox::new()));
+            let grants = Arc::new(crate::grants::GrantState::new(
+                sandbox.read().unwrap().sandbox_root.clone(),
+            ));
+            let mut registry = ToolRegistry::new();
+            registry.register(Arc::new(tools::bash::BashTool::new(
+                crate::SandboxContext::new(sandbox),
+            )));
+            state.registry = Arc::new(registry.with_grant_state(Some(grants.clone())));
+            let command = "printf WATCH_INPUT_SECRET";
+            let call = state.registry.create_call(
+                "bash", call_id, serde_json::json!({"command": command}),
+            ).unwrap();
+            state.pending_tools.push_back(PendingTool::new(call));
+            state.advance_tool_queue(false).await;
+            assert!(matches!(updates.try_recv(), Ok(UiUpdate::ToolPending { id, run_id: Some(run), .. })
+                if id == call_id && run == run_id));
+
+            state.approve_pending_front_if_granted().await;
+            assert!(updates.try_recv().is_err(), "an unmatched recheck must not reprompt");
+            let grant = crate::grants::Grant::from_stored(crate::grants::GrantTool::Bash, None, Some(command)).unwrap();
+            grants.add_temporary(grant);
+            state.approve_pending_front_if_granted().await;
+            assert!(matches!(updates.try_recv(), Ok(UiUpdate::ToolStart { id, .. }) if id == call_id));
+            assert!(state.pending_tools.is_empty());
+        }.instrument(scope).await;
+        },
+    );
+    let records: Vec<serde_json::Value> = log
+        .lines()
+        .filter(|line| approval_trail::captured_trail_line(line))
+        .map(|line| {
+            assert!(!line.contains("WATCH_INPUT_SECRET"), "{line}");
+            serde_json::from_str(line).unwrap()
+        })
+        .collect();
+    let [pending, not_covered, covered, disposition] = records.as_slice() else {
+        panic!("expected one admission, two rechecks and one disposition: {records:?}");
+    };
+    for record in &records {
+        assert_eq!(record["level"], "INFO");
+        assert_eq!(record["fields"]["tool_call_id"], call_id.to_string());
+        assert!(
+            record["spans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|span| span["name"] == "subagent" && span["run_id"] == run_id.to_string()),
+            "{record}"
+        );
+    }
+    assert_eq!(pending["fields"]["phase"], "admission");
+    for recheck in [not_covered, covered] {
+        assert_eq!(recheck["fields"]["phase"], "grant_recheck");
+        assert_eq!(recheck["fields"]["outcome"], "user_approval_required");
+        assert_eq!(
+            recheck["fields"]["parent_id"],
+            pending["fields"]["record_id"]
+        );
+    }
+    assert_ne!(
+        not_covered["fields"]["record_id"],
+        covered["fields"]["record_id"]
+    );
+    assert_eq!(disposition["fields"]["outcome"], "grant_matched");
+    assert_eq!(
+        disposition["fields"]["parent_id"],
+        covered["fields"]["record_id"]
+    );
+    assert!(disposition["fields"]["grants"]
+        .as_str()
+        .unwrap()
+        .starts_with("temporary:bash:"));
+}
+
+#[test]
+fn text_trail_records_only_effective_human_responses_and_excludes_clarify() {
+    let log = crate::test_support::capture_logs_with_format(
+        crate::logging::LogFormat::Text,
+        async {
+            approval_trail::prime_trail_capture();
+            for approve in [true, false] {
+                let (mut state, mut updates) = run_state();
+                let mut registry = ToolRegistry::new();
+                registry.register(Arc::new(tools::bash::BashTool::new(
+                    crate::SandboxContext::new(Arc::new(std::sync::RwLock::new(
+                        crate::Sandbox::new(),
+                    ))),
+                )));
+                state.registry = Arc::new(registry);
+                let id = Uuid::new_v4();
+                let call = state
+                    .registry
+                    .create_call(
+                        "bash",
+                        id,
+                        serde_json::json!({"command": "printf NEVER_LOG_THIS_INPUT"}),
+                    )
+                    .unwrap();
+                state.pending_tools.push_back(PendingTool::new(call));
+                state.advance_tool_queue(false).await;
+                assert!(matches!(
+                    updates.try_recv(),
+                    Ok(UiUpdate::ToolPending { .. })
+                ));
+                state
+                    .handle_command(Some(AgentCommand::ApproveTool { id: Uuid::new_v4() }))
+                    .await;
+                assert!(updates.try_recv().is_err());
+                state
+                    .handle_command(Some(if approve {
+                        AgentCommand::ApproveTool { id }
+                    } else {
+                        AgentCommand::DenyTool {
+                            id,
+                            reason: "NEVER_LOG_THIS_REASON".into(),
+                        }
+                    }))
+                    .await;
+                let update = updates.try_recv().unwrap();
+                if approve {
+                    assert!(
+                        matches!(update, UiUpdate::ToolStart { id: started, .. } if started == id)
+                    );
+                } else {
+                    assert!(
+                        matches!(update, UiUpdate::ToolError { error, .. } if error.contains("NEVER_LOG_THIS_REASON"))
+                    );
+                }
+            }
+
+            let (mut state, mut updates) = run_state();
+            let mut registry = ToolRegistry::new();
+            registry.register(Arc::new(tools::clarify::ClarifyTool));
+            state.registry = Arc::new(registry);
+            let call = state
+                .registry
+                .create_call(
+                    "clarify",
+                    Uuid::new_v4(),
+                    serde_json::json!({"question": "Pick one"}),
+                )
+                .unwrap();
+            state.pending_tools.push_back(PendingTool::new(call));
+            state.advance_tool_queue(false).await;
+            assert!(matches!(
+                updates.try_recv(),
+                Ok(UiUpdate::ClarifyPending { .. })
+            ));
+            state
+                .handle_command(Some(AgentCommand::AnswerClarify("private answer".into())))
+                .await;
+            assert!(matches!(updates.try_recv(), Ok(UiUpdate::ToolDone { .. })));
+        },
+    );
+    let records: Vec<_> = log
+        .lines()
+        .filter(|line| approval_trail::captured_trail_line(line))
+        .collect();
+    assert_eq!(records.len(), 4, "{records:?}");
+    assert!(records
+        .iter()
+        .all(|line| line.contains("INFO") && !line.contains("NEVER_LOG_THIS")));
+    assert!(records[1].contains("approve_once") && records[1].contains("parent_id="));
+    assert!(records[3].contains("human_denied") && records[3].contains("parent_id="));
 }
 
 #[test]
@@ -573,15 +753,15 @@ fn session_replacement_barrier_counts_tool_subagent_and_summary_queues() {
         state.is_subagent = false;
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(tools::clarify::ClarifyTool));
-        state.pending_tools.push_back(PendingTool {
-            call: registry
+        state.pending_tools.push_back(PendingTool::new(
+            registry
                 .create_call(
                     "clarify",
                     Uuid::new_v4(),
                     serde_json::json!({"question": "Pick", "choices": ["a", "b"]}),
                 )
                 .expect("clarify"),
-        });
+        ));
         assert!(!state.session_switch_quiescent());
         state.pending_tools.clear();
         let (subagent_updates, _subagent_receiver) = mpsc::unbounded_channel();

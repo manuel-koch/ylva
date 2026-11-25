@@ -40,6 +40,7 @@ use serde::Deserialize;
 
 use super::{WebSearchBackend, WebSearchError, WebSearchHit};
 use crate::http::OUTBOUND_USER_AGENT;
+use crate::text_normalization::collapse_whitespace;
 
 /// Hint attached to an HTTP `403`: SearXNG only answers `format=json` when
 /// the instance lists it in `search.formats` of its `settings.yml`, and the
@@ -261,12 +262,12 @@ fn parse_searxng_results(body: &[u8], limit: usize) -> Result<Vec<WebSearchHit>,
         .results
         .iter()
         .filter_map(|result| {
-            let title = normalize_whitespace(&result.title);
+            let title = collapse_whitespace(&result.title);
             let url = result.url.trim();
             if title.is_empty() || url.is_empty() {
                 return None;
             }
-            let snippet = normalize_whitespace(result.content.as_deref().unwrap_or_default());
+            let snippet = collapse_whitespace(result.content.as_deref().unwrap_or_default());
             Some(WebSearchHit {
                 title,
                 url: url.to_string(),
@@ -276,13 +277,6 @@ fn parse_searxng_results(body: &[u8], limit: usize) -> Result<Vec<WebSearchHit>,
         .take(limit)
         .collect();
     Ok(hits)
-}
-
-/// Collapse every run of whitespace into a single space and trim the ends, so
-/// engine-provided text (titles, snippets) is single-line and
-/// comparison-stable.
-fn normalize_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

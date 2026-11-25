@@ -85,8 +85,8 @@ fn tool_execution_log_events_carry_spanned_tool_call_id() {
             tools::ToolRegistryConfig::default(),
         )
         .expect("valid sandbox fixture");
-        let pending = PendingTool {
-            call: registry
+        let pending = PendingTool::new(
+            registry
                 .create_call(
                     "write",
                     id,
@@ -102,7 +102,7 @@ fn tool_execution_log_events_carry_spanned_tool_call_id() {
                     }),
                 )
                 .expect("write tool registered"),
-        };
+        );
         let _cancel = pending.execute(agent_tx, 0, None);
         tokio::time::timeout(Duration::from_secs(2), async {
             while let Some((_generation, event)) = agent_rx.recv().await {

@@ -32,7 +32,9 @@ use serde_json::Value;
 use super::ToolAttachment;
 use crate::grants::GrantSubjects;
 use crate::llm::ToolSchema;
-use crate::sandbox::ApprovalCheck;
+use crate::path_expansion::expand_path_tokens;
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, RuleOrigin, ToolRuleList};
+use crate::text_normalization::sanitize_inline_title;
 
 pub(crate) use base64::engine::general_purpose::STANDARD as STANDARD_BASE64;
 
@@ -61,6 +63,7 @@ pub mod write;
 /// here so tool modules can `use` it alongside the other tool-trait items
 /// without an extra `crate::agent::` import.
 pub use super::DEFAULT_TOOL_TIMEOUT_SECS;
+const DEFAULT_TOOL_APPROVAL_RULE: &str = "tool.default";
 
 /// Transport encoding for file content accepted by the `read` and `write`
 /// tools.
@@ -409,7 +412,7 @@ pub fn display_title_with_subtype(
     for (key, value) in title_arguments {
         if subtype_value.is_none() && key == subtype_key {
             if let Some(raw_value) = value.as_str() {
-                subtype_value = Some(single_line_text(raw_value));
+                subtype_value = Some(sanitize_inline_title(raw_value));
                 continue;
             }
         }
@@ -419,18 +422,6 @@ pub fn display_title_with_subtype(
         Some(value) => (format!("{title} ({value})"), remaining),
         None => (title.to_string(), remaining),
     }
-}
-
-/// Replace the control characters that would break a single-line title with
-/// visible placeholders — the same mapping the TUI applies to title props.
-fn single_line_text(text: &str) -> String {
-    text.chars()
-        .map(|character| match character {
-            '\n' | '\r' => '↵',
-            '\t' => ' ',
-            character => character,
-        })
-        .collect()
 }
 
 /// A named, schema-described tool the model may call.
@@ -504,7 +495,10 @@ pub trait Tool: Send + Sync {
     ///
     /// Defaults to `UserApprovalRequired` (safe-by-default).
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
-        ApprovalCheck::UserApprovalRequired
+        ApprovalCheck::tool(
+            ApprovalVerdict::UserApprovalRequired,
+            DEFAULT_TOOL_APPROVAL_RULE,
+        )
     }
 
     /// Whether a call of this tool is a mandatory interaction with the human
@@ -677,7 +671,7 @@ impl ToolRegistry {
     /// Before dispatch, rewrites each of the tool's
     /// [`Tool::path_like_arguments`] string values in two steps: first the
     /// value's `~`/`$ENVVAR` tokens are expanded (see
-    /// [`crate::sandbox::expand_path_tokens`]), then an absolute result that
+    /// `expand_path_tokens`), then an absolute result that
     /// falls inside the current working directory is rewritten to its
     /// cwd-relative form (see [`crate::sandbox::to_relative_path`]). Some
     /// LLMs emit absolute paths — including verbatim sentinel sources such as
@@ -706,10 +700,9 @@ impl ToolRegistry {
                         Some(Value::String(path_str)) => path_str.clone(),
                         _ => continue,
                     };
-                    let expanded =
-                        crate::sandbox::expand_path_tokens(&path_str, &|variable_name| {
-                            std::env::var(variable_name).ok()
-                        });
+                    let expanded = expand_path_tokens(&path_str, &|variable_name| {
+                        std::env::var(variable_name).ok()
+                    });
                     let normalized = crate::sandbox::to_relative_path(&expanded, &current_dir)
                         .unwrap_or(expanded);
                     if normalized != path_str {
@@ -875,7 +868,7 @@ pub struct ToolRegistryConfig {
     /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`); an entry
     /// fully replaces that floor for its tool. See `docs/configuration.md`'s
     /// "Sandbox" section.
-    pub tool_sandbox_rules: HashMap<String, Vec<crate::sandbox::SandboxRuleConfig>>,
+    pub tool_sandbox_rules: HashMap<String, ToolRuleList>,
     /// Maximum seconds for one Bash command before collecting partial output.
     pub bash_timeout_secs: u64,
     /// HTTP timeout in seconds for one web-search request.
@@ -917,6 +910,14 @@ pub fn default_registry(
     sandbox: std::sync::Arc<std::sync::RwLock<crate::sandbox::Sandbox>>,
     config: ToolRegistryConfig,
 ) -> Result<ToolRegistry, crate::sandbox::SandboxRuleError> {
+    default_registry_with_overrides(sandbox, config, &HashMap::new())
+}
+
+pub(crate) fn default_registry_with_overrides(
+    sandbox: std::sync::Arc<std::sync::RwLock<crate::sandbox::Sandbox>>,
+    config: ToolRegistryConfig,
+    auto_approve_origins: &HashMap<AutoApproveTool, RuleOrigin>,
+) -> Result<ToolRegistry, crate::sandbox::SandboxRuleError> {
     use crate::sandbox::SandboxContext;
 
     let allowed = &config.allowed_tools;
@@ -930,10 +931,18 @@ pub fn default_registry(
     // `auto_approve_tool` is set in `config.auto_approve`, a catch-all
     // `AutoApproved` rule is appended last, so it always wins regardless of
     // `[tools.<name>]` config.
+    let approval_override = |tool| {
+        auto_approve_origins.get(&tool).cloned().or_else(|| {
+            config
+                .auto_approve
+                .contains(&tool)
+                .then_some(RuleOrigin::Programmatic)
+        })
+    };
     let sandbox_context_for = |tool_name: &str, auto_approve_tool: AutoApproveTool| {
         let mut context = SandboxContext::new(Arc::clone(&sandbox));
         if let Some(rules) = config.tool_sandbox_rules.get(tool_name) {
-            context = context.with_tool_rules(tool_name, rules.clone())?;
+            context = context.with_tool_rule_list(tool_name, rules.clone())?;
         }
         if tool_name == read::ReadTool::NAME {
             context = context.with_skill_sources(Arc::new(
@@ -945,11 +954,14 @@ pub fn default_registry(
                     .collect(),
             ));
         }
-        if config.auto_approve.contains(&auto_approve_tool) {
-            context = context.with_rule(crate::sandbox::SandboxRule {
-                verdict: crate::sandbox::ApprovalCheck::AutoApproved,
-                pattern: ::glob::Pattern::new("**").expect("** is a valid glob"),
-            });
+        if let Some(origin) = approval_override(auto_approve_tool) {
+            context = context.with_rule_origin(
+                crate::sandbox::SandboxRule {
+                    verdict: ApprovalVerdict::AutoApproved,
+                    pattern: ::glob::Pattern::new("**").expect("** is a valid glob"),
+                },
+                origin,
+            );
         }
         Ok::<_, crate::sandbox::SandboxRuleError>(context)
     };
@@ -995,7 +1007,7 @@ pub fn default_registry(
         .any(|name| name == load_skill::LoadSkillTool::NAME)
         && !config.skills.skills.is_empty()
     {
-        let context = SandboxContext::new(Arc::clone(&sandbox)).with_tool_rules(
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_tool_rule_list(
             load_skill::LoadSkillTool::NAME,
             config
                 .tool_sandbox_rules
@@ -1063,9 +1075,9 @@ pub fn default_registry(
     // the latter is injected only into `Role::Subagent` registries.
     if config.include_spawn_subagent {
         registry.register(Arc::new(
-            spawn_subagent::SpawnSubagentTool::new(
-                config.auto_approve.contains(&AutoApproveTool::Spawn),
-            )
+            spawn_subagent::SpawnSubagentTool::with_approval_override(approval_override(
+                AutoApproveTool::Spawn,
+            ))
             .with_agent_types(config.spawn_agent_types),
         ));
     }

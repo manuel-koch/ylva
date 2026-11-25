@@ -506,7 +506,7 @@ async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_subagent() {
             "briefing": "context"
         }),
     );
-    let pending = PendingTool { call };
+    let pending = PendingTool::new(call);
 
     let started: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let started_clone = started.clone();

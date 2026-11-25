@@ -22,6 +22,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::text_normalization::strip_byte_order_mark;
+
 mod fingerprint;
 pub mod policy;
 
@@ -330,7 +332,7 @@ fn read_skill(
 }
 
 fn parse_skill(contents: &str, directory_name: &str) -> Result<(String, String, String), String> {
-    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
+    let contents = strip_byte_order_mark(contents);
     let mut lines = contents.split_inclusive('\n');
     if lines.next().map(|line| line.trim_end_matches(['\r', '\n'])) != Some("---") {
         return Err("skill must start with YAML frontmatter ('---')".into());

@@ -31,10 +31,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use ylva::{
-    default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, AutoApproveTool,
-    DeltaChunk, EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox, StreamEvent, Tool,
-    ToolAttachment, ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig,
-    ToolSchema, UiUpdate, UserMessageKind, DEFAULT_MAX_TOOL_USE_ITERATIONS,
+    default_registry, AgentCommand, AgentLoop, ApprovalCheck, ApprovalVerdict, AssistantStatus,
+    AutoApproveTool, DeltaChunk, EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox,
+    StreamEvent, Tool, ToolAttachment, ToolCall, ToolCallResult, ToolError, ToolRegistry,
+    ToolRegistryConfig, ToolSchema, UiUpdate, UserMessageKind, DEFAULT_MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -98,9 +98,9 @@ where
             {
                 let approval_check = registry
                     .get(name)
-                    .map(|tool| tool.needs_approval(arguments))
-                    .unwrap_or(ApprovalCheck::UserApprovalRequired);
-                let command = if matches!(approval_check, ApprovalCheck::AutoApproved) {
+                    .map(|tool| tool.needs_approval(arguments).verdict)
+                    .unwrap_or(ApprovalVerdict::UserApprovalRequired);
+                let command = if matches!(approval_check, ApprovalVerdict::AutoApproved) {
                     AgentCommand::ApproveTool { id: *id }
                 } else {
                     AgentCommand::DenyTool {
@@ -291,7 +291,11 @@ impl Tool for GatedOutputTool {
         ylva::tool_schema_for::<SleepArgs>()
     }
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
-        ApprovalCheck::AutoApproved
+        ApprovalCheck::new(
+            ApprovalVerdict::AutoApproved,
+            ylva::DecisionMaker::Tool,
+            ylva::RuleOrigin::Programmatic,
+        )
     }
     fn timeout_secs(&self) -> u64 {
         30
@@ -498,7 +502,11 @@ impl Tool for SleepTool {
         ylva::tool_schema_for::<SleepArgs>()
     }
     fn needs_approval(&self, _args: &serde_json::Value) -> ApprovalCheck {
-        ApprovalCheck::AutoApproved
+        ApprovalCheck::new(
+            ApprovalVerdict::AutoApproved,
+            ylva::DecisionMaker::Tool,
+            ylva::RuleOrigin::Programmatic,
+        )
     }
     fn timeout_secs(&self) -> u64 {
         600

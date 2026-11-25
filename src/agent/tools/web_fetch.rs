@@ -46,7 +46,7 @@ use super::backends::web_fetch::{
 };
 use super::{read::READ_MEDIA_MAX_BYTES, title_case_tool_name, Tool, ToolCall};
 use crate::config::WebFetchConfig;
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 
 /// Model-facing tool description. Deliberately backend-agnostic (only
 /// [`WebFetchTool::title`] hints at the configured backend). Built from
@@ -99,6 +99,10 @@ pub struct WebFetchTool {
 
 impl WebFetchTool {
     pub const NAME: &'static str = "web_fetch";
+    const DEFAULT_APPROVAL_RULE: &'static str = "web_fetch.default";
+    const URL_TYPE_RULE: &'static str = "web_fetch.url_type";
+    const EMPTY_URL_RULE: &'static str = "web_fetch.empty_url";
+    const NETWORK_TARGET_RULE: &'static str = "web_fetch.network_target";
 
     /// Build the tool from the profile's `[web_fetch]` section plus the
     /// sandbox context `default_registry` resolved for it (configured
@@ -157,26 +161,40 @@ impl Tool for WebFetchTool {
     /// auto-denied here (it can never become a request).
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
         let Some(url) = arguments.get("url").and_then(|value| value.as_str()) else {
-            return ApprovalCheck::AutoDenied {
-                reason: "Required argument 'url' is missing or not a string".to_string(),
-            };
+            return ApprovalCheck::tool(
+                ApprovalVerdict::AutoDenied {
+                    reason: "Required argument 'url' is missing or not a string".to_string(),
+                },
+                Self::URL_TYPE_RULE,
+            );
         };
         if url.is_empty() {
-            return ApprovalCheck::AutoDenied {
-                reason: "Required argument 'url' must not be empty".to_string(),
-            };
+            return ApprovalCheck::tool(
+                ApprovalVerdict::AutoDenied {
+                    reason: "Required argument 'url' must not be empty".to_string(),
+                },
+                Self::EMPTY_URL_RULE,
+            );
         }
         let target = match network_target(url) {
             Ok(target) => target,
             Err(error) => {
-                return ApprovalCheck::AutoDenied {
-                    reason: error.to_string(),
-                }
+                return ApprovalCheck::tool(
+                    ApprovalVerdict::AutoDenied {
+                        reason: error.to_string(),
+                    },
+                    Self::NETWORK_TARGET_RULE,
+                );
             }
         };
         self.sandbox_context
             .check_network_request(&target)
-            .unwrap_or(ApprovalCheck::UserApprovalRequired)
+            .unwrap_or_else(|| {
+                ApprovalCheck::tool(
+                    ApprovalVerdict::UserApprovalRequired,
+                    Self::DEFAULT_APPROVAL_RULE,
+                )
+            })
     }
 
     fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {

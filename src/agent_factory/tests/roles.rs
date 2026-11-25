@@ -36,12 +36,14 @@ fn configured_bash_timeout_preserves_the_default_sandbox_floor() {
         900 + crate::agent::tools::bash::BASH_OUTER_TIMEOUT_GRACE_SECS
     );
     assert_eq!(
-        bash.needs_approval(&serde_json::json!({"command": "echo hi"})),
-        crate::sandbox::ApprovalCheck::UserApprovalRequired
+        bash.needs_approval(&serde_json::json!({"command": "echo hi"}))
+            .verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
     );
     assert!(matches!(
-        bash.needs_approval(&serde_json::json!({"command": "echo hi &"})),
-        crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        bash.needs_approval(&serde_json::json!({"command": "echo hi &"}))
+            .verdict,
+        crate::sandbox::ApprovalVerdict::AutoDenied { .. }
     ));
 }
 
@@ -58,8 +60,9 @@ fn empty_read_table_inherits_the_default_sandbox_floor() {
             .registry()
             .get("read")
             .unwrap()
-            .needs_approval(&serde_json::json!({"path": ".ylva-private-test-file"})),
-        crate::sandbox::ApprovalCheck::UserApprovalRequired
+            .needs_approval(&serde_json::json!({"path": ".ylva-private-test-file"}))
+            .verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
     );
 }
 
@@ -94,12 +97,14 @@ fn agent_timeout_inherits_profile_rules_and_explicit_empty_rules_replace_them() 
         let bash = agent.registry().get("bash").unwrap();
         assert_eq!(bash.timeout_secs(), timeout);
         assert_eq!(
-            bash.needs_approval(&serde_json::json!({"command": "git status"})),
-            crate::sandbox::ApprovalCheck::AutoApproved
+            bash.needs_approval(&serde_json::json!({"command": "git status"}))
+                .verdict,
+            crate::sandbox::ApprovalVerdict::AutoApproved
         );
         assert!(matches!(
-            bash.needs_approval(&serde_json::json!({"command": "echo hi &"})),
-            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+            bash.needs_approval(&serde_json::json!({"command": "echo hi &"}))
+                .verdict,
+            crate::sandbox::ApprovalVerdict::AutoDenied { .. }
         ));
     }
 
@@ -114,12 +119,14 @@ fn agent_timeout_inherits_profile_rules_and_explicit_empty_rules_replace_them() 
     let (agent, _ui_rx) = factory.create(&profile, "worker", Role::Root).unwrap();
     let bash = agent.registry().get("bash").unwrap();
     assert_eq!(
-        bash.needs_approval(&serde_json::json!({"command": "git status"})),
-        crate::sandbox::ApprovalCheck::UserApprovalRequired
+        bash.needs_approval(&serde_json::json!({"command": "git status"}))
+            .verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
     );
     assert_eq!(
-        bash.needs_approval(&serde_json::json!({"command": "echo hi &"})),
-        crate::sandbox::ApprovalCheck::UserApprovalRequired
+        bash.needs_approval(&serde_json::json!({"command": "echo hi &"}))
+            .verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
     );
 
     profile.tools.get_mut("bash").unwrap().rules = Some(vec![]);
@@ -129,8 +136,9 @@ fn agent_timeout_inherits_profile_rules_and_explicit_empty_rules_replace_them() 
             .registry()
             .get("bash")
             .unwrap()
-            .needs_approval(&serde_json::json!({"command": "echo hi &"})),
-        crate::sandbox::ApprovalCheck::UserApprovalRequired
+            .needs_approval(&serde_json::json!({"command": "echo hi &"}))
+            .verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
     );
 }
 
@@ -537,8 +545,8 @@ fn create_honors_per_agent_type_tools_sandbox_rules_override() {
         .get("write")
         .expect("write tool registered");
     assert_eq!(
-        default_write.needs_approval(&write_args),
-        crate::sandbox::ApprovalCheck::UserApprovalRequired,
+        default_write.needs_approval(&write_args).verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired,
         "the default agent type has no agent-scoped tools override, so it \
              must fall back to the profile-level table alone, which does not \
              auto-approve scratch/ paths"
@@ -552,8 +560,8 @@ fn create_honors_per_agent_type_tools_sandbox_rules_override() {
         .get("write")
         .expect("write tool registered");
     assert_eq!(
-        scratch_write.needs_approval(&write_args),
-        crate::sandbox::ApprovalCheck::AutoApproved,
+        scratch_write.needs_approval(&write_args).verdict,
+        crate::sandbox::ApprovalVerdict::AutoApproved,
         "the scratch-writer agent type's own tools.write table must win \
              over the profile-level table for that tool"
     );

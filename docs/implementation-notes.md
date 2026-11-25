@@ -324,10 +324,11 @@ because schemars 1.x keeps the source newlines in `description`.
 
 ## Path-like argument normalization
 
-`ToolRegistry::create_call` applies `sandbox::expand_path_tokens` to keys
-declared by `Tool::path_like_arguments()`, then `to_relative_path`, before
-sandbox approval. `startup::run` exports the resolved `YLVA_HOME`, so sentinel
-paths work in path tools and `bash`. See
+`ToolRegistry::create_call` expands tokens in arguments declared by
+`Tool::path_like_arguments()`, then rewrites absolute paths under the
+current directory to relative form. Both happen before sandbox approval,
+so approval checks see the path the tool will use. `startup::run` exports
+the resolved `YLVA_HOME`, so sentinel paths work in path tools and `bash`. See
 [features](./features.md#tools-to-be-used-by-models).
 
 ## Sandbox policy and the `cross_filesystem` rule
@@ -679,15 +680,16 @@ See [persistence](./persistence.md) for on-disk contracts.
 
 ## Tool-approval grants
 
-- Grants are evaluated in `evaluate_call_approval` after the sandbox verdict,
-  so they can only turn `UserApprovalRequired` into approval. Each tool
-  describes its call as grant subjects; the same resolved value is judged by
-  `needs_approval` and by the grant, so the two cannot disagree.
+- Grants are evaluated after the sandbox verdict and can only satisfy an
+  approval requirement, not replace the verdict. Policy and grant matching
+  use the same resolved subject.
 - One `GrantState` is shared by the root loop and every subagent through the
   factory and tool registry. Its generation counter is a `watch` channel: a
-  loop waiting in `ToolPending` re-evaluates its front call and approves it
-  through the normal `ApproveTool` path, and the presenter drops a stale approval
-  prompt when the call starts.
+  waiting loop rechecks only the published front call. Keeping the original
+  policy check with that call lets a host response or grant wake-up explain
+  how the request was resolved without attributing that action to the sandbox.
+  An unchanged pending recheck does not republish the prompt; the presenter
+  drops the prompt when the call starts.
 - The grant dialog is a sub-state of the approval prompt (`AppState::grant_dialog`),
   not a `Focus`. *Grant…* sends `RequestGrantPreview`; the agent answers with
   `UiUpdate::GrantPreview` (rows plus the call's grant subjects), since only it

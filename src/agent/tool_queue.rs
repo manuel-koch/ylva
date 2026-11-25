@@ -15,21 +15,12 @@
 use super::runtime::compaction_updates::sweep_compaction_and_report;
 use super::runtime::{apply_model_changes, PendingModelChange};
 use super::*;
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, DecisionMaker};
+use approval_trail::{Disposition, Phase, PublishedApproval};
 pub(super) mod spawn;
 use spawn::resolve_spawn_subagent;
-/// Log the "tool approval requested" event for the given pending call using the
-/// tool's own non-default redacted arguments so sensitive values are never
-/// written to the log.
-pub(super) fn log_tool_approval_request(call: &dyn ToolCall) {
-    let safe_args: serde_json::Map<String, serde_json::Value> =
-        call.non_default_redacted_arguments().into_iter().collect();
-    tracing::info!(
-        tool = %call.name(),
-        tool_call_id = %call.id(),
-        args = %serde_json::to_string(&safe_args).unwrap_or_else(|_| "{}".to_string()),
-        "tool approval requested"
-    );
-}
+
+const INVALID_ARGUMENT_SCHEMA_RULE: &str = "schema.invalid_arguments";
 
 /// Whether a tool's model-facing result is subject to the shared per-request
 /// context allowance.
@@ -367,34 +358,56 @@ pub(super) async fn advance_tool_queue(
                         continue;
                     }
                 }
-                let approval = evaluate_call_approval(&registry, front.call.as_ref());
-                match approval {
-                    crate::sandbox::ApprovalCheck::AutoApproved
-                        if front.call.name() == tools::spawn_subagent::SpawnSubagentTool::NAME =>
-                    {
+                let CallApproval { check, grants } =
+                    evaluate_call_approval(&registry, front.call.as_ref());
+                let already_pending = front.published_approval.is_some();
+                let record_id = approval_trail::check(
+                    front.call.name(),
+                    front.call.id(),
+                    &check,
+                    if already_pending {
+                        Phase::QueueRecheck
+                    } else {
+                        Phase::Admission
+                    },
+                    front.approval_parent(),
+                );
+                match (&check.verdict, &grants) {
+                    (ApprovalVerdict::AutoApproved, _)
+                    | (ApprovalVerdict::UserApprovalRequired, Some(_)) => {
                         let pending = pending_tools.pop_front().expect("checked front");
-                        resolve_spawn_subagent(
-                            pending,
-                            subagent_manager,
-                            context,
-                            &ui_tx,
-                            spawn_content_sections,
-                        )
-                        .await;
-                        // Resolves synchronously (unlike a normally-executing
-                        // tool); continue the loop to process the next
-                        // pending tool or re-prompt. This still counts as a
-                        // completed tool-use round against the iteration cap.
-                        increment_iterations = true;
-                    }
-                    crate::sandbox::ApprovalCheck::AutoApproved => {
-                        let pending = pending_tools.pop_front().expect("checked front");
+                        if let Some(references) = grants {
+                            approval_trail::disposition(
+                                pending.call.as_ref(),
+                                Disposition::GrantMatch,
+                                record_id,
+                                &references,
+                            );
+                        } else if already_pending {
+                            approval_trail::disposition(
+                                pending.call.as_ref(),
+                                Disposition::RecheckApproved,
+                                record_id,
+                                &[],
+                            );
+                        }
+                        if pending.call.name() == tools::spawn_subagent::SpawnSubagentTool::NAME {
+                            resolve_spawn_subagent(
+                                pending,
+                                subagent_manager,
+                                context,
+                                &ui_tx,
+                                spawn_content_sections,
+                            )
+                            .await;
+                            increment_iterations = true;
+                            continue;
+                        }
                         let name = pending.call.name().to_string();
                         let call_id = pending.call.id();
                         let arguments = pending.call.arguments().clone();
                         let content_sections = pending.call.pending_content_sections();
                         let title_arguments = pending.call.title_arguments();
-                        tracing::info!(tool = %name, tool_call_id = %call_id, "tool auto-approved");
                         let max_output_tokens = result_allowance;
                         *current_tool_cancel = Some(PendingTool::execute(
                             pending,
@@ -414,13 +427,20 @@ pub(super) async fn advance_tool_queue(
                             .await;
                         return; // wait for ToolDone/ToolError
                     }
-                    crate::sandbox::ApprovalCheck::AutoDenied { reason } => {
+                    (ApprovalVerdict::AutoDenied { reason }, _) => {
                         let pending = pending_tools.pop_front().expect("checked front");
+                        if already_pending {
+                            approval_trail::disposition(
+                                pending.call.as_ref(),
+                                Disposition::RecheckDenied,
+                                record_id,
+                                &[],
+                            );
+                        }
                         let name = pending.call.name().to_string();
                         let call_id = pending.call.id();
                         let title_arguments = pending.call.title_arguments();
                         let content_sections = pending.call.pending_content_sections();
-                        tracing::info!(tool = %name, tool_call_id = %call_id, %reason, "tool auto-denied");
                         context.push_tool_error(
                             call_id,
                             name.clone(),
@@ -436,7 +456,7 @@ pub(super) async fn advance_tool_queue(
                                 name,
                                 title_arguments,
                                 content_sections,
-                                reason,
+                                reason: reason.clone(),
                                 run_id: own_run_id,
                             })
                             .await;
@@ -446,7 +466,7 @@ pub(super) async fn advance_tool_queue(
                         // `increment_iterations` above).
                         increment_iterations = true;
                     }
-                    crate::sandbox::ApprovalCheck::UserApprovalRequired
+                    (ApprovalVerdict::UserApprovalRequired, None)
                         if front.call.name() == tools::clarify::ClarifyTool::NAME =>
                     {
                         let args = front.call.arguments();
@@ -482,9 +502,13 @@ pub(super) async fn advance_tool_queue(
                             .await;
                         return;
                     }
-                    crate::sandbox::ApprovalCheck::UserApprovalRequired => {
-                        log_tool_approval_request(front.call.as_ref());
+                    (ApprovalVerdict::UserApprovalRequired, None) => {
                         *mode = AgentMode::ToolPending;
+                        if already_pending {
+                            return;
+                        }
+                        let front = pending_tools.front_mut().expect("checked front");
+                        front.published_approval = Some(PublishedApproval { check, record_id });
                         let _ = ui_tx
                             .send(UiUpdate::ToolPending {
                                 name: front.call.name().to_string(),
@@ -503,14 +527,18 @@ pub(super) async fn advance_tool_queue(
     }
 }
 
-/// The full approval verdict for a queued call: schema validation, sandbox
-/// policy, then reusable grants (which only satisfy an ordinary
-/// `UserApprovalRequired`).
+pub(super) struct CallApproval {
+    pub check: ApprovalCheck,
+    pub grants: Option<Vec<crate::grants::GrantReference>>,
+}
+
+/// Validate the schema and check policy before considering grants. Coverage
+/// satisfies an approval request without changing its policy verdict.
 pub(super) fn evaluate_call_approval(
     registry: &ToolRegistry,
     call: &dyn tools::ToolCall,
-) -> crate::sandbox::ApprovalCheck {
-    let approval = {
+) -> CallApproval {
+    let check = {
         let _span = tracing::debug_span!(
             "needs_approval",
             tool = %call.name(),
@@ -523,48 +551,26 @@ pub(super) fn evaluate_call_approval(
             .get(call.name())
             .map(|tool| tool.validate_args(call.arguments()));
         match validation {
-            Some(Err(reason)) => crate::sandbox::ApprovalCheck::AutoDenied { reason },
+            Some(Err(reason)) => ApprovalCheck::builtin(
+                ApprovalVerdict::AutoDenied { reason },
+                DecisionMaker::Schema,
+                INVALID_ARGUMENT_SCHEMA_RULE,
+            ),
             _ => registry
                 .get(call.name())
                 .map(|tool| tool.needs_approval(call.arguments()))
-                .unwrap_or(crate::sandbox::ApprovalCheck::UserApprovalRequired),
+                .unwrap_or_else(ApprovalCheck::missing_tool),
         }
     };
-    apply_grants(registry, call, approval)
-}
-
-/// Turn an ordinary `UserApprovalRequired` verdict into `AutoApproved` when a
-/// grant covers the call. Every other verdict passes through unchanged, so a
-/// grant can never override a denial.
-fn apply_grants(
-    registry: &ToolRegistry,
-    call: &dyn tools::ToolCall,
-    approval: crate::sandbox::ApprovalCheck,
-) -> crate::sandbox::ApprovalCheck {
-    if !matches!(
-        approval,
-        crate::sandbox::ApprovalCheck::UserApprovalRequired
-    ) {
-        return approval;
-    }
-    match registry.grant_decision(call.name(), call.arguments()) {
-        crate::grants::GrantDecision::NotCovered => approval,
-        crate::grants::GrantDecision::Covered(references) => {
-            tracing::info!(
-                tool = %call.name(),
-                tool_call_id = %call.id(),
-                decision_source = "grant",
-                grants = %references
-                    .iter()
-                    .map(|reference| reference.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                parent_verdict = "user_approval_required",
-                "tool approved by grant"
-            );
-            crate::sandbox::ApprovalCheck::AutoApproved
+    let grants = if check.verdict == ApprovalVerdict::UserApprovalRequired {
+        match registry.grant_decision(call.name(), call.arguments()) {
+            crate::grants::GrantDecision::NotCovered => None,
+            crate::grants::GrantDecision::Covered(references) => Some(references),
         }
-    }
+    } else {
+        None
+    };
+    CallApproval { check, grants }
 }
 
 /// Drains queued steers into context as user messages; returns true if any
@@ -609,7 +615,7 @@ pub(super) async fn admit_tool_batch(
         });
         match pending_call {
             Some(call) if position < batch_cap => {
-                pending_tools.push_back(PendingTool { call });
+                pending_tools.push_back(PendingTool::new(call));
             }
             Some(call) => {
                 skipped_calls.push((

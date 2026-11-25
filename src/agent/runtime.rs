@@ -452,7 +452,7 @@ impl AgentLoop {
                         None => std::future::pending::<()>().await,
                     }
                 }, if state.mode == AgentMode::ToolPending => {
-                    state.approve_pending_front_if_granted().await;
+                    state.approve_pending_front_if_granted().instrument(session_span.clone()).await;
                     continue;
                 }
                 _ = &mut startup_checks, if !state.startup_checks_finished => {

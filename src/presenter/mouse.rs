@@ -15,7 +15,8 @@
 //! Pure mouse event handling.
 
 use super::TextareaContext;
-use crate::markdown::{render_markdown, slice_by_display_columns};
+use crate::markdown::render_markdown;
+use crate::terminal_text::slice_by_display_columns;
 use crate::tui_reducer_state::{
     model_picker_row_entries, slash_overlay_text_rows, AppState, ChatEntry, ChatSelection, Effect,
     EngineSaveFocus, Focus, PickerRow, SlashOverlay, TuiMode,

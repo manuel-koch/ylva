@@ -20,7 +20,6 @@ mod selection;
 pub(super) use cache::{draw_cached_chat, prepare_cached_header};
 pub(super) use selection::{
     apply_selection_highlight_to_line, line_alignment_offset, rendered_line_selection_data,
-    terminal_display_width,
 };
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};

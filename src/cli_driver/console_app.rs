@@ -83,9 +83,7 @@ pub(super) fn display_registry_config(profile: &ProfileConfig) -> ToolRegistryCo
     let tool_sandbox_rules = profile
         .tools
         .iter()
-        .filter_map(|(tool_name, tool_config)| {
-            Some((tool_name.clone(), tool_config.rules.clone()?))
-        })
+        .filter_map(|(tool_name, tool_config)| Some((tool_name.clone(), tool_config.rule_list()?)))
         .collect();
     ToolRegistryConfig {
         tool_sandbox_rules,

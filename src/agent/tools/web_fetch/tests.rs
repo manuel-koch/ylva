@@ -103,7 +103,7 @@ fn default_sandbox_context() -> SandboxContext {
 
 fn auto_approve_catch_all_context() -> SandboxContext {
     default_sandbox_context().with_rule(SandboxRule {
-        verdict: ApprovalCheck::AutoApproved,
+        verdict: ApprovalVerdict::AutoApproved,
         pattern: glob::Pattern::new("**").expect("** is a valid glob"),
     })
 }
@@ -137,6 +137,86 @@ fn run_call(tool: &WebFetchTool, arguments: Value) -> Result<Box<dyn ToolCallRes
         outcome = Some(execute(tool, arguments).await);
     });
     outcome.expect("the async body must run")
+}
+
+#[test]
+fn hop_trail_reports_deny_only_enforcement_without_the_url() {
+    use tracing::Instrument;
+
+    use crate::agent::approval_trail;
+    use crate::agent::tools::backends::web_fetch::HopPolicy;
+    use crate::sandbox::ApprovalVerdictConfig;
+
+    #[derive(Debug)]
+    struct HopProbe;
+    impl WebFetchBackend for HopProbe {
+        fn fetch<'a>(
+            &'a self,
+            _url: &'a str,
+            policy: HopPolicy<'a>,
+        ) -> BoxFuture<'a, Result<WebFetchResponse, WebFetchError>> {
+            Box::pin(async move {
+                assert_eq!((policy.deny)("https://hop-secret.example"), None);
+                assert_eq!(
+                    (policy.deny)("https://blocked-secret.example").as_deref(),
+                    Some("reason-secret")
+                );
+                Ok(text_response("done", false))
+            })
+        }
+    }
+
+    let sandbox = default_sandbox_context()
+        .with_tool_rules(
+            "web_fetch",
+            vec![
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::NetworkRequest,
+                    verdict: ApprovalVerdictConfig::UserApprovalRequired,
+                    reason: None,
+                    target: Some("https://hop-secret.example".into()),
+                },
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::NetworkRequest,
+                    verdict: ApprovalVerdictConfig::AutoDenied,
+                    reason: Some("reason-secret".into()),
+                    target: Some("https://blocked-secret.example".into()),
+                },
+            ],
+        )
+        .unwrap();
+    let log =
+        crate::test_support::capture_logs_with_format(crate::logging::LogFormat::Json, async {
+            approval_trail::prime_trail_capture();
+            let tool = WebFetchTool::new(
+                Arc::new(HopProbe),
+                &WebFetchConfig::default(),
+                sandbox,
+                std::time::Duration::from_secs(5),
+            );
+            let response = execute(&tool, arguments("https://input-secret.example"))
+                .instrument(tracing::info_span!("tool_execute", tool = "web_fetch"))
+                .await
+                .unwrap();
+            assert!(response.text().contains("done"));
+        });
+    let trail: Vec<_> = log
+        .lines()
+        .filter(|line| approval_trail::captured_trail_line(line))
+        .collect();
+    assert_eq!(trail.len(), 2);
+    for (line, outcome, enforcement) in [
+        (trail[0], "user_approval_required", "continue"),
+        (trail[1], "auto_denied", "deny"),
+    ] {
+        assert!(!line.contains("-secret"), "{line}");
+        let record: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(record["level"], "INFO");
+        assert_eq!(record["spans"][0]["name"], "tool_execute");
+        assert_eq!(record["fields"]["phase"], "network_hop");
+        assert_eq!(record["fields"]["outcome"], outcome);
+        assert_eq!(record["fields"]["enforcement"], enforcement);
+    }
 }
 
 #[test]
@@ -370,8 +450,8 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
     // No rules at all → the tool's own default.
     let tool = tool_with(backend(), default_sandbox_context());
     assert_eq!(
-        tool.needs_approval(&url),
-        ApprovalCheck::UserApprovalRequired
+        tool.needs_approval(&url).verdict,
+        ApprovalVerdict::UserApprovalRequired
     );
 
     // A target-less network_request rule matches every call.
@@ -386,7 +466,10 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
             }])
             .expect("valid sandbox fixture"),
     );
-    assert_eq!(tool.needs_approval(&url), ApprovalCheck::AutoApproved);
+    assert_eq!(
+        tool.needs_approval(&url).verdict,
+        ApprovalVerdict::AutoApproved
+    );
 
     // A matching `target` pattern applies to the requested URL's scheme://host.
     let tool = tool_with(
@@ -400,7 +483,10 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
             }])
             .expect("valid sandbox fixture"),
     );
-    assert_eq!(tool.needs_approval(&url), ApprovalCheck::AutoApproved);
+    assert_eq!(
+        tool.needs_approval(&url).verdict,
+        ApprovalVerdict::AutoApproved
+    );
 
     // A non-matching `target` abstains.
     let tool = tool_with(
@@ -415,13 +501,16 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
             .expect("valid sandbox fixture"),
     );
     assert_eq!(
-        tool.needs_approval(&url),
-        ApprovalCheck::UserApprovalRequired
+        tool.needs_approval(&url).verdict,
+        ApprovalVerdict::UserApprovalRequired
     );
 
     // The --auto-approve-web-fetch catch-all always wins.
     let tool = tool_with(backend(), auto_approve_catch_all_context());
-    assert_eq!(tool.needs_approval(&url), ApprovalCheck::AutoApproved);
+    assert_eq!(
+        tool.needs_approval(&url).verdict,
+        ApprovalVerdict::AutoApproved
+    );
 }
 
 #[test]
@@ -431,16 +520,17 @@ fn missing_or_empty_url_is_auto_denied() {
         default_sandbox_context(),
     );
     assert!(matches!(
-        tool.needs_approval(&serde_json::json!({})),
-        ApprovalCheck::AutoDenied { .. }
+        tool.needs_approval(&serde_json::json!({})).verdict,
+        ApprovalVerdict::AutoDenied { .. }
     ));
     assert!(matches!(
-        tool.needs_approval(&serde_json::json!({ "url": "" })),
-        ApprovalCheck::AutoDenied { .. }
+        tool.needs_approval(&serde_json::json!({ "url": "" }))
+            .verdict,
+        ApprovalVerdict::AutoDenied { .. }
     ));
     assert!(matches!(
-        tool.needs_approval(&serde_json::json!({ "url": "ftp://example.com" })),
-        ApprovalCheck::AutoDenied { reason } if reason.contains("http")
+        tool.needs_approval(&serde_json::json!({ "url": "ftp://example.com" })).verdict,
+        ApprovalVerdict::AutoDenied { reason } if reason.contains("http")
     ));
 }
 

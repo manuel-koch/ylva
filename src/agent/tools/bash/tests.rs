@@ -34,7 +34,7 @@ fn bash_tool_requires_user_approval_via_sandbox_abstain() {
     let tool = BashTool::default();
     let approval = tool.needs_approval(&serde_json::json!({ "command": "echo hi" }));
     assert!(
-        matches!(approval, ApprovalCheck::UserApprovalRequired),
+        matches!(approval.verdict, ApprovalVerdict::UserApprovalRequired),
         "sandbox abstains → tool falls back to UserApprovalRequired"
     );
 }
@@ -214,7 +214,7 @@ fn needs_approval_is_unaffected_by_label() {
         .needs_approval(&serde_json::json!({ "command": "echo hi", "label": "Greet the user" }));
     assert_eq!(without_label, with_label, "label must not affect verdicts");
     assert!(
-        matches!(with_label, ApprovalCheck::UserApprovalRequired),
+        matches!(with_label.verdict, ApprovalVerdict::UserApprovalRequired),
         "sandbox abstains → tool falls back to UserApprovalRequired"
     );
 }

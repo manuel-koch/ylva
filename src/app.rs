@@ -29,18 +29,6 @@ pub struct SessionExitSnapshot {
 
 pub type SessionExitHandle = std::sync::Arc<std::sync::Mutex<Option<SessionExitSnapshot>>>;
 
-pub fn single_line(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if character.is_control() || character == '\u{2028}' || character == '\u{2029}' {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
-}
-
 pub(crate) struct SessionExitGuard {
     pub current_store: std::sync::Arc<std::sync::Mutex<Option<crate::Store>>>,
     pub snapshot: Option<SessionExitHandle>,

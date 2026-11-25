@@ -42,7 +42,7 @@ use serde_json::Value;
 use tracing::Instrument;
 
 use super::{Section, Tool, ToolCall, ToolCallResult, ToolError};
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 use execution::run_bash;
 use result::label_and_command_display_sections;
 
@@ -221,6 +221,7 @@ fn build_description(timeout_secs: u64) -> String {
 
 impl BashTool {
     pub const NAME: &'static str = "bash";
+    const DEFAULT_APPROVAL_RULE: &'static str = "bash.default";
 
     pub fn new(sandbox_context: SandboxContext) -> Self {
         Self::with_timeout(DEFAULT_BASH_TIMEOUT_SECS, sandbox_context)
@@ -269,7 +270,10 @@ impl Tool for BashTool {
             .and_then(|value| value.as_str())
             .unwrap_or("");
         match self.sandbox_context.check_command(command) {
-            None => ApprovalCheck::UserApprovalRequired,
+            None => ApprovalCheck::tool(
+                ApprovalVerdict::UserApprovalRequired,
+                Self::DEFAULT_APPROVAL_RULE,
+            ),
             Some(verdict) => verdict,
         }
     }
@@ -313,7 +317,9 @@ impl Tool for BashTool {
                                 has_variable_assignment_prefix: extracted
                                     .has_variable_assignment_prefix,
                             },
-                            policy_approved: verdict == Some(ApprovalCheck::AutoApproved),
+                            policy_approved: verdict.is_some_and(|check| {
+                                check.verdict == ApprovalVerdict::AutoApproved
+                            }),
                         }
                     }
                 })
