@@ -162,11 +162,6 @@ ARM64/x64). A macOS-only Seatbelt implementation is not a cross-platform
 boundary; Linux, Windows and other systems need their own enforcement backend and
 must not be assumed semantically identical.
 
-## Learned persistent rules
-
-See [reusable tool-approval grants](tool-approval-grants.md) for user-approved
-temporary and persistent Bash grants and their interaction with existing rules.
-
 ## Verdict provenance and explanations
 
 Carry structured decision provenance through approval evaluation and show it in
