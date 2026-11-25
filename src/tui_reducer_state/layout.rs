@@ -90,11 +90,14 @@ impl HelpPopupLayout {
 }
 
 /// Screen-space geometry of the grant dialog, written by the View each frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GrantDialogLayout {
     pub rect: Rect,
-    pub temporary_row: Rect,
-    pub persistent_row: Rect,
+    /// First line of each grant row; empty when scrolled out of view.
+    pub rows: Vec<Rect>,
+    /// Visible lines of the editable rule of each row; empty when the row has
+    /// no rule or it is scrolled out of view.
+    pub rules: Vec<Vec<Rect>>,
     pub confirm_button: Rect,
     pub back_button: Rect,
     /// Largest scroll offset of the body; zero when everything fits.

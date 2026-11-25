@@ -88,21 +88,27 @@ pub async fn request_device_code(
     client: &reqwest::Client,
     endpoints: &DeviceFlowEndpoints,
 ) -> anyhow::Result<DeviceCode> {
-    let response = client
+    let request_body = serde_json::json!({"client_id": COPILOT_CLIENT_ID, "scope": "read:user"});
+    let request = client
         .post(&endpoints.device_code_url)
         .header("accept", "application/json")
-        .json(&serde_json::json!({"client_id": COPILOT_CLIENT_ID, "scope": "read:user"}))
-        .send()
-        .await
-        .map_err(|error| anyhow::anyhow!("device code request failed: {error}"))?;
+        .json(&request_body);
+    // The response carries the device code, so its body is not dumped.
+    let (status, response_body) = crate::http::send_dumped_once(
+        client,
+        request,
+        "device code request",
+        &request_body,
+        true,
+        &crate::http::RequestDumpSource::Environment,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("device code request failed: {error}"))?;
     anyhow::ensure!(
-        response.status().is_success(),
-        "device code request failed (HTTP {})",
-        response.status()
+        status.is_success(),
+        "device code request failed (HTTP {status})"
     );
-    let body: DeviceCodeResponse = response
-        .json()
-        .await
+    let body: DeviceCodeResponse = serde_json::from_slice(&response_body)
         .map_err(|error| anyhow::anyhow!("invalid device code response: {error}"))?;
     Ok(DeviceCode {
         device_code: body.device_code,
@@ -132,20 +138,30 @@ pub async fn poll_for_access_token(
             Instant::now() < deadline,
             "the device code expired, run the command again"
         );
-        let response = client
+        let request = client
             .post(&endpoints.access_token_url)
             .header("accept", "application/json")
             .json(&serde_json::json!({
                 "client_id": COPILOT_CLIENT_ID,
                 "device_code": device_code.device_code,
                 "grant_type": DEVICE_GRANT_TYPE,
-            }))
-            .send()
-            .await
-            .map_err(|error| anyhow::anyhow!("access token request failed: {error}"))?;
-        let body: AccessTokenResponse = response
-            .json()
-            .await
+            }));
+        // Neither the device code nor the returned access token is dumped.
+        let (_, response_body) = crate::http::send_dumped_once(
+            client,
+            request,
+            "access token request",
+            &serde_json::json!({
+                "client_id": COPILOT_CLIENT_ID,
+                "device_code": "[redacted]",
+                "grant_type": DEVICE_GRANT_TYPE,
+            }),
+            true,
+            &crate::http::RequestDumpSource::Environment,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("access token request failed: {error}"))?;
+        let body: AccessTokenResponse = serde_json::from_slice(&response_body)
             .map_err(|error| anyhow::anyhow!("invalid access token response: {error}"))?;
         if let Some(access_token) = body.access_token.filter(|token| !token.is_empty()) {
             return Ok(access_token);

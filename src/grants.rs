@@ -42,7 +42,7 @@ pub use bash_rule::{
 };
 pub use origin_rule::OriginRule;
 pub use path_rule::PathRule;
-pub use proposal::{describe_grant, grant_warnings, propose_grants};
+pub use proposal::{describe_grant, grant_warnings, propose_grants, validate_draft, GrantProposal};
 pub use state::{GrantDecision, GrantState, SharedGrantState};
 pub use store::{GrantStore, GrantStoreError, SaveOutcome, GRANTS_FILE_NAME};
 pub use subject::{CommandStatement, CommandSubject, CommandToken, GrantSubject, GrantSubjects};
@@ -133,18 +133,18 @@ impl GrantTool {
 
 /// How long a grant lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GrantLifetime {
+pub enum GrantScope {
     /// In memory, global to the running root conversation and its subagents.
     Temporary,
     /// Stored in the workspace profile's `grants.toml`.
     Persistent,
 }
 
-impl GrantLifetime {
+impl GrantScope {
     pub fn label(self) -> &'static str {
         match self {
-            GrantLifetime::Temporary => "temporary",
-            GrantLifetime::Persistent => "persistent",
+            GrantScope::Temporary => "temporary",
+            GrantScope::Persistent => "persistent",
         }
     }
 }
@@ -162,6 +162,32 @@ pub enum GrantMatcher {
     Origin(OriginRule),
     /// `web_search`, `spawn_subagent`: any call of the tool.
     Any,
+}
+
+/// A grant as it is stored (and edited in the grant dialog) before it is
+/// validated against a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantDraft {
+    pub tool: GrantTool,
+    pub name: Option<String>,
+    pub rule: Option<String>,
+}
+
+impl GrantDraft {
+    pub fn of(grant: &Grant) -> GrantDraft {
+        GrantDraft {
+            tool: grant.tool,
+            name: grant.stored_name().map(str::to_string),
+            rule: grant.stored_rule(),
+        }
+    }
+}
+
+/// A draft the user selected for creation, with its scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantRequest {
+    pub draft: GrantDraft,
+    pub scope: GrantScope,
 }
 
 /// A reusable approval for similar calls of one tool.
@@ -266,9 +292,9 @@ impl Grant {
         }
     }
 
-    /// A non-sensitive identifier for logs: lifetime, tool and a short digest
+    /// A non-sensitive identifier for logs: scope, tool and a short digest
     /// of the stored attributes. Never contains the rule text itself.
-    pub fn reference(&self, lifetime: GrantLifetime) -> GrantReference {
+    pub fn reference(&self, scope: GrantScope) -> GrantReference {
         let mut hasher = Sha256::new();
         hasher.update(self.tool.name().as_bytes());
         hasher.update([0]);
@@ -278,7 +304,7 @@ impl Grant {
         let digest = crate::hexadecimal::hex_digest(&hasher.finalize());
         GrantReference(format!(
             "{}:{}:{}",
-            lifetime.label(),
+            scope.label(),
             self.tool.name(),
             &digest[..8]
         ))

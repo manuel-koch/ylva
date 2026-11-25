@@ -994,20 +994,50 @@ fn granting_a_pending_bash_call_runs_it_and_covers_the_next_identical_call() {
         .expect("preview arrives");
         assert_eq!(preview.id, bash_id);
         assert_eq!(preview.refusal, None);
-        assert_eq!(preview.rules.len(), 1);
+        assert_eq!(preview.rows.len(), 1);
+        assert_eq!(preview.rows[0].tool, crate::grants::GrantTool::Bash);
         assert!(
-            preview.rules[0].starts_with("bash '"),
+            preview.rows[0]
+                .rule
+                .as_deref()
+                .is_some_and(|rule| rule.starts_with("printf")),
             "{:?}",
-            preview.rules
+            preview.rows
         );
-        assert!(preview
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("ylva trust")));
+        let unrelated = crate::grants::GrantRequest {
+            draft: crate::grants::GrantDraft {
+                tool: crate::grants::GrantTool::Bash,
+                name: None,
+                rule: Some("cargo build".to_string()),
+            },
+            scope: crate::grants::GrantScope::Temporary,
+        };
         agent_loop
             .send_command(AgentCommand::GrantAndApprove {
                 id: bash_id,
-                lifetime: crate::grants::GrantLifetime::Temporary,
+                requests: vec![unrelated],
+                reload_snapshot: false,
+            })
+            .await;
+        let failure = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(UiUpdate::GrantFailed { id, reason, .. }) = ui_rx.recv().await {
+                    break (id, reason);
+                }
+            }
+        })
+        .await
+        .expect("a rule that does not match the call is refused");
+        assert_eq!(failure.0, bash_id);
+        assert!(failure.1.contains("does not match"), "{}", failure.1);
+        agent_loop
+            .send_command(AgentCommand::GrantAndApprove {
+                id: bash_id,
+                requests: vec![crate::grants::GrantRequest {
+                    draft: preview.rows[0].clone(),
+                    scope: crate::grants::GrantScope::Temporary,
+                }],
+                reload_snapshot: false,
             })
             .await;
         let mut notice = None;

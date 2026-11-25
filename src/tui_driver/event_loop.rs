@@ -593,6 +593,8 @@ where
                 let focus_before = state.prompt_button_focus;
                 let session_action_before = session_picker_action(&state);
                 let parameter_cursor_before = state.model_parameters_mut().map(|edit| edit.cursor);
+                let grant_focus_before = state.grant_dialog.as_ref().map(|dialog| dialog.focused);
+                let engine_save_focus_before = state.engine_save_form().map(|form| form.focus);
                 let is_key_event = matches!(event, TuiEvent::Input(_));
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
                 // Keyboard focus change replaces the pointer hover highlight.
@@ -602,6 +604,18 @@ where
                 if is_key_event
                     && session_action_before.is_some()
                     && session_picker_action(&state) != session_action_before
+                {
+                    mouse_pos = None;
+                }
+                if is_key_event
+                    && grant_focus_before.is_some()
+                    && state.grant_dialog.as_ref().map(|dialog| dialog.focused) != grant_focus_before
+                {
+                    mouse_pos = None;
+                }
+                if is_key_event
+                    && engine_save_focus_before.is_some()
+                    && state.engine_save_form().map(|form| form.focus) != engine_save_focus_before
                 {
                     mouse_pos = None;
                 }

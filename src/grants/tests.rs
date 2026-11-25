@@ -56,13 +56,13 @@ fn covers_matches_only_the_same_subject_kind() {
 #[test]
 fn reference_hides_the_rule_text() {
     let grant = Grant::from_stored(GrantTool::Read, None, Some("./secret-dir/*")).unwrap();
-    let reference = grant.reference(GrantLifetime::Persistent);
+    let reference = grant.reference(GrantScope::Persistent);
     assert!(reference.as_str().starts_with("persistent:read:"));
     assert!(!reference.as_str().contains("secret"));
     assert_ne!(
         reference,
         Grant::from_stored(GrantTool::Read, None, Some("./other/*"))
             .unwrap()
-            .reference(GrantLifetime::Persistent)
+            .reference(GrantScope::Persistent)
     );
 }

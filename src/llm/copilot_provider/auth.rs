@@ -218,11 +218,17 @@ impl CopilotAuth {
         for (name, value) in copilot_identification_headers() {
             request = request.header(name, value);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| anyhow::anyhow!("Copilot token exchange failed: {error}"))?;
-        let status = response.status();
+        // The response carries the session token, so its body is not dumped.
+        let (status, response_body) = crate::http::send_dumped_once(
+            &self.client,
+            request,
+            "Copilot token exchange",
+            &serde_json::Value::Null,
+            true,
+            &crate::http::RequestDumpSource::Environment,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("Copilot token exchange failed: {error}"))?;
         if !status.is_success() {
             return Err(match status.as_u16() {
                 401 | 403 | 404 => anyhow::anyhow!(
@@ -233,9 +239,7 @@ impl CopilotAuth {
                 _ => anyhow::anyhow!("Copilot token exchange failed (HTTP {status})"),
             });
         }
-        let body: TokenExchangeResponse = response
-            .json()
-            .await
+        let body: TokenExchangeResponse = serde_json::from_slice(&response_body)
             .map_err(|error| anyhow::anyhow!("invalid Copilot token exchange response: {error}"))?;
         let api_base = body
             .endpoints

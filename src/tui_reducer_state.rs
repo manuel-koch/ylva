@@ -64,7 +64,10 @@ pub use engine_save::{
     NameCursorMove, ENGINE_SAVE_BUTTON_COUNT,
 };
 pub use events::{ConfirmKey, DomainEvent, Effect, Focus, InputEvent, TuiMode};
-pub use grant_dialog::{GrantDialogButton, GrantDialogState};
+pub use grant_dialog::{
+    GrantDialogFocus, GrantDialogRow, GrantDialogState, GrantFailure, GrantRowEdit,
+    GrantRowSelection,
+};
 pub use input_history::HistoryDirection;
 pub use layout::{
     AgentsPopupLayout, AppLayout, ChatArea, ChatScrollbarLayout, GrantDialogLayout,

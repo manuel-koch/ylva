@@ -882,3 +882,12 @@ extensions. Unknown buffered types use `.bin`. Buffered responses are written
 as their original bytes rather than JSON-encoded strings. Transport failures
 without response headers use `.jsonl` and are recorded as `[transport] ...`
 markers.
+
+A request that is dropped before its response completes (an outer timeout or a
+cancellation) appends `[failure] abandoned after N ms ...` to the same response
+file and logs a `warn` with the redacted URL, operation and `dump_id`; the warning
+is also logged when dumps are disabled. The Copilot sign-in requests (device code,
+access token, session-token exchange) are dumped with their response bodies
+omitted (`[redacted] HTTP <status> response body omitted`), and the device code
+in the access-token request body is replaced by `[redacted]`. The release check
+is dumped like any other request.

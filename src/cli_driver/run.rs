@@ -600,7 +600,8 @@ pub(super) async fn run_cli_to_with_title(
             Some(UiUpdate::SteerQueued { .. })
             | Some(UiUpdate::SteerApplied { .. })
             | Some(UiUpdate::ModelChangeApplied)
-            | Some(UiUpdate::GrantPreview { .. }) => {}
+            | Some(UiUpdate::GrantPreview { .. })
+            | Some(UiUpdate::GrantFailed { .. }) => {}
             // Headless output has no footer for the model-view readout.
             Some(UiUpdate::ContextUsage { .. } | UiUpdate::SubagentContextUsage { .. }) => {}
             // Headless output renders messages inline as they stream, so a

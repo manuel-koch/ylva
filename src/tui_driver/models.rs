@@ -150,7 +150,8 @@ impl CatalogOutage {
                 failures.join("; ")
             ),
             CatalogOutage::Timeout => format!(
-                "Could not list models: the provider did not answer within {} s. {source_summary}",
+                "Could not list models: provider connections did not answer within {} s, so no \
+                 catalog models were collected. {source_summary}",
                 MODEL_LIST_TIMEOUT.as_secs()
             ),
         }

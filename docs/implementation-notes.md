@@ -209,6 +209,10 @@ See [configuration](./configuration.md),
 - Provider clients use a connect timeout and an *idle* read timeout, neither
   configurable: the idle limit applies to headers and between chunks, so
   stalled servers fail while long, steadily streaming responses survive.
+- `/models` catalog listing: `EngineRouter` bounds each provider connection with
+  `CATALOG_CONNECTION_TIMEOUT` (below the driver's overall timeout) and reports a hung
+  connection as a partial failure, so healthy connections' models still list. The
+  overall timeout stays a backstop and discards every model when it fires.
 - Output limit: `EngineConfig::max_output_tokens_for_model` resolves the
   configured value (configured model only, clamped to `ModelInfo::max_output_tokens`);
   `EngineRuntimeConfig` holds `max_output_tokens` plus the picker's
@@ -686,11 +690,16 @@ See [persistence](./persistence.md) for on-disk contracts.
   prompt when the call starts.
 - The grant dialog is a sub-state of the approval prompt (`AppState::grant_dialog`),
   not a `Focus`. *Grant…* sends `RequestGrantPreview`; the agent answers with
-  `UiUpdate::GrantPreview`, since only it holds the tool objects. *Grant* sends
-  `GrantAndApprove`; the agent, not the UI, derives the grant again from the
-  pending call so tools stay the only judges of their arguments. The TUI keeps
-  the prompt until the call starts, so a refused or failed grant leaves it
-  pending. The footer never drops *Grant…*: narrow terminals get compact labels.
+  `UiUpdate::GrantPreview` (rows plus the call's grant subjects), since only it
+  holds the tool objects. The dialog validates edited rows with the same
+  `validate_draft` the agent applies. *Grant* sends `GrantAndApprove` with the
+  selected, possibly edited drafts; the agent re-validates each against the
+  pending call and never trusts UI text. The TUI keeps the prompt and the
+  dialog until the call starts; a refused or failed grant arrives as
+  `UiUpdate::GrantFailed` and the dialog offers retry, changing the rows or going back.
+  Retrying after an external edit sets `reload_snapshot`, which only re-bases
+  the store on the reviewed file and does not activate grants found in it. The
+  footer never drops *Grant…*: narrow terminals get compact labels.
 - `grants.toml` is trust-covered and compared as parsed TOML; saving changes the
   fingerprint on purpose so a hostile edit cannot ride along.
 

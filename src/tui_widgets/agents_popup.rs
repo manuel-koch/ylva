@@ -23,9 +23,8 @@ use ratatui::Frame;
 use crate::agent::subagent_manager::{STATUS_QUEUED, STATUS_RUNNING};
 use crate::saturating_cast::saturating_u16;
 use crate::theme::{
-    active_model_color, chat_scrollbar_color, error_color, help_popup_border_color,
-    list_selection_background_color, list_selection_foreground_color, list_text_color,
-    muted_text_color, overlay_selection_color,
+    active_model_color, chat_scrollbar_color, content_color, error_color, list_text_color,
+    muted_text_color, overlay_selection_color, popup_border_color,
 };
 use crate::tui_reducer_state::{AgentRow, AgentRowStatus, SubagentOutcome};
 use crate::tui_render_state::TuiState;
@@ -153,8 +152,8 @@ fn row_line(
     };
     let (base_style, result_style) = if selected {
         let selection = Style::default()
-            .fg(list_selection_foreground_color())
-            .bg(list_selection_background_color());
+            .fg(content_color())
+            .add_modifier(Modifier::BOLD);
         (selection, selection)
     } else {
         (base_style, result_style)
@@ -224,7 +223,7 @@ pub(super) fn draw_agents_popup(frame: &mut Frame, state: &mut TuiState, input_a
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(help_popup_border_color()))
+        .border_style(Style::default().fg(popup_border_color()))
         .title(" Agents")
         .title_alignment(Alignment::Left);
     let inner = block.inner(popup);

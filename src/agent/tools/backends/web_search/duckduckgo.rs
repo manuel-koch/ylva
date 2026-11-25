@@ -153,24 +153,32 @@ impl WebSearchBackend for DuckDuckGoBackend {
                     path,
                 );
             }
+            let guard = dump_context.drop_guard("web search", &request_url);
             // No retry: every failure is terminal (see the module docs).
-            let response = self.client.execute(request).await.map_err(|error| {
-                let response_dump_path = dump_context.response_path_for_content_type(None, "jsonl");
-                crate::http::dump_response_transport_error(&response_dump_path, &error);
-                WebSearchError::Request(error.to_string())
-            })?;
-            let status = response.status();
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok());
-            let response_dump_path =
-                dump_context.response_path_for_content_type(content_type, "bin");
-            let body = response.bytes().await.map_err(|error| {
-                crate::http::dump_response_transport_error(&response_dump_path, &error);
-                WebSearchError::Request(error.to_string())
-            })?;
-            crate::http::dump_buffered_response(&body, response_dump_path.as_deref());
+            let outcome = async {
+                let response = self.client.execute(request).await.map_err(|error| {
+                    let response_dump_path =
+                        dump_context.response_path_for_content_type(None, "jsonl");
+                    crate::http::dump_response_transport_error(&response_dump_path, &error);
+                    WebSearchError::Request(error.to_string())
+                })?;
+                let status = response.status();
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok());
+                let response_dump_path =
+                    dump_context.response_path_for_content_type(content_type, "bin");
+                let body = response.bytes().await.map_err(|error| {
+                    crate::http::dump_response_transport_error(&response_dump_path, &error);
+                    WebSearchError::Request(error.to_string())
+                })?;
+                crate::http::dump_buffered_response(&body, response_dump_path.as_deref());
+                Ok::<_, WebSearchError>((status, body))
+            }
+            .await;
+            guard.finish();
+            let (status, body) = outcome?;
             if !status.is_success() {
                 return Err(WebSearchError::Status {
                     status: status.as_u16(),

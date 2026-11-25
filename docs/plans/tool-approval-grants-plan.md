@@ -101,7 +101,7 @@ public origins (preview must say so; deny/private-address checks still apply to 
 does not change availability, concurrency, depth, agent selection, nor grant the spawned agent
 tool permissions.
 
-Lifetime and runtime:
+Scope and runtime:
 
 - Temporary: one shared runtime state across root and subagent loops, global (no requester or
   agent scoping; also covers later subagents); cleared on session switch, `/clear`, exit; not
@@ -112,7 +112,7 @@ Lifetime and runtime:
 - Grant changes re-evaluate not-yet-executed calls, including calls waiting in another agent's
   approval queue; recheck effective policy before dispatch; never revive a
   cancelled call or interrupt a running one; no stale prompts; no leakage across root conversations.
-- Preview before confirmation: exact matcher, affected tools, lifetime (stating it applies to all
+- Preview before confirmation: exact matcher, affected tools, scope (stating it applies to all
   agents), consequences;
   persistent also shows file to be written, resolved base/scope for path matchers, any workspace
   marker to be created; warns that matching calls already waiting may proceed; file-mutation
@@ -120,7 +120,7 @@ Lifetime and runtime:
   wider command scope; literal paths/hosts/prefixes may be sensitive — show and warn.
 - Defaults/UX: default to the requesting tool and its specific resource; user may widen the
   resource, add compatible tools (one `[[grants]]` entry per tool); user may edit the
-  rule, invalid or non-matching rule rejected with an explanation; lifetime chosen per grant (per
+  rule, invalid or non-matching rule rejected with an explanation; scope chosen per grant (per
   row for Bash, default temporary). Offer reusable grants only when the call has a supported
   matcher; otherwise only existing one-time decisions.
 - Apply a confirmed temporary grant immediately; apply a persistent grant only after successful
@@ -198,7 +198,7 @@ without user consent).
    grants-only profile directory and trust coverage decision.
 3. [x] Add a `grants` module (`src/grants.rs` + `src/grants/*.rs`, file-per-module, license header,
    re-export through `src/lib.rs`) with the domain types: `GrantTool`, `GrantRule` (per-tool
-   matcher), `Grant` (+ lifetime/scope), `GrantReference` (non-sensitive id for logs).
+   matcher), `Grant` (+ scope), `GrantReference` (non-sensitive id for logs).
 4. [x] TDD path matcher: grant-rule validation (reject bare `**`, newline, `~`/env use as
    expansion), exact-rule generation with metacharacter escaping, workspace-relative vs absolute
    form, matching via `sandbox::rules::path_glob_matches` (expose as `pub(crate)` if needed),
@@ -254,12 +254,12 @@ without user consent).
 16. [x] TUI approval dialog (`src/presenter/keyboard.rs`, `mouse.rs`, `domain.rs`,
         `src/tui_reducer_state/*`, `src/tui_render_state.rs`, `src/tui_widgets.rs`,
         `src/events.rs`): keep Approve/Deny and add a "Grant…" button opening a second modal (rule
-        editor, tool checklist, lifetime, preview with all required warnings, Confirm/Back); Bash
+        editor, tool checklist, scope, preview with all required warnings, Confirm/Back); Bash
         shows per-row checklist with selector and footnote, "N already allowed"; validation errors,
         save failure/conflict behavior (refuse overwrite on external edit, leave approval pending,
         offer once/temporary/retry-with-reload), marker-creation offer. New `Effect`s for save +
         apply grants. Update keybindings. *Delivered as a minimal modal:* one always-visible
-        *Grant…* button opens a second page with the read-only proposed rules, the lifetime choice,
+        *Grant…* button opens a second page with the read-only proposed rules, the scope choice,
         notes (the warnings above, marker creation included) and Grant/Back. Not delivered: rule
         editing, tool checklist, per-row selector and the once/temporary/retry offer after a save
         failure (the prompt just stays pending with a notice).
@@ -278,16 +278,20 @@ without user consent).
         on touched Markdown.
 19. [x] Verify: `make format lint`, `make test-coverage`; `make audit` if `Cargo.toml`/`Cargo.lock`
     changed.
-20. [ ] Grant dialog: tool checklist (grant for a subset of the proposed tools) and, for Bash,
+20. [x] Grant dialog: tool checklist (grant for a subset of the proposed tools) and, for Bash,
     a per-row selector with footnote and "N already allowed" (extends the minimal modal of step 16;
-    update `docs/features.md`, `docs/keybindings.md`).
-21. [ ] Grant dialog: rule editing (edit a proposed rule in place, validate with the rule parsers,
+    update `docs/features.md`, `docs/keybindings.md`). *Delivered:* a per-row selector
+    (`off | temporary | persistent`) for every tool; adding grants for other tools than the
+    requesting one is not offered.
+21. [x] Grant dialog: rule editing (edit a proposed rule in place, validate with the rule parsers,
     show validation errors, keep Grant disabled while invalid); apply the edited rules in the agent
     (`GrantAndApprove` carries them, the agent re-validates, never trusts UI text blindly);
     update `docs/features.md`, `docs/keybindings.md`, `docs/implementation-notes.md`.
-22. [ ] Save failure/conflict recovery: after a refused or failed persistent save, offer once /
+22. [x] Save failure/conflict recovery: after a refused or failed persistent save, offer once /
     temporary / retry-with-reload instead of only leaving the prompt pending with a notice.
-23. [ ] Tests for steps 20–22 (presenter, widget, agent e2e) and verify:
+    *Delivered:* the dialog stays open with the reason (`UiUpdate::GrantFailed`); retry, `t`
+    temporary, `r` retry-with-reload, Back for once.
+23. [x] Tests for steps 20–22 (presenter, widget, agent e2e) and verify:
     `make format lint`, `make test-coverage`, `rumdl check .`.
 
 ## Proposed Improvements

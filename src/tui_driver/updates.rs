@@ -193,6 +193,7 @@ pub(super) fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent
         | UiUpdate::ToolAutoDenied { .. }
         | UiUpdate::Notice { .. }
         | UiUpdate::GrantPreview { .. }
+        | UiUpdate::GrantFailed { .. }
         | UiUpdate::OutputTruncated { .. } => None,
     }
 }
@@ -314,6 +315,16 @@ pub(super) async fn process_one_update(
     }
     if let UiUpdate::GrantPreview { preview, .. } = update {
         state.open_grant_dialog(preview.clone());
+        return ActionOutcome::Continue;
+    }
+    if let UiUpdate::GrantFailed {
+        id,
+        reason,
+        reloadable,
+        ..
+    } = update
+    {
+        state.grant_dialog_failed(*id, reason.clone(), *reloadable);
         return ActionOutcome::Continue;
     }
     if matches!(update, UiUpdate::ModelChangeApplied) {

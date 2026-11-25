@@ -458,7 +458,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
         agents_popup: agents_popup_render_state(state),
         status_popup: status_popup_render_state(state),
         grant_dialog: state.visible_grant_dialog().cloned(),
-        grant_dialog_layout: state.layout.grant_dialog,
+        grant_dialog_layout: state.layout.grant_dialog.clone(),
         clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
             pending_clarify: if let crate::tui_reducer_state::TuiMode::ClarifyPending {
                 question,

@@ -145,13 +145,21 @@ pub(super) async fn execute_effects(
                     AgentCommand::RequestGrantPreview { id },
                 ));
             }
-            Effect::GrantTool { id, lifetime } => {
+            Effect::GrantTool {
+                id,
+                requests,
+                reload_snapshot,
+            } => {
                 // The prompt stays pending until the agent starts the call, so
                 // the run id is kept for a retry after a refused grant.
                 let run_id = pending_run_ids.tool_run_ids.get(&id).copied();
                 let _ = cmd_tx.try_send(route_command(
                     run_id,
-                    AgentCommand::GrantAndApprove { id, lifetime },
+                    AgentCommand::GrantAndApprove {
+                        id,
+                        requests,
+                        reload_snapshot,
+                    },
                 ));
             }
             Effect::DenyTool { id, reason } => {

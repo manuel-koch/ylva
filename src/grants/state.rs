@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::{
-    CommandStatement, Grant, GrantLifetime, GrantReference, GrantStore, GrantStoreError,
-    GrantSubject, GrantSubjects, GrantTool, SaveOutcome,
+    CommandStatement, CommandSubject, Grant, GrantReference, GrantScope, GrantStore,
+    GrantStoreError, GrantSubject, GrantSubjects, GrantTool, SaveOutcome,
 };
 
 /// Result of evaluating a tool call against the grants.
@@ -141,6 +141,32 @@ impl GrantState {
             .and_then(GrantStore::marker_to_create)
     }
 
+    /// Whether an existing grant covers the simple `command`.
+    pub fn covers_command(&self, command: &CommandSubject) -> bool {
+        !command.has_unquoted_expansion
+            && !command.has_variable_assignment_prefix
+            && matches!(
+                self.evaluate(
+                    GrantTool::Bash.name(),
+                    &GrantSubjects::Commands(vec![CommandStatement::Command {
+                        command: command.clone(),
+                        policy_approved: false,
+                    }]),
+                ),
+                GrantDecision::Covered(_)
+            )
+    }
+
+    /// Accept the current grants file as the content to save into, after an
+    /// external edit was reviewed. Does not activate grants found in it.
+    pub fn reload_snapshot(&self) -> Result<(), GrantStoreError> {
+        let mut inner = self.lock();
+        let store = inner.store.as_mut().ok_or_else(|| {
+            GrantStoreError::Unavailable("no workspace profile directory is available".into())
+        })?;
+        store.reload_snapshot()
+    }
+
     /// Save `grant` to `grants.toml` and make it effective in this run.
     /// Saves are serialized by the state lock.
     pub fn add_persistent(&self, grant: Grant) -> Result<SaveOutcome, GrantStoreError> {
@@ -166,17 +192,17 @@ impl GrantState {
             inner
                 .temporary
                 .iter()
-                .map(|grant| (grant, GrantLifetime::Temporary))
+                .map(|grant| (grant, GrantScope::Temporary))
                 .chain(
                     inner
                         .persistent
                         .iter()
-                        .map(|grant| (grant, GrantLifetime::Persistent)),
+                        .map(|grant| (grant, GrantScope::Persistent)),
                 )
                 .find(|(grant, _)| {
                     grant.tool == tool && grant.covers(subject, &self.workspace_root)
                 })
-                .map(|(grant, lifetime)| grant.reference(lifetime))
+                .map(|(grant, scope)| grant.reference(scope))
         };
         match subjects {
             GrantSubjects::NotGrantable => GrantDecision::NotCovered,

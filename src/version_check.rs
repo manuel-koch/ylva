@@ -117,15 +117,20 @@ impl ReleaseFetcher for GithubReleaseFetcher {
             let client = provider_client_builder(CONNECT_TIMEOUT, TOTAL_TIMEOUT)
                 .timeout(TOTAL_TIMEOUT)
                 .build()?;
-            let body: serde_json::Value = client
+            let request = client
                 .get(&url)
-                .header("Accept", "application/vnd.github+json")
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            Ok::<_, reqwest::Error>(body)
+                .header("Accept", "application/vnd.github+json");
+            let (status, response_body) = crate::http::send_dumped_once(
+                &client,
+                request,
+                "release check",
+                &serde_json::Value::Null,
+                false,
+                &crate::http::RequestDumpSource::Environment,
+            )
+            .await?;
+            anyhow::ensure!(status.is_success(), "HTTP {status}");
+            Ok::<serde_json::Value, anyhow::Error>(serde_json::from_slice(&response_body)?)
         }
         .await;
         match result {

@@ -55,6 +55,7 @@ pub mod store;
 #[cfg(unix)]
 pub(crate) mod strict_json;
 pub mod system_prompt_origins;
+pub(crate) mod text_wrap;
 pub(crate) mod theme;
 #[cfg(unix)]
 pub(crate) mod trufflehog;

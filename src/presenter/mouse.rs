@@ -18,7 +18,7 @@ use super::TextareaContext;
 use crate::markdown::{render_markdown, slice_by_display_columns};
 use crate::tui_reducer_state::{
     model_picker_row_entries, slash_overlay_text_rows, AppState, ChatEntry, ChatSelection, Effect,
-    Focus, PickerRow, SlashOverlay, TuiMode,
+    EngineSaveFocus, Focus, PickerRow, SlashOverlay, TuiMode,
 };
 use crossterm::event::MouseEventKind;
 
@@ -426,7 +426,7 @@ pub(super) fn route_mouse(
                             .engine_save_control_at(column, row)
                         {
                             state.focus_engine_save_control(focus);
-                            if focus.is_button() {
+                            if focus.is_button() || focus == EngineSaveFocus::Mode {
                                 return state.activate_engine_save_focus();
                             }
                             return vec![];
@@ -941,16 +941,22 @@ pub(super) fn route_mouse(
 /// the dialog closes, and a click outside the dialog goes back.
 fn click_grant_dialog(state: &mut AppState, column: u16, row: u16) -> Vec<Effect> {
     let position = (column, row).into();
-    let layout = state.layout.grant_dialog;
+    let layout = state.layout.grant_dialog.clone();
     if layout.confirm_button.contains(position) {
-        return state.confirm_grant_dialog();
+        return state.confirm_grant_dialog(false);
     }
     if layout.back_button.contains(position) || !layout.rect.contains(position) {
         state.close_grant_dialog();
-    } else if layout.temporary_row.contains(position) {
-        state.select_grant_lifetime(crate::grants::GrantLifetime::Temporary);
-    } else if layout.persistent_row.contains(position) {
-        state.select_grant_lifetime(crate::grants::GrantLifetime::Persistent);
+    } else if let Some(index) = layout
+        .rules
+        .iter()
+        .position(|areas| areas.iter().any(|area| area.contains(position)))
+    {
+        state.click_grant_rule(index);
+    } else if let Some(index) = layout.rows.iter().position(|area| area.contains(position)) {
+        state.end_grant_edit(true);
+        state.focus_grant_row(index);
+        state.cycle_grant_row(index, true);
     }
     vec![]
 }

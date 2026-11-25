@@ -1971,7 +1971,7 @@ fn save_page_name_field_supports_caret_movement_and_editing_in_the_middle() {
     state.engine_save_move_name_cursor(Start);
     assert_eq!(
         state.engine_save_form().unwrap().name_caret_column(),
-        Some(7)
+        Some(9)
     );
 }
 
@@ -2057,7 +2057,7 @@ fn save_page_rows_end_with_the_two_buttons_and_follow_the_focus() {
     let form = state.engine_save_form().unwrap().clone();
     let entries = form.entries();
     assert_eq!(&entries[entries.len() - 2..], ["Save", "Save & apply"]);
-    assert!(entries[1].starts_with("Name:  fast"));
+    assert!(entries[1].starts_with("Name:  ✎ fast"));
     assert_eq!(form.focus_entry(entries.len()), 1);
     assert_eq!(
         form.entry_focus(entries.len() - 1, entries.len()),

@@ -152,6 +152,11 @@ impl CommandRule {
         &self.text
     }
 
+    /// The literal program token.
+    pub fn program(&self) -> Option<&str> {
+        self.tokens.first().map(|token| token.text.as_str())
+    }
+
     pub fn scope(&self) -> CommandRuleScope {
         if self.trailing_wildcard {
             CommandRuleScope::Prefix

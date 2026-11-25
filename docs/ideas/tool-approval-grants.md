@@ -25,9 +25,9 @@ use a workspace-local per-profile file; the exact schema is still open.
    types and roles. The user can explicitly widen the resource, select
    additional compatible tools, or share a temporary grant with more agents.
    Let the user edit the proposed rule; reject an invalid rule or one that
-   does not match the current request, with an explanation. Lifetime is chosen
+   does not match the current request, with an explanation. Scope is chosen
    per grant; a Bash dialog chooses it per row (default temporary).
-4. Preview the exact matcher, affected tools and agents, lifetime, and
+4. Preview the exact matcher, affected tools and agents, scope, and
    consequences before confirmation. For a persistent grant, also show the
    file to be written, the resolved base and scope for any path matcher, and
    any workspace marker that will be created. Warn that matching calls already
@@ -185,7 +185,7 @@ has no separate "show full command" control.
   uncovered command has a selected row, the call runs without a separate
   approve-once. Otherwise it runs once for the remainder. Deny saves nothing. A
   failed persistent save leaves the approval pending.
-- Each row has its own lifetime. A temporary grant defaults to the requesting
+- Each row has its own scope. A temporary grant defaults to the requesting
   agent instance; a persistent grant applies per profile and workspace.
 
 #### Proposing a matcher
@@ -268,7 +268,7 @@ depth limits, and it does not grant the spawned agent permission to use other
 tools. The grant's **requester** scope is separate from the type of agent being
 spawned.
 
-## Lifetime, scope, and visibility
+## Scope and visibility
 
 - Temporary grants default to the requesting agent instance. The user can
   explicitly share one with the root and its subagents, including later

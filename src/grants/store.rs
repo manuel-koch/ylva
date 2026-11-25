@@ -215,6 +215,18 @@ impl GrantStore {
         same.then_some(GrantStoreError::YlvaHome { path: marker })
     }
 
+    /// Accept the file as it is now as the content to build on, after the
+    /// user reviewed an external edit. Grants found in it stay inactive in
+    /// this run. Fails when the file cannot be read or is malformed.
+    pub fn reload_snapshot(&mut self) -> Result<(), GrantStoreError> {
+        let current = read_optional(&self.path)?;
+        if let Some(bytes) = &current {
+            parse_grants(&String::from_utf8_lossy(bytes), &self.path)?;
+        }
+        self.snapshot = current;
+        Ok(())
+    }
+
     /// Append `grant` as a `[[grants]]` entry.
     pub fn append(&mut self, grant: &Grant) -> Result<SaveOutcome, GrantStoreError> {
         if let Some(refusal) = self.refusal() {
@@ -464,6 +476,24 @@ mod tests {
             "{error}"
         );
         assert_eq!(std::fs::read_to_string(store.path()).unwrap(), edited);
+    }
+
+    #[test]
+    fn reloading_the_snapshot_accepts_a_reviewed_edit_and_keeps_it() {
+        let (_directory, root) = workspace();
+        let (mut store, _grants) = GrantStore::load(&root, "default", None).unwrap();
+        store.append(&read_grant()).unwrap();
+        let edited = "# edited\n".to_string() + &std::fs::read_to_string(store.path()).unwrap();
+        std::fs::write(store.path(), &edited).unwrap();
+        store.reload_snapshot().unwrap();
+        store
+            .append(&Grant::from_stored(GrantTool::WebSearch, None, None).unwrap())
+            .unwrap();
+        let saved = std::fs::read_to_string(store.path()).unwrap();
+        assert!(saved.starts_with("# edited"), "{saved}");
+        assert!(saved.contains("web_search"), "{saved}");
+        std::fs::write(store.path(), "grants = 1").unwrap();
+        assert!(store.reload_snapshot().is_err());
     }
 
     #[test]

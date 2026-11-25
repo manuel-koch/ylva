@@ -887,7 +887,8 @@ impl Provider for OpenAiCompatibleProvider {
                 );
             }
             let request_started_at = std::time::Instant::now();
-            let (response, request_permit) = match tracing::Instrument::instrument(
+            let request_guard = dump_context.drop_guard("chat completion", &completions_url);
+            let post_result = tracing::Instrument::instrument(
                 crate::http::post_with_retry_and_limiter(
                     &client,
                     &completions_url,
@@ -899,8 +900,9 @@ impl Provider for OpenAiCompatibleProvider {
                 // Correlates retry logs with the request/response dump files.
                 tracing::info_span!("chat_request", dump_id = %dump_id),
             )
-            .await
-            {
+            .await;
+            request_guard.finish();
+            let (response, request_permit) = match post_result {
                 Ok(response) => response,
                 Err(error) => {
                     crate::llm::token_usage::append_token_usage_record(

@@ -168,6 +168,33 @@ async fn engine_router_preserves_successful_catalogs_and_reports_partial_failure
     assert!(complete_error.to_string().contains("offline"));
 }
 
+#[tokio::test]
+async fn engine_router_keeps_healthy_catalogs_when_one_connection_hangs() {
+    let healthy: Arc<dyn Engine> = Arc::new(CatalogEngine::new("healthy", "model", &["available"]));
+    let hanging: Arc<dyn Engine> = Arc::new(CatalogEngine::hanging("hanging"));
+    let router = EngineRouter::new(
+        HashMap::from([
+            ("healthy-engine".to_string(), healthy),
+            ("hanging-engine".to_string(), hanging),
+        ]),
+        "healthy-engine",
+    )
+    .expect("router construction")
+    .with_catalog_connection_timeout(Duration::from_millis(50));
+
+    let (options, failures) = router
+        .list_model_options_with_failures()
+        .await
+        .expect("the healthy connection still lists models");
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].model.id, "available");
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0].starts_with("hanging: timed out"),
+        "{failures:?}"
+    );
+}
+
 #[test]
 fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection() {
     let engine_a = CatalogEngine::new("ollama", "shared", &[]);

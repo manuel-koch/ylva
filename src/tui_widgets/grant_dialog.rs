@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Grant dialog rendering: the proposed rules, the lifetime choice, the notes
+//! Grant dialog rendering: the proposed rules, the scope choice, the notes
 //! to read and the Confirm / Back buttons, centred over the approval prompt.
 
 use ratatui::layout::{Alignment, Rect};
@@ -21,13 +21,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::grants::GrantLifetime;
 use crate::theme::{
     approve_background_color, approve_hover_background_color, chat_scrollbar_color, content_color,
-    deny_background_color, deny_hover_background_color, help_popup_border_color,
-    help_popup_heading_color, muted_text_color,
+    deny_background_color, deny_hover_background_color, muted_text_color, popup_border_color,
+    popup_heading_color, tool_bubble_foreground_color, warning_color,
 };
-use crate::tui_reducer_state::{GrantDialogButton, GrantDialogLayout, GrantDialogState};
+use crate::tui_reducer_state::{
+    GrantDialogFocus, GrantDialogLayout, GrantDialogState, GrantRowSelection, GREATER_VALUE_GLYPH,
+    SMALLER_VALUE_GLYPH,
+};
 use crate::tui_render_state::TuiState;
 
 use super::chat::render_chat_scrollbar;
@@ -37,47 +39,17 @@ const MAXIMUM_DIALOG_WIDTH: u16 = 76;
 const CONFIRM_LABEL: &str = " [ ✓ Grant ] ";
 const BACK_LABEL: &str = " [ ← Back ] ";
 
-/// Greedy word wrap of `text` to `width` columns; never returns no lines.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let word_width = word.chars().count();
-        let current_width = current.chars().count();
-        if !current.is_empty() && current_width + 1 + word_width > width {
-            lines.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-        while current.chars().count() > width {
-            let rest: String = current.chars().skip(width).collect();
-            lines.push(current.chars().take(width).collect());
-            current = rest;
-        }
-    }
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
+const COMMAND_RULE_HINT: &str = "Use * to match one or more arguments.";
 
-fn indented(text: &str, first: &str, width: usize) -> Vec<String> {
-    let rest = " ".repeat(first.chars().count());
-    wrap(text, width.saturating_sub(first.chars().count()))
-        .into_iter()
-        .enumerate()
-        .map(|(index, line)| format!("{}{line}", if index == 0 { first } else { &rest }))
-        .collect()
+fn is_command_row(row: &crate::tui_reducer_state::GrantDialogRow) -> bool {
+    row.draft.tool.name() == crate::agent::tools::bash::BashTool::NAME
 }
 
 fn heading(text: &str) -> Line<'static> {
     Line::styled(
         text.to_string(),
         Style::default()
-            .fg(help_popup_heading_color())
+            .fg(popup_heading_color())
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -90,11 +62,20 @@ fn dialog_width(frame_width: u16) -> u16 {
     frame_width.saturating_sub(2).clamp(1, MAXIMUM_DIALOG_WIDTH)
 }
 
-/// The rule lines, the lifetime lines and the note lines of `dialog`.
-fn build_sections(
-    dialog: &GrantDialogState,
-    text_width: usize,
-) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+/// The sections of the dialog body. `row_offsets` are the indices within
+/// `rules` of the first line of each grant row.
+struct Sections {
+    rules: Vec<Line<'static>>,
+    row_offsets: Vec<usize>,
+    /// Number of lines of each row's editable rule, directly below its first line.
+    rule_line_counts: Vec<usize>,
+    /// Body line and dialog column of the caret of the rule being edited.
+    caret: Option<(usize, usize)>,
+    scopes: Vec<Line<'static>>,
+    notes: Vec<Line<'static>>,
+}
+
+fn build_sections(dialog: &GrantDialogState, text_width: usize) -> Sections {
     let plain = |text: String| Line::styled(text, Style::default().fg(content_color()));
 
     let mut rules = vec![heading(if dialog.preview.refusal.is_some() {
@@ -102,61 +83,252 @@ fn build_sections(
     } else {
         "Proposed rules:"
     })];
+    let mut row_offsets = Vec::new();
+    let mut rule_line_counts = Vec::new();
+    let mut caret = None;
     match &dialog.preview.refusal {
-        Some(reason) => rules.extend(wrap(reason, text_width).into_iter().map(plain)),
+        Some(reason) => rules.extend(
+            crate::text_wrap::wrap(reason, text_width)
+                .into_iter()
+                .map(plain),
+        ),
         None => {
-            for rule in &dialog.preview.rules {
-                rules.extend(indented(rule, "  ", text_width).into_iter().map(plain));
+            for (index, row) in dialog.rows.iter().enumerate() {
+                let focused = dialog.focused == GrantDialogFocus::Row(index);
+                let edit = dialog.editing.as_ref().filter(|edit| edit.row == index);
+                let editing = edit.is_some();
+                let rule = match &row.draft.rule {
+                    Some(rule) => rule.clone(),
+                    None => "(any call)".to_string(),
+                };
+                let name = row
+                    .draft
+                    .name
+                    .as_ref()
+                    .map(|name| format!(" {name}"))
+                    .unwrap_or_default();
+                if index > 0 {
+                    rules.push(Line::default());
+                }
+                row_offsets.push(rules.len());
+                let base = if focused {
+                    Style::default()
+                        .fg(content_color())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(content_color())
+                };
+                let value_style = if focused {
+                    base.add_modifier(Modifier::REVERSED)
+                } else {
+                    base
+                };
+                let tool_style = Style::default()
+                    .fg(tool_bubble_foreground_color())
+                    .add_modifier(if focused {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    });
+                let spans = vec![
+                    Span::styled(if focused { "▸ " } else { "  " }, base),
+                    Span::styled(row.draft.tool.name().to_string(), tool_style),
+                    Span::styled(format!("{name}  "), base),
+                    Span::styled(format!("{SMALLER_VALUE_GLYPH} "), base),
+                    Span::styled(format!("{:<10}", row.selection.label()), value_style),
+                    Span::styled(format!(" {GREATER_VALUE_GLYPH}"), base),
+                ];
+                rules.push(Line::from(spans));
+                let rule_prefix = "    ✎ ";
+                let rule_start = rules.len();
+                let rule_width = text_width.saturating_sub(rule_prefix.chars().count());
+                // While editing, characters keep their cells so the terminal
+                // cursor can sit exactly at the insertion point.
+                let rule_lines = match (edit, &row.draft.rule) {
+                    (Some(edit), Some(rule)) => {
+                        let width = rule_width.max(1);
+                        let cursor = edit.cursor.min(rule.chars().count());
+                        caret = Some((
+                            rules.len() + cursor / width,
+                            rule_prefix.chars().count() + cursor % width,
+                        ));
+                        crate::text_wrap::indent_lines(
+                            crate::text_wrap::character_wrap(rule, width),
+                            rule_prefix,
+                        )
+                    }
+                    _ => crate::text_wrap::indented(&rule, rule_prefix, text_width),
+                };
+                for (line_index, line) in rule_lines.into_iter().enumerate() {
+                    let split = rule_prefix.chars().count();
+                    let (prefix, text): (String, String) = (
+                        line.chars().take(split).collect(),
+                        line.chars().skip(split).collect(),
+                    );
+                    let mut line_spans = vec![
+                        Span::styled(prefix, Style::default().fg(muted_text_color())),
+                        Span::styled(text, base),
+                    ];
+                    if line_index == 0 && focused && !editing && row.draft.rule.is_some() {
+                        line_spans.push(Span::styled(
+                            "  enter: edit",
+                            Style::default().fg(muted_text_color()),
+                        ));
+                    }
+                    rules.push(Line::from(line_spans));
+                }
+                rule_line_counts.push(if row.draft.rule.is_some() {
+                    rules.len() - rule_start
+                } else {
+                    0
+                });
+                if editing && is_command_row(row) {
+                    rules.extend(
+                        crate::text_wrap::indented(COMMAND_RULE_HINT, "      ", text_width)
+                            .into_iter()
+                            .map(muted),
+                    );
+                }
+                if let Some(error) = dialog.row_error(index) {
+                    rules.extend(
+                        crate::text_wrap::indented(
+                            &format!("Invalid: {error}"),
+                            "      ✗ ",
+                            text_width,
+                        )
+                        .into_iter()
+                        .map(|line| Line::styled(line, Style::default().fg(warning_color()))),
+                    );
+                }
+            }
+            let already_allowed = dialog.preview.already_allowed;
+            if already_allowed > 0 {
+                let noun = if already_allowed == 1 {
+                    "command is"
+                } else {
+                    "commands are"
+                };
+                rules.extend(
+                    crate::text_wrap::indented(
+                        &format!("{already_allowed} more {noun} already allowed by policy or an existing grant."),
+                        "  ",
+                        text_width,
+                    )
+                    .into_iter()
+                    .map(muted),
+                );
+            }
+            if dialog.preview.other_parts {
+                rules.extend(
+                    crate::text_wrap::indented(
+                        "Other parts of this call can only be approved once.",
+                        "  ",
+                        text_width,
+                    )
+                    .into_iter()
+                    .map(muted),
+                );
             }
         }
     }
 
-    let radio = |lifetime: GrantLifetime, label: &str, available: bool| {
-        let selected = dialog.lifetime == lifetime;
-        let marker = if selected { "(•)" } else { "( )" };
-        let line = format!(" {marker} {label}");
-        if available {
-            let style = if selected {
-                Style::default()
-                    .fg(content_color())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(content_color())
-            };
-            Line::styled(line, style)
-        } else {
-            muted(line)
+    let mut scopes = Vec::new();
+    if dialog.preview.refusal.is_none() {
+        scopes.push(heading("Scope:"));
+        for (label, meaning) in [
+            ("one-time:", "grant for this call only"),
+            ("temporary:", "grant until the conversation is cleared"),
+            (
+                "persistent:",
+                "grant and save decision to this profile's grants.toml",
+            ),
+        ] {
+            scopes.extend(
+                crate::text_wrap::indented(meaning, &format!("  {label:<12}"), text_width)
+                    .into_iter()
+                    .map(muted),
+            );
         }
-    };
-    let persistent_available = dialog.preview.persistent_unavailable.is_none();
-    let mut lifetime_lines = vec![
-        heading("Lifetime (←/→ or t/p):"),
-        radio(
-            GrantLifetime::Temporary,
-            "Temporary: until the conversation is cleared",
-            true,
-        ),
-        radio(
-            GrantLifetime::Persistent,
-            "Persistent: saved to this profile's grants.toml",
-            persistent_available,
-        ),
-    ];
-    if let Some(reason) = &dialog.preview.persistent_unavailable {
-        lifetime_lines.extend(
-            indented(&format!("Unavailable: {reason}"), "     ", text_width)
+        if let Some(reason) = &dialog.preview.persistent_unavailable {
+            scopes.extend(
+                crate::text_wrap::indented(
+                    &format!("Persistent unavailable: {reason}"),
+                    "  ",
+                    text_width,
+                )
+                .into_iter()
+                .map(muted),
+            );
+        }
+    }
+
+    let mut notes: Vec<Line> = Vec::new();
+    if let Some(failure) = &dialog.failure {
+        notes.extend(
+            crate::text_wrap::indented(
+                &format!("Nothing was created: {}", failure.reason),
+                " ✗ ",
+                text_width,
+            )
+            .into_iter()
+            .map(|line| Line::styled(line, Style::default().fg(warning_color()))),
+        );
+        let hint = if failure.reloadable {
+            "Press r to retry with the file as it is now, change the rows, or go Back \
+             to approve once."
+        } else {
+            "Fix or change the rows and retry, or go Back to approve once."
+        };
+        notes.extend(
+            crate::text_wrap::indented(hint, "   ", text_width)
                 .into_iter()
                 .map(muted),
         );
     }
-
-    let mut notes: Vec<Line> = Vec::new();
     if dialog.preview.refusal.is_none() {
-        for warning in &dialog.preview.warnings {
-            notes.extend(indented(warning, " • ", text_width).into_iter().map(muted));
+        for warning in dialog.warnings() {
+            notes.extend(
+                crate::text_wrap::indented(&warning, " • ", text_width)
+                    .into_iter()
+                    .map(muted),
+            );
         }
     }
-    (rules, lifetime_lines, notes)
+    Sections {
+        rules,
+        row_offsets,
+        rule_line_counts,
+        caret,
+        scopes,
+        notes,
+    }
+}
+
+struct Body {
+    lines: Vec<Line<'static>>,
+    row_offsets: Vec<usize>,
+    rule_line_counts: Vec<usize>,
+    caret: Option<(usize, usize)>,
+}
+
+fn build_body(dialog: &GrantDialogState, text_width: usize) -> Body {
+    let sections = build_sections(dialog, text_width);
+    let mut lines: Vec<Line> = sections.rules;
+    if !sections.scopes.is_empty() {
+        lines.push(Line::default());
+        lines.extend(sections.scopes);
+    }
+    if !sections.notes.is_empty() {
+        lines.push(Line::default());
+        lines.push(heading("Notes:"));
+        lines.extend(sections.notes);
+    }
+    Body {
+        lines,
+        row_offsets: sections.row_offsets,
+        rule_line_counts: sections.rule_line_counts,
+        caret: sections.caret,
+    }
 }
 
 /// Fewest terminal rows the dialog is drawn in: borders, a few body rows and
@@ -186,16 +358,32 @@ pub(super) fn draw_grant_dialog(
     // One column each side for padding; the right one carries the scrollbar.
     let text_width = usize::from(width.saturating_sub(4)).max(1);
 
-    let (rules, lifetime_lines, notes) = build_sections(&dialog, text_width);
-    let mut body: Vec<Line> = rules;
-    body.push(Line::default());
-    let lifetime_top = body.len();
-    body.extend(lifetime_lines);
-    if !notes.is_empty() {
-        body.push(Line::default());
-        body.push(heading("Notes:"));
-        body.extend(notes);
+    let Body {
+        lines: mut body,
+        row_offsets,
+        rule_line_counts,
+        caret,
+    } = build_body(&dialog, text_width);
+    // Reserve the lines a persistent selection or the edit hint adds, so
+    // neither resizes the dialog.
+    let hint_in_body = dialog
+        .editing
+        .as_ref()
+        .is_some_and(|edit| dialog.rows.get(edit.row).is_some_and(is_command_row));
+    let hint_room = if !hint_in_body && dialog.rows.iter().any(is_command_row) {
+        crate::text_wrap::indented(COMMAND_RULE_HINT, "      ", text_width).len()
+    } else {
+        0
+    };
+    let mut reserved = body.len() + hint_room;
+    if dialog.preview.persistent_unavailable.is_none() {
+        let mut worst_case = dialog.clone();
+        for row in &mut worst_case.rows {
+            row.selection = GrantRowSelection::Persistent;
+        }
+        reserved = reserved.max(build_body(&worst_case, text_width).lines.len() + hint_room);
     }
+    body.resize(reserved, Line::default());
     let height = (body.len() as u16 + 3).min(area.height);
     let body_rows = usize::from(height - 3);
     let maximum_scroll = body.len().saturating_sub(body_rows);
@@ -210,7 +398,7 @@ pub(super) fn draw_grant_dialog(
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(help_popup_border_color()))
+        .border_style(Style::default().fg(popup_border_color()))
         .title(" Grant similar calls ");
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -243,6 +431,15 @@ pub(super) fn draw_grant_dialog(
         );
     }
 
+    if let Some((body_line, column)) = caret {
+        let visible_line = body_line
+            .checked_sub(scroll)
+            .filter(|line| *line < body_rows);
+        if let (Some(line), true) = (visible_line, column < usize::from(body_area.width)) {
+            frame.set_cursor_position((body_area.x + column as u16, body_area.y + line as u16));
+        }
+    }
+
     let row_rect =
         |body_row: usize| match body_row.checked_sub(scroll).filter(|row| *row < body_rows) {
             Some(row) => Rect::new(body_area.x, body_area.y + row as u16, body_area.width, 1),
@@ -262,8 +459,17 @@ pub(super) fn draw_grant_dialog(
 
     state.grant_dialog_layout = GrantDialogLayout {
         rect,
-        temporary_row: row_rect(lifetime_top + 1),
-        persistent_row: row_rect(lifetime_top + 2),
+        rules: row_offsets
+            .iter()
+            .zip(&rule_line_counts)
+            .map(|(offset, count)| {
+                (0..*count)
+                    .map(|line| row_rect(offset + 1 + line))
+                    .filter(|area| !area.is_empty())
+                    .collect()
+            })
+            .collect(),
+        rows: row_offsets.into_iter().map(row_rect).collect(),
         confirm_button,
         back_button,
         maximum_scroll,
@@ -285,7 +491,7 @@ fn draw_buttons(
             approve_background_color(),
             approve_hover_background_color(),
             hovered(confirm),
-            dialog.focused == GrantDialogButton::Confirm,
+            dialog.focused == GrantDialogFocus::Confirm,
         )
     } else {
         Style::default().fg(muted_text_color())
@@ -294,7 +500,7 @@ fn draw_buttons(
         deny_background_color(),
         deny_hover_background_color(),
         hovered(back),
-        dialog.focused == GrantDialogButton::Back,
+        dialog.focused == GrantDialogFocus::Back,
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(CONFIRM_LABEL, confirm_style))),
@@ -309,28 +515,74 @@ fn draw_buttons(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui_reducer_state::GrantDialogRow;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use uuid::Uuid;
 
     fn dialog(
-        warnings: usize,
+        notes: usize,
         persistent_unavailable: Option<&str>,
         refusal: Option<&str>,
     ) -> GrantDialogState {
-        GrantDialogState {
-            preview: crate::agent::GrantPreview {
-                id: Uuid::new_v4(),
-                rules: vec!["bash 'make test'".to_string()],
-                refusal: refusal.map(str::to_string),
-                warnings: (0..warnings)
-                    .map(|index| format!("Warning number {index} with some words to wrap"))
+        let command = |words: &[&str]| crate::grants::CommandStatement::Command {
+            command: crate::grants::CommandSubject {
+                tokens: words
+                    .iter()
+                    .map(|word| crate::grants::CommandToken::new(*word, false))
                     .collect(),
-                persistent_unavailable: persistent_unavailable.map(str::to_string),
+                has_unquoted_expansion: false,
+                has_variable_assignment_prefix: false,
             },
-            lifetime: GrantLifetime::Temporary,
-            focused: GrantDialogButton::Confirm,
+            policy_approved: false,
+        };
+        let draft = |rule: &str| crate::grants::GrantDraft {
+            tool: crate::grants::GrantTool::Bash,
+            name: None,
+            rule: Some(rule.to_string()),
+        };
+        // Many rules make the body long, so a short terminal has to scroll.
+        let rules: Vec<_> = (0..notes.max(1))
+            .map(|index| {
+                if index == 0 {
+                    "make test".to_string()
+                } else {
+                    format!("tool{index} run")
+                }
+            })
+            .collect();
+        let statements = rules
+            .iter()
+            .map(|rule| command(&rule.split(' ').collect::<Vec<_>>()))
+            .collect();
+        let preview = crate::agent::GrantPreview {
+            id: Uuid::new_v4(),
+            rows: rules.iter().map(|rule| draft(rule)).collect(),
+            already_allowed: 2,
+            other_parts: true,
+            refusal: refusal.map(str::to_string),
+            persistent_unavailable: persistent_unavailable.map(str::to_string),
+            marker_to_create: None,
+            subjects: crate::grants::GrantSubjects::Commands(statements),
+            workspace_root: std::path::PathBuf::from("/work"),
+        };
+        let rows = preview
+            .rows
+            .iter()
+            .map(|draft| GrantDialogRow {
+                draft: draft.clone(),
+                selection: GrantRowSelection::Temporary,
+            })
+            .collect();
+        GrantDialogState {
+            preview,
+            rows,
+            focused: GrantDialogFocus::Confirm,
+            editing: None,
+            failure: None,
+            awaiting_answer: false,
             scroll_offset: 0,
+            rule_click: Default::default(),
         }
     }
 
@@ -354,22 +606,132 @@ mod tests {
     }
 
     #[test]
-    fn the_dialog_shows_rules_lifetimes_notes_and_buttons_with_hit_areas() {
-        let (text, layout) = render(80, 24, dialog(2, None, None));
+    fn the_dialog_shows_rows_selections_footnotes_and_buttons_with_hit_areas() {
+        let (text, layout) = render(90, 30, dialog(2, None, None));
         assert_eq!(layout.maximum_scroll, 0);
         for expected in [
-            "bash 'make test'",
-            "Temporary",
-            "Persistent",
+            "temporary",
+            "◂ temporary",
+            "✎ make test",
+            "2 more commands are already allowed",
+            "Other parts of this call can only be approved once.",
             "Notes:",
             "Grant ]",
             "Back ]",
         ] {
             assert!(text.contains(expected), "{expected}: {text}");
         }
+        assert_eq!(layout.rows.len(), 2);
+        assert!(layout.rows[0].y < layout.rows[1].y);
+        assert!(layout.rows[1].y < layout.confirm_button.y);
         assert!(!layout.confirm_button.is_empty() && !layout.back_button.is_empty());
-        assert!(layout.temporary_row.y < layout.persistent_row.y);
-        assert!(layout.persistent_row.y < layout.confirm_button.y);
+    }
+
+    #[test]
+    fn the_already_allowed_sentence_wraps_on_a_narrow_dialog() {
+        let (text, _) = render(40, 40, dialog(2, None, None));
+        assert!(text.contains("2 more commands are already"), "{text}");
+        assert!(text.contains("allowed by policy or an existing"), "{text}");
+    }
+
+    #[test]
+    fn editing_a_command_rule_hints_at_the_wildcard_without_resizing() {
+        let (idle_text, idle) = render(90, 40, dialog(2, None, None));
+        assert!(!idle_text.contains("Use * to match"), "{idle_text}");
+        let mut editing = dialog(2, None, None);
+        editing.editing = Some(crate::tui_reducer_state::GrantRowEdit {
+            row: 0,
+            cursor: 0,
+            original: editing.rows[0].draft.rule.clone(),
+        });
+        let (text, edited) = render(90, 40, editing);
+        assert!(
+            text.contains("Use * to match one or more arguments."),
+            "{text}"
+        );
+        assert_eq!(idle.rect.height, edited.rect.height);
+    }
+
+    #[test]
+    fn the_terminal_cursor_sits_at_the_caret_without_shifting_the_rule() {
+        let mut editing = dialog(1, None, None);
+        let rule = editing.rows[0].draft.rule.clone().unwrap();
+        editing.editing = Some(crate::tui_reducer_state::GrantRowEdit {
+            row: 0,
+            cursor: 2,
+            original: Some(rule.clone()),
+        });
+        let mut state = TuiState::new();
+        state.grant_dialog = Some(editing);
+        let mut terminal = Terminal::new(TestBackend::new(90, 40)).expect("terminal");
+        terminal
+            .draw(|frame| draw_grant_dialog(frame, &mut state, None))
+            .expect("draw");
+        let cursor = terminal.get_cursor_position().expect("cursor");
+        let buffer = terminal.backend().buffer();
+        let cells: Vec<String> = (0..90)
+            .map(|x| buffer[(x, cursor.y)].symbol().to_string())
+            .collect();
+        let start = cells
+            .windows(rule.chars().count())
+            .position(|window| window.concat() == rule)
+            .expect("rule is drawn unbroken") as u16;
+        assert_eq!(cursor.x, start + 2);
+    }
+
+    #[test]
+    fn a_long_rule_being_edited_wraps_by_character_and_keeps_the_caret_on_screen() {
+        let mut editing = dialog(1, None, None);
+        editing.rows[0].draft.rule = Some("make ".repeat(20).trim_end().to_string());
+        let length = editing.rows[0].draft.rule.as_ref().unwrap().chars().count();
+        editing.editing = Some(crate::tui_reducer_state::GrantRowEdit {
+            row: 0,
+            cursor: length,
+            original: None,
+        });
+        let mut state = TuiState::new();
+        state.grant_dialog = Some(editing);
+        let mut terminal = Terminal::new(TestBackend::new(40, 40)).expect("terminal");
+        terminal
+            .draw(|frame| draw_grant_dialog(frame, &mut state, None))
+            .expect("draw");
+        let cursor = terminal.get_cursor_position().expect("cursor");
+        let layout = &state.grant_dialog_layout;
+        let last_rule_line = layout.rules[0].last().expect("rule lines");
+        assert_eq!(cursor.y, last_rule_line.y);
+    }
+
+    #[test]
+    fn the_rule_lines_of_each_row_are_hit_areas() {
+        let (_, layout) = render(90, 40, dialog(2, None, None));
+        assert_eq!(layout.rules.len(), 2);
+        assert!(layout.rules.iter().all(|areas| !areas.is_empty()));
+        assert_eq!(layout.rules[0][0].y, layout.rows[0].y + 1);
+    }
+
+    #[test]
+    fn changing_a_selection_does_not_resize_the_dialog() {
+        let (_, temporary) = render(90, 40, dialog(2, None, None));
+        let mut persistent = dialog(2, None, None);
+        persistent.rows[0].selection = GrantRowSelection::Persistent;
+        let (_, resized) = render(90, 40, persistent);
+        assert_eq!(temporary.rect.height, resized.rect.height);
+    }
+
+    #[test]
+    fn an_invalid_edit_and_a_failure_are_explained() {
+        let mut edited = dialog(1, None, None);
+        edited.rows[0].draft.rule = Some("git push".to_string());
+        edited.rows[0].selection = GrantRowSelection::OneTime;
+        edited.failure = Some(crate::tui_reducer_state::GrantFailure {
+            reason: "file changed".to_string(),
+            reloadable: true,
+        });
+        let (text, _) = render(90, 30, edited);
+        assert!(text.contains("Invalid:"), "{text}");
+        assert!(text.contains("one-time"), "{text}");
+        assert!(text.contains("Nothing was created: file changed"), "{text}");
+        assert!(text.contains("Press r"), "{text}");
     }
 
     #[test]
@@ -378,12 +740,14 @@ mod tests {
         let (text, layout) = render(40, 9, long.clone());
         assert!(!layout.confirm_button.is_empty(), "{text}");
         assert!(layout.maximum_scroll > 0, "{text}");
-        assert!(!text.contains("Notes:"), "{text}");
         long.scroll_offset = usize::MAX;
         let (text, layout) = render(40, 9, long);
-        assert!(text.contains("Warning number 5"), "{text}");
         assert!(!layout.confirm_button.is_empty(), "{text}");
-        assert!(layout.temporary_row.is_empty());
+        assert!(
+            text.contains("Persistent unavailable") || text.contains("Notes"),
+            "{text}"
+        );
+        assert!(layout.rows.iter().all(|row| row.is_empty()));
         let (_, layout) = render(
             40,
             grant_dialog_required_height() - 1,
@@ -397,12 +761,5 @@ mod tests {
         let (text, _) = render(80, 24, dialog(1, None, Some("approve it once")));
         assert!(text.contains("Cannot be granted:") && text.contains("approve it once"));
         assert!(!text.contains("Proposed rules:"));
-    }
-
-    #[test]
-    fn wrap_breaks_at_words_and_splits_overlong_words() {
-        assert_eq!(wrap("aa bb cc", 5), vec!["aa bb", "cc"]);
-        assert_eq!(wrap("abcdefg", 3), vec!["abc", "def", "g"]);
-        assert_eq!(wrap("", 3), vec![String::new()]);
     }
 }

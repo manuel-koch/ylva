@@ -557,29 +557,29 @@ resuming a session.
 After `[ ✓ Apply ]`, `[ Save… ]` opens the *save page*, which persists the draft as a named engine
 (`[engines.<name>]`) in the profile file Ylva loaded at startup; there is no destination choice.
 Rows of an explicit engine offer *Create new engine* (copies the origin's table without credentials)
-or *Update engine*; raw catalog rows offer creation only, with the model as the suggested name. New
-names must be slugs (letters, digits, `-`, `_`, `.`, `/`) and may not collide with any engine in
-use, explicit or implicit. The page previews the engine table that will be written (an update shows
-the changed lines with their old values), the destination file, and any re-trust guidance, as
-read-only text in the info area below the controls (next to the compaction and model details). The
-controls always get their rows first; the info area takes the remaining height (at least three rows)
-and scrolls with the mouse wheel (with a scrollbar) when it is longer. In the model list the info
-area scrolls the same way. Only parameters you changed are written: untouched context/output limits
-stay unset and a provider-default effort stays default. The engine refers to a
-`[provider_connections.*]` table of the same file and never copies endpoints or credentials; without
-such a table, or without a profile file, the page shows setup guidance instead of saving. Focus
-starts on the name; `enter` only commits on a focused `[ Save ]` or `[ Save & apply ]` button,
-`←`/`→` switch the mode (on the name field they move the caret). The save buttons are disabled,
-skipped by tab and explained by a `✗` line while the new name is empty, invalid, reserved
-(`default`) or already in use. `esc` returns to the parameters page with the draft intact (a second
-`esc` discards it). Saving a new engine keeps the active engine unchanged and makes it available in
-the picker and `/models` of the running session; `[ Save & apply ]` also activates it and closes the
-picker. A workspace profile that changed needs re-trusting before the next launch (the notice says
-how; trust is never modified). Updating the engine that is currently active takes effect in the
-running session right away (the next request uses the saved settings, like a `/models` switch);
-updating any other engine applies to new sessions and the next launch. Edits to the file made
-outside Ylva after startup stop further saves until Ylva is restarted. Action buttons share a row
-while they fit the popup width and wrap onto further rows when they do not.
+or *Update engine* through a `◂ value ▸` mode selector; raw catalog rows offer creation only, with
+the model as the suggested name. New names must be slugs (letters, digits, `-`, `_`, `.`, `/`) and
+may not collide with any engine in use, explicit or implicit. The page previews the engine table
+that will be written (an update shows the changed lines with their old values), the destination
+file, and any re-trust guidance, as read-only text in the info area below the controls (next to the
+compaction and model details). The controls always get their rows first; the info area takes the
+remaining height (at least three rows) and scrolls with the mouse wheel (with a scrollbar) when it
+is longer. In the model list the info area scrolls the same way. Only parameters you changed are
+written: untouched context/output limits stay unset and a provider-default effort stays default. The
+engine refers to a `[provider_connections.*]` table of the same file and never copies endpoints or
+credentials; without such a table, or without a profile file, the page shows setup guidance instead
+of saving. Focus starts on the name; `enter` only commits on a focused `[ Save ]` or
+`[ Save & apply ]` button, `←`/`→` switch the mode (on the name field they move the caret). The save
+buttons are disabled, skipped by tab and explained by a `✗` line while the new name is empty,
+invalid, reserved (`default`) or already in use. `esc` returns to the parameters page with the draft
+intact (a second `esc` discards it). Saving a new engine keeps the active engine unchanged and makes
+it available in the picker and `/models` of the running session; `[ Save & apply ]` also activates
+it and closes the picker. A workspace profile that changed needs re-trusting before the next launch
+(the notice says how; trust is never modified). Updating the engine that is currently active takes
+effect in the running session right away (the next request uses the saved settings, like a `/models`
+switch); updating any other engine applies to new sessions and the next launch. Edits to the file
+made outside Ylva after startup stop further saves until Ylva is restarted. Action buttons share a
+row while they fit the popup width and wrap onto further rows when they do not.
 
 A "Switched to…" notice for a `/models` switch made while a turn is running waits below the live
 response and joins the transcript when the next request starts, where the switch took effect. A
@@ -1432,19 +1432,38 @@ and the [trust command](cli-options.md#trust-command).
 
 When a tool call needs approval, the TUI footer offers a *Grant…* button next to *Approve* and
 *Deny*. It is always shown; on a terminal too narrow for the decorated labels the three buttons use
-compact labels. *Grant…* opens a second page showing the proposed rules (read-only), a lifetime
-choice (*Temporary* or *Persistent*), notes about the consequences (file-modifying tools, trailing
-`*`, wider rules, environment and working directory not matched, the `.ylva` directory a save would
-create, the need for `ylva trust`) and *Grant* / *Back*. The page scrolls (mouse wheel,
-`pgup`/`pgdn`/`home`/`end`) when it does not fit, with a scrollbar and pinned buttons. On a terminal
-under 7 rows the dialog is not drawn and the footer shows a bold red hint (`esc` still goes back).
-*Grant* approves the pending call and creates the narrowest grant covering it: the exact resolved
-path (`read`, `write`, `edit`, `search`, `glob`), the skill name and source (`load_skill`), the
-scheme, host and port (`web_fetch`), the tool itself (`web_search`, `spawn_subagent`), or one rule
-per simple command of a `bash` call. A notice shows what was granted. A call that cannot be granted
-(for example `python -c`, a pipeline with a subshell or a destructive wildcard) shows the reason on
-the second page and can only be approved once. A grant that fails to save leaves the approval
-pending and reports a notice.
+compact labels. *Grant…* opens a second page with one row per proposed grant. Each row shows a value
+selector like the model parameters (`◂ temporary ▸`; `←`/`→` cycle `one-time`, `temporary`,
+`persistent`; default `temporary`), the tool and an editable rule (`enter` or a double-click edits
+it), separated by blank lines: the exact resolved path (`read`, `write`, `edit`, `search`, `glob`),
+the skill name and source (`load_skill`), the scheme, host and port (`web_fetch`), the tool itself
+(`web_search`, `spawn_subagent`), or one rule per simple command of a `bash` call. For `bash`,
+commands already allowed by policy or an existing grant get no row and are counted as "N more
+commands are already allowed"; parts that can only be approved once (subshells, heredocs,
+`python -c`, destructive wildcards, …) get no row and are explained by the footnote "Other parts of
+this call can only be approved once.". Below the rows, notes name the consequences of the selected
+rows (file-modifying tools, trailing `*`, wider rules, environment and working directory not
+matched, the `.ylva` directory a save would create, the need for `ylva trust`); the dialog reserves
+the room of the persistent notes so changing a selection never resizes it. The page scrolls (mouse
+wheel, `pgup`/`pgdn`/`home`/`end`) when it does not fit, with a scrollbar and pinned buttons. On a
+terminal under 7 rows the dialog is not drawn and the footer shows a bold red hint (`esc` still goes
+back).
+
+Editing a rule validates it live with the same parsers the agent uses: it must be a valid rule and
+match a part of the pending call that policy does not already approve (a `bash` rule keeps the
+program of the command and `make test` cannot become `make test *`, widen it as `make *`). An
+invalid row shows its error and keeps *Grant* disabled while it is selected; *Esc* restores the
+previous rule. *Grant* needs at least one row that is not `one-time`. It approves the pending call
+and creates the selected grants (persistent ones are saved first, so a failed save adds nothing
+temporary). A notice shows what was granted. A call without any grantable part shows the reason on
+the second page and can only be approved once. Rows left `one-time` and ungrantable parts of the
+call are not covered; the call itself still runs once as approved.
+
+If creating the grants fails (a rejected rule, a save refused, `grants.toml` changed behind Ylva's
+back), the dialog stays open and shows the reason: *Grant* retries (after changing the rows if
+wanted), `r` retries after reloading a `grants.toml` that changed on disk (only offered for that
+failure; the reviewed content is kept, the grants found in it stay inactive in this run), and *Back*
+returns to the prompt to approve once. The approval stays pending throughout.
 
 - *Temporary* grants are in memory: in memory, shared by the root conversation
   and its subagents until `/clear` or a session switch.
@@ -1457,11 +1476,8 @@ pending and reports a notice.
 - A grant added while an approval is pending releases every pending call it
   covers, also in other conversations.
 
-The grant dialog with an editable rule, tool checklist and preview described in
-the plan is not implemented; grants are created from the proposed rule. Edit
-`grants.toml` to widen or narrow a rule. See
-[grant configuration](configuration.md#tool-approval-grants) for the file
-format and matching rules.
+See [grant configuration](configuration.md#tool-approval-grants) for the file format and
+matching rules.
 
 ### Layered global persona and initialization
 

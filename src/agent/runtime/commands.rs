@@ -33,12 +33,20 @@ impl RunState {
         }
     }
 
-    /// The grants proposed for the pending `call` and the state that holds them.
-    fn proposed_grants(
+    /// The grant context of the pending `call`: its tool, subjects and the
+    /// shared state that holds grants.
+    fn grant_context(
         &self,
         pending: &PendingTool,
-    ) -> Result<(Vec<crate::grants::Grant>, &crate::grants::SharedGrantState), String> {
-        use crate::grants::{propose_grants, GrantTool};
+    ) -> Result<
+        (
+            crate::grants::GrantTool,
+            crate::grants::GrantSubjects,
+            &crate::grants::SharedGrantState,
+        ),
+        String,
+    > {
+        use crate::grants::GrantTool;
         let grant_state = self
             .registry
             .grant_state()
@@ -48,13 +56,11 @@ impl RunState {
         let grant_tool = GrantTool::from_name(name)
             .filter(|_| !tool.requires_human_interaction())
             .ok_or("this tool cannot be granted; approve it once")?;
-        let grants = propose_grants(
+        Ok((
             grant_tool,
-            &tool.grant_subjects(pending.call.arguments()),
-            grant_state.workspace_root(),
-        )
-        .map_err(|error| error.to_string())?;
-        Ok((grants, grant_state))
+            tool.grant_subjects(pending.call.arguments()),
+            grant_state,
+        ))
     }
 
     /// Publishes what a grant for the pending front call `id` would contain,
@@ -69,19 +75,40 @@ impl RunState {
         };
         let mut preview = crate::agent::GrantPreview {
             id,
-            rules: Vec::new(),
+            rows: Vec::new(),
+            already_allowed: 0,
+            other_parts: false,
             refusal: None,
-            warnings: Vec::new(),
             persistent_unavailable: None,
+            marker_to_create: None,
+            subjects: crate::grants::GrantSubjects::NotGrantable,
+            workspace_root: std::path::PathBuf::new(),
         };
-        match self.proposed_grants(front) {
-            Ok((grants, grant_state)) => {
-                preview.rules = grants.iter().map(crate::grants::describe_grant).collect();
-                preview.warnings = crate::grants::grant_warnings(
-                    &grants,
-                    grant_state.marker_to_create().as_deref(),
-                );
+        let proposal = self
+            .grant_context(front)
+            .and_then(|(tool, subjects, state)| {
+                let proposal = crate::grants::propose_grants(
+                    tool,
+                    &subjects,
+                    state.workspace_root(),
+                    &|command| state.covers_command(command),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok((proposal, subjects, state))
+            });
+        match proposal {
+            Ok((proposal, subjects, grant_state)) => {
+                preview.rows = proposal
+                    .grants
+                    .iter()
+                    .map(crate::grants::GrantDraft::of)
+                    .collect();
+                preview.already_allowed = proposal.already_allowed;
+                preview.other_parts = proposal.other_parts;
                 preview.persistent_unavailable = grant_state.persistence_unavailable();
+                preview.marker_to_create = grant_state.marker_to_create();
+                preview.subjects = subjects;
+                preview.workspace_root = grant_state.workspace_root().to_path_buf();
             }
             Err(reason) => preview.refusal = Some(reason),
         }
@@ -94,43 +121,119 @@ impl RunState {
             .await;
     }
 
-    /// Creates the grants proposed for the pending front call `id` and returns
-    /// the approval to run. Returns `None` after publishing a notice when the
-    /// call is not the front call, cannot be granted, or saving failed; the
-    /// call then stays pending.
+    /// Validates `requests` against the pending front call `id`, creates the
+    /// grants and returns the approval to run. Returns `None` after
+    /// publishing the reason when the call is not the front call, a request
+    /// is invalid, or saving failed; the call then stays pending. Persistent
+    /// grants are saved before any temporary grant is added.
     async fn grant_pending_call(
         &mut self,
         id: uuid::Uuid,
-        lifetime: crate::grants::GrantLifetime,
+        requests: Vec<crate::grants::GrantRequest>,
+        reload_snapshot: bool,
     ) -> Option<AgentCommand> {
-        use crate::grants::GrantLifetime;
-        let front = self.pending_tools.front()?;
-        if self.mode != AgentMode::ToolPending || front.call.id() != id {
-            return None;
-        }
-        let outcome = (|| -> Result<String, String> {
-            let (grants, grant_state) = self.proposed_grants(front)?;
-            let mut summary = Vec::new();
-            for grant in grants {
-                summary.push(crate::grants::describe_grant(&grant));
-                match lifetime {
-                    GrantLifetime::Temporary => grant_state.add_temporary(grant),
-                    GrantLifetime::Persistent => {
-                        grant_state
-                            .add_persistent(grant)
-                            .map_err(|error| error.to_string())?;
-                    }
-                }
+        use crate::grants::{GrantScope, GrantStoreError};
+        let front = self
+            .pending_tools
+            .front()
+            .filter(|front| front.call.id() == id);
+        let outcome = (|| -> Result<String, (String, bool)> {
+            let front = front
+                .filter(|_| self.mode == AgentMode::ToolPending)
+                .ok_or((
+                    "the call is no longer waiting for approval".to_string(),
+                    false,
+                ))?;
+            let (tool, subjects, grant_state) =
+                self.grant_context(front).map_err(|e| (e, false))?;
+            if requests.is_empty() {
+                return Err(("no grant was selected".to_string(), false));
             }
-            Ok(summary.join(", "))
+            let mut validated = Vec::new();
+            for request in &requests {
+                if request.draft.tool != tool {
+                    return Err((
+                        "a grant must be for the tool of the pending call".to_string(),
+                        false,
+                    ));
+                }
+                let grant = crate::grants::validate_draft(
+                    &request.draft,
+                    &subjects,
+                    grant_state.workspace_root(),
+                )
+                .map_err(|error| (error.to_string(), false))?;
+                validated.push((grant, request.scope));
+            }
+            let has_persistent = validated
+                .iter()
+                .any(|(_, scope)| *scope == GrantScope::Persistent);
+            if has_persistent && reload_snapshot {
+                grant_state
+                    .reload_snapshot()
+                    .map_err(|error| (error.to_string(), false))?;
+            }
+            let describe = |scope: GrantScope| {
+                validated
+                    .iter()
+                    .filter(|(_, candidate)| *candidate == scope)
+                    .map(|(grant, _)| crate::grants::describe_grant(grant))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            for (saved, (grant, _)) in validated
+                .iter()
+                .filter(|(_, scope)| *scope == GrantScope::Persistent)
+                .enumerate()
+            {
+                grant_state.add_persistent(grant.clone()).map_err(|error| {
+                    let mut reason = error.to_string();
+                    if saved > 0 {
+                        reason.push_str(&format!(" ({saved} grant(s) were already saved)"));
+                    }
+                    (
+                        reason,
+                        matches!(error, GrantStoreError::ExternalEdit { .. }),
+                    )
+                })?;
+            }
+            for (grant, _) in validated
+                .iter()
+                .filter(|(_, scope)| *scope == GrantScope::Temporary)
+            {
+                grant_state.add_temporary(grant.clone());
+            }
+            let mut texts = Vec::new();
+            if has_persistent {
+                texts.push(format!(
+                    "Saved grant {} to grants.toml. The changed file needs `ylva trust` before \
+                     the next start.",
+                    describe(GrantScope::Persistent)
+                ));
+            }
+            if validated
+                .iter()
+                .any(|(_, scope)| *scope == GrantScope::Temporary)
+            {
+                texts.push(format!(
+                    "Granted {} until the conversation is cleared.",
+                    describe(GrantScope::Temporary)
+                ));
+            }
+            Ok(texts.join(" "))
         })();
-        let text = match outcome {
-            Ok(summary) if lifetime == GrantLifetime::Persistent => format!(
-                "Saved grant {summary} to grants.toml. The changed file needs `ylva trust` \
-                 before the next start."
-            ),
-            Ok(summary) => format!("Granted {summary} until the conversation is cleared."),
-            Err(reason) => {
+        match outcome {
+            Ok(text) => {
+                let _ = self
+                    .ui_tx
+                    .send(UiUpdate::Notice {
+                        text,
+                        run_id: self.own_run_id,
+                    })
+                    .await;
+                Some(AgentCommand::ApproveTool { id })
+            }
+            Err((reason, reloadable)) => {
                 let _ = self
                     .ui_tx
                     .send(UiUpdate::Notice {
@@ -138,17 +241,18 @@ impl RunState {
                         run_id: self.own_run_id,
                     })
                     .await;
-                return None;
+                let _ = self
+                    .ui_tx
+                    .send(UiUpdate::GrantFailed {
+                        id,
+                        reason,
+                        reloadable,
+                        run_id: self.own_run_id,
+                    })
+                    .await;
+                None
             }
-        };
-        let _ = self
-            .ui_tx
-            .send(UiUpdate::Notice {
-                text,
-                run_id: self.own_run_id,
-            })
-            .await;
-        Some(AgentCommand::ApproveTool { id })
+        }
     }
 
     /// Temporary grants belong to the running conversation: a cleared or
@@ -253,12 +357,14 @@ impl RunState {
             return LoopControl::PollAgain;
         }
         let cmd = match cmd {
-            AgentCommand::GrantAndApprove { id, lifetime } => {
-                match self.grant_pending_call(id, lifetime).await {
-                    Some(approval) => approval,
-                    None => return LoopControl::PollAgain,
-                }
-            }
+            AgentCommand::GrantAndApprove {
+                id,
+                requests,
+                reload_snapshot,
+            } => match self.grant_pending_call(id, requests, reload_snapshot).await {
+                Some(approval) => approval,
+                None => return LoopControl::PollAgain,
+            },
             other => other,
         };
         match cmd {

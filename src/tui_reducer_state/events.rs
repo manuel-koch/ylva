@@ -405,12 +405,14 @@ pub enum Effect {
     RequestGrantPreview {
         id: Uuid,
     },
-    /// Send `AgentCommand::GrantAndApprove { id, lifetime }`: the agent saves
-    /// grants for similar calls and approves the call. The prompt stays until
-    /// the agent starts the call, so a refused grant leaves it pending.
+    /// Send `AgentCommand::GrantAndApprove`: the agent validates the selected
+    /// rows, saves grants for similar calls and approves the call. The prompt
+    /// stays until the agent starts the call, so a refused grant leaves it
+    /// pending.
     GrantTool {
         id: Uuid,
-        lifetime: crate::grants::GrantLifetime,
+        requests: Vec<crate::grants::GrantRequest>,
+        reload_snapshot: bool,
     },
     /// Send `AgentCommand::DenyTool { id, reason }` to the agent.
     /// `reason` is the user-typed denial text; empty when no reason was given.

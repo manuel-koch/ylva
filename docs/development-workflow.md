@@ -9,11 +9,16 @@ threshold, so running `make test` in addition is redundant and is not required.
 When dependencies change (`Cargo.toml` or `Cargo.lock`), also run `make audit`
 (see [Dependency audit](#dependency-audit)).
 
+The [styleguide](./styleguide.md) is authoritative for the UX/UI of TUI elements and,
+where applicable, the CLI. Code changes that add or alter such elements follow it.
+A deliberate deviation updates the styleguide in the same commit.
+
 For new features come up with appropriate test case(s) to verify them.
 
-Bugfixes MUST add or strengthen a test that fails before the fix and passes after.
+Bugfixes MUST add or strengthen a test that fails before the fix and passes after ( RED before
+GREEN ).
 
-If test runs exhibit flaky results/errors, the tests must fixed immediately,
+If test runs exhibit flaky results/errors, the tests must be fixed immediately,
 don't postpone fixing (pre-existing) flaky tests!
 
 Coverage threshold: **≥80% aggregate line coverage** is enforced by

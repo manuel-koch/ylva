@@ -21,7 +21,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::model_picker::{ModelParameterEdit, ParameterField, SlashOverlay};
+use super::model_picker::{
+    ModelParameterEdit, ParameterField, SlashOverlay, GREATER_VALUE_GLYPH, SMALLER_VALUE_GLYPH,
+};
 use super::{AppState, Effect};
 use crate::config::{
     validate_engine_name, EngineSaveChange, EngineSaveMode, EngineSaveRequest, DEFAULT_PROFILE_NAME,
@@ -124,7 +126,8 @@ pub struct EngineSaveForm {
     pub name_problem: Option<String>,
 }
 
-const NAME_ROW_PREFIX: &str = "Name:  ";
+/// The pen marks the name as editable; an updated engine keeps its name.
+const NAME_ROW_PREFIX: &str = "Name:  ✎ ";
 
 /// Number of fixed button rows at the end of [`EngineSaveForm::entries`].
 pub const ENGINE_SAVE_BUTTON_COUNT: usize = 2;
@@ -155,10 +158,12 @@ impl EngineSaveForm {
         let mut entries = Vec::new();
         entries.push(match (&self.origin_name, self.update) {
             (Some(origin), true) => {
-                format!("Mode:  [ ] Create new engine   [X] Update engine '{origin}'")
+                format!(
+                    "Mode:  {SMALLER_VALUE_GLYPH} Update engine '{origin}' {GREATER_VALUE_GLYPH}"
+                )
             }
-            (Some(origin), false) => {
-                format!("Mode:  [X] Create new engine   [ ] Update engine '{origin}'")
+            (Some(_), false) => {
+                format!("Mode:  {SMALLER_VALUE_GLYPH} Create new engine {GREATER_VALUE_GLYPH}")
             }
             (None, _) => "Mode:  Create new engine".to_string(),
         });
@@ -437,6 +442,33 @@ impl AppState {
             (current + 1) % stops.len()
         };
         form.focus = stops[next];
+    }
+
+    /// Move focus over the Mode and Name rows only, without wrapping and
+    /// without reaching the buttons. From a button, `up` returns to the last row.
+    pub fn move_engine_save_row_focus(&mut self, backwards: bool) {
+        let Some(form) = self.engine_save_form_mut() else {
+            return;
+        };
+        let rows: Vec<EngineSaveFocus> = form
+            .focus_stops()
+            .into_iter()
+            .filter(|stop| matches!(stop, EngineSaveFocus::Mode | EngineSaveFocus::Name))
+            .collect();
+        let Some(current) = rows.iter().position(|row| *row == form.focus) else {
+            if backwards {
+                if let Some(last) = rows.last() {
+                    form.focus = *last;
+                }
+            }
+            return;
+        };
+        let next = if backwards {
+            current.saturating_sub(1)
+        } else {
+            (current + 1).min(rows.len() - 1)
+        };
+        form.focus = rows[next];
     }
 
     /// Focus a control directly (mouse click). Ignored when it is not a stop.

@@ -92,7 +92,12 @@ pub enum AgentCommand {
     /// the agent publishes a notice and the call stays pending.
     GrantAndApprove {
         id: Uuid,
-        lifetime: crate::grants::GrantLifetime,
+        /// The rows the user selected, possibly edited; the agent validates
+        /// each against the pending call.
+        requests: Vec<crate::grants::GrantRequest>,
+        /// Accept the current content of `grants.toml` as the base to save
+        /// into, after an external edit was reviewed.
+        reload_snapshot: bool,
     },
     /// Ask what a grant for the pending call `id` would contain; answered
     /// with `UiUpdate::GrantPreview`. Nothing is created.
@@ -211,14 +216,19 @@ pub(super) fn log_agent_command(
                 "agent command received"
             );
         }
-        AgentCommand::GrantAndApprove { id, lifetime } => {
+        AgentCommand::GrantAndApprove {
+            id,
+            requests,
+            reload_snapshot,
+        } => {
             tracing::debug!(
                 command = command_name,
                 ?mode,
                 has_stream,
                 has_tool,
                 tool_call_id = %id,
-                lifetime = lifetime.label(),
+                requests = requests.len(),
+                reload_snapshot,
                 "agent command received"
             );
         }
@@ -333,14 +343,21 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantPreview {
     pub id: Uuid,
-    /// One line per proposed rule, e.g. `bash 'make test'`.
-    pub rules: Vec<String>,
+    /// One proposed grant per dialog row.
+    pub rows: Vec<crate::grants::GrantDraft>,
+    /// Bash commands already allowed by policy or an existing grant.
+    pub already_allowed: usize,
+    /// Parts of the call that can only be approved once.
+    pub other_parts: bool,
     /// Why nothing can be granted; the call can only be approved once.
     pub refusal: Option<String>,
-    /// Consequences to read before confirming.
-    pub warnings: Vec<String>,
     /// Why a persistent grant cannot be saved, if it cannot.
     pub persistent_unavailable: Option<String>,
+    /// The `.ylva` directory a persistent save would create.
+    pub marker_to_create: Option<std::path::PathBuf>,
+    /// The call as the grant evaluator sees it, to validate edited rows.
+    pub subjects: crate::grants::GrantSubjects,
+    pub workspace_root: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,6 +488,15 @@ pub enum UiUpdate {
     /// `AgentCommand::RecordModelChanged` took effect: the next request is the
     /// first the switched engine serves. Root loop only.
     ModelChangeApplied,
+    /// `AgentCommand::GrantAndApprove` created nothing; the call stays pending.
+    GrantFailed {
+        id: Uuid,
+        reason: String,
+        /// The grants file changed on disk; saving again after reviewing it
+        /// is possible with `reload_snapshot`.
+        reloadable: bool,
+        run_id: Option<Uuid>,
+    },
     /// Answer to `AgentCommand::RequestGrantPreview`.
     GrantPreview {
         preview: GrantPreview,

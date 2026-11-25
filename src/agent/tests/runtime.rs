@@ -401,7 +401,8 @@ fn agent_command_dispatch_logs_every_command_variant() {
         agent_loop
             .send_command(AgentCommand::GrantAndApprove {
                 id: tool_call_id,
-                lifetime: crate::grants::GrantLifetime::Temporary,
+                requests: Vec::new(),
+                reload_snapshot: false,
             })
             .await;
         agent_loop
