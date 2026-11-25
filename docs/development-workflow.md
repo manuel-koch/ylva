@@ -250,9 +250,9 @@ call; `src/logging.rs` owns the subscriber (level filter, a single file in the
 Correlate related events inside a `tracing` span so every log line is
 attributable to its context. E.g. tool execution runs inside a `tool_execute`
 span (carrying `tool` and `tool_call_id` fields) with a nested `tool_args` span.
-Span context renders inline in text and as the `spans` array in JSONL (see
-`docs/features.md`). Use spans the same way for other long-running scopes
-(e.g. a request/stream), and only for data safe to log.
+See [Reading Ylva logs](./logging.md#text-and-json-logs) for how that context
+is rendered. Use spans the same way for other long-running scopes (e.g. a
+request/stream), and only for data safe to log.
 
 Persisted work uses an immutable root `session` span. `/clear` replaces the
 identity for new work; already-spawned request, tool, compaction, title and writer

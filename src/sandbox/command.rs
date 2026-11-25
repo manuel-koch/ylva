@@ -144,7 +144,7 @@ impl SandboxContext {
         }
 
         tracing::debug!(
-            command = %command,
+            command,
             sandbox_verdict = match verdict.as_ref().map(|check| &check.verdict) {
                 None => "abstain".to_string(),
                 Some(ApprovalVerdict::AutoApproved) => "auto-approved".to_string(),

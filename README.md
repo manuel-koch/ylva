@@ -115,6 +115,7 @@ secrets, and Markdown can contain active HTML, links, or remote images.
 - [Provider notes](docs/provider-notes.md): what each provider reports, such as
   usage and costs.
 - [Features](docs/features.md): implemented behavior.
+- [Logging](docs/logging.md): how to read diagnostics and trace tool approvals.
 
 ## Contribution
 

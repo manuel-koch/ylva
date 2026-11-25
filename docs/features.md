@@ -51,64 +51,10 @@ so starts within the interval show the hint without a request. Opt out with
 
 ## Logging
 
-Logging is opt-in and controlled entirely by CLI flags (there is no logging
-configuration file).
-See [CLI options](./cli-options.md) for usage of `--log-file`, `--log-level`
-and `--log-format` options.
-
-At startup (when logging is enabled), an `INFO`-level `"build info"` event is
-logged before anything else, carrying `version`, `commit`, `built`, and
-`profile` (the same values as `ylva --version`). It applies to every
-invocation, including `session` and `profile` subcommands. TUI and CLI runs
-then log a `"starting"` event carrying `app` (`"cli"` or `"tui"`, matching the
-mode `main.rs` selected). This makes the exact build identifiable from the log
-file alone, without cross-referencing a separate `--version` invocation.
-
-At `DEBUG` level, `ylva session` logs one `"resolved session store"` event
-with `cwd`, `chats_root`, and `project_key`. Session listings are per project,
-so this event explains an empty `session list` run from an unexpected
-directory.
-
-Session-title generation emits structured lifecycle events when logging is
-enabled. The main stages are recorded with `stage` values such as
-`scheduled`, `request_started`, `response_received`, `normalized`,
-`persist_started`, and `persisted`; failures and skipped attempts include a
-reason or error stage. These events include the session id, selected utility
-engine/provider/model, and character counts, but never the conversation
-prompt, assistant reply, or generated title text.
-
-At `DEBUG` level, every received `AgentCommand` emits one `"agent command
-received"` event with a stable `command` variant field. Payloads are represented
-by lengths or correlation IDs rather than their contents; tool approval/denial
-events remain separate outcome events.
-
-Session work is correlated through immutable `session` spans. Request, tool,
-compaction, title and writer scopes retain the session that admitted their work;
-after `/clear`, new work uses the replacement ID. Subagent spans additionally
-identify their run and parent session, including completion and transcript
-persistence. No new prompt, credential, or conversation-body fields are logged.
-
-With a logfile and `--log-level info`, text and JSON logs include `tool approval
-trail` events. These show which rule or fallback decided a tool call and, when
-a pending request is resolved, what happened next: a human approved once,
-denied, or saved a grant; an existing grant covered the call; or the headless
-CLI could not ask. A recheck has its own phase and record ID. Use the
-`tool_call_id` and session or subagent span to group records, then match
-`parent_id` to `record_id` within the same process to follow the decision.
-See [sandbox configuration](./configuration.md#sandbox-tool-approval-rules)
-for how to read rule locators.
-
-The trail omits tool arguments, raw rule and grant text, absolute paths, URLs,
-credentials, and free-form denial reasons. It uses opaque grant references
-and does not record grant previews or `clarify` exchanges. This guarantee
-applies to the trail records, not to other diagnostics in the logfile.
-
-When a logfile is enabled, user-visible provider/stream failures, tool
-failures, and fatal startup errors are also emitted through `tracing`. Fatal
-startup paths flush the non-blocking logfile before exiting. A provider stream
-failure is routed through the agent event loop once, so one failed request
-produces one user-facing error even though lower layers may record their own
-structured diagnostics.
+Ylva can write text or JSON logs for TUI and CLI runs, including an `INFO`
+approval trail for tool calls. See [Reading Ylva logs](./logging.md) for
+diagnostic fields, a worked approval trail, and what to review before sharing
+a logfile. Use the [CLI flags](./cli-options.md#flags) to enable logging.
 
 ## CLI mode
 

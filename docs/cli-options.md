@@ -56,6 +56,8 @@ command dispatch or side effects, even when placed before the subcommand.
 The `init` subcommand also exits with code `2` when its target root cannot be
 resolved or a seeded file cannot be written.
 
+See [Reading Ylva logs](./logging.md) for event fields and an approval trail example.
+
 When the CLI writes to a terminal, its section headers and tool status lines
 use the same semantic colors as the TUI. Colors are disabled automatically for
 non-terminal output, `TERM=dumb`, or when the standard `NO_COLOR` environment

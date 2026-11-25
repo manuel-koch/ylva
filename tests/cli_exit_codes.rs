@@ -263,6 +263,38 @@ async fn denied_approval_exits_with_approval_denied_and_run_continues() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn debug_text_log_quotes_and_escapes_bash_commands() {
+    let server = mock_provider(
+        MockLlmConfig {
+            frames: vec![content_frame("understood")],
+            end_after_frames: true,
+            ..MockLlmConfig::default()
+        },
+        vec![vec![tool_call_frame(
+            0,
+            "bash",
+            r#"{"command":"echo \"first\nsecond\""}"#,
+        )]],
+    )
+    .await;
+
+    let run = HeadlessRun::spawn(
+        &server.base_url(),
+        &["--log-file", "approval.jsonl", "--log-level", "debug"],
+    );
+    let (_, _, _, log) = run.finish_with_log().await;
+    let check = log
+        .lines()
+        .find(|line| line.contains("sandbox check_command"))
+        .expect("Bash sandbox check logged");
+
+    assert!(
+        check.contains(r#"command="echo \"first\nsecond\"" sandbox_verdict="abstain""#),
+        "{check}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn info_log_names_the_winning_configured_rule_or_cli_override_without_inputs() {
     for (flag, expected_locator, expected_verdict) in [
         (None, "ylva_home:tools.bash.rules[1]", "auto_denied"),

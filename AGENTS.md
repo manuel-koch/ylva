@@ -8,6 +8,7 @@ A Rust-based terminal UI that implements an agent-harness.
    - [README](./README.md) (project intro and quickstart)
    - [CONTEXT](./CONTEXT.md) (Ylva's ubiquitous language and domain terms)
    - [features](./docs/features.md) (implemented feature reference)
+   - [logging](./docs/logging.md) (how to read diagnostics and trace tool approvals)
    - [implementation-notes](./docs/implementation-notes.md) (cross-module
      interactions, constraints/workarounds and design rationale only; no module
      inventories, constants or field lists, read the source)

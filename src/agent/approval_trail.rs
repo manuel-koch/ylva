@@ -134,9 +134,11 @@ fn safe_identifier(value: &str) -> Cow<'_, str> {
     {
         Cow::Borrowed(value)
     } else {
+        const IDENTIFIER_DIGEST_BYTES: usize = 8;
+        let digest = Sha256::digest(value.as_bytes());
         Cow::Owned(format!(
-            "sha256:{}",
-            crate::hexadecimal::hex_digest(&Sha256::digest(value.as_bytes()))
+            "sha256-64:{}",
+            crate::hexadecimal::hex_digest(&digest[..IDENTIFIER_DIGEST_BYTES])
         ))
     }
 }
@@ -299,4 +301,27 @@ pub(super) fn prime_trail_capture() {
 #[cfg(test)]
 pub(super) fn captured_trail_line(line: &str) -> bool {
     line.contains("tool approval trail") && !line.contains("trail_probe")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rule_locator_shortens_hashed_names_without_changing_simple_names() {
+        let origin = RuleOrigin::Configured {
+            source: RuleListSource::Profile {
+                layer: ConfigLayer::Workspace,
+                agent_type: Some("team/reviewer".into()),
+            }
+            .into(),
+            tool: "web_fetch".into(),
+            index: 1,
+        };
+
+        assert_eq!(
+            rule_locator(&origin),
+            "workspace:agents.sha256-64:632deafee6810518.tools.web_fetch.rules[1]"
+        );
+    }
 }

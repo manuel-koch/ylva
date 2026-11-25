@@ -1247,17 +1247,8 @@ matches that rule. `dot_path` matches `.env` in either `project/service/` or
 Launching from `project/` instead also uses
 a different session group; see [project-key derivation](persistence.md#project_key-derivation).
 
-In the [approval trail](./features.md#logging), the rule locator identifies
-the effective rule, not every rule that matched. For example,
-`ylva_home:tools.bash.rules[1]` is the second entry in the Ylva-home profile's
-`tools.bash.rules` list. `workspace:agents.reviewer.tools.bash.rules[0]`
-is the first entry in the workspace profile's inline `reviewer` agent list.
-Standalone agent-type files use `agent_file:<scope>:<name>.<format>`
-followed by the key and index in that file's TOML or Markdown front matter.
-Indices are zero-based in the original list. Non-simple identifiers are
-shown as SHA-256 digests. A CLI override names its exact flag (for example,
-`cli:--auto-approve-bash`); a built-in rule names its stable identifier under
-`builtin:`. Locators do not include patterns, denial reasons, or absolute paths.
+See [rule locators](./logging.md#rule-locators) to map an approval trail
+event back to the effective rule.
 
 **Default floor.** When a path tool has no explicit `rules` list at any
 resolved layer (see below), two rules apply unconditionally, evaluated in
