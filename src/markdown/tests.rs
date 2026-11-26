@@ -323,3 +323,14 @@ fn table_column_shrink_is_proportional_not_winner_take_all() {
         "narrow column shrunk far below its fair share: width {col1_width} in {header:?}"
     );
 }
+
+#[test]
+fn follow_up_paragraph_in_list_item_is_indented_under_item_text() {
+    let text = "1. first\n\n   second paragraph\n\n   - nested\n\nafter";
+    let rendered: Vec<String> = render_markdown(text, 40).iter().map(plain_text).collect();
+    assert_eq!(rendered[0], "1. first");
+    assert_eq!(rendered[1], "");
+    assert!(rendered.contains(&"   second paragraph".to_string()));
+    assert!(rendered.contains(&"   • nested".to_string()));
+    assert_eq!(rendered.last().unwrap(), "after");
+}

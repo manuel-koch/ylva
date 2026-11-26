@@ -92,6 +92,11 @@ pub fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
                     style_stack.push(s);
                 }
                 Tag::BlockQuote(_) => quote_depth += 1,
+                Tag::Paragraph => {
+                    if item_has_paragraph.last().copied().unwrap_or(false) {
+                        push_spacer_if_needed(&mut out);
+                    }
+                }
                 Tag::Heading { level, .. } => {
                     push_spacer_if_needed(&mut out);
                     heading_level = Some(level as usize);
@@ -365,6 +370,10 @@ fn flush_buffer(
             }
             if let Some(prefix) = pending_item_prefix.take() {
                 spans.push(Span::raw(prefix));
+            } else if item_continuation_indent > 0 {
+                // Follow-up paragraph inside a list item: the marker was
+                // consumed by the item's first block, so align under its text.
+                spans.push(Span::raw(" ".repeat(item_continuation_indent)));
             }
         } else {
             let indent = heading_prefix_len + item_continuation_indent;
