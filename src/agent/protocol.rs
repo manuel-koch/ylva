@@ -96,6 +96,10 @@ pub enum AgentCommand {
         id: Uuid,
         check: crate::ApprovalCheck,
     },
+    /// Accept the current content of `grants.toml` as the base to save into,
+    /// after an external edit was reviewed. Nothing is created and nothing is
+    /// approved: this only lets the next `GrantAndApprove` save succeed.
+    ReloadGrants,
     /// Create reusable grants covering the pending call `id`, then approve it
     /// like `ApproveTool`. When the call cannot be granted or saving fails,
     /// the agent publishes a notice and the call stays pending.
@@ -167,6 +171,7 @@ pub(super) fn agent_command_name(command: &AgentCommand) -> &'static str {
         AgentCommand::Stop { .. } => "stop",
         AgentCommand::ApproveTool { .. } => "approve_tool",
         AgentCommand::DenyTool { .. } => "deny_tool",
+        AgentCommand::ReloadGrants => "reload_grants",
         AgentCommand::ResolveCliTool { .. } => "resolve_cli_tool",
         AgentCommand::GrantAndApprove { .. } => "grant_and_approve",
         AgentCommand::RequestGrantPreview { .. } => "request_grant_preview",
@@ -213,6 +218,15 @@ pub(super) fn log_agent_command(
                 has_stream,
                 has_tool,
                 tool_call_id = %id,
+                "agent command received"
+            );
+        }
+        AgentCommand::ReloadGrants => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
                 "agent command received"
             );
         }

@@ -4,4 +4,4 @@ rule = "./.github/**/*"
 
 [[grants]]
 tool = "read"
-rule = ".rumdl.toml"
+rule = "./.rumdl.toml"

@@ -162,6 +162,12 @@ pub(super) async fn execute_effects(
                     },
                 ));
             }
+            Effect::ReloadGrants => {
+                // Grants are shared across the root conversation and its
+                // subagents, so the root loop owns the store and receives the
+                // command.
+                let _ = cmd_tx.try_send(AgentCommand::ReloadGrants);
+            }
             Effect::DenyTool { id, reason } => {
                 pending_run_ids.run_outcome.record_approval_denied();
                 state.apply_tool_denied(id, &reason);

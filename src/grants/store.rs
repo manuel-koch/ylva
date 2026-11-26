@@ -48,7 +48,7 @@ pub enum GrantStoreError {
     Malformed { path: PathBuf, reason: String },
     #[error(
         "{} changed since it was loaded; nothing was saved. Review the file, then retry \
-         (restart Ylva to reload it) or use a one-time or temporary grant",
+         or use a one-time or temporary grant",
         display_path(path)
     )]
     ExternalEdit { path: PathBuf },

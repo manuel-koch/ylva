@@ -699,9 +699,16 @@ See [persistence](./persistence.md) for on-disk contracts.
   pending call and never trusts UI text. The TUI keeps the prompt and the
   dialog until the call starts; a refused or failed grant arrives as
   `UiUpdate::GrantFailed` and the dialog offers retry, changing the rows or going back.
-  Retrying after an external edit sets `reload_snapshot`, which only re-bases
-  the store on the reviewed file and does not activate grants found in it. The
-  footer never drops *Grant…*: narrow terminals get compact labels.
+  The failure reason is shown only in the dialog; no transcript notice is added
+  (the dialog text stays in place for retrying and disappears with the resolved
+  approval). Reloading is its own *Reload* button (`GrantDialogFocus::Reload`,
+  effect `ReloadGrants` → `AgentCommand::ReloadGrants`), shown after a
+  reloadable failure and focused by it; it only re-bases the store on the reviewed
+  file — nothing is saved, no grant is activated and the pending call stays pending.
+  The failure carries a `reloaded` flag: the used button renders muted, is skipped
+  by the focus cycle and ignores activations until a further failure re-offers it.
+  A plain *Grant* after a failure never reloads. The footer never drops *Grant…*:
+  narrow terminals get compact labels.
 - `grants.toml` is trust-covered and compared as parsed TOML; saving changes the
   fingerprint on purpose so a hostile edit cannot ride along.
 

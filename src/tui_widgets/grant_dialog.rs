@@ -37,6 +37,7 @@ use super::footer::button_style;
 
 const MAXIMUM_DIALOG_WIDTH: u16 = 76;
 const CONFIRM_LABEL: &str = " [ ✓ Grant ] ";
+const RELOAD_LABEL: &str = " [ ⟳ Reload ] ";
 const BACK_LABEL: &str = " [ ← Back ] ";
 
 const COMMAND_RULE_HINT: &str = "Use * to match one or more arguments.";
@@ -268,9 +269,12 @@ fn build_sections(dialog: &GrantDialogState, text_width: usize) -> Sections {
             .into_iter()
             .map(|line| Line::styled(line, Style::default().fg(warning_color()))),
         );
-        let hint = if failure.reloadable {
-            "Grant again to retry with the file as it is now, change the rows, or go Back \
-             to approve once."
+        let hint = if failure.reloadable && !failure.reloaded {
+            "Reload accepts the file as it is now (grants in it stay inactive \
+             in this run); Grant then saves the selection, or go Back to approve once."
+        } else if failure.reloadable {
+            "The file was accepted as it is now; Grant saves the selection, or \
+             go Back to approve once."
         } else {
             "Fix or change the rows and retry, or go Back to approve once."
         };
@@ -289,6 +293,8 @@ fn build_sections(dialog: &GrantDialogState, text_width: usize) -> Sections {
             );
         }
     }
+    // Reserve the room a persistent selection adds, so changing a selection
+    // never resizes the dialog.
     Sections {
         rules,
         row_offsets,
@@ -443,14 +449,40 @@ pub(super) fn draw_grant_dialog(
     let buttons = Rect::new(content.x, body_area.bottom(), content.width, 1);
     let confirm_width = (CONFIRM_LABEL.chars().count() as u16).min(buttons.width);
     let confirm_button = Rect::new(buttons.x, buttons.y, confirm_width, buttons.height.min(1));
-    let back_start = (buttons.x + confirm_width + 2).min(buttons.right());
+    let reload_button = if dialog
+        .failure
+        .as_ref()
+        .is_some_and(|failure| failure.reloadable)
+    {
+        let reload_start = (buttons.x + confirm_width + 2).min(buttons.right());
+        Rect::new(
+            reload_start,
+            buttons.y,
+            (RELOAD_LABEL.chars().count() as u16).min(buttons.right() - reload_start),
+            buttons.height.min(1),
+        )
+    } else {
+        Rect::default()
+    };
+    let back_start = if reload_button.is_empty() {
+        (buttons.x + confirm_width + 2).min(buttons.right())
+    } else {
+        (reload_button.right() + 2).min(buttons.right())
+    };
     let back_button = Rect::new(
         back_start,
         buttons.y,
         (BACK_LABEL.chars().count() as u16).min(buttons.right() - back_start),
         buttons.height.min(1),
     );
-    draw_buttons(frame, mouse_pos, &dialog, confirm_button, back_button);
+    draw_buttons(
+        frame,
+        mouse_pos,
+        &dialog,
+        confirm_button,
+        reload_button,
+        back_button,
+    );
 
     state.grant_dialog_layout = GrantDialogLayout {
         rect,
@@ -466,6 +498,7 @@ pub(super) fn draw_grant_dialog(
             .collect(),
         rows: row_offsets.into_iter().map(row_rect).collect(),
         confirm_button,
+        reload_button,
         back_button,
         maximum_scroll,
         body_rows,
@@ -477,6 +510,7 @@ fn draw_buttons(
     mouse_pos: Option<(u16, u16)>,
     dialog: &GrantDialogState,
     confirm: Rect,
+    reload: Rect,
     back: Rect,
 ) {
     let pointer = mouse_pos.map(|(column, row)| ratatui::layout::Position::new(column, row));
@@ -491,6 +525,16 @@ fn draw_buttons(
     } else {
         Style::default().fg(muted_text_color())
     };
+    let reload_style = if dialog.can_reload() {
+        button_style(
+            approve_background_color(),
+            approve_hover_background_color(),
+            hovered(reload),
+            dialog.focused == GrantDialogFocus::Reload,
+        )
+    } else {
+        Style::default().fg(muted_text_color())
+    };
     let back_style = button_style(
         navigation_background_color(),
         navigation_hover_background_color(),
@@ -501,6 +545,12 @@ fn draw_buttons(
         Paragraph::new(Line::from(Span::styled(CONFIRM_LABEL, confirm_style))),
         confirm,
     );
+    if !reload.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(RELOAD_LABEL, reload_style))),
+            reload,
+        );
+    }
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(BACK_LABEL, back_style))),
         back,
@@ -721,12 +771,58 @@ mod tests {
         edited.failure = Some(crate::tui_reducer_state::GrantFailure {
             reason: "file changed".to_string(),
             reloadable: true,
+            reloaded: false,
         });
         let (text, _) = render(90, 30, edited);
         assert!(text.contains("Invalid:"), "{text}");
         assert!(text.contains("one-time"), "{text}");
         assert!(text.contains("Nothing was created: file changed"), "{text}");
-        assert!(text.contains("Grant again to retry"), "{text}");
+        assert!(
+            text.contains("Reload accepts the file as it is now"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_reloadable_failure_offers_the_reload_button_between_grant_and_back() {
+        let mut failed = dialog(1, None, None);
+        failed.failure = Some(crate::tui_reducer_state::GrantFailure {
+            reason: "file changed".to_string(),
+            reloadable: true,
+            reloaded: false,
+        });
+        let (text, layout) = render(90, 30, failed);
+        assert!(text.contains("⟳ Reload"), "{text}");
+        assert!(
+            !layout.reload_button.is_empty()
+                && layout.confirm_button.right() < layout.reload_button.x,
+            "reload sits right of Grant"
+        );
+        assert!(
+            layout.reload_button.right() < layout.back_button.x,
+            "Back sits right of Reload"
+        );
+
+        let (_, plain) = render(90, 30, dialog(1, None, None));
+        assert!(
+            plain.reload_button.is_empty(),
+            "without a failure no reload button is drawn"
+        );
+    }
+
+    #[test]
+    fn a_used_reload_turns_muted_until_a_further_failure_re_offers_it() {
+        let mut failed = dialog(1, None, None);
+        failed.failure = Some(crate::tui_reducer_state::GrantFailure {
+            reason: "file changed".to_string(),
+            reloadable: true,
+            reloaded: true,
+        });
+        // The button stays visible and in place but is no longer offered.
+        let (text, layout) = render(90, 30, failed);
+        assert!(text.contains("⟳ Reload"), "{text}");
+        assert!(!layout.reload_button.is_empty());
+        assert!(!text.contains("Reload accepts the file as it is now"));
     }
 
     #[test]

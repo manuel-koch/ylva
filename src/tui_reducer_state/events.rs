@@ -420,6 +420,10 @@ pub enum Effect {
         id: Uuid,
         reason: String,
     },
+    /// Send `AgentCommand::ReloadGrants`: accept the current content of
+    /// `grants.toml` as the base to save into after an external edit was
+    /// reviewed. Nothing is saved and the pending call stays pending.
+    ReloadGrants,
     /// Send `AgentCommand::AnswerClarify(answer)` to the agent that asked
     /// clarify question `id`.
     AnswerClarify {

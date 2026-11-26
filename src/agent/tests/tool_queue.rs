@@ -1034,9 +1034,12 @@ fn granting_a_pending_bash_call_runs_it_and_covers_the_next_identical_call() {
                 })
                 .await;
             let failure = tokio::time::timeout(Duration::from_secs(1), async {
+                let mut notices = Vec::new();
                 loop {
-                    if let Some(UiUpdate::GrantFailed { id, reason, .. }) = ui_rx.recv().await {
-                        break (id, reason);
+                    match ui_rx.recv().await.expect("agent channel stays open") {
+                        UiUpdate::Notice { text, .. } => notices.push(text),
+                        UiUpdate::GrantFailed { id, reason, .. } => break (id, reason, notices),
+                        _ => {}
                     }
                 }
             })
@@ -1044,6 +1047,11 @@ fn granting_a_pending_bash_call_runs_it_and_covers_the_next_identical_call() {
             .expect("a rule that does not match the call is refused");
             assert_eq!(failure.0, bash_id);
             assert!(failure.1.contains("does not match"), "{}", failure.1);
+            assert!(
+                failure.2.is_empty(),
+                "a refused grant reports its reason only in the dialog, got notices: {:?}",
+                failure.2
+            );
             agent_loop
                 .send_command(AgentCommand::GrantAndApprove {
                     id: bash_id,

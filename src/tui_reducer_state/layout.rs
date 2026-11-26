@@ -99,6 +99,9 @@ pub struct GrantDialogLayout {
     /// no rule or it is scrolled out of view.
     pub rules: Vec<Vec<Rect>>,
     pub confirm_button: Rect,
+    /// Hit area of the *Reload* button; empty unless a reloadable
+    /// failure offers it.
+    pub reload_button: Rect,
     pub back_button: Rect,
     /// Largest scroll offset of the body; zero when everything fits.
     pub maximum_scroll: usize,

@@ -58,6 +58,9 @@ pub struct GrantDialogRow {
 pub enum GrantDialogFocus {
     Row(usize),
     Confirm,
+    /// Reload `grants.toml` and confirm in one step; only reachable after a
+    /// reloadable failure.
+    Reload,
     Back,
 }
 
@@ -75,6 +78,9 @@ pub struct GrantRowEdit {
 pub struct GrantFailure {
     pub reason: String,
     pub reloadable: bool,
+    /// The user already reloaded the file for this failure; a further reload
+    /// would do nothing new.
+    pub reloaded: bool,
 }
 
 /// The open grant dialog for the pending approval `preview.id`.
@@ -132,6 +138,15 @@ impl GrantDialogState {
             && self.rows.iter().enumerate().all(|(index, row)| {
                 row.selection == GrantRowSelection::OneTime || self.row_error(index).is_none()
             })
+    }
+
+    /// Whether a reloadable failure offers an enabled *Reload* button: a
+    /// reloadable failure offers the button until it was used, a further
+    /// failure after a reload re-enables it.
+    pub fn can_reload(&self) -> bool {
+        self.failure
+            .as_ref()
+            .is_some_and(|failure| failure.reloadable && !failure.reloaded)
     }
 
     /// Consequences of the selected rows (all valid rows while none is
@@ -229,8 +244,16 @@ impl AppState {
             .filter(|dialog| dialog.preview.id == id)
         {
             dialog.awaiting_answer = false;
-            dialog.failure = Some(GrantFailure { reason, reloadable });
-            dialog.focused = GrantDialogFocus::Confirm;
+            dialog.failure = Some(GrantFailure {
+                reason,
+                reloadable,
+                reloaded: false,
+            });
+            dialog.focused = if reloadable {
+                GrantDialogFocus::Reload
+            } else {
+                GrantDialogFocus::Confirm
+            };
         }
     }
 
@@ -341,15 +364,20 @@ impl AppState {
             if dialog.editing.is_some() {
                 return;
             }
-            let stops = [
-                GrantDialogFocus::Row(0),
-                GrantDialogFocus::Confirm,
-                GrantDialogFocus::Back,
-            ];
+            // The reload stop is reachable only while the failure offers an
+            // enabled reload; once used (muted) the cycle skips over it and a
+            // stale focus falls back to Grant.
+            let mut stops = vec![GrantDialogFocus::Row(0), GrantDialogFocus::Confirm];
+            if dialog.can_reload() {
+                stops.push(GrantDialogFocus::Reload);
+            }
+            stops.push(GrantDialogFocus::Back);
             let current = match dialog.focused {
                 GrantDialogFocus::Row(_) => 0,
                 GrantDialogFocus::Confirm => 1,
-                GrantDialogFocus::Back => 2,
+                GrantDialogFocus::Reload if !dialog.can_reload() => 1,
+                GrantDialogFocus::Reload => 2,
+                GrantDialogFocus::Back => stops.len() - 1,
             };
             let next = if backward {
                 (current + stops.len() - 1) % stops.len()
@@ -484,8 +512,6 @@ impl AppState {
     /// Confirms the selected rows. The dialog stays open until the agent
     /// approves the call (the prompt then goes away) or reports why nothing
     /// was created. Does nothing when the selection cannot be confirmed.
-    /// After a reported external edit of `grants.toml` the confirmation retries
-    /// with the file as it is now.
     pub fn confirm_grant_dialog(&mut self) -> Vec<Effect> {
         if !self
             .visible_grant_dialog()
@@ -496,23 +522,46 @@ impl AppState {
         let Some(dialog) = self.grant_dialog.as_mut() else {
             return vec![];
         };
-        let reload_snapshot = dialog
-            .failure
-            .as_ref()
-            .is_some_and(|failure| failure.reloadable);
         dialog.awaiting_answer = true;
         dialog.failure = None;
         vec![Effect::GrantTool {
             id: dialog.preview.id,
             requests: dialog.requests(),
-            reload_snapshot,
+            reload_snapshot: false,
         }]
+    }
+
+    /// Re-bases the grant store on the current content of `grants.toml` after
+    /// an external edit was reviewed. Nothing is saved and the pending call
+    /// stays pending; a toast confirms the reload and the failure note stays
+    /// until the user grants, changes the rows or goes back. A second reload
+    /// is refused: the button turns muted until a further failure offers it
+    /// again. Inactive while an edit is in progress or a confirmation awaits
+    /// the agent's answer.
+    pub fn reload_grant_dialog(&mut self) -> Vec<Effect> {
+        if !self
+            .visible_grant_dialog()
+            .is_some_and(|dialog| dialog.can_reload())
+            || self
+                .visible_grant_dialog()
+                .is_some_and(|dialog| dialog.editing.is_some() || dialog.awaiting_answer)
+        {
+            return vec![];
+        }
+        if let Some(dialog) = self.grant_dialog.as_mut() {
+            if let Some(failure) = dialog.failure.as_mut() {
+                failure.reloaded = true;
+            }
+        }
+        self.set_toast("✓ Reloaded grants.toml as the base to save into.");
+        vec![Effect::ReloadGrants]
     }
 
     /// Activates the keyboard-focused element.
     pub fn activate_grant_dialog_focus(&mut self) -> Vec<Effect> {
         match self.grant_dialog.as_ref().map(|dialog| dialog.focused) {
             Some(GrantDialogFocus::Confirm) => self.confirm_grant_dialog(),
+            Some(GrantDialogFocus::Reload) => self.reload_grant_dialog(),
             Some(GrantDialogFocus::Back) => {
                 self.close_grant_dialog();
                 vec![]

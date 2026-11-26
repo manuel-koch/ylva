@@ -1173,7 +1173,7 @@ fn an_edited_rule_is_validated_and_restored_on_cancel() {
 }
 
 #[test]
-fn confirming_after_a_failed_grant_retries_reloading_only_for_a_changed_file() {
+fn confirming_after_a_failed_grant_retries_saving_without_reloading() {
     use crate::grants::GrantScope::Persistent;
     let (mut state, tool_id) = state_with_grant_dialog(grant_preview);
     for row in 0..2 {
@@ -1186,10 +1186,16 @@ fn confirming_after_a_failed_grant_retries_reloading_only_for_a_changed_file() {
     let dialog = state.grant_dialog.as_ref().unwrap();
     assert!(!dialog.awaiting_answer);
     assert!(dialog.failure.is_some());
+    // The failure focused the reload button; go back to Grant first.
+    state.cycle_grant_focus(true);
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().focused,
+        crate::tui_reducer_state::GrantDialogFocus::Confirm
+    );
     let effects = press(&mut state, KeyCode::Enter);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::GrantTool { reload_snapshot: true, requests, .. }]
+        [Effect::GrantTool { reload_snapshot: false, requests, .. }]
             if requests.iter().all(|request| request.scope == Persistent)
     ));
     state.grant_dialog_failed(tool_id, "disk full".to_string(), false);
@@ -1224,6 +1230,107 @@ fn confirming_after_a_failed_grant_retries_reloading_only_for_a_changed_file() {
             .reason,
         "disk full"
     );
+}
+
+#[test]
+fn a_reloadable_failure_focuses_the_reload_button_and_reloading_sends_no_approval() {
+    use crate::tui_reducer_state::GrantDialogFocus;
+    let (mut state, tool_id) = state_with_grant_dialog(grant_preview);
+    state.grant_dialog_failed(tool_id, "file changed".to_string(), true);
+    // The reloadable failure moves the keyboard focus onto the reload button,
+    // which sits between Grant and Back in the tab cycle.
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().focused,
+        GrantDialogFocus::Reload
+    );
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().focused,
+        GrantDialogFocus::Back
+    );
+    press(&mut state, KeyCode::BackTab);
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().focused,
+        GrantDialogFocus::Reload
+    );
+    // Its activation reloads the grant file without approving anything.
+    assert_eq!(
+        press(&mut state, KeyCode::Enter),
+        vec![Effect::ReloadGrants]
+    );
+
+    // A non-reloadable failure offers no reload stop and its activation does
+    // nothing; the tab cycle goes Grant → Back without it.
+    state.grant_dialog_failed(tool_id, "disk full".to_string(), false);
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().focused,
+        GrantDialogFocus::Confirm
+    );
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().focused,
+        GrantDialogFocus::Back
+    );
+    press(&mut state, KeyCode::BackTab);
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().focused,
+        GrantDialogFocus::Confirm
+    );
+    assert!(state.reload_grant_dialog().is_empty());
+}
+
+#[test]
+fn grant_after_a_reloadable_failure_no_longer_reloads_and_reload_clears_nothing() {
+    use crate::grants::GrantScope::Persistent;
+    let (mut state, tool_id) = state_with_grant_dialog(grant_preview);
+    for row in 0..2 {
+        state.focus_grant_row(row);
+        press(&mut state, KeyCode::Right);
+    }
+    press(&mut state, KeyCode::Tab);
+    press(&mut state, KeyCode::Enter);
+    state.grant_dialog_failed(tool_id, "file changed".to_string(), true);
+    // Reloading keeps the failure note and the selected rows; nothing is
+    // approved and the approval stays pending. A toast confirms the reload.
+    let effects = state.reload_grant_dialog();
+    assert_eq!(effects, vec![Effect::ReloadGrants]);
+    let dialog = state.grant_dialog.as_ref().unwrap();
+    assert!(dialog.failure.is_some());
+    assert!(!dialog.awaiting_answer);
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+    assert_eq!(
+        state.toast.as_ref().map(|(message, _)| message.as_str()),
+        Some("✓ Reloaded grants.toml as the base to save into.")
+    );
+    // A second reload is refused: the used button is muted and inert until a
+    // further failure re-offers it.
+    assert!(state.reload_grant_dialog().is_empty());
+    assert!(
+        state
+            .grant_dialog
+            .as_ref()
+            .unwrap()
+            .failure
+            .as_ref()
+            .unwrap()
+            .reloaded
+    );
+    // Focus stays on the used Reload stop; the cycle treats it as Grant, so
+    // moving backward lands on Row(0) and a forward step reaches Back. Move
+    // focus explicitly to Grant before confirming; the plain confirm retries
+    // the save without reloading the file.
+    state.focus_grant_row(0);
+    state.cycle_grant_focus(false);
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().focused,
+        crate::tui_reducer_state::GrantDialogFocus::Confirm
+    );
+    let effects = press(&mut state, KeyCode::Enter);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::GrantTool { reload_snapshot: false, requests, .. }]
+            if requests.iter().all(|request| request.scope == Persistent)
+    ));
 }
 
 #[test]

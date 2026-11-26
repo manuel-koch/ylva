@@ -946,6 +946,9 @@ fn click_grant_dialog(state: &mut AppState, column: u16, row: u16) -> Vec<Effect
     if layout.confirm_button.contains(position) {
         return state.confirm_grant_dialog();
     }
+    if layout.reload_button.contains(position) {
+        return state.reload_grant_dialog();
+    }
     if layout.back_button.contains(position) || !layout.rect.contains(position) {
         state.close_grant_dialog();
     } else if let Some(index) = layout

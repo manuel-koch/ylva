@@ -280,7 +280,9 @@ impl RunState {
     /// grants and returns the approval to run. Returns `None` after
     /// publishing the reason when the call is not the front call, a request
     /// is invalid, or saving failed; the call then stays pending. Persistent
-    /// grants are saved before any temporary grant is added.
+    /// grants are saved before any temporary grant is added. A failure is
+    /// reported only as [`UiUpdate::GrantFailed`]: the still-open grant dialog
+    /// shows the reason, so no transcript notice duplicates it.
     async fn grant_pending_call(
         &mut self,
         id: uuid::Uuid,
@@ -388,13 +390,10 @@ impl RunState {
                 Some(references)
             }
             Err((reason, reloadable)) => {
-                let _ = self
-                    .ui_tx
-                    .send(UiUpdate::Notice {
-                        text: format!("No grant created: {reason}"),
-                        run_id: self.own_run_id,
-                    })
-                    .await;
+                // The reason is delivered only through `GrantFailed`: the
+                // grant dialog is still open and shows it there; a transcript
+                // notice would duplicate the dialog text (and outlive the
+                // resolved approval when the user goes back to approve once).
                 let _ = self
                     .ui_tx
                     .send(UiUpdate::GrantFailed {
@@ -511,6 +510,22 @@ impl RunState {
             return LoopControl::PollAgain;
         }
         match cmd {
+            AgentCommand::ReloadGrants => {
+                match self.registry.grant_state() {
+                    Some(grant_state) => match grant_state.reload_snapshot() {
+                        Ok(()) => {
+                            tracing::debug!("grant file snapshot reloaded after external edit");
+                        }
+                        Err(error) => {
+                            // The dialog keeps showing the original failure;
+                            // the next save attempt reports the load error.
+                            tracing::warn!(%error, "reloading the grant file failed");
+                        }
+                    },
+                    None => tracing::debug!("no grant state in this run; reload ignored"),
+                }
+                return LoopControl::PollAgain;
+            }
             AgentCommand::GrantAndApprove {
                 id,
                 requests,

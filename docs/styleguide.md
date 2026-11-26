@@ -49,6 +49,7 @@ Rules:
 | `•` | A note (muted) |
 | ` · ` | Separator between entries on one line (footer hints and status, e.g. `cost · usage`) |
 | `✓` | Confirming action label (`[ ✓ Grant ]`, `[ ✓ Apply ]`) |
+| `⟳` | Reload action label that refreshes from external state (`[ ⟳ Reload ]`) |
 | `←` | Back or leaving action label (`[ ← Back ]`) |
 | `⇢` | Action label that moves to another conversation (`[ ⇢ Go to agent ]`) |
 | `●` | The current or active item, in `active_model_color` (the viewed agent in the agents popup) |
@@ -72,7 +73,7 @@ Rules:
 | Key | Behavior |
 | --- | --- |
 | `↑` `↓` | Move over the rows only; never reach the buttons; no wrapping |
-| `tab` / `shift-tab` | Cycle first row → primary button → secondary button |
+| `tab` / `shift-tab` | Cycle first row → primary button → further buttons when offered → secondary button |
 | `←` `→` | Cycle the value of the focused row (`◂ value ▸`), wrapping |
 | `space` | Toggle or cycle the focused row's value |
 | `enter` | On a row: start editing its text, or activate it; on a button: activate it |
@@ -121,8 +122,9 @@ Rules:
 
 ## Buttons
 
-- Written ` [ label ] `, with a leading `✓` for the confirming action and `←` for going back
-  (`[ ✓ Grant ]`, `[ ← Back ]`); the label is a verb or a short verb phrase.
+- Written ` [ label ] `, with a leading `✓` for the confirming action, `⟳` for the reload action
+  (`[ ⟳ Reload ]`, the grant dialog) and `←` for going back
+  (`[ ← Back ]`); the label is a verb or a short verb phrase.
 - Normal: `approve_background_color` as foreground; hovered: `button_text_color` on the hover
   background; focused: `button_text_color` on the normal background, bold (`button_style`).
 - Primary action first, secondary after it, separated by one space; buttons share a row and wrap

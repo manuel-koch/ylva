@@ -1422,10 +1422,14 @@ the second page and can only be approved once. Rows left `one-time` and ungranta
 call are not covered; the call itself still runs once as approved.
 
 If creating the grants fails (a rejected rule, a save refused, `grants.toml` changed behind Ylva's
-back), the dialog stays open and shows the reason: *Grant* retries (after changing the rows if
-wanted; after a `grants.toml` that changed on disk it reloads the file first, the reviewed content
-is kept and the grants found in it stay inactive in this run), and *Back* returns to the prompt to
-approve once. The approval stays pending throughout.
+back), the dialog stays open and shows the reason — this is the only place it is reported, no
+transcript notice is added. When the save was refused because `grants.toml` changed on disk, a
+*Reload* button appears beside *Grant* and takes the focus: `enter` on it accepts the file as it
+is now (the reviewed content is kept and the grants found in it stay inactive in this run), with a
+`✓` toast as confirmation; nothing is saved and the approval stays pending, so *Grant* then saves
+with the reloaded base. The used *Reload* button turns muted — a later refusal re-offers it.
+*Grant* retries without reloading (after changing the rows if wanted), and
+*Back* returns to the prompt to approve once. The approval stays pending throughout.
 
 - *Temporary* grants are in memory: in memory, shared by the root conversation
   and its subagents until `/clear` or a session switch.
