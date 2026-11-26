@@ -9,11 +9,16 @@ threshold, so running `make test` in addition is redundant and is not required.
 When dependencies change (`Cargo.toml` or `Cargo.lock`), also run `make audit`
 (see [Dependency audit](#dependency-audit)).
 
+The [styleguide](./styleguide.md) is authoritative for the UX/UI of TUI elements and,
+where applicable, the CLI. Code changes that add or alter such elements follow it.
+A deliberate deviation updates the styleguide in the same commit.
+
 For new features come up with appropriate test case(s) to verify them.
 
-Bugfixes MUST add or strengthen a test that fails before the fix and passes after.
+Bugfixes MUST add or strengthen a test that fails before the fix and passes after ( RED before
+GREEN ).
 
-If test runs exhibit flaky results/errors, the tests must fixed immediately,
+If test runs exhibit flaky results/errors, the tests must be fixed immediately,
 don't postpone fixing (pre-existing) flaky tests!
 
 Coverage threshold: **≥80% aggregate line coverage** is enforced by
@@ -245,9 +250,9 @@ call; `src/logging.rs` owns the subscriber (level filter, a single file in the
 Correlate related events inside a `tracing` span so every log line is
 attributable to its context. E.g. tool execution runs inside a `tool_execute`
 span (carrying `tool` and `tool_call_id` fields) with a nested `tool_args` span.
-Span context renders inline in text and as the `spans` array in JSONL (see
-`docs/features.md`). Use spans the same way for other long-running scopes
-(e.g. a request/stream), and only for data safe to log.
+See [Reading Ylva logs](./logging.md#text-and-json-logs) for how that context
+is rendered. Use spans the same way for other long-running scopes (e.g. a
+request/stream), and only for data safe to log.
 
 Persisted work uses an immutable root `session` span. `/clear` replaces the
 identity for new work; already-spawned request, tool, compaction, title and writer

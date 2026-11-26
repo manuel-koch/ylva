@@ -91,12 +91,16 @@ fn root_subagent_and_storeless_factory_copies_keep_independent_catalogs() {
         let (mut root, _updates) = storeless.create(&profile, "default", Role::Root).unwrap();
         let loader = root.registry().get("load_skill").unwrap();
         assert_eq!(
-            loader.needs_approval(&serde_json::json!({"name":"alpha"})),
-            crate::ApprovalCheck::AutoApproved
+            loader
+                .needs_approval(&serde_json::json!({"name":"alpha"}))
+                .verdict,
+            crate::ApprovalVerdict::AutoApproved
         );
         assert!(matches!(
-            loader.needs_approval(&serde_json::json!({"name":"beta"})),
-            crate::ApprovalCheck::AutoDenied { .. }
+            loader
+                .needs_approval(&serde_json::json!({"name":"beta"}))
+                .verdict,
+            crate::ApprovalVerdict::AutoDenied { .. }
         ));
         let handle = root.run();
         root.send_command(crate::AgentCommand::ClearContext).await;
@@ -129,12 +133,16 @@ fn root_subagent_and_storeless_factory_copies_keep_independent_catalogs() {
             .unwrap();
         let loader = subagent.registry().get("load_skill").unwrap();
         assert_eq!(
-            loader.needs_approval(&serde_json::json!({"name":"beta"})),
-            crate::ApprovalCheck::AutoApproved
+            loader
+                .needs_approval(&serde_json::json!({"name":"beta"}))
+                .verdict,
+            crate::ApprovalVerdict::AutoApproved
         );
         assert!(matches!(
-            loader.needs_approval(&serde_json::json!({"name":"alpha"})),
-            crate::ApprovalCheck::AutoDenied { .. }
+            loader
+                .needs_approval(&serde_json::json!({"name":"alpha"}))
+                .verdict,
+            crate::ApprovalVerdict::AutoDenied { .. }
         ));
         assert!(subagent.registry().get("bash").is_none());
         assert!(subagent.registry().get("write").is_none());

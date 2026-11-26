@@ -16,6 +16,7 @@
 //! resume hint.
 
 use crate::agent_factory::{select_root_agent_type, RootAgentTypeSelection};
+use crate::text_normalization::single_line_display;
 use crate::ProfileConfig;
 
 /// Resolve the root agent type for this run: `--agent` first, else the type
@@ -153,7 +154,7 @@ fn resume_hint_text(
 ) -> String {
     let mut hint = format!("\nSession: {session_id}");
     if !title.is_empty() {
-        hint.push_str(&format!("\nTitle:   {}", crate::app::single_line(title)));
+        hint.push_str(&format!("\nTitle:   {}", single_line_display(title)));
     }
     if let Some(cost_text) = cost_text {
         hint.push_str(&format!("\nCosts:   {cost_text}"));

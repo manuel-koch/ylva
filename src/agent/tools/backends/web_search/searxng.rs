@@ -40,6 +40,7 @@ use serde::Deserialize;
 
 use super::{WebSearchBackend, WebSearchError, WebSearchHit};
 use crate::http::OUTBOUND_USER_AGENT;
+use crate::text_normalization::collapse_whitespace;
 
 /// Hint attached to an HTTP `403`: SearXNG only answers `format=json` when
 /// the instance lists it in `search.formats` of its `settings.yml`, and the
@@ -147,24 +148,32 @@ impl WebSearchBackend for SearXngBackend {
                     path,
                 );
             }
+            let guard = dump_context.drop_guard("web search", &request_url);
             // No retry: every failure is terminal (see the module docs).
-            let response = self.client.execute(request).await.map_err(|error| {
-                let response_dump_path = dump_context.response_path_for_content_type(None, "jsonl");
-                crate::http::dump_response_transport_error(&response_dump_path, &error);
-                WebSearchError::Request(error.to_string())
-            })?;
-            let status = response.status();
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok());
-            let response_dump_path =
-                dump_context.response_path_for_content_type(content_type, "bin");
-            let body = response.bytes().await.map_err(|error| {
-                crate::http::dump_response_transport_error(&response_dump_path, &error);
-                WebSearchError::Request(error.to_string())
-            })?;
-            crate::http::dump_buffered_response(&body, response_dump_path.as_deref());
+            let outcome = async {
+                let response = self.client.execute(request).await.map_err(|error| {
+                    let response_dump_path =
+                        dump_context.response_path_for_content_type(None, "jsonl");
+                    crate::http::dump_response_transport_error(&response_dump_path, &error);
+                    WebSearchError::Request(error.to_string())
+                })?;
+                let status = response.status();
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok());
+                let response_dump_path =
+                    dump_context.response_path_for_content_type(content_type, "bin");
+                let body = response.bytes().await.map_err(|error| {
+                    crate::http::dump_response_transport_error(&response_dump_path, &error);
+                    WebSearchError::Request(error.to_string())
+                })?;
+                crate::http::dump_buffered_response(&body, response_dump_path.as_deref());
+                Ok::<_, WebSearchError>((status, body))
+            }
+            .await;
+            guard.finish();
+            let (status, body) = outcome?;
             if !status.is_success() {
                 let status_code = status.as_u16();
                 return Err(if status == reqwest::StatusCode::FORBIDDEN {
@@ -253,12 +262,12 @@ fn parse_searxng_results(body: &[u8], limit: usize) -> Result<Vec<WebSearchHit>,
         .results
         .iter()
         .filter_map(|result| {
-            let title = normalize_whitespace(&result.title);
+            let title = collapse_whitespace(&result.title);
             let url = result.url.trim();
             if title.is_empty() || url.is_empty() {
                 return None;
             }
-            let snippet = normalize_whitespace(result.content.as_deref().unwrap_or_default());
+            let snippet = collapse_whitespace(result.content.as_deref().unwrap_or_default());
             Some(WebSearchHit {
                 title,
                 url: url.to_string(),
@@ -268,13 +277,6 @@ fn parse_searxng_results(body: &[u8], limit: usize) -> Result<Vec<WebSearchHit>,
         .take(limit)
         .collect();
     Ok(hits)
-}
-
-/// Collapse every run of whitespace into a single space and trim the ends, so
-/// engine-provided text (titles, snippets) is single-line and
-/// comparison-stable.
-fn normalize_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

@@ -46,6 +46,7 @@ pub struct EngineRouter {
     active_engine: RwLock<String>,
     catalog_cache: CatalogCache,
     catalog_cache_lifetime: Duration,
+    catalog_connection_timeout: Duration,
 }
 
 /// Fetched model catalogs by provider connection name.
@@ -53,6 +54,11 @@ type CatalogCache = Arc<Mutex<HashMap<String, (Instant, Vec<ModelInfo>)>>>;
 
 /// How long a provider connection's model catalog is reused by `/models`.
 const CATALOG_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 60);
+
+/// How long one provider connection may take to list its models before it is
+/// reported as failed. It stays below the overall `/models` timeout so a hung
+/// connection cannot discard the catalogs of the healthy ones.
+const CATALOG_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl EngineRouter {
     pub fn new(
@@ -73,6 +79,7 @@ impl EngineRouter {
             active_engine: RwLock::new(active_engine.to_string()),
             catalog_cache: Arc::new(Mutex::new(HashMap::new())),
             catalog_cache_lifetime: CATALOG_CACHE_LIFETIME,
+            catalog_connection_timeout: CATALOG_CONNECTION_TIMEOUT,
         })
     }
 
@@ -104,6 +111,12 @@ impl EngineRouter {
     #[cfg(test)]
     pub(crate) fn with_catalog_cache_lifetime(mut self, lifetime: Duration) -> Self {
         self.catalog_cache_lifetime = lifetime;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_catalog_connection_timeout(mut self, timeout: Duration) -> Self {
+        self.catalog_connection_timeout = timeout;
         self
     }
 
@@ -475,6 +488,7 @@ impl Engine for EngineRouter {
             .collect();
         let catalog_cache = Arc::clone(&self.catalog_cache);
         let lifetime = self.catalog_cache_lifetime;
+        let connection_timeout = self.catalog_connection_timeout;
 
         Box::pin(async move {
             let requests =
@@ -492,7 +506,15 @@ impl Engine for EngineRouter {
                             if let Some(models) = cached {
                                 return (provider_connection, Ok(models));
                             }
-                            let result = engine.list_models().await;
+                            let result =
+                                tokio::time::timeout(connection_timeout, engine.list_models())
+                                    .await
+                                    .unwrap_or_else(|_| {
+                                        Err(anyhow::anyhow!(
+                                            "timed out after {} s",
+                                            connection_timeout.as_secs_f32().ceil()
+                                        ))
+                                    });
                             if let Ok(models) = &result {
                                 catalog_cache
                                     .lock()

@@ -209,6 +209,10 @@ See [configuration](./configuration.md),
 - Provider clients use a connect timeout and an *idle* read timeout, neither
   configurable: the idle limit applies to headers and between chunks, so
   stalled servers fail while long, steadily streaming responses survive.
+- `/models` catalog listing: `EngineRouter` bounds each provider connection with
+  `CATALOG_CONNECTION_TIMEOUT` (below the driver's overall timeout) and reports a hung
+  connection as a partial failure, so healthy connections' models still list. The
+  overall timeout stays a backstop and discards every model when it fires.
 - Output limit: `EngineConfig::max_output_tokens_for_model` resolves the
   configured value (configured model only, clamped to `ModelInfo::max_output_tokens`);
   `EngineRuntimeConfig` holds `max_output_tokens` plus the picker's
@@ -320,10 +324,11 @@ because schemars 1.x keeps the source newlines in `description`.
 
 ## Path-like argument normalization
 
-`ToolRegistry::create_call` applies `sandbox::expand_path_tokens` to keys
-declared by `Tool::path_like_arguments()`, then `to_relative_path`, before
-sandbox approval. `startup::run` exports the resolved `YLVA_HOME`, so sentinel
-paths work in path tools and `bash`. See
+`ToolRegistry::create_call` expands tokens in arguments declared by
+`Tool::path_like_arguments()`, then rewrites absolute paths under the
+current directory to relative form. Both happen before sandbox approval,
+so approval checks see the path the tool will use. `startup::run` exports
+the resolved `YLVA_HOME`, so sentinel paths work in path tools and `bash`. See
 [features](./features.md#tools-to-be-used-by-models).
 
 ## Sandbox policy and the `cross_filesystem` rule
@@ -672,6 +677,33 @@ See [persistence](./persistence.md) for on-disk contracts.
   never repaired, rewritten or appended to; subagent transcript files stay in
   place and are reused as read-only history. `--clone` requires
   `--conversation-id` (clap `requires`).
+
+## Tool-approval grants
+
+- Grants are evaluated after the sandbox verdict and can only satisfy an
+  approval requirement, not replace the verdict. Policy and grant matching
+  use the same resolved subject.
+- One `GrantState` is shared by the root loop and every subagent through the
+  factory and tool registry. Its generation counter is a `watch` channel: a
+  waiting loop rechecks only the published front call. Keeping the original
+  policy check with that call lets a host response or grant wake-up explain
+  how the request was resolved without attributing that action to the sandbox.
+  An unchanged pending recheck does not republish the prompt; the presenter
+  drops the prompt when the call starts.
+- The grant dialog is a sub-state of the approval prompt (`AppState::grant_dialog`),
+  not a `Focus`. *Grant…* sends `RequestGrantPreview`; the agent answers with
+  `UiUpdate::GrantPreview` (rows plus the call's grant subjects), since only it
+  holds the tool objects. The dialog validates edited rows with the same
+  `validate_draft` the agent applies. *Grant* sends `GrantAndApprove` with the
+  selected, possibly edited drafts; the agent re-validates each against the
+  pending call and never trusts UI text. The TUI keeps the prompt and the
+  dialog until the call starts; a refused or failed grant arrives as
+  `UiUpdate::GrantFailed` and the dialog offers retry, changing the rows or going back.
+  Retrying after an external edit sets `reload_snapshot`, which only re-bases
+  the store on the reviewed file and does not activate grants found in it. The
+  footer never drops *Grant…*: narrow terminals get compact labels.
+- `grants.toml` is trust-covered and compared as parsed TOML; saving changes the
+  fingerprint on purpose so a hostile edit cannot ride along.
 
 ## Subagent delegation internals
 

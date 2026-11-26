@@ -212,8 +212,10 @@ fn identical_copies_include_nested_resources_and_preserve_the_winner() {
     }])
     .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_path(&roots[0].join("example/resources/nested/a")),
-        Some(crate::ApprovalCheck::AutoApproved),
+        context
+            .check_path(&roots[0].join("example/resources/nested/a"))
+            .map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::AutoApproved),
     );
     assert_eq!(
         context.check_path(&roots[1].join("example/resources/nested/a")),
@@ -742,12 +744,14 @@ fn symlinked_files_validate_logical_names_and_broken_roots_and_files_warn() {
     std::fs::write(&changed, "Changed").unwrap();
     symlink(&changed, &target_file).unwrap();
     assert_eq!(
-        context.check_snapshot_path(&catalog.skills["example"].source.canonical_path),
-        Some(crate::ApprovalCheck::AutoApproved)
+        context
+            .check_snapshot_path(&catalog.skills["example"].source.canonical_path)
+            .map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::AutoApproved)
     );
     assert!(matches!(
-        context.check_path(&target_file),
-        Some(crate::ApprovalCheck::AutoDenied { .. })
+        context.check_path(&target_file).map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::AutoDenied { .. })
     ));
 }
 
@@ -1001,8 +1005,9 @@ fn loader_delivers_snapshot_and_rejects_adversarial_names_without_side_effects()
             .validate_args(&serde_json::json!({"name":"alpha","path":"/tmp"}))
             .is_err());
         assert_eq!(
-            tool.needs_approval(&serde_json::json!({"name":"alpha"})),
-            crate::ApprovalCheck::AutoApproved
+            tool.needs_approval(&serde_json::json!({"name":"alpha"}))
+                .verdict,
+            crate::ApprovalVerdict::AutoApproved
         );
         let first = tool
             .create_call(uuid::Uuid::new_v4(), serde_json::json!({"name":"alpha"}))
@@ -1038,8 +1043,8 @@ fn loader_delivers_snapshot_and_rejects_adversarial_names_without_side_effects()
         for name in ["", "beta", "../alpha", "/tmp/SKILL.md", "ALPHA"] {
             let args = serde_json::json!({"name":name});
             assert!(matches!(
-                tool.needs_approval(&args),
-                crate::ApprovalCheck::AutoDenied { .. }
+                tool.needs_approval(&args).verdict,
+                crate::ApprovalVerdict::AutoDenied { .. }
             ));
             assert!(tool
                 .create_call(uuid::Uuid::new_v4(), args)
@@ -1099,35 +1104,43 @@ fn sidecar_rules_use_callable_canonical_boundaries_and_normal_ordering() {
         ])
         .expect("valid sandbox fixture");
     assert_eq!(
-        context.check_path(&sidecar),
-        Some(crate::ApprovalCheck::AutoApproved)
+        context.check_path(&sidecar).map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::AutoApproved)
     );
     assert_eq!(
-        context.check_path(&source),
-        Some(crate::ApprovalCheck::UserApprovalRequired)
+        context.check_path(&source).map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::UserApprovalRequired)
     );
     assert_eq!(
-        context.check_path(directory),
-        Some(crate::ApprovalCheck::UserApprovalRequired)
+        context.check_path(directory).map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::UserApprovalRequired)
     );
     assert_eq!(
-        context.check_path(&directory.join("missing")),
-        Some(crate::ApprovalCheck::UserApprovalRequired)
+        context
+            .check_path(&directory.join("missing"))
+            .map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::UserApprovalRequired)
     );
     assert_eq!(
-        context.check_path(&catalog.skills["beta"].source.canonical_path),
-        Some(crate::ApprovalCheck::UserApprovalRequired)
+        context
+            .check_path(&catalog.skills["beta"].source.canonical_path)
+            .map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::UserApprovalRequired)
     );
     std::fs::write(directory.join("nested/SKILL.md"), "not eligible").unwrap();
     assert_eq!(
-        context.check_path(&directory.join("nested/SKILL.md")),
-        Some(crate::ApprovalCheck::UserApprovalRequired)
+        context
+            .check_path(&directory.join("nested/SKILL.md"))
+            .map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::UserApprovalRequired)
     );
     let default_context = crate::SandboxContext::new(sandbox.clone())
         .with_skill_sources(Arc::new(vec![source.clone()]));
     assert_eq!(
-        default_context.check_path(&sidecar),
-        Some(crate::ApprovalCheck::UserApprovalRequired)
+        default_context
+            .check_path(&sidecar)
+            .map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::UserApprovalRequired)
     );
     let empty_context = crate::SandboxContext::new(sandbox.clone())
         .with_configured_rules(vec![rule(ApprovalVerdictConfig::AutoApproved)])
@@ -1143,16 +1156,19 @@ fn sidecar_rules_use_callable_canonical_boundaries_and_normal_ordering() {
             .with_configured_rules(vec![rule(verdict.clone())])
             .expect("valid sandbox fixture");
         assert!(matches!(
-            (verdict, context.check_path(&sidecar)),
+            (
+                verdict,
+                context.check_path(&sidecar).map(|check| check.verdict)
+            ),
             (
                 ApprovalVerdictConfig::AutoApproved,
-                Some(crate::ApprovalCheck::AutoApproved)
+                Some(crate::ApprovalVerdict::AutoApproved)
             ) | (
                 ApprovalVerdictConfig::AutoDenied,
-                Some(crate::ApprovalCheck::AutoDenied { .. })
+                Some(crate::ApprovalVerdict::AutoDenied { .. })
             ) | (
                 ApprovalVerdictConfig::UserApprovalRequired,
-                Some(crate::ApprovalCheck::UserApprovalRequired),
+                Some(crate::ApprovalVerdict::UserApprovalRequired),
             )
         ));
     }
@@ -1168,8 +1184,8 @@ fn sidecar_rules_use_callable_canonical_boundaries_and_normal_ordering() {
         ])
         .expect("valid sandbox fixture");
     assert!(matches!(
-        denied.check_path(&sidecar),
-        Some(crate::ApprovalCheck::AutoDenied { .. })
+        denied.check_path(&sidecar).map(|check| check.verdict),
+        Some(crate::ApprovalVerdict::AutoDenied { .. })
     ));
     let wrong_tool = crate::SandboxContext::new(sandbox).with_tool_rules(
         "load_skill",
@@ -1195,16 +1211,22 @@ fn sidecar_rules_use_callable_canonical_boundaries_and_normal_ordering() {
         )
         .unwrap();
         assert_eq!(
-            context.check_path(&directory.join("inside")),
-            Some(crate::ApprovalCheck::AutoApproved)
+            context
+                .check_path(&directory.join("inside"))
+                .map(|check| check.verdict),
+            Some(crate::ApprovalVerdict::AutoApproved)
         );
         assert_eq!(
-            context.check_path(&directory.join("escape")),
-            Some(crate::ApprovalCheck::UserApprovalRequired)
+            context
+                .check_path(&directory.join("escape"))
+                .map(|check| check.verdict),
+            Some(crate::ApprovalVerdict::UserApprovalRequired)
         );
         assert_eq!(
-            context.check_path(&directory.join("outside/../beta/SKILL.md")),
-            Some(crate::ApprovalCheck::UserApprovalRequired)
+            context
+                .check_path(&directory.join("outside/../beta/SKILL.md"))
+                .map(|check| check.verdict),
+            Some(crate::ApprovalVerdict::UserApprovalRequired)
         );
     }
 }

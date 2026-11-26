@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::config::FavoriteModelsWriter;
 use crate::home_relative_path::display_path;
@@ -100,6 +101,34 @@ pub(crate) fn trusted_profile_workspace_root(
          review it, then run `ylva trust` to use it",
         display_path(&workspace_root.join(crate::YLVA_DIR_NAME))
     ))
+}
+
+/// Shared grant state for this run. Persistent grants are read from the
+/// selected profile's workspace `grants.toml` (already covered by the trust
+/// check) unless `--no-workspace-grants` is set; temporary grants always work.
+pub(crate) fn build_grant_state(
+    disable_workspace_grants: bool,
+    workspace_root: Option<&Path>,
+    current_directory: Option<&Path>,
+    explicit_profile_name: Option<&str>,
+) -> Result<crate::grants::SharedGrantState, String> {
+    let Some(grant_root) = workspace_root.or(current_directory) else {
+        return Ok(Arc::new(crate::grants::GrantState::new(PathBuf::new())));
+    };
+    if disable_workspace_grants {
+        return Ok(Arc::new(crate::grants::GrantState::new(
+            grant_root.to_path_buf(),
+        )));
+    }
+    let profile_name = explicit_profile_name.unwrap_or(crate::DEFAULT_PROFILE_NAME);
+    let (store, grants) =
+        crate::grants::GrantStore::load(grant_root, profile_name, crate::ylva_home())
+            .map_err(|error| error.to_string())?;
+    Ok(Arc::new(crate::grants::GrantState::with_persistent(
+        grant_root.to_path_buf(),
+        grants,
+        Some(store),
+    )))
 }
 
 /// Describe the profile file whose configuration is being materialized.

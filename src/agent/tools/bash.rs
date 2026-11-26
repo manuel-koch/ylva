@@ -42,7 +42,7 @@ use serde_json::Value;
 use tracing::Instrument;
 
 use super::{Section, Tool, ToolCall, ToolCallResult, ToolError};
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 use execution::run_bash;
 use result::label_and_command_display_sections;
 
@@ -221,6 +221,7 @@ fn build_description(timeout_secs: u64) -> String {
 
 impl BashTool {
     pub const NAME: &'static str = "bash";
+    const DEFAULT_APPROVAL_RULE: &'static str = "bash.default";
 
     pub fn new(sandbox_context: SandboxContext) -> Self {
         Self::with_timeout(DEFAULT_BASH_TIMEOUT_SECS, sandbox_context)
@@ -269,9 +270,61 @@ impl Tool for BashTool {
             .and_then(|value| value.as_str())
             .unwrap_or("");
         match self.sandbox_context.check_command(command) {
-            None => ApprovalCheck::UserApprovalRequired,
+            None => ApprovalCheck::tool(
+                ApprovalVerdict::UserApprovalRequired,
+                Self::DEFAULT_APPROVAL_RULE,
+            ),
             Some(verdict) => verdict,
         }
+    }
+
+    /// One statement per top-level statement of the command, each with its
+    /// own policy verdict, so grants can cover the uncovered ones one by one.
+    fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {
+        use crate::grants::{CommandStatement, CommandSubject, CommandToken, GrantSubjects};
+        use crate::sandbox::bash_command_extractor::{
+            token_has_unquoted_brace_expansion, token_has_unquoted_glob,
+        };
+        use crate::sandbox::StatementAnalysis;
+
+        let command = arguments
+            .get("command")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let Some(statements) = self.sandbox_context.analyse_command_statements(command) else {
+            return GrantSubjects::NotGrantable;
+        };
+        GrantSubjects::Commands(
+            statements
+                .into_iter()
+                .map(|statement| match statement {
+                    StatementAnalysis::Unanalysable => CommandStatement::Unanalysable,
+                    StatementAnalysis::Command { extracted, verdict } => {
+                        CommandStatement::Command {
+                            command: CommandSubject {
+                                tokens: extracted
+                                    .argv
+                                    .iter()
+                                    .map(|token| {
+                                        CommandToken::new(token.text.clone(), token.quoted)
+                                    })
+                                    .collect(),
+                                has_unquoted_expansion: extracted.argv.iter().any(|token| {
+                                    token_has_unquoted_glob(token)
+                                        || token_has_unquoted_brace_expansion(token)
+                                        || token.unquoted_text.starts_with('~')
+                                }),
+                                has_variable_assignment_prefix: extracted
+                                    .has_variable_assignment_prefix,
+                            },
+                            policy_approved: verdict.is_some_and(|check| {
+                                check.verdict == ApprovalVerdict::AutoApproved
+                            }),
+                        }
+                    }
+                })
+                .collect(),
+        )
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {

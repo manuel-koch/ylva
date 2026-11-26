@@ -20,7 +20,7 @@ use serde_json::Value;
 use super::{
     validate_args_with_schema, ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError,
 };
-use crate::sandbox::ApprovalCheck;
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict};
 
 /// Maximum number of choices a `clarify` call may offer. The schema
 /// `maxItems`, field description, and validation all derive from this.
@@ -46,6 +46,7 @@ pub struct ClarifyTool;
 
 impl ClarifyTool {
     pub const NAME: &'static str = "clarify";
+    const INTERACTION_RULE: &'static str = "clarify.interaction";
 
     /// Returns the display sections for a completed clarify call — the context
     /// (if any) and the choices list (if any). These are the tool's own
@@ -136,7 +137,14 @@ impl Tool for ClarifyTool {
     }
 
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
-        ApprovalCheck::UserApprovalRequired
+        ApprovalCheck::tool(
+            ApprovalVerdict::UserApprovalRequired,
+            Self::INTERACTION_RULE,
+        )
+    }
+
+    fn requires_human_interaction(&self) -> bool {
+        true
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {

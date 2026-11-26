@@ -89,6 +89,22 @@ impl HelpPopupLayout {
     }
 }
 
+/// Screen-space geometry of the grant dialog, written by the View each frame.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GrantDialogLayout {
+    pub rect: Rect,
+    /// First line of each grant row; empty when scrolled out of view.
+    pub rows: Vec<Rect>,
+    /// Visible lines of the editable rule of each row; empty when the row has
+    /// no rule or it is scrolled out of view.
+    pub rules: Vec<Vec<Rect>>,
+    pub confirm_button: Rect,
+    pub back_button: Rect,
+    /// Largest scroll offset of the body; zero when everything fits.
+    pub maximum_scroll: usize,
+    pub body_rows: usize,
+}
+
 /// Screen-space geometry for the status popup, written by the View each frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StatusPopupLayout {
@@ -281,6 +297,9 @@ pub struct AppLayout {
     /// Written by the Driver after each `tui_widgets::draw` call; zero-sized when
     /// no approval footer is visible.
     pub deny_button: Rect,
+    /// Rect of the "Grant…" button of the approval prompt.
+    pub grant_button: Rect,
+    pub grant_dialog: GrantDialogLayout,
     /// Rect of the OK button below the clarify banner. Zero-sized when no
     /// clarify is pending.
     pub clarify_ok_button: Rect,

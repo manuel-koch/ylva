@@ -188,9 +188,27 @@ pub struct ToolConfig {
     /// Ordered sandbox rules; omission inherits and the last match wins.
     #[serde(default)]
     pub rules: Option<Vec<crate::sandbox::SandboxRuleConfig>>,
+    /// Origin attached by the profile loader, never parsed as configuration.
+    #[serde(skip)]
+    pub rule_source: Option<crate::sandbox::RuleListSource>,
     /// Optional execution timeout in seconds for supported tools.
     #[serde(default, deserialize_with = "deserialize_optional_timeout_secs")]
     pub timeout_secs: Option<u64>,
+}
+
+impl ToolConfig {
+    pub(crate) fn rule_list(&self) -> Option<crate::sandbox::ToolRuleList> {
+        Some(crate::sandbox::ToolRuleList {
+            rules: self.rules.clone()?,
+            source: self.rule_source.clone(),
+        })
+    }
+
+    fn attach_rule_source(&mut self, source: &crate::sandbox::RuleListSource) {
+        if self.rules.is_some() {
+            self.rule_source = Some(source.clone());
+        }
+    }
 }
 
 /// Validate that every `[tools.<name>]`/`[agents.<type>.tools.<name>]` rule
@@ -833,6 +851,13 @@ impl ProfileConfig {
                 },
             )?;
         profile.apply_default_model();
+        let rule_source = crate::sandbox::RuleListSource::Profile {
+            layer,
+            agent_type: None,
+        };
+        for tool in profile.tools.values_mut() {
+            tool.attach_rule_source(&rule_source);
+        }
         let (agents, agent_warnings) = load_agent_types(
             profiles_root,
             profile_name,
@@ -966,14 +991,24 @@ impl ProfileConfig {
         agent_type: Option<&str>,
         tool_name: &str,
     ) -> Option<&[crate::sandbox::SandboxRuleConfig]> {
+        self.effective_tool_rule_config(agent_type, tool_name)?
+            .rules
+            .as_deref()
+    }
+
+    pub(crate) fn effective_tool_rule_config(
+        &self,
+        agent_type: Option<&str>,
+        tool_name: &str,
+    ) -> Option<&ToolConfig> {
         agent_type
             .and_then(|name| self.agents.get(name))
             .and_then(|agent| agent.tools.get(tool_name))
-            .and_then(|tool| tool.rules.as_deref())
+            .filter(|tool| tool.rules.is_some())
             .or_else(|| {
                 self.tools
                     .get(tool_name)
-                    .and_then(|tool| tool.rules.as_deref())
+                    .filter(|tool| tool.rules.is_some())
             })
     }
 
@@ -1146,8 +1181,24 @@ fn load_agent_types(
     let mut warnings = Vec::new();
     let mut agents = resolved_files
         .into_iter()
-        .map(|(agent_type, file)| {
+        .map(|(agent_type, mut file)| {
             debug_assert_eq!(agent_type, file.agent_type);
+            let rule_source = crate::sandbox::RuleListSource::AgentTypeFile {
+                scope: file.scope.label(),
+                agent_type: agent_type.clone(),
+                format: if file
+                    .path
+                    .extension()
+                    .is_some_and(|extension| extension == "toml")
+                {
+                    "toml"
+                } else {
+                    "md"
+                },
+            };
+            for tool in file.definition.config.tools.values_mut() {
+                tool.attach_rule_source(&rule_source);
+            }
             warnings.extend(file.definition.warnings);
             (agent_type, file.definition.config)
         })
@@ -1156,7 +1207,18 @@ fn load_agent_types(
         .entry(DEFAULT_PROFILE_NAME.to_string())
         .or_insert_with(default_agent_config);
 
-    for (agent_type, overrides) in inline_agents {
+    for (agent_type, mut overrides) in inline_agents {
+        let rule_source = crate::sandbox::RuleListSource::Profile {
+            layer: config_layer,
+            agent_type: Some(agent_type.clone()),
+        };
+        for tool in overrides
+            .tools
+            .iter_mut()
+            .flat_map(|tools| tools.values_mut())
+        {
+            tool.attach_rule_source(&rule_source);
+        }
         let config = agents.entry(agent_type).or_insert_with(|| AgentConfig {
             engine: None,
             compaction: None,
@@ -1215,6 +1277,7 @@ fn apply_agent_config_overrides(config: &mut AgentConfig, overrides: AgentConfig
             let tool = config.tools.entry(name).or_default();
             if overrides.rules.is_some() {
                 tool.rules = overrides.rules;
+                tool.rule_source = overrides.rule_source;
             }
             if overrides.timeout_secs.is_some() {
                 tool.timeout_secs = overrides.timeout_secs;

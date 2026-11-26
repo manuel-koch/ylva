@@ -64,6 +64,8 @@ themed_colors! {
     // Tool palette.
     /// Tool bubble color.
     tool_bubble_border_color(Color::Magenta, Color::Magenta);
+    /// Tool name text color; matches the tool bubble color.
+    tool_bubble_foreground_color(Color::Magenta, Color::Magenta);
 
     // Error/warning and interruption palette.
     /// Error color.
@@ -92,8 +94,8 @@ themed_colors! {
 
     // Help and notification palette.
     /// Help popup border, title, section heading, and scroll-indicator colors.
-    help_popup_border_color(Color::Cyan, LIGHT_TEAL);
-    help_popup_heading_color(Color::Cyan, LIGHT_TEAL);
+    popup_border_color(Color::Cyan, LIGHT_TEAL);
+    popup_heading_color(Color::Cyan, LIGHT_TEAL);
     toast_bg_color(Color::Blue, Color::Blue);
     toast_fg_color(Color::White, Color::White);
     notice_color(Color::Cyan, LIGHT_TEAL);
@@ -125,10 +127,7 @@ themed_colors! {
     diff_removed_color(Color::Red, Color::Red);
 
     // Selection and approval-control palette.
-    list_selection_foreground_color(Color::Black, Color::Black);
-    list_selection_background_color(Color::Cyan, Color::Cyan);
     list_text_color(Color::Gray, Color::Rgb(95, 95, 95));
-    list_border_color(Color::Cyan, LIGHT_TEAL);
     /// Foreground of the `/models` row for the model currently serving the conversation.
     active_model_color(Color::Green, Color::Rgb(0, 140, 40));
     overlay_selection_color(Color::Yellow, LIGHT_AMBER);
@@ -139,6 +138,9 @@ themed_colors! {
     approve_background_color(Color::Green, Color::Green);
     deny_hover_background_color(Color::LightRed, Color::LightRed);
     deny_background_color(Color::Red, Color::Red);
+    /// Navigation-only buttons (`[ ← Back ]`, `[ ⇢ Go to agent ]`): neither confirm nor discard.
+    navigation_background_color(Color::Rgb(110, 160, 255), Color::Rgb(30, 80, 200));
+    navigation_hover_background_color(Color::Rgb(160, 195, 255), Color::Rgb(100, 140, 235));
 }
 
 // Queued and steered messages keep separate roles even while they currently

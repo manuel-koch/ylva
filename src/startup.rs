@@ -208,6 +208,12 @@ pub fn run(
     let explicit_profile_name = cli.profile.as_deref();
     let profile_workspace_root =
         trusted_profile_workspace_root(explicit_profile_name, workspace_root.as_deref())?;
+    let grant_state = profile::build_grant_state(
+        cli.no_workspace_grants,
+        profile_workspace_root.as_deref(),
+        current_directory.as_deref(),
+        explicit_profile_name,
+    )?;
     let profile_environment = load_selected_profile_environment(
         explicit_profile_name,
         profile_workspace_root.as_deref(),
@@ -299,10 +305,11 @@ pub fn run(
                 .with_allowed_tools(DEFAULT_TUI_TOOLS)
                 .with_routed_roots();
         }
-        for tool in cli.auto_approve_tools() {
-            factory = factory.with_auto_approve(tool);
+        for (tool, origin) in cli.auto_approve_overrides() {
+            factory = factory.with_auto_approve_origin(tool, origin);
         }
         factory = factory
+            .with_grant_state(Arc::clone(&grant_state))
             .with_system_prompt_origins(root_system_prompt.clone())
             .with_skill_catalog(skills, use_tui);
         factory

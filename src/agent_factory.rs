@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -22,7 +22,8 @@ use tracing::Instrument;
 use crate::agent::tools::agent_finish::AgentFinishToolConfig;
 use crate::agent::tools::spawn_subagent::AgentTypeInfo;
 use crate::agent::tools::{
-    default_registry, AutoApproveTool, ToolRegistryConfig, DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
+    default_registry_with_overrides, AutoApproveTool, ToolRegistryConfig, DEFAULT_CLI_TOOLS,
+    DEFAULT_TUI_TOOLS,
 };
 use crate::agent::{AgentLoop, Context, Message, Role, SubagentRoleConfig, UiUpdate};
 use crate::config::ProfileConfig;
@@ -53,7 +54,7 @@ pub struct AgentFactory {
     /// The set of tools whose approval prompt is bypassed (auto-approved)
     /// without user confirmation. Intended for automated / e2e testing where
     /// no human is present to approve.
-    auto_approve: HashSet<AutoApproveTool>,
+    auto_approve: HashMap<AutoApproveTool, crate::RuleOrigin>,
     /// Explicit list of tool names to register. Defaults to [`DEFAULT_CLI_TOOLS`].
     allowed_tools: Vec<String>,
     /// Session store handed to every `Role::Root` agent this factory builds,
@@ -61,6 +62,9 @@ pub struct AgentFactory {
     store: Option<Store>,
     /// Resolved `SOUL.md` text used only for newly created root contexts.
     system_prompt: Option<SystemPromptOrigins>,
+    /// Tool-approval grants shared by every root and subagent this factory
+    /// builds (and by every copy made by [`Self::without_store`]).
+    grant_state: Option<crate::grants::SharedGrantState>,
 }
 
 #[derive(Clone, Default)]
@@ -108,10 +112,11 @@ impl AgentFactory {
             skills: SkillRuntime::default(),
             engines: Arc::new(std::sync::RwLock::new(engines)),
             routed_roots: false,
-            auto_approve: HashSet::new(),
+            auto_approve: HashMap::new(),
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             store: None,
             system_prompt: None,
+            grant_state: None,
         }
     }
 
@@ -314,7 +319,18 @@ impl AgentFactory {
             allowed_tools: self.allowed_tools.clone(),
             store: None,
             system_prompt: self.system_prompt.clone(),
+            grant_state: self.grant_state.clone(),
         }
+    }
+
+    /// Share one grant state with every agent this factory builds.
+    pub fn with_grant_state(mut self, grant_state: crate::grants::SharedGrantState) -> Self {
+        self.grant_state = Some(grant_state);
+        self
+    }
+
+    pub fn grant_state(&self) -> Option<&crate::grants::SharedGrantState> {
+        self.grant_state.as_ref()
     }
 
     /// Build an isolated configured runtime for an explicitly opened root store.
@@ -342,6 +358,7 @@ impl AgentFactory {
             Some(store),
             self.system_prompt.clone(),
             None,
+            self.grant_state.clone(),
         )
     }
 
@@ -391,8 +408,16 @@ impl AgentFactory {
     }
 
     /// Enable automatic approval of the given tool's calls (no user prompt).
-    pub fn with_auto_approve(mut self, tool: AutoApproveTool) -> Self {
-        self.auto_approve.insert(tool);
+    pub fn with_auto_approve(self, tool: AutoApproveTool) -> Self {
+        self.with_auto_approve_origin(tool, crate::RuleOrigin::Programmatic)
+    }
+
+    pub(crate) fn with_auto_approve_origin(
+        mut self,
+        tool: AutoApproveTool,
+        origin: crate::RuleOrigin,
+    ) -> Self {
+        self.auto_approve.insert(tool, origin);
         self
     }
 
@@ -441,6 +466,7 @@ impl AgentFactory {
             self.store.clone(),
             self.system_prompt.clone(),
             None,
+            self.grant_state.clone(),
         )
     }
 
@@ -455,13 +481,14 @@ impl AgentFactory {
         engines: &HashMap<String, Arc<dyn Engine>>,
         routed_roots: bool,
         allowed_tools: &[String],
-        auto_approve: &HashSet<AutoApproveTool>,
+        auto_approve: &HashMap<AutoApproveTool, crate::RuleOrigin>,
         profile: &ProfileConfig,
         agent_type: &str,
         role: Role,
         store: Option<Store>,
         system_prompt: Option<SystemPromptOrigins>,
         inherited_engine: Option<Arc<dyn Engine>>,
+        grant_state: Option<crate::grants::SharedGrantState>,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
         let engine_name = resolve_engine_name(profile, agent_type);
         let inherits_parent_runtime = inherited_engine.is_some();
@@ -543,33 +570,39 @@ impl AgentFactory {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .filter_map(|tool_name| {
-                let rules = profile.effective_tool_rules(Some(agent_type), tool_name)?;
-                Some((tool_name.clone(), rules.to_vec()))
+                let rules = profile
+                    .effective_tool_rule_config(Some(agent_type), tool_name)?
+                    .rule_list()?;
+                Some((tool_name.clone(), rules))
             })
             .collect();
-        let registry = Arc::new(default_registry(
-            sandbox,
-            ToolRegistryConfig {
-                skills: callable_skills.clone(),
-                auto_approve: auto_approve.clone(),
-                allowed_tools: configured_allowed_tools,
-                include_spawn_subagent: can_spawn,
-                spawn_agent_types,
-                agent_finish: agent_finish_config,
-                tool_sandbox_rules,
-                bash_timeout_secs: profile
-                    .effective_tool_timeout_secs(Some(agent_type), "bash")
-                    .unwrap_or(crate::agent::tools::bash::DEFAULT_BASH_TIMEOUT_SECS),
-                web_search_timeout_secs: profile
-                    .effective_tool_timeout_secs(Some(agent_type), "web_search")
-                    .unwrap_or(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
-                web_fetch_timeout_secs: profile
-                    .effective_tool_timeout_secs(Some(agent_type), "web_fetch")
-                    .unwrap_or(crate::config::DEFAULT_WEB_FETCH_TIMEOUT_SECS),
-                web_search: profile.web_search.clone(),
-                web_fetch: profile.web_fetch.clone(),
-            },
-        )?);
+        let registry = Arc::new(
+            default_registry_with_overrides(
+                sandbox,
+                ToolRegistryConfig {
+                    skills: callable_skills.clone(),
+                    auto_approve: Default::default(),
+                    allowed_tools: configured_allowed_tools,
+                    include_spawn_subagent: can_spawn,
+                    spawn_agent_types,
+                    agent_finish: agent_finish_config,
+                    tool_sandbox_rules,
+                    bash_timeout_secs: profile
+                        .effective_tool_timeout_secs(Some(agent_type), "bash")
+                        .unwrap_or(crate::agent::tools::bash::DEFAULT_BASH_TIMEOUT_SECS),
+                    web_search_timeout_secs: profile
+                        .effective_tool_timeout_secs(Some(agent_type), "web_search")
+                        .unwrap_or(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
+                    web_fetch_timeout_secs: profile
+                        .effective_tool_timeout_secs(Some(agent_type), "web_fetch")
+                        .unwrap_or(crate::config::DEFAULT_WEB_FETCH_TIMEOUT_SECS),
+                    web_search: profile.web_search.clone(),
+                    web_fetch: profile.web_fetch.clone(),
+                },
+                auto_approve,
+            )?
+            .with_grant_state(grant_state.clone()),
+        );
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
         let mut agent_loop = agent_loop
             .with_configured_engine_name(engine_name)
@@ -597,6 +630,7 @@ impl AgentFactory {
                 engine.clone(),
                 engine_name.to_string(),
                 system_prompt,
+                grant_state,
             );
             if let Some(store) = store.clone() {
                 manager.manager = manager.manager.with_store(store);
@@ -708,12 +742,13 @@ impl AgentFactory {
         skills: SkillRuntime,
         engines: HashMap<String, Arc<dyn Engine>>,
         allowed_tools: Vec<String>,
-        auto_approve: HashSet<AutoApproveTool>,
+        auto_approve: HashMap<AutoApproveTool, crate::RuleOrigin>,
         profile: ProfileConfig,
         parent_store: Arc<std::sync::Mutex<Option<Store>>>,
         parent_engine: Arc<dyn Engine>,
         parent_engine_name: String,
         system_prompt: Option<SystemPromptOrigins>,
+        grant_state: Option<crate::grants::SharedGrantState>,
     ) -> BuiltSubagentManager {
         let (finish_tx, finish_rx) = mpsc::unbounded_channel::<FinishResult>();
         let (subagent_ui_tx, subagent_ui_rx) = mpsc::unbounded_channel::<UiUpdate>();
@@ -735,6 +770,7 @@ impl AgentFactory {
                 let parent_engine = parent_engine.clone();
                 let parent_engine_name = parent_engine_name.clone();
                 let system_prompt = system_prompt.clone();
+                let grant_state = grant_state.clone();
                 let utility_engine = engines.get(profile.utility_engine_name()).cloned();
                 let subagent_engine_name =
                     resolve_engine_name(&profile, &request.agent_type).to_string();
@@ -783,6 +819,7 @@ impl AgentFactory {
                     None,
                     system_prompt,
                     inherited_engine,
+                    grant_state,
                 );
                 let (subagent_loop, subagent_ui_rx) = match built {
                     Ok((subagent_loop, subagent_ui_rx)) => (

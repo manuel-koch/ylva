@@ -138,6 +138,30 @@ pub(super) async fn execute_effects(
                 let run_id = pending_run_ids.tool_run_ids.remove(&id);
                 let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::ApproveTool { id }));
             }
+            Effect::RequestGrantPreview { id } => {
+                let run_id = pending_run_ids.tool_run_ids.get(&id).copied();
+                let _ = cmd_tx.try_send(route_command(
+                    run_id,
+                    AgentCommand::RequestGrantPreview { id },
+                ));
+            }
+            Effect::GrantTool {
+                id,
+                requests,
+                reload_snapshot,
+            } => {
+                // The prompt stays pending until the agent starts the call, so
+                // the run id is kept for a retry after a refused grant.
+                let run_id = pending_run_ids.tool_run_ids.get(&id).copied();
+                let _ = cmd_tx.try_send(route_command(
+                    run_id,
+                    AgentCommand::GrantAndApprove {
+                        id,
+                        requests,
+                        reload_snapshot,
+                    },
+                ));
+            }
             Effect::DenyTool { id, reason } => {
                 pending_run_ids.run_outcome.record_approval_denied();
                 state.apply_tool_denied(id, &reason);
@@ -184,7 +208,7 @@ pub(super) async fn execute_effects(
             }
             Effect::CopyToClipboard(text) => {
                 if clipboard.write_text(text) {
-                    state.set_toast("Copied to clipboard");
+                    state.set_toast("✓ Copied to clipboard");
                 }
             }
             // Slash-command effects need the engine, which this function

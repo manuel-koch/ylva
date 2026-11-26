@@ -38,17 +38,23 @@ use super::{
     utf8_text_preview, ContentSection, FileEncoding, Section, Tool, ToolCall, ToolCallResult,
     ToolError, DEFAULT_TOOL_TIMEOUT_SECS, STANDARD_BASE64,
 };
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 
 fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ApprovalCheck> {
     match args.get(key).and_then(|v| v.as_str()) {
         Some(value) if !value.is_empty() => Ok(value),
-        Some(_) => Err(ApprovalCheck::AutoDenied {
-            reason: format!("Required argument '{key}' must not be empty"),
-        }),
-        None => Err(ApprovalCheck::AutoDenied {
-            reason: format!("Required argument '{key}' is missing or not a string"),
-        }),
+        Some(_) => Err(ApprovalCheck::tool(
+            ApprovalVerdict::AutoDenied {
+                reason: format!("Required argument '{key}' must not be empty"),
+            },
+            WriteTool::EMPTY_ARGUMENT_RULE,
+        )),
+        None => Err(ApprovalCheck::tool(
+            ApprovalVerdict::AutoDenied {
+                reason: format!("Required argument '{key}' is missing or not a string"),
+            },
+            WriteTool::ARGUMENT_TYPE_RULE,
+        )),
     }
 }
 
@@ -245,6 +251,9 @@ pub struct WriteTool {
 
 impl WriteTool {
     pub const NAME: &'static str = "write";
+    const DEFAULT_APPROVAL_RULE: &'static str = "write.default";
+    const EMPTY_ARGUMENT_RULE: &'static str = "write.empty_argument";
+    const ARGUMENT_TYPE_RULE: &'static str = "write.argument_type";
 
     pub fn new(sandbox_context: SandboxContext) -> Self {
         WriteTool {
@@ -303,20 +312,30 @@ impl Tool for WriteTool {
             .sandbox_context
             .check_path(std::path::Path::new(path_str));
         let approval = match sandbox_verdict {
-            None => ApprovalCheck::UserApprovalRequired,
+            None => ApprovalCheck::tool(
+                ApprovalVerdict::UserApprovalRequired,
+                Self::DEFAULT_APPROVAL_RULE,
+            ),
             Some(verdict) => verdict,
         };
         tracing::debug!(
             tool = "write",
             path = path_str,
-            decision = match &approval {
-                ApprovalCheck::AutoApproved => "auto-approved",
-                ApprovalCheck::AutoDenied { .. } => "auto-denied",
-                ApprovalCheck::UserApprovalRequired => "sandbox-abstain→user-approval-required",
+            decision = match &approval.verdict {
+                ApprovalVerdict::AutoApproved => "auto-approved",
+                ApprovalVerdict::AutoDenied { .. } => "auto-denied",
+                ApprovalVerdict::UserApprovalRequired => "sandbox-abstain→user-approval-required",
             },
             "tool approval decision"
         );
         approval
+    }
+
+    fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {
+        match require_string_arg(arguments, "path") {
+            Ok(path) => super::path_grant_subjects(&self.sandbox_context, path),
+            Err(_) => crate::grants::GrantSubjects::NotGrantable,
+        }
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
@@ -466,8 +485,8 @@ mod tests {
         let tool = WriteTool::default();
         let args = serde_json::json!({ "path": "src/main.rs", "content": "hello" });
         assert!(matches!(
-            tool.needs_approval(&args),
-            crate::sandbox::ApprovalCheck::UserApprovalRequired
+            tool.needs_approval(&args).verdict,
+            crate::sandbox::ApprovalVerdict::UserApprovalRequired
         ));
     }
 
@@ -478,8 +497,8 @@ mod tests {
         // the user instead of approving it outright.
         let args = serde_json::json!({ "path": "/tmp/evil.sh", "content": "rm -rf /" });
         assert!(matches!(
-            tool.needs_approval(&args),
-            crate::sandbox::ApprovalCheck::UserApprovalRequired
+            tool.needs_approval(&args).verdict,
+            crate::sandbox::ApprovalVerdict::UserApprovalRequired
         ));
     }
 
@@ -509,18 +528,20 @@ mod tests {
         let tool = WriteTool::default();
         // Missing path.
         assert!(matches!(
-            tool.needs_approval(&serde_json::json!({ "content": "hello" })),
-            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+            tool.needs_approval(&serde_json::json!({ "content": "hello" }))
+                .verdict,
+            crate::sandbox::ApprovalVerdict::AutoDenied { .. }
         ));
         // Missing content.
         assert!(matches!(
-            tool.needs_approval(&serde_json::json!({ "path": "out.txt" })),
-            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+            tool.needs_approval(&serde_json::json!({ "path": "out.txt" }))
+                .verdict,
+            crate::sandbox::ApprovalVerdict::AutoDenied { .. }
         ));
         // Both missing.
         assert!(matches!(
-            tool.needs_approval(&serde_json::json!({})),
-            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+            tool.needs_approval(&serde_json::json!({})).verdict,
+            crate::sandbox::ApprovalVerdict::AutoDenied { .. }
         ));
     }
 
@@ -531,8 +552,8 @@ mod tests {
         let tool = WriteTool::default();
         let args = serde_json::json!({ "path": "src/empty.rs", "content": "" });
         assert!(matches!(
-            tool.needs_approval(&args),
-            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+            tool.needs_approval(&args).verdict,
+            crate::sandbox::ApprovalVerdict::AutoDenied { .. }
         ));
     }
 
@@ -847,8 +868,8 @@ mod tests {
             "encoding": "base64",
         });
         assert!(matches!(
-            tool.needs_approval(&args),
-            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+            tool.needs_approval(&args).verdict,
+            crate::sandbox::ApprovalVerdict::AutoDenied { .. }
         ));
     }
 

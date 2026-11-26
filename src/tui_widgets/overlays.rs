@@ -25,10 +25,9 @@ use crate::saturating_cast::saturating_u16;
 use crate::theme::{
     active_model_color, approve_background_color, approve_hover_background_color,
     chat_scrollbar_color, clarify_banner_fg_color, clarify_banner_scroll_indicator_color,
-    clarify_banner_selection_fg_color, deny_background_color, deny_hover_background_color,
-    list_border_color, list_selection_background_color, list_selection_foreground_color,
-    list_text_color, muted_text_color, overlay_selection_color, toast_bg_color, toast_fg_color,
-    warning_color,
+    clarify_banner_selection_fg_color, content_color, deny_background_color,
+    deny_hover_background_color, list_text_color, muted_text_color, overlay_selection_color,
+    popup_border_color, popup_heading_color, toast_bg_color, toast_fg_color, warning_color,
 };
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, model_picker_row_is_details,
@@ -44,9 +43,9 @@ use super::footer::{
 };
 use super::ButtonAreas;
 
-const SESSION_RESUME_BUTTON_LABEL: &str = " [ Resume ] ";
-const SESSION_CLONE_BUTTON_LABEL: &str = " [ Clone ] ";
-const SESSION_DELETE_BUTTON_LABEL: &str = " [ Delete ] ";
+const SESSION_RESUME_BUTTON_LABEL: &str = " [ ✓ Resume ] ";
+const SESSION_CLONE_BUTTON_LABEL: &str = " [ ✓ Clone ] ";
+const SESSION_DELETE_BUTTON_LABEL: &str = " [ ✗ Delete ] ";
 const SESSION_ACTION_BUTTON_GAP: &str = "  ";
 /// A `/models` list row with the model name (the model ID after its last `/`)
 /// in bold. The name is searched only within the identity part of the row;
@@ -446,6 +445,8 @@ pub(super) fn draw_slash_overlay(
     let mut parameter_buttons: Vec<(Rect, usize)> = Vec::new();
     let mut engine_save_controls: Vec<(Rect, crate::tui_reducer_state::EngineSaveFocus)> =
         Vec::new();
+    // Terminal cursor cell of the save page's name field while it is edited.
+    let mut text_cursor: Option<(u16, u16)> = None;
     let mut lines: Vec<Line<'static>> = rows
         .iter()
         .enumerate()
@@ -460,11 +461,11 @@ pub(super) fn draw_slash_overlay(
                         content_width.saturating_sub(MODEL_PICKER_HEADER_INDENT.chars().count()),
                     );
                     let header_style = Style::default()
-                        .fg(muted_text_color())
+                        .fg(popup_heading_color())
                         .add_modifier(Modifier::BOLD);
                     return Line::from(vec![
                         Span::styled(MODEL_PICKER_HEADER_INDENT, header_style),
-                        Span::styled(header_text, header_style.add_modifier(Modifier::UNDERLINED)),
+                        Span::styled(header_text, header_style),
                     ]);
                 }
                 PickerRow::Entry(entry_index) => *entry_index,
@@ -498,10 +499,13 @@ pub(super) fn draw_slash_overlay(
                 && visible_model_choices_in_overlay
                     .get(entry_index)
                     .is_some_and(|choice| !choice.configuration_warnings.is_empty());
-            let style = if is_selected {
+            // Every slash overlay highlights its focused row by foreground only,
+            // as the grant dialog does.
+            let style = if save_form.is_some() && !is_selected {
+                Style::default().fg(muted_text_color())
+            } else if is_selected {
                 Style::default()
-                    .fg(list_selection_foreground_color())
-                    .bg(list_selection_background_color())
+                    .fg(content_color())
                     .add_modifier(Modifier::BOLD)
             } else if is_misconfigured_row {
                 let style = Style::default().fg(warning_color());
@@ -623,23 +627,12 @@ pub(super) fn draw_slash_overlay(
                         .name_caret_column()
                         .filter(|column| entry_index == 1 && *column <= text.chars().count());
                     if let Some(caret_column) = caret_column {
-                        // A highlighted cell marks the caret on the character
-                        // under it, so the text itself never shifts.
-                        let mut characters: Vec<char> = text.chars().collect();
-                        characters.push(' ');
-                        let before: String = characters[..caret_column].iter().collect();
-                        let after: String = characters[caret_column + 1..].iter().collect();
-                        return Line::from(vec![
-                            Span::styled(format!("{marker}{before}"), style),
-                            Span::styled(
-                                characters[caret_column].to_string(),
-                                // Inverse of the selected row, which the name row is.
-                                Style::default()
-                                    .fg(list_selection_background_color())
-                                    .bg(list_selection_foreground_color()),
-                            ),
-                            Span::styled(after, style),
-                        ]);
+                        // The terminal cursor marks the insertion point without
+                        // adding a cell, so the text never shifts.
+                        text_cursor = Some((
+                            list_origin.0 + (marker.chars().count() + caret_column) as u16,
+                            list_origin.1 + (row_index - first_visible) as u16,
+                        ));
                     }
                     return Line::styled(format!("{marker}{text}"), style);
                 }
@@ -738,8 +731,8 @@ pub(super) fn draw_slash_overlay(
     frame.render_widget(Clear, panel_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(list_border_color()))
-        .title(title);
+        .border_style(Style::default().fg(popup_border_color()))
+        .title(format!(" {title} "));
     let inner_area = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -760,6 +753,9 @@ pub(super) fn draw_slash_overlay(
         apply_overlay_drag_highlight(&mut lines, content_area, selection);
     }
     frame.render_widget(Paragraph::new(lines), content_area);
+    if let Some(position) = text_cursor {
+        frame.set_cursor_position(position);
+    }
 
     if detail_height > 0 {
         let [separator_area, details_area] = Layout::default()
@@ -842,7 +838,7 @@ pub(super) fn draw_slash_overlay(
 
 /// Screen rects of the Resume, Clone and Delete buttons in the button row.
 fn session_button_areas(row_area: Rect) -> [Rect; 3] {
-    let gap = SESSION_ACTION_BUTTON_GAP.len() as u16;
+    let gap = SESSION_ACTION_BUTTON_GAP.chars().count() as u16;
     let mut offset = 0u16;
     [
         SESSION_RESUME_BUTTON_LABEL,
@@ -850,7 +846,7 @@ fn session_button_areas(row_area: Rect) -> [Rect; 3] {
         SESSION_DELETE_BUTTON_LABEL,
     ]
     .map(|label| {
-        let width = label.len() as u16;
+        let width = label.chars().count() as u16;
         let area = Rect::new(
             row_area.x.saturating_add(offset),
             row_area.y,
@@ -863,12 +859,16 @@ fn session_button_areas(row_area: Rect) -> [Rect; 3] {
 }
 
 /// The Resume / Clone / Delete button row. The focused button is filled;
-/// the hovered one is lighter, and focus always wins over hover.
+/// the hovered one is lighter, and focus always wins over hover. All buttons are
+/// muted while the list is loading, busy or empty.
 fn session_button_line(
     picker: &crate::tui_reducer_state::SessionPicker,
     hovered: Option<SessionAction>,
 ) -> Line<'static> {
     let mut spans = Vec::new();
+    // Buttons only act on a loaded, non-empty list that is not busy.
+    let enabled = picker.phase == crate::tui_reducer_state::SessionPickerPhase::Ready
+        && !picker.choices.is_empty();
     for (index, (action, label)) in [
         (SessionAction::Resume, SESSION_RESUME_BUTTON_LABEL),
         (SessionAction::Clone, SESSION_CLONE_BUTTON_LABEL),
@@ -879,6 +879,10 @@ fn session_button_line(
     {
         if index > 0 {
             spans.push(Span::raw(SESSION_ACTION_BUTTON_GAP));
+        }
+        if !enabled {
+            spans.push(Span::styled(label, Style::default().fg(muted_text_color())));
+            continue;
         }
         let (normal, hover) = if action == SessionAction::Delete {
             (deny_background_color(), deny_hover_background_color())
@@ -1088,7 +1092,8 @@ fn model_picker_detail_lines(
             };
             Line::styled(
                 format!(
-                    "Compaction uses {provider_connection}/{model}, context: {}",
+                    "{}Compaction uses {provider_connection}/{model}, context: {}",
+                    if mismatch { "✗ " } else { "" },
                     crate::llm::token_estimate::format_token_estimate(context_length)
                 ),
                 Style::default().fg(color),
@@ -1134,7 +1139,7 @@ pub(super) fn draw_clarify_buttons(
     offers_go_to_agent: bool,
     mouse_pos: Option<(u16, u16)>,
 ) -> ButtonAreas {
-    let ok_label = " [ ✓ OK ] ";
+    let ok_label = " [ ✓ Answer ] ";
     let cancel_label = " [ ✗ Cancel ] ";
     let ok_width = saturating_u16(ok_label.chars().count());
     let cancel_width = saturating_u16(cancel_label.chars().count());
@@ -1192,6 +1197,7 @@ pub(super) fn draw_clarify_buttons(
     ButtonAreas {
         approve: ok_area,
         deny: cancel_area,
+        grant: Rect::default(),
         go_to_agent: if offers_go_to_agent {
             go_to_area
         } else {
@@ -1407,7 +1413,11 @@ fn banner_line_with_selection(
 /// The popup is one line of text between its border rows and includes
 /// horizontal padding around the message.
 pub(super) fn draw_toast(frame: &mut Frame, area: Rect, message: &str) {
-    let content = format!(" ✓ {message} ");
+    let content = if message.starts_with('✗') {
+        format!(" {message} ")
+    } else {
+        format!(" ✓ {message} ")
+    };
     let popup_width = saturating_u16(content.chars().count().saturating_add(2)).min(area.width);
     let popup_height = 3u16;
     let x = area.x + area.width.saturating_sub(popup_width + 1);

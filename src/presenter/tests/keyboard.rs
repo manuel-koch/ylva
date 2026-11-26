@@ -14,7 +14,9 @@
 
 use super::*;
 use crate::llm::ModelInfo;
-use crate::tui_reducer_state::{ChoiceLabel, ModelChoice, PromptButton};
+use crate::tui_reducer_state::{
+    ChoiceLabel, EngineSaveFocus, GrantRowSelection, ModelChoice, PromptButton,
+};
 
 pub(super) fn picker_choice(
     connection: &str,
@@ -290,6 +292,28 @@ fn model_picker_list_forwards_left_and_right_to_the_filter_draft() {
             "{code:?}"
         );
     }
+}
+
+#[test]
+fn save_page_up_and_down_move_over_the_rows_without_reaching_the_buttons() {
+    let mut state = model_picker_state(true);
+    state.open_engine_save_form();
+    let press = |state: &mut AppState, code: KeyCode| {
+        update(
+            state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event_with_modifiers(
+                code,
+                KeyModifiers::NONE,
+            ))),
+            &textarea_with(""),
+        );
+        state.engine_save_form().expect("save page").focus
+    };
+    assert_eq!(press(&mut state, KeyCode::Down), EngineSaveFocus::Name);
+    assert_eq!(press(&mut state, KeyCode::Up), EngineSaveFocus::Name);
+    state.cycle_engine_save_focus(false);
+    assert_eq!(press(&mut state, KeyCode::Down), EngineSaveFocus::Save);
+    assert_eq!(press(&mut state, KeyCode::Up), EngineSaveFocus::Name);
 }
 
 #[test]
@@ -905,6 +929,388 @@ fn escape_while_tool_approval_only_drops_button_focus() {
     assert!(matches!(state.focus, Focus::ToolApproval { .. }));
 }
 
+fn grant_command(words: &[&str]) -> crate::grants::CommandStatement {
+    crate::grants::CommandStatement::Command {
+        command: crate::grants::CommandSubject {
+            tokens: words
+                .iter()
+                .map(|word| crate::grants::CommandToken::new(*word, false))
+                .collect(),
+            has_unquoted_expansion: false,
+            has_variable_assignment_prefix: false,
+        },
+        policy_approved: false,
+    }
+}
+
+fn grant_draft(rule: &str) -> crate::grants::GrantDraft {
+    crate::grants::GrantDraft {
+        tool: crate::grants::GrantTool::Bash,
+        name: None,
+        rule: Some(rule.to_string()),
+    }
+}
+
+/// A bash call `make test && cargo build` with one proposed rule per command.
+fn grant_preview(id: Uuid) -> crate::agent::GrantPreview {
+    crate::agent::GrantPreview {
+        id,
+        rows: vec![grant_draft("make test"), grant_draft("cargo build")],
+        already_allowed: 0,
+        other_parts: false,
+        refusal: None,
+        persistent_unavailable: None,
+        marker_to_create: None,
+        subjects: crate::grants::GrantSubjects::Commands(vec![
+            grant_command(&["make", "test"]),
+            grant_command(&["cargo", "build"]),
+        ]),
+        workspace_root: std::path::PathBuf::from("/work"),
+    }
+}
+
+fn state_with_grant_dialog(
+    preview_for: impl FnOnce(Uuid) -> crate::agent::GrantPreview,
+) -> (AppState, Uuid) {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    state.focus = Focus::ToolApproval {
+        tool_id,
+        tool_name: "bash".to_string(),
+    };
+    state.open_grant_dialog(preview_for(tool_id));
+    (state, tool_id)
+}
+
+fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
+    update(
+        state,
+        TuiEvent::Input(InputEvent::KeyInput(key_event(code))),
+        &empty_textarea(),
+    )
+}
+
+#[test]
+fn double_clicking_a_rule_starts_editing_it_without_cycling_the_selection() {
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    state.click_grant_rule(1);
+    let dialog = state.grant_dialog.as_ref().unwrap();
+    assert!(dialog.editing.is_none());
+    assert_eq!(
+        dialog.focused,
+        crate::tui_reducer_state::GrantDialogFocus::Row(1)
+    );
+    let selection = dialog.rows[1].selection;
+    state.click_grant_rule(1);
+    let dialog = state.grant_dialog.as_ref().unwrap();
+    assert_eq!(dialog.editing.as_ref().map(|edit| edit.row), Some(1));
+    assert_eq!(dialog.rows[1].selection, selection);
+}
+
+#[test]
+fn the_grant_button_requests_a_preview_and_keeps_the_prompt() {
+    let mut state = AppState::new();
+    let tool_id = Uuid::new_v4();
+    state.focus = Focus::ToolApproval {
+        tool_id,
+        tool_name: "bash".to_string(),
+    };
+    state.prompt_button_focus = Some(PromptButton::Grant);
+    let effects = press(&mut state, KeyCode::Enter);
+    assert_eq!(effects, vec![Effect::RequestGrantPreview { id: tool_id }]);
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+    assert!(state.grant_dialog.is_none());
+}
+
+fn grant_request(rule: &str, scope: crate::grants::GrantScope) -> crate::grants::GrantRequest {
+    crate::grants::GrantRequest {
+        draft: grant_draft(rule),
+        scope,
+    }
+}
+
+#[test]
+fn the_grant_dialog_confirms_every_row_as_temporary_by_default_once() {
+    use crate::grants::GrantScope::Temporary;
+    let (mut state, tool_id) = state_with_grant_dialog(grant_preview);
+    let effects = press(&mut state, KeyCode::Enter);
+    assert_eq!(
+        effects,
+        vec![Effect::GrantTool {
+            id: tool_id,
+            requests: vec![
+                grant_request("make test", Temporary),
+                grant_request("cargo build", Temporary)
+            ],
+            reload_snapshot: false,
+        }]
+    );
+    assert!(state.grant_dialog.is_some());
+    assert!(press(&mut state, KeyCode::Enter).is_empty());
+}
+
+#[test]
+fn rows_are_selected_per_row_and_an_empty_selection_cannot_be_confirmed() {
+    use crate::grants::GrantScope::Persistent;
+    let (mut state, tool_id) = state_with_grant_dialog(grant_preview);
+    state.focus_grant_row(0);
+    press(&mut state, KeyCode::Right);
+    press(&mut state, KeyCode::Down);
+    press(&mut state, KeyCode::Char(' '));
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(
+        state.grant_dialog.as_ref().unwrap().rows[1].selection,
+        GrantRowSelection::OneTime
+    );
+    let effects = press(&mut state, KeyCode::Enter);
+    assert_eq!(
+        effects,
+        vec![Effect::GrantTool {
+            id: tool_id,
+            requests: vec![grant_request("make test", Persistent)],
+            reload_snapshot: false,
+        }]
+    );
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    for row in 0..2 {
+        state.focus_grant_row(row);
+        press(&mut state, KeyCode::Left);
+    }
+    press(&mut state, KeyCode::Tab);
+    assert!(press(&mut state, KeyCode::Enter).is_empty());
+    state.focus_grant_row(0);
+    press(&mut state, KeyCode::Right);
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(press(&mut state, KeyCode::Enter).len(), 1);
+}
+
+#[test]
+fn the_rule_caret_moves_and_edits_happen_at_the_caret() {
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    state.focus_grant_row(0);
+    press(&mut state, KeyCode::Enter);
+    let rule = |state: &AppState| {
+        state.grant_dialog.as_ref().unwrap().rows[0]
+            .draft
+            .rule
+            .clone()
+            .unwrap()
+    };
+    press(&mut state, KeyCode::Home);
+    press(&mut state, KeyCode::Char('x'));
+    assert_eq!(rule(&state), "xmake test");
+    press(&mut state, KeyCode::Delete);
+    press(&mut state, KeyCode::Delete);
+    assert_eq!(rule(&state), "xke test");
+    press(&mut state, KeyCode::Right);
+    press(&mut state, KeyCode::Left);
+    press(&mut state, KeyCode::Backspace);
+    assert_eq!(rule(&state), "ke test");
+    press(&mut state, KeyCode::End);
+    press(&mut state, KeyCode::Char('!'));
+    assert_eq!(rule(&state), "ke test!");
+    assert_eq!(
+        state
+            .grant_dialog
+            .as_ref()
+            .unwrap()
+            .editing
+            .as_ref()
+            .map(|edit| edit.cursor),
+        Some(8)
+    );
+}
+
+#[test]
+fn an_edited_rule_is_validated_and_restored_on_cancel() {
+    use crate::grants::GrantScope::Temporary;
+    let (mut state, tool_id) = state_with_grant_dialog(grant_preview);
+    state.focus_grant_row(0);
+    press(&mut state, KeyCode::Enter);
+    update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(crossterm::event::KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        ))),
+        &empty_textarea(),
+    );
+    for character in "git push".chars() {
+        press(&mut state, KeyCode::Char(character));
+    }
+    let dialog = state.grant_dialog.as_ref().unwrap();
+    assert!(dialog.row_error(0).is_some());
+    assert!(!dialog.can_confirm());
+    update(
+        &mut state,
+        TuiEvent::Input(InputEvent::Escape),
+        &empty_textarea(),
+    );
+    let dialog = state.grant_dialog.as_ref().unwrap();
+    assert_eq!(dialog.rows[0].draft.rule.as_deref(), Some("make test"));
+    assert!(dialog.editing.is_none());
+
+    press(&mut state, KeyCode::Enter);
+    press(&mut state, KeyCode::Backspace);
+    press(&mut state, KeyCode::Backspace);
+    press(&mut state, KeyCode::Backspace);
+    press(&mut state, KeyCode::Backspace);
+    press(&mut state, KeyCode::Char('*'));
+    press(&mut state, KeyCode::Enter);
+    state.focus_grant_row(1);
+    press(&mut state, KeyCode::Left);
+    let effects = press(&mut state, KeyCode::Tab);
+    assert!(effects.is_empty());
+    let effects = press(&mut state, KeyCode::Enter);
+    assert_eq!(
+        effects,
+        vec![Effect::GrantTool {
+            id: tool_id,
+            requests: vec![grant_request("make *", Temporary)],
+            reload_snapshot: false,
+        }]
+    );
+}
+
+#[test]
+fn confirming_after_a_failed_grant_retries_reloading_only_for_a_changed_file() {
+    use crate::grants::GrantScope::Persistent;
+    let (mut state, tool_id) = state_with_grant_dialog(grant_preview);
+    for row in 0..2 {
+        state.focus_grant_row(row);
+        press(&mut state, KeyCode::Right);
+    }
+    press(&mut state, KeyCode::Tab);
+    press(&mut state, KeyCode::Enter);
+    state.grant_dialog_failed(tool_id, "file changed".to_string(), true);
+    let dialog = state.grant_dialog.as_ref().unwrap();
+    assert!(!dialog.awaiting_answer);
+    assert!(dialog.failure.is_some());
+    let effects = press(&mut state, KeyCode::Enter);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::GrantTool { reload_snapshot: true, requests, .. }]
+            if requests.iter().all(|request| request.scope == Persistent)
+    ));
+    state.grant_dialog_failed(tool_id, "disk full".to_string(), false);
+    assert!(matches!(
+        press(&mut state, KeyCode::Enter).as_slice(),
+        [Effect::GrantTool {
+            reload_snapshot: false,
+            ..
+        }]
+    ));
+    state.grant_dialog_failed(tool_id, "disk full".to_string(), false);
+    for row in 0..2 {
+        state.focus_grant_row(row);
+        press(&mut state, KeyCode::Left);
+    }
+    assert!(state
+        .grant_dialog
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .all(|row| row.selection == GrantRowSelection::Temporary));
+    state.grant_dialog_failed(Uuid::new_v4(), "other".to_string(), false);
+    assert_eq!(
+        state
+            .grant_dialog
+            .as_ref()
+            .unwrap()
+            .failure
+            .as_ref()
+            .unwrap()
+            .reason,
+        "disk full"
+    );
+}
+
+#[test]
+fn the_grant_dialog_goes_back_without_resolving_the_prompt() {
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    press(&mut state, KeyCode::Tab);
+    assert!(press(&mut state, KeyCode::Enter).is_empty());
+    assert!(state.grant_dialog.is_none());
+
+    state.open_grant_dialog(grant_preview(match &state.focus {
+        Focus::ToolApproval { tool_id, .. } => *tool_id,
+        _ => unreachable!(),
+    }));
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::Escape),
+        &empty_textarea(),
+    );
+    assert!(effects.is_empty());
+    assert!(state.grant_dialog.is_none());
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+}
+
+#[test]
+fn the_grant_dialog_refuses_what_cannot_be_granted() {
+    let (mut state, _) = state_with_grant_dialog(|id| crate::agent::GrantPreview {
+        refusal: Some("this call cannot be granted".to_string()),
+        ..grant_preview(id)
+    });
+    assert!(press(&mut state, KeyCode::Enter).is_empty());
+    assert!(state.grant_dialog.is_some());
+
+    let (mut state, _) = state_with_grant_dialog(|id| crate::agent::GrantPreview {
+        persistent_unavailable: Some("no profile directory".to_string()),
+        ..grant_preview(id)
+    });
+    state.focus_grant_row(0);
+    press(&mut state, KeyCode::Right);
+    press(&mut state, KeyCode::Right);
+    assert!(state
+        .grant_dialog
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .all(|row| row.selection != GrantRowSelection::Persistent));
+}
+
+#[test]
+fn the_grant_dialog_scrolls_within_the_drawn_content() {
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    state.layout.grant_dialog.maximum_scroll = 3;
+    state.layout.grant_dialog.body_rows = 4;
+    press(&mut state, KeyCode::PageDown);
+    assert_eq!(state.grant_dialog.as_ref().unwrap().scroll_offset, 3);
+    state.scroll_grant_dialog(-1);
+    assert_eq!(state.grant_dialog.as_ref().unwrap().scroll_offset, 2);
+    press(&mut state, KeyCode::Home);
+    assert_eq!(state.grant_dialog.as_ref().unwrap().scroll_offset, 0);
+    press(&mut state, KeyCode::End);
+    assert_eq!(state.grant_dialog.as_ref().unwrap().scroll_offset, 3);
+}
+
+#[test]
+fn ctrl_c_in_the_grant_dialog_goes_back_without_quitting() {
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    let effects = update(
+        &mut state,
+        TuiEvent::Input(InputEvent::CtrlC),
+        &empty_textarea(),
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(state.grant_dialog.is_none());
+    assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+}
+
+#[test]
+fn a_grant_dialog_for_another_prompt_is_not_opened() {
+    let mut state = AppState::new();
+    state.focus = Focus::ToolApproval {
+        tool_id: Uuid::new_v4(),
+        tool_name: "bash".to_string(),
+    };
+    state.open_grant_dialog(grant_preview(Uuid::new_v4()));
+    assert!(state.grant_dialog.is_none());
+}
+
 #[test]
 fn escape_while_busy_empty_input_triggers_confirm() {
     let mut state = AppState::new();
@@ -1106,6 +1512,8 @@ fn tab_cycles_approval_buttons_and_enter_activates_the_focused_one() {
     assert_eq!(state.prompt_button_focus, Some(PromptButton::Approve));
     update(&mut state, tab.clone(), &empty_textarea());
     assert_eq!(state.prompt_button_focus, Some(PromptButton::Deny));
+    update(&mut state, tab.clone(), &empty_textarea());
+    assert_eq!(state.prompt_button_focus, Some(PromptButton::Grant));
     update(&mut state, tab, &empty_textarea());
     assert_eq!(state.prompt_button_focus, Some(PromptButton::Approve));
 
@@ -1461,6 +1869,7 @@ fn go_to_agent_button_is_offered_and_switches_to_the_prompt_owner() {
     for expected in [
         PromptButton::Approve,
         PromptButton::Deny,
+        PromptButton::Grant,
         PromptButton::GoToAgent,
     ] {
         update(&mut state, tab.clone(), &empty_textarea());
@@ -1495,9 +1904,9 @@ fn go_to_agent_button_is_not_offered_while_viewing_the_prompt_owner() {
         tool_name: "bash".to_string(),
     };
     let tab = TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab)));
-    update(&mut state, tab.clone(), &empty_textarea());
-    update(&mut state, tab.clone(), &empty_textarea());
-    update(&mut state, tab, &empty_textarea());
+    for _ in 0..4 {
+        update(&mut state, tab.clone(), &empty_textarea());
+    }
     assert_eq!(state.prompt_button_focus, Some(PromptButton::Approve));
 }
 
@@ -1625,4 +2034,24 @@ fn status_popup_escape_closes_it() {
         &empty_textarea(),
     );
     assert_eq!(state.focus, Focus::MainInput);
+}
+
+#[test]
+fn arrows_move_over_rows_only_and_tab_cycles_first_row_and_buttons() {
+    use crate::tui_reducer_state::GrantDialogFocus;
+    let (mut state, _) = state_with_grant_dialog(grant_preview);
+    let focused = |state: &AppState| state.grant_dialog.as_ref().unwrap().focused;
+    state.focus_grant_row(0);
+    press(&mut state, KeyCode::Up);
+    assert_eq!(focused(&state), GrantDialogFocus::Row(0));
+    press(&mut state, KeyCode::Down);
+    assert_eq!(focused(&state), GrantDialogFocus::Row(1));
+    press(&mut state, KeyCode::Down);
+    assert_eq!(focused(&state), GrantDialogFocus::Row(1));
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(focused(&state), GrantDialogFocus::Confirm);
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(focused(&state), GrantDialogFocus::Back);
+    press(&mut state, KeyCode::Tab);
+    assert_eq!(focused(&state), GrantDialogFocus::Row(0));
 }

@@ -1,6 +1,7 @@
 # Ylva agent-harness keybindings
 
-Reference for Ylva's TUI keybindings.
+Reference for Ylva's TUI keybindings. Dialog and picker key behavior follows the
+[styleguide](./styleguide.md#keyboard).
 
 Footer hints render each keybinding in bold and its action in normal text.
 Multiple hints are separated by ` · `, for example:
@@ -44,7 +45,15 @@ conversation. The original draft returns after all approvals are resolved.
 | `ctrl-c` (×2, same key, ≤ 2 s) | Help popup open | Quit when idle; interrupt and quit while busy |
 | Left-click inside popup | Help popup open | No effect (stays open) |
 | Left-click outside popup | Help popup open | Close popup |
-| `tab` / `shift-tab` | Approval sub-mode | Move focus between the Approve and Deny buttons, plus the *Go to agent* button when the approval belongs to another conversation than the viewed one (none focused initially) |
+| `tab` / `shift-tab` | Approval sub-mode | Move focus between the Approve, Deny and Grant… buttons, plus the *Go to agent* button when the approval belongs to another conversation than the viewed one (none focused initially) |
+| `enter` / left-click *Grant…* | Approval sub-mode | Open the grant dialog for similar calls |
+| `↑` `↓` | Grant dialog | Move focus over the rows only |
+| `tab` / `shift-tab` | Grant dialog | Cycle focus: first row → *Grant* → *Back* |
+| `←` `→` / `space` / click a row | Grant dialog | Cycle the focused row's selector (`one-time`, `temporary`, `persistent`) |
+| `enter` on a row / double-click its rule (✎) | Grant dialog | Edit the row's rule: type at the caret, `←` `→` `home` `end` move it, `backspace` / `delete` remove, `ctrl-u` clears, `enter` keeps, `esc` restores; a single click on the rule only focuses the row |
+| `pgup` `pgdn` `home` `end` / mouse wheel | Grant dialog | Scroll the dialog body when it does not fit the terminal |
+| `enter` / left-click *Grant* | Grant dialog | Approve the tool and create the selected grants; the dialog stays open with the reason if nothing could be created |
+| `esc` / `ctrl-c` / left-click *Back* or outside | Grant dialog | Return to the approval prompt |
 | `enter` | Approval sub-mode, Approve focused | Approve the tool; text in the input field is left untouched |
 | `enter` | Approval sub-mode, Deny focused | Deny the tool with the input text as the reason, then clear the field |
 | `enter` | Approval sub-mode, no button focused | No effect (typed text never changes what a bare `enter` does) |
@@ -130,12 +139,13 @@ conversation. The original draft returns after all approvals are resolved.
 | `esc` | `/models` parameter popup open | Return to the model list and discard the parameter edits |
 | typing / backspace | `/models` parameter popup open | Ignored; the filter stays as it was |
 | `tab` / `shift-tab` | engine save page | Move focus between mode, name, `[ Save ]` and `[ Save & apply ]` |
+| `↑` / `↓` | engine save page | Move focus over the mode and name rows (no wrapping; never onto the buttons) |
 | `←` / `→`, `space` | engine save page, mode focused | Switch between creating a new engine and updating the origin engine (when it is explicit) |
 | typing / backspace / delete | engine save page, name focused | Edit the new engine's name at the caret |
 | `left` / `right` / `home` / `end` | engine save page, name focused | Move the caret within the name |
 | `enter` | engine save page | Commit only on a focused `[ Save ]` / `[ Save & apply ]` button; never from the mode or name fields |
 | `esc` | engine save page | Return to the parameters page with the draft kept |
-| `left-click` on a control | engine save page | Focus the mode or name field; activate `[ Save ]` / `[ Save & apply ]` |
+| `left-click` on a control | engine save page | Focus the name field; switch the mode (`◂ value ▸`); activate `[ Save ]` / `[ Save & apply ]` |
 | `↑` / `↓`, page keys, mouse wheel | `/session` picker ready | Move the highlighted session |
 | `tab` / `shift-tab` | `/session` picker ready | Move button focus between Resume, Clone and Delete (wraps; overrides mouse hover); every new open focuses Resume |
 | `left-click` on button | `/session` picker ready | Activate Resume, Clone or Delete on the highlighted row |

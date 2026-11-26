@@ -25,6 +25,7 @@ use crate::agent::{Message, UserMessageKind};
 use crate::llm::token_estimate::truncate_text_to_token_budget;
 use crate::llm::TokenEstimator;
 use crate::prompt::{format_prompt_block, PromptBlockKind};
+use crate::text_normalization::collapse_whitespace;
 
 /// Marker prefixing the recovery handoff in the model view. Like
 /// [`super::COMPACTION_SUMMARY_MARKER`] it is projected as a `user` message,
@@ -292,7 +293,7 @@ impl ProjectionBudget {
 }
 
 fn excerpt(text: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(text);
     let mut characters = collapsed.chars();
     let head: String = characters.by_ref().take(OUTCOME_EXCERPT_CHARS).collect();
     if characters.next().is_some() {

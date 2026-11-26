@@ -19,8 +19,30 @@ use super::*;
 /// reports completion through `agent_tx` so the loop never blocks on a tool.
 pub struct PendingTool {
     pub call: Box<dyn ToolCall>,
+    pub(super) published_approval: Option<approval_trail::PublishedApproval>,
 }
 impl PendingTool {
+    /// Queue a call that has not yet been presented for approval.
+    pub fn new(call: Box<dyn ToolCall>) -> Self {
+        Self {
+            call,
+            published_approval: None,
+        }
+    }
+
+    pub(super) fn approval_parent(&self) -> Option<approval_trail::RecordId> {
+        let published = self.published_approval.as_ref()?;
+        published.record_id.or_else(|| {
+            approval_trail::check(
+                self.call.name(),
+                self.call.id(),
+                &published.check,
+                approval_trail::Phase::Admission,
+                None,
+            )
+        })
+    }
+
     /// Spawn the tool in its own task, bounded by `timeout_secs` (or the
     /// default) and a per-tool `CancellationToken`. Completion is reported via
     /// `agent_tx` (`ToolDone`/`ToolError`/`ToolKilled`); returns the token the

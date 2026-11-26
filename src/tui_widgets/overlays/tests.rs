@@ -129,7 +129,7 @@ fn detail_text_and_color(
     let lines = model_picker_detail_lines(overlay, display, 120, 5);
     let line = lines
         .iter()
-        .find(|line| line.to_string().starts_with("Compaction"))
+        .find(|line| line.to_string().contains("Compaction"))
         .expect("compaction detail line");
     let text = line
         .spans
@@ -214,8 +214,9 @@ fn draft_window_matching_explicit_compaction_engine_clears_mismatch_highlight() 
     let display = engine_display(explicit_compaction_engine);
 
     let mismatching = picker_overlay(None);
-    let (_, mismatch_color) = detail_text_and_color(&mismatching, &display);
+    let (mismatch_text, mismatch_color) = detail_text_and_color(&mismatching, &display);
     assert_eq!(mismatch_color, Some(warning_color()));
+    assert!(mismatch_text.starts_with("✗ Compaction"), "{mismatch_text}");
 
     let matching = picker_overlay(Some(context_length_draft(0, 128 * KB, true)));
     let (text, matching_color) = detail_text_and_color(&matching, &display);
@@ -354,7 +355,7 @@ fn save_page_shows_its_controls_and_clipped_hit_areas_at_every_width() {
 }
 
 #[test]
-fn save_page_marks_the_name_caret_with_a_highlighted_cell_on_the_character_under_it() {
+fn save_page_places_the_terminal_cursor_at_the_name_caret_without_shifting_text() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -388,14 +389,18 @@ fn save_page_marks_the_name_caret_with_a_highlighted_cell_on_the_character_under
             );
         })
         .expect("draw");
+    let cursor = terminal.get_cursor_position().expect("cursor");
     let buffer = terminal.backend().buffer();
-    let reversed: Vec<&str> = buffer
-        .content()
-        .iter()
-        .filter(|cell| cell.bg == crate::theme::list_selection_foreground_color())
-        .map(|cell| cell.symbol())
+    let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+    assert!(text.contains("Name:  ✎ fast"), "{text}");
+    let cursor_cells: Vec<String> = (0..80)
+        .map(|x| buffer[(x, cursor.y)].symbol().to_string())
         .collect();
-    assert_eq!(reversed, ["a"]);
+    let name_column = cursor_cells
+        .windows(4)
+        .position(|cells| cells.concat() == "fast")
+        .expect("name") as u16;
+    assert_eq!(cursor.x, name_column + 1);
 }
 
 #[test]
@@ -414,7 +419,7 @@ fn long_save_page_info_scrolls_below_the_controls_instead_of_squeezing_them() {
     };
     let overlay = picker_overlay(Some(parameters_with_buttons(Some(Box::new(form)))));
     let (layout, text) = render_overlay(&overlay, 60);
-    assert!(text.contains("Name:  fast"), "{text}");
+    assert!(text.contains("Name:  ✎ fast"), "{text}");
     assert!(text.contains("Save"), "{text}");
     assert!(layout.detail_total_rows > layout.detail_rows.len());
     assert_eq!(layout.detail_first_visible_row, 0);
@@ -537,4 +542,60 @@ fn model_picker_dialog_height_does_not_depend_on_the_selected_details() {
     let (_, first) = render_overlay(&overlay_for(0, ""), 60);
     let (_, later) = render_overlay(&overlay_for(5, ""), 60);
     assert_eq!(dialog_height(&first), dialog_height(&later));
+}
+
+#[test]
+fn session_buttons_are_muted_unless_the_list_is_loaded_and_not_empty() {
+    use crate::tui_reducer_state::{SessionChoice, SessionPicker, SessionPickerPhase};
+    let muted = Style::default().fg(crate::theme::muted_text_color());
+    let all_muted = |picker: &SessionPicker, hovered| {
+        super::session_button_line(picker, hovered)
+            .spans
+            .iter()
+            .filter(|span| !span.content.trim().is_empty())
+            .all(|span| span.style == muted)
+    };
+
+    let mut picker = SessionPicker::loading();
+    assert!(all_muted(&picker, None));
+    assert!(all_muted(&picker, Some(SessionAction::Resume)));
+
+    picker.phase = SessionPickerPhase::Ready;
+    assert!(
+        all_muted(&picker, None),
+        "an empty list has nothing to act on"
+    );
+
+    picker.choices.push(SessionChoice {
+        session_id: uuid::Uuid::new_v4(),
+        title: "title".to_string(),
+        last_used_at: "today".to_string(),
+    });
+    assert!(!all_muted(&picker, None));
+
+    picker.phase = SessionPickerPhase::Deleting;
+    assert!(all_muted(&picker, None));
+}
+
+#[test]
+fn toast_shows_confirmation_glyph_unless_message_is_a_problem() {
+    let render = |message: &str| {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| draw_toast(frame, frame.area(), message))
+            .expect("draw toast");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    let confirmation = render("Copied to clipboard");
+    assert!(confirmation.contains("✓ Copied to clipboard"));
+    let problem = render("✗ Paste rejected");
+    assert!(problem.contains("✗ Paste rejected"));
+    assert!(!problem.contains('✓'));
 }

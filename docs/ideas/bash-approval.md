@@ -143,13 +143,13 @@ candidates, not selected dependencies.
 
 Two operational ideas are particularly relevant to Ylva even without adopting a
 sandbox. First, violation reporting can turn denied operations from opaque
-`EPERM` failures into explainable records (operation, process, target and rule),
-which could feed the [approval verdict trail](approval-verdict-trail.md) and
-make compatibility failures actionable. Second, audit/learning mode can record
-observed access and help discover necessary exceptions before enforcement. Such
-observations support policy authoring; they are not proof that a policy is safe or
-complete. Policy digests, backend/tier and any relaxations should accompany
-results for provenance.
+`EPERM` failures into explainable records (operation, process, target and rule)
+and make compatibility failures easier to diagnose. Keep these records separate
+from the tool approval trail: they explain runtime enforcement, not the approval
+decision. Second, audit/learning mode can record observed access and help
+discover necessary exceptions before enforcement. Such observations support
+policy authoring; they are not proof that a policy is safe or complete. Policy
+digests, backend/tier and any relaxations should accompany results for provenance.
 
 Caveats: deny-by-default profiles need tuning because ordinary tools and
 toolchains may read system program files and may need temporary, cache, lock or
@@ -161,22 +161,6 @@ must be tested across supported macOS versions and architectures (including
 ARM64/x64). A macOS-only Seatbelt implementation is not a cross-platform
 boundary; Linux, Windows and other systems need their own enforcement backend and
 must not be assumed semantically identical.
-
-## Learned persistent rules
-
-See [reusable tool-approval grants](tool-approval-grants.md) for user-approved
-temporary and persistent Bash grants and their interaction with existing rules.
-
-## Verdict provenance and explanations
-
-Carry structured decision provenance through approval evaluation and show it in
-the approval prompt: matched rule, configuration origin, relevant argument
-identity, unsupported syntax or the point where parsing became ambiguous.
-
-See [approval verdict trail](approval-verdict-trail.md). An aggregate verdict
-should retain the contributing command and reason, not only the final status.
-This would also provide evidence for ranking frequently approved commands before
-extending grammars or suggesting persistent rules.
 
 ## Additional veto layers
 

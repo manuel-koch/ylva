@@ -36,7 +36,7 @@ use uuid::Uuid;
 use super::{
     ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
-use crate::sandbox::ApprovalCheck;
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, DecisionMaker, RuleOrigin};
 
 /// The default agent-type name used when a `spawn_subagent` call omits
 /// `agent_type`.
@@ -74,14 +74,19 @@ pub struct AgentTypeInfo {
 }
 
 pub struct SpawnSubagentTool {
-    auto_approve: bool,
+    auto_approve: Option<RuleOrigin>,
     description: String,
 }
 
 impl SpawnSubagentTool {
     pub const NAME: &'static str = "spawn_subagent";
+    const DEFAULT_APPROVAL_RULE: &'static str = "spawn_subagent.default";
 
     pub fn new(auto_approve: bool) -> Self {
+        Self::with_approval_override(auto_approve.then_some(RuleOrigin::Programmatic))
+    }
+
+    pub(super) fn with_approval_override(auto_approve: Option<RuleOrigin>) -> Self {
         SpawnSubagentTool {
             auto_approve,
             description: Self::base_description().to_string(),
@@ -151,10 +156,17 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
-        if self.auto_approve {
-            ApprovalCheck::AutoApproved
+        if let Some(origin) = &self.auto_approve {
+            ApprovalCheck::new(
+                ApprovalVerdict::AutoApproved,
+                DecisionMaker::Tool,
+                origin.clone(),
+            )
         } else {
-            ApprovalCheck::UserApprovalRequired
+            ApprovalCheck::tool(
+                ApprovalVerdict::UserApprovalRequired,
+                Self::DEFAULT_APPROVAL_RULE,
+            )
         }
     }
 
@@ -168,6 +180,10 @@ impl Tool for SpawnSubagentTool {
     /// [`is_default_argument`](Self::is_default_argument) already drops it.
     fn subtype_argument(&self) -> Option<&'static str> {
         Some("agent_type")
+    }
+
+    fn grant_subjects(&self, _arguments: &Value) -> crate::grants::GrantSubjects {
+        crate::grants::GrantSubjects::Single(crate::grants::GrantSubject::Unconditional)
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
@@ -272,8 +288,9 @@ mod tests {
     fn needs_approval_defaults_to_user_approval_required() {
         let tool = SpawnSubagentTool::new(false);
         assert_eq!(
-            tool.needs_approval(&serde_json::json!({"task": "do it"})),
-            ApprovalCheck::UserApprovalRequired
+            tool.needs_approval(&serde_json::json!({"task": "do it"}))
+                .verdict,
+            ApprovalVerdict::UserApprovalRequired
         );
     }
 
@@ -281,8 +298,9 @@ mod tests {
     fn needs_approval_is_auto_approved_when_configured() {
         let tool = SpawnSubagentTool::new(true);
         assert_eq!(
-            tool.needs_approval(&serde_json::json!({"task": "do it"})),
-            ApprovalCheck::AutoApproved
+            tool.needs_approval(&serde_json::json!({"task": "do it"}))
+                .verdict,
+            ApprovalVerdict::AutoApproved
         );
     }
 

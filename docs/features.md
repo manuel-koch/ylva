@@ -51,49 +51,10 @@ so starts within the interval show the hint without a request. Opt out with
 
 ## Logging
 
-Logging is opt-in and controlled entirely by CLI flags (there is no logging
-configuration file).
-See [CLI options](./cli-options.md) for usage of `--log-file`, `--log-level`
-and `--log-format` options.
-
-At startup (when logging is enabled), an `INFO`-level `"build info"` event is
-logged before anything else, carrying `version`, `commit`, `built`, and
-`profile` (the same values as `ylva --version`). It applies to every
-invocation, including `session` and `profile` subcommands. TUI and CLI runs
-then log a `"starting"` event carrying `app` (`"cli"` or `"tui"`, matching the
-mode `main.rs` selected). This makes the exact build identifiable from the log
-file alone, without cross-referencing a separate `--version` invocation.
-
-At `DEBUG` level, `ylva session` logs one `"resolved session store"` event
-with `cwd`, `chats_root`, and `project_key`. Session listings are per project,
-so this event explains an empty `session list` run from an unexpected
-directory.
-
-Session-title generation emits structured lifecycle events when logging is
-enabled. The main stages are recorded with `stage` values such as
-`scheduled`, `request_started`, `response_received`, `normalized`,
-`persist_started`, and `persisted`; failures and skipped attempts include a
-reason or error stage. These events include the session id, selected utility
-engine/provider/model, and character counts, but never the conversation
-prompt, assistant reply, or generated title text.
-
-At `DEBUG` level, every received `AgentCommand` emits one `"agent command
-received"` event with a stable `command` variant field. Payloads are represented
-by lengths or correlation IDs rather than their contents; tool approval/denial
-events remain separate outcome events.
-
-Session work is correlated through immutable `session` spans. Request, tool,
-compaction, title and writer scopes retain the session that admitted their work;
-after `/clear`, new work uses the replacement ID. Subagent spans additionally
-identify their run and parent session, including completion and transcript
-persistence. No new prompt, credential, or conversation-body fields are logged.
-
-When a logfile is enabled, user-visible provider/stream failures, tool
-failures, and fatal startup errors are also emitted through `tracing`. Fatal
-startup paths flush the non-blocking logfile before exiting. A provider stream
-failure is routed through the agent event loop once, so one failed request
-produces one user-facing error even though lower layers may record their own
-structured diagnostics.
+Ylva can write text or JSON logs for TUI and CLI runs, including an `INFO`
+approval trail for tool calls. See [Reading Ylva logs](./logging.md) for
+diagnostic fields, a worked approval trail, and what to review before sharing
+a logfile. Use the [CLI flags](./cli-options.md#flags) to enable logging.
 
 ## CLI mode
 
@@ -475,22 +436,22 @@ favorite models and the remaining raw `provider_connection/model` catalog entrie
 membership is an exact, case-sensitive provider-connection preference saved with ctrl-f from the
 highlighted row in either the list or parameter popup; it does not switch the model or alter
 parameter drafts. Favorites not currently returned by discovery remain configured but are hidden.
-Groups are introduced by non-selectable, underlined `Engines`, `Favorites` and `Models` headers;
-favorites are marked with `⚑`, and model names stay aligned with or without it. Favorites keep their
-configured order within each connection. Partial catalog outages retain available choices and add a
-notice naming failed connections; total outages continue to show available named-engine shortcuts.
-Selecting a shortcut activates that exact engine's current Engine runtime settings, even when
-another engine uses the same connection and model. A raw catalog entry keeps provider-based routing:
-it changes the active engine for its connection, or the deterministic representative engine for
-another connection. Engine rows whose settings the connection's catalog does not advertise get extra
-detail segments and render in the theme's orange warning colour; they stay selectable. The picker
-title shows the number of rows, as `(visible/total)` while the filter hides some.
-`model not in catalog` replaces all other warnings when the catalog lacks the model; otherwise
-`context not advertised` and `max output not advertised` mean the configured value exceeds the
-catalog's limit, and `reasoning not advertised` means the configured effort is rejected by the
+Groups are introduced by non-selectable `Engines`, `Favorites` and `Models` headings (bold, in the
+popup heading color); favorites are marked with `⚑`, and model names stay aligned with or without
+it. Favorites keep their configured order within each connection. Partial catalog outages retain
+available choices and add a notice naming failed connections; total outages continue to show
+available named-engine shortcuts. Selecting a shortcut activates that exact engine's current Engine
+runtime settings, even when another engine uses the same connection and model. A raw catalog entry
+keeps provider-based routing: it changes the active engine for its connection, or the deterministic
+representative engine for another connection. Engine rows whose settings the connection's catalog
+does not advertise get extra detail segments and render in the theme's orange warning colour; they
+stay selectable. The picker title shows the number of rows, as `(visible/total)` while the filter
+hides some. `model not in catalog` replaces all other warnings when the catalog lacks the model;
+otherwise `context not advertised` and `max output not advertised` mean the configured value exceeds
+the catalog's limit, and `reasoning not advertised` means the configured effort is rejected by the
 provider's reasoning policy (efforts accepted as unverified keep their `(unverified)` label
 instead). Nothing is flagged for a limit the catalog does not state. The same warnings appear as an
-orange `⚠️` transcript notice
+orange `✗` transcript notice
 (`Engine '<name>' has settings the provider catalog does not advertise: …`) after applying a named
 engine and once shortly after startup when a named engine is active; an unreachable catalog produces
 no warning. The startup check also covers an explicit `utility_engine`, an explicit compaction
@@ -557,29 +518,29 @@ resuming a session.
 After `[ ✓ Apply ]`, `[ Save… ]` opens the *save page*, which persists the draft as a named engine
 (`[engines.<name>]`) in the profile file Ylva loaded at startup; there is no destination choice.
 Rows of an explicit engine offer *Create new engine* (copies the origin's table without credentials)
-or *Update engine*; raw catalog rows offer creation only, with the model as the suggested name. New
-names must be slugs (letters, digits, `-`, `_`, `.`, `/`) and may not collide with any engine in
-use, explicit or implicit. The page previews the engine table that will be written (an update shows
-the changed lines with their old values), the destination file, and any re-trust guidance, as
-read-only text in the info area below the controls (next to the compaction and model details). The
-controls always get their rows first; the info area takes the remaining height (at least three rows)
-and scrolls with the mouse wheel (with a scrollbar) when it is longer. In the model list the info
-area scrolls the same way. Only parameters you changed are written: untouched context/output limits
-stay unset and a provider-default effort stays default. The engine refers to a
-`[provider_connections.*]` table of the same file and never copies endpoints or credentials; without
-such a table, or without a profile file, the page shows setup guidance instead of saving. Focus
-starts on the name; `enter` only commits on a focused `[ Save ]` or `[ Save & apply ]` button,
-`←`/`→` switch the mode (on the name field they move the caret). The save buttons are disabled,
-skipped by tab and explained by a `✗` line while the new name is empty, invalid, reserved
-(`default`) or already in use. `esc` returns to the parameters page with the draft intact (a second
-`esc` discards it). Saving a new engine keeps the active engine unchanged and makes it available in
-the picker and `/models` of the running session; `[ Save & apply ]` also activates it and closes the
-picker. A workspace profile that changed needs re-trusting before the next launch (the notice says
-how; trust is never modified). Updating the engine that is currently active takes effect in the
-running session right away (the next request uses the saved settings, like a `/models` switch);
-updating any other engine applies to new sessions and the next launch. Edits to the file made
-outside Ylva after startup stop further saves until Ylva is restarted. Action buttons share a row
-while they fit the popup width and wrap onto further rows when they do not.
+or *Update engine* through a `◂ value ▸` mode selector; raw catalog rows offer creation only, with
+the model as the suggested name. New names must be slugs (letters, digits, `-`, `_`, `.`, `/`) and
+may not collide with any engine in use, explicit or implicit. The page previews the engine table
+that will be written (an update shows the changed lines with their old values), the destination
+file, and any re-trust guidance, as read-only text in the info area below the controls (next to the
+compaction and model details). The controls always get their rows first; the info area takes the
+remaining height (at least three rows) and scrolls with the mouse wheel (with a scrollbar) when it
+is longer. In the model list the info area scrolls the same way. Only parameters you changed are
+written: untouched context/output limits stay unset and a provider-default effort stays default. The
+engine refers to a `[provider_connections.*]` table of the same file and never copies endpoints or
+credentials; without such a table, or without a profile file, the page shows setup guidance instead
+of saving. Focus starts on the name; `enter` only commits on a focused `[ Save ]` or
+`[ Save & apply ]` button, `←`/`→` switch the mode (on the name field they move the caret). The save
+buttons are disabled, skipped by tab and explained by a `✗` line while the new name is empty,
+invalid, reserved (`default`) or already in use. `esc` returns to the parameters page with the draft
+intact (a second `esc` discards it). Saving a new engine keeps the active engine unchanged and makes
+it available in the picker and `/models` of the running session; `[ Save & apply ]` also activates
+it and closes the picker. A workspace profile that changed needs re-trusting before the next launch
+(the notice says how; trust is never modified). Updating the engine that is currently active takes
+effect in the running session right away (the next request uses the saved settings, like a `/models`
+switch); updating any other engine applies to new sessions and the next launch. Edits to the file
+made outside Ylva after startup stop further saves until Ylva is restarted. Action buttons share a
+row while they fit the popup width and wrap onto further rows when they do not.
 
 A "Switched to…" notice for a `/models` switch made while a turn is running waits below the live
 response and joins the transcript when the next request starts, where the switch took effect. A
@@ -1162,7 +1123,7 @@ for the full mechanics.
   while you are typing is queued instead of shown, so a keystroke cannot answer
   it. It appears after 1.5 s without keystrokes, or at the latest 10 s after
   the typing burst began. The footer shows `⏳ N prompt(s) waiting (finish
-  typing)` meanwhile. Clarify prompts use `[ ✓ OK ]  [ ✗ Cancel ]` buttons with
+  typing)` meanwhile. Clarify prompts use `[ ✓ Answer ]  [ ✗ Cancel ]` buttons with
   the same focus rules. When you view another conversation than the prompt's
   owner, a `[ ⇢ Go to agent ]` button (click, or `tab` then `enter`) switches
   to it; the prompt stays pending.
@@ -1177,12 +1138,11 @@ for the full mechanics.
   behavior. An external
   SIGINT or SIGTERM skips the double-press: an idle TUI quits at once, and a
   running turn is stopped before the TUI quits with exit code `130`.
-- **Agents popup (`ctrl-x a` or `/agents`):** a modal tree of the root
-  conversation and the session's subagent runs, one level deep (`├─`/`└─`).
-  Order: root, running (oldest first), queued, finished (newest first;
-  replayed runs last). Each agent is one line: a marker for the viewed
-  conversation, the elided label, then the status, the tool-call count and the
-  elapsed time flush right, three spaces apart.
+- **Agents popup (`ctrl-x a` or `/agents`):** a modal tree of the root conversation and the
+  session's subagent runs, one level deep (`├─`/`└─`). Order: root, running (oldest first), queued,
+  finished (newest first; replayed runs last). Each agent is one line: the focus marker `▸` on the
+  selected row, the marker `●` on the viewed conversation, the elided label, then the status, the
+  tool-call count and the elapsed time flush right, three spaces apart.
   - **Label:** the root row shows the session title once generated, else
     `Root (main conversation)`.
   - **Status:** `running`, `queued`, `success`, `error`, `cancelled`, or
@@ -1337,7 +1297,7 @@ for the full mechanics.
   and is replaced by the final duration with millisecond precision on completion
   (`1m30s` from one minute on).
 - **Toast notifications:** transient messages appear in the bottom-right
-  corner (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
+  corner (e.g., `"✓ Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
   track at the end of the list (and the top at the start). Left-clicking its
   top/bottom arrow jumps to the start/end; clicking the track jumps to the
@@ -1423,10 +1383,63 @@ for scope, environment, and `PATH` setup.
 
 ### Workspace configuration trust
 
-Workspace profile configuration (`config.toml`, `.env`, `.ylva/agents/**`) blocks
+Workspace profile configuration (`config.toml`, `.env`, `grants.toml`, `.ylva/agents/**`) blocks
 startup until `ylva trust` approved its exact content; edits revoke the
 approval. See [workspace trust](configuration.md#workspace-trust)
 and the [trust command](cli-options.md#trust-command).
+
+### Tool-approval grants
+
+The grant dialog follows the [styleguide](./styleguide.md).
+
+When a tool call needs approval, the TUI footer offers a *Grant…* button next to *Approve* and
+*Deny*. It is always shown; on a terminal too narrow for the decorated labels the three buttons use
+compact labels. *Grant…* opens a second page with one row per proposed grant. Each row shows a value
+selector like the model parameters (`◂ temporary ▸`; `←`/`→` cycle `one-time`, `temporary`,
+`persistent`; default `temporary`), the tool and an editable rule (`enter` or a double-click edits
+it), separated by blank lines: the exact resolved path (`read`, `write`, `edit`, `search`, `glob`),
+the skill name and source (`load_skill`), the scheme, host and port (`web_fetch`), the tool itself
+(`web_search`, `spawn_subagent`), or one rule per simple command of a `bash` call. For `bash`,
+commands already allowed by policy or an existing grant get no row and are counted as "N more
+commands are already allowed"; parts that can only be approved once (subshells, heredocs,
+`python -c`, destructive wildcards, …) get no row and are explained by the footnote "Other parts of
+this call can only be approved once.". Below the rows, notes name the consequences of the selected
+rows (file-modifying tools, trailing `*`, wider rules, environment and working directory not
+matched, the `.ylva` directory a save would create, the need for `ylva trust`); the dialog reserves
+the room of the persistent notes so changing a selection never resizes it. The page scrolls (mouse
+wheel, `pgup`/`pgdn`/`home`/`end`) when it does not fit, with a scrollbar and pinned buttons. On a
+terminal under 7 rows the dialog is not drawn and the footer shows a bold red hint (`esc` still goes
+back).
+
+Editing a rule validates it live with the same parsers the agent uses: it must be a valid rule and
+match a part of the pending call that policy does not already approve (a `bash` rule keeps the
+program of the command and `make test` cannot become `make test *`, widen it as `make *`). An
+invalid row shows its error and keeps *Grant* disabled while it is selected; *Esc* restores the
+previous rule. *Grant* needs at least one row that is not `one-time`. It approves the pending call
+and creates the selected grants (persistent ones are saved first, so a failed save adds nothing
+temporary). A notice shows what was granted. A call without any grantable part shows the reason on
+the second page and can only be approved once. Rows left `one-time` and ungrantable parts of the
+call are not covered; the call itself still runs once as approved.
+
+If creating the grants fails (a rejected rule, a save refused, `grants.toml` changed behind Ylva's
+back), the dialog stays open and shows the reason: *Grant* retries (after changing the rows if
+wanted; after a `grants.toml` that changed on disk it reloads the file first, the reviewed content
+is kept and the grants found in it stay inactive in this run), and *Back* returns to the prompt to
+approve once. The approval stays pending throughout.
+
+- *Temporary* grants are in memory: in memory, shared by the root conversation
+  and its subagents until `/clear` or a session switch.
+- *Persistent* grants are appended to `<workspace-root>/.ylva/profiles/<profile>/grants.toml`
+  and loaded at the next start (disable with `--no-workspace-grants`). Saving
+  changes a trusted file, so run `ylva trust` before the next start.
+- Grants only satisfy ordinary approval requests. Denials, schema errors and
+  `clarify` are never covered. Headless mode runs covered calls and still denies
+  the rest.
+- A grant added while an approval is pending releases every pending call it
+  covers, also in other conversations.
+
+See [grant configuration](configuration.md#tool-approval-grants) for the file format and
+matching rules.
 
 ### Layered global persona and initialization
 
@@ -1528,8 +1541,9 @@ empty titles display `Untitled`.
 Browsing is allowed while busy, but activation requires root work, queued
 steers, queued/running subagents, and running/pending compaction to be quiescent.
 
-The popup title is `Sessions`; the *Resume* and *Clone* buttons are green and the *Delete*
-button is red.
+The popup title is `Sessions`; the *Resume* and *Clone* buttons are green (`[ ✓ Resume ]`,
+`[ ✓ Clone ]`) and the *Delete* button is red (`[ ✗ Delete ]`); see the
+[styleguide](./styleguide.md#buttons).
 The focused button is filled; hovering another button lightens it but never takes the focus away.
 Keybinding hints appear only in the TUI footer. The popup shows status or errors only when relevant,
 without repeating footer controls. Each open focuses **Resume**. `Tab`/`Shift-Tab` move button focus
@@ -1553,7 +1567,7 @@ Missing types, locked/missing/invalid sources, and preparation failures are
 explicit errors, not fresh-session fallbacks. Resume hydrates without
 duplicating messages; Clone uses the existing [clone contract](persistence.md#clone-contract).
 A clone durably created before cancellation or activation failure is retained
-and reported as `Clone created but not activated: <id>`, including after
+and reported as `warning: Clone created but not activated: <id>` on stderr, including after
 terminal restoration on quit.
 
 `/compact` is not offered in the slash suggestions of a subagent view; typing

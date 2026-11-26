@@ -29,8 +29,7 @@ use super::effects::{
     action_key, execute_effects, execute_slash_effects, split_slash_effects, PendingRunIds,
 };
 use super::favorites::{
-    apply_engine_completion, apply_favorite_completion, completion_notice,
-    engine_completion_notice, start_favorite_saves, SaveCompletion,
+    apply_engine_completion, apply_favorite_completion, start_favorite_saves, SaveCompletion,
 };
 use super::frame::draw_frame;
 use super::input::{
@@ -593,6 +592,8 @@ where
                 let focus_before = state.prompt_button_focus;
                 let session_action_before = session_picker_action(&state);
                 let parameter_cursor_before = state.model_parameters_mut().map(|edit| edit.cursor);
+                let grant_focus_before = state.grant_dialog.as_ref().map(|dialog| dialog.focused);
+                let engine_save_focus_before = state.engine_save_form().map(|form| form.focus);
                 let is_key_event = matches!(event, TuiEvent::Input(_));
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
                 // Keyboard focus change replaces the pointer hover highlight.
@@ -602,6 +603,18 @@ where
                 if is_key_event
                     && session_action_before.is_some()
                     && session_picker_action(&state) != session_action_before
+                {
+                    mouse_pos = None;
+                }
+                if is_key_event
+                    && grant_focus_before.is_some()
+                    && state.grant_dialog.as_ref().map(|dialog| dialog.focused) != grant_focus_before
+                {
+                    mouse_pos = None;
+                }
+                if is_key_event
+                    && engine_save_focus_before.is_some()
+                    && state.engine_save_form().map(|form| form.focus) != engine_save_focus_before
                 {
                     mouse_pos = None;
                 }
@@ -819,15 +832,10 @@ where
     // reports its outcome.
     if let Some(completion) = favorite_owner.finish().await {
         let profile_name = state.display_metadata.profile_name.clone();
-        let report = match &completion {
-            SaveCompletion::Favorite(completion) => {
-                apply_favorite_completion(&mut state, &engine, completion);
-                completion_notice(completion, &profile_name)
-            }
-            SaveCompletion::Engine(completion) => {
-                engine_completion_notice(completion, &profile_name)
-            }
-        };
+        if let SaveCompletion::Favorite(favorite) = &completion {
+            apply_favorite_completion(&mut state, &engine, favorite);
+        }
+        let report = completion.shutdown_report(&profile_name);
         favorite_shutdown_reports
             .lock()
             .expect("favorite report mutex")

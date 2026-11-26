@@ -50,8 +50,10 @@ fn check_command_default_floor_denies_backgrounded_command() {
 
     assert!(
         matches!(
-            context.check_command("sleep 10 &"),
-            Some(ApprovalCheck::AutoDenied { .. })
+            context
+                .check_command("sleep 10 &")
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoDenied { .. })
         ),
         "a backgrounded command is denied by the unconditional default floor"
     );
@@ -64,8 +66,10 @@ fn check_command_default_floor_requires_approval_for_variable_assignment_prefix(
     let context = SandboxContext::new(Arc::clone(&sandbox));
 
     assert_eq!(
-        context.check_command("FOO=bar git status"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_command("FOO=bar git status")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
 }
 
@@ -76,12 +80,16 @@ fn check_command_default_floor_requires_approval_for_unquoted_glob_or_brace() {
     let context = SandboxContext::new(Arc::clone(&sandbox));
 
     assert_eq!(
-        context.check_command("cat *.txt"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_command("cat *.txt")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
     assert_eq!(
-        context.check_command("echo {a,b}"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_command("echo {a,b}")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
     assert_eq!(
         context.check_command(r#"cat "*.txt""#),
@@ -97,8 +105,10 @@ fn check_command_unanalysable_construct_requires_approval() {
     let context = SandboxContext::new(Arc::clone(&sandbox));
 
     assert_eq!(
-        context.check_command("echo $(whoami)"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_command("echo $(whoami)")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
 }
 
@@ -138,13 +148,17 @@ fn harmless_redirects_preserve_default_floor_and_configured_command_verdicts() {
             "configured command rule should treat {redirected:?} as {bare:?}"
         );
         assert_eq!(
-            configured_context.check_command(redirected),
-            Some(ApprovalCheck::AutoApproved)
+            configured_context
+                .check_command(redirected)
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved)
         );
     }
     assert_eq!(
-        configured_context.check_command("git status > out.txt"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        configured_context
+            .check_command("git status > out.txt")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
 }
 
@@ -174,9 +188,13 @@ fn check_command_aggregates_worst_case_across_multiple_commands() {
 
     // First segment matches an AutoApproved CommandGlob rule; second
     // segment ($(whoami)) is un-analysable -> overall UserApprovalRequired.
+    let check = context
+        .check_command("git status ; echo $(whoami)")
+        .unwrap();
+    assert_eq!(check.verdict, ApprovalVerdict::UserApprovalRequired);
     assert_eq!(
-        context.check_command("git status ; echo $(whoami)"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        check.rule_origin,
+        super::super::RuleOrigin::BuiltIn("unanalysable_statement")
     );
 }
 
@@ -196,10 +214,15 @@ fn check_command_unmatched_command_in_list_blocks_auto_approval() {
         .expect("valid sandbox fixture");
 
     for command in ["rm -rf foo; cat x", "cat x && rm -rf foo", "cat x | sh"] {
+        let check = context.check_command(command).unwrap();
         assert_eq!(
-            context.check_command(command),
-            Some(ApprovalCheck::UserApprovalRequired),
+            check.verdict,
+            ApprovalVerdict::UserApprovalRequired,
             "an unmatched command must block auto-approval of {command:?}"
+        );
+        assert_eq!(
+            check.rule_origin,
+            super::super::RuleOrigin::BuiltIn("unmatched_statement")
         );
     }
 }
@@ -219,11 +242,50 @@ fn check_command_all_commands_auto_approved_list_is_auto_approved() {
         }])
         .expect("valid sandbox fixture");
 
+    let collective = context.check_command("cat a; cat b").unwrap();
+    assert_eq!(collective.verdict, ApprovalVerdict::AutoApproved);
     assert_eq!(
-        context.check_command("cat a; cat b"),
-        Some(ApprovalCheck::AutoApproved)
+        collective.rule_origin,
+        super::super::RuleOrigin::BuiltIn("all_statements_approved")
     );
+    assert!(collective.parent.is_none());
     assert_eq!(context.check_command("rm -rf foo"), None);
+}
+
+#[test]
+fn compound_bash_check_retains_the_earliest_worst_statement() {
+    let temporary_dir = tempfile::tempdir().unwrap();
+    let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+        .with_configured_rules(
+            [("first", "first reason"), ("second", "second reason")]
+                .into_iter()
+                .map(|(command, reason)| SandboxRuleConfig::CommandGlob {
+                    command: vec![command.to_string()],
+                    with_arguments: None,
+                    only_arguments: None,
+                    allowed_scripts: None,
+                    verdict: ApprovalVerdictConfig::AutoDenied,
+                    reason: Some(reason.to_string()),
+                })
+                .collect(),
+        )
+        .unwrap();
+
+    let aggregate = context.check_command("second; first").unwrap();
+    assert_eq!(
+        aggregate.verdict,
+        ApprovalVerdict::AutoDenied {
+            reason: "second reason".into()
+        }
+    );
+    assert_eq!(
+        aggregate.rule_origin,
+        super::super::RuleOrigin::BuiltIn("worst_statement")
+    );
+    assert_eq!(
+        *aggregate.parent.unwrap(),
+        context.check_command("second").unwrap()
+    );
 }
 
 #[test]
@@ -235,8 +297,10 @@ fn check_command_auto_denied_in_one_segment_wins_over_others() {
     // "echo hello" abstains (no rule fires), "sleep 10 &" is
     // AutoDenied by the default floor -> overall AutoDenied.
     assert!(matches!(
-        context.check_command("echo hello ; sleep 10 &"),
-        Some(ApprovalCheck::AutoDenied { .. })
+        context
+            .check_command("echo hello ; sleep 10 &")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
 }
 
@@ -277,8 +341,10 @@ fn check_command_default_floor_combines_named_rules_by_worst_case_not_last_match
     // regardless of which rule's condition happens to be evaluated
     // first in the implementation.
     assert!(matches!(
-        context.check_command("cat *.txt &"),
-        Some(ApprovalCheck::AutoDenied { .. })
+        context
+            .check_command("cat *.txt &")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
 }
 
@@ -287,15 +353,17 @@ fn check_command_self_rules_catch_all_wins_over_structural_auto_denied() {
     let temporary_dir = tempfile::tempdir().unwrap();
     let sandbox = make_sandbox(temporary_dir.path());
     let context = SandboxContext::new(Arc::clone(&sandbox)).with_rule(SandboxRule {
-        verdict: ApprovalCheck::AutoApproved,
+        verdict: ApprovalVerdict::AutoApproved,
         pattern: Pattern::new("**").unwrap(),
     });
 
     // "sleep 10 &" would be AutoDenied by the default floor, but the
     // code-appended catch-all (simulating --auto-approve-bash) wins.
     assert_eq!(
-        context.check_command("sleep 10 &"),
-        Some(ApprovalCheck::AutoApproved)
+        context
+            .check_command("sleep 10 &")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
 }
 
@@ -315,8 +383,10 @@ fn check_command_glob_rule_matches_trailing_single_wildcard() {
         .expect("valid sandbox fixture");
 
     assert_eq!(
-        context.check_command("git reflog show"),
-        Some(ApprovalCheck::AutoApproved)
+        context
+            .check_command("git reflog show")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(
         context.check_command("git reflog show extra"),
@@ -446,8 +516,8 @@ fn migrated_sample_uses_argument_filters_and_explicit_structural_protection() {
         "test --unknown",
     ] {
         assert_eq!(
-            context.check_command(command),
-            Some(ApprovalCheck::AutoApproved),
+            context.check_command(command).map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{command}"
         );
     }
@@ -516,8 +586,8 @@ fn migrated_sample_uses_argument_filters_and_explicit_structural_protection() {
         "head -q -20 file",
     ] {
         assert_ne!(
-            context.check_command(command),
-            Some(ApprovalCheck::AutoApproved),
+            context.check_command(command).map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{command}"
         );
     }
@@ -530,21 +600,23 @@ fn migrated_sample_uses_argument_filters_and_explicit_structural_protection() {
         "git check-ignore -v *.rs",
     ] {
         assert_eq!(
-            context.check_command(command),
-            Some(ApprovalCheck::AutoApproved),
+            context.check_command(command).map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{command}"
         );
     }
     for command in ["FOO=bar cat file", "VALUE=other git check-ignore -v file"] {
         assert_eq!(
-            context.check_command(command),
-            Some(ApprovalCheck::UserApprovalRequired),
+            context.check_command(command).map(|check| check.verdict),
+            Some(ApprovalVerdict::UserApprovalRequired),
             "{command}"
         );
     }
     assert!(matches!(
-        context.check_command("cat file &"),
-        Some(ApprovalCheck::AutoDenied { .. })
+        context
+            .check_command("cat file &")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
 }
 
@@ -588,8 +660,8 @@ rules = [
         "cat 'literal *' && git status",
     ] {
         assert_eq!(
-            context.check_command(command),
-            Some(ApprovalCheck::AutoApproved),
+            context.check_command(command).map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{command}"
         );
     }
@@ -630,8 +702,8 @@ rules = [
         "(cat file)",
     ] {
         assert_ne!(
-            context.check_command(command),
-            Some(ApprovalCheck::AutoApproved),
+            context.check_command(command).map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{command}"
         );
     }
@@ -649,8 +721,8 @@ rules = [
         ));
         for command in ["git log -5", "git log HEAD -5", "git log '-0005'"] {
             assert_eq!(
-                context.check_command(command),
-                Some(ApprovalCheck::AutoApproved),
+                context.check_command(command).map(|check| check.verdict),
+                Some(ApprovalVerdict::AutoApproved),
                 "{alias}: {command}"
             );
         }
@@ -661,8 +733,8 @@ rules = [
             "git log --grep -5",
         ] {
             assert_ne!(
-                context.check_command(command),
-                Some(ApprovalCheck::AutoApproved),
+                context.check_command(command).map(|check| check.verdict),
+                Some(ApprovalVerdict::AutoApproved),
                 "{alias}: {command}"
             );
         }
@@ -690,8 +762,8 @@ rules = [
     ] {
         assert!(
             matches!(
-                context.check_command(command),
-                Some(ApprovalCheck::AutoDenied { .. })
+                context.check_command(command).map(|check| check.verdict),
+                Some(ApprovalVerdict::AutoDenied { .. })
             ),
             "{command}"
         );
@@ -708,8 +780,10 @@ rules = [
         assert_eq!(context.check_command(command), None, "{command}");
     }
     assert_eq!(
-        context.check_command("cat -n --unknown"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_command("cat -n --unknown")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
 }
 
@@ -725,16 +799,22 @@ rules = [
 "#,
     );
     assert_eq!(
-        context.check_command("cat -- file"),
-        Some(ApprovalCheck::AutoApproved)
+        context
+            .check_command("cat -- file")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(
-        context.check_command("cat -- -n"),
-        Some(ApprovalCheck::AutoApproved)
+        context
+            .check_command("cat -- -n")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert!(matches!(
-        context.check_command("cat -n file"),
-        Some(ApprovalCheck::AutoDenied { .. })
+        context
+            .check_command("cat -n file")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
     assert_eq!(
         context.check_command("cat -nb file"),
@@ -776,13 +856,15 @@ rules = [{ command = ["cat", "**"], only_arguments = [], verdict = "auto_approve
         "unalias cat",
     ] {
         assert_ne!(
-            context.check_command(command),
-            Some(ApprovalCheck::AutoApproved),
+            context.check_command(command).map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{command}"
         );
         assert_eq!(
-            context.check_command(&format!("cat file; {command}")),
-            Some(ApprovalCheck::UserApprovalRequired),
+            context
+                .check_command(&format!("cat file; {command}"))
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::UserApprovalRequired),
             "{command}"
         );
     }
@@ -805,8 +887,10 @@ rules = [
         "cd somewhere",
     ] {
         assert_eq!(
-            unconditional.check_command(command),
-            Some(ApprovalCheck::AutoApproved),
+            unconditional
+                .check_command(command)
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{command}"
         );
     }
@@ -824,35 +908,45 @@ rules = [
 "#,
     );
     assert!(matches!(
-        context.check_command("find . -delete"),
-        Some(ApprovalCheck::AutoDenied { .. })
+        context
+            .check_command("find . -delete")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
     assert_eq!(
-        context.check_command("find . -delete -print"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_command("find . -delete -print")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
     assert_eq!(
-        context.check_command("find . -unknown"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_command("find . -unknown")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "grammar does not revoke explicit unconditional approvals"
     );
     assert_eq!(
-        context.check_command("find . -name -delete"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_command("find . -name -delete")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "values are not identities"
     );
     assert_eq!(
-        context.check_command("find .; unmatched"),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_command("find .; unmatched")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
     let context = context.with_rule(SandboxRule {
-        verdict: ApprovalCheck::AutoApproved,
+        verdict: ApprovalVerdict::AutoApproved,
         pattern: Pattern::new("**").unwrap(),
     });
     for command in ["find . -delete", "FOO=bar cat file", "(unknown)", "unknown"] {
         assert_eq!(
-            context.check_command(command),
-            Some(ApprovalCheck::AutoApproved),
+            context.check_command(command).map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{command}"
         );
     }
@@ -878,8 +972,10 @@ fn check_command_glob_rule_trailing_single_wildcard_abstains_on_unquoted_glob_ta
     // configured list (no default floor), the whole check abstains.
     assert_eq!(context.check_command("cat *.txt"), None);
     assert_eq!(
-        context.check_command("cat notes.txt"),
-        Some(ApprovalCheck::AutoApproved)
+        context
+            .check_command("cat notes.txt")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
 }
 
@@ -899,12 +995,16 @@ fn check_command_glob_rule_trailing_double_wildcard_matches_multiple_tokens() {
         .expect("valid sandbox fixture");
 
     assert_eq!(
-        context.check_command("find . -type f"),
-        Some(ApprovalCheck::AutoApproved)
+        context
+            .check_command("find . -type f")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
     assert_eq!(
-        context.check_command("find *.txt -type f"),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_command("find *.txt -type f")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "** never abstains on unquoted glob/brace in its tail"
     );
     assert_eq!(
@@ -932,7 +1032,8 @@ fn sed_rules_require_allowed_scripts_and_match_each_script_command() {
         ("sed -n -e 5p -e 'w out' file", false),
     ] {
         assert_eq!(
-            narrow.check_command(command) == Some(ApprovalCheck::AutoApproved),
+            narrow.check_command(command).map(|check| check.verdict)
+                == Some(ApprovalVerdict::AutoApproved),
             approved,
             "{command}"
         );
@@ -946,13 +1047,15 @@ fn sed_rules_require_allowed_scripts_and_match_each_script_command() {
         "sed -n -f s f",
     ] {
         assert_ne!(
-            permissive.check_command(command),
-            Some(ApprovalCheck::AutoApproved),
+            permissive.check_command(command).map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{command}"
         );
     }
     assert_eq!(
-        permissive.check_command("sed -n 1p f"),
-        Some(ApprovalCheck::AutoApproved)
+        permissive
+            .check_command("sed -n 1p f")
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
 }

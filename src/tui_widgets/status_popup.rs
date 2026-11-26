@@ -26,12 +26,12 @@ use crate::context_breakdown::{format_percentage, ContextBreakdown, ContextGroup
 use crate::llm::token_estimate::format_token_estimate;
 use crate::store::ModelParameters;
 use crate::theme::{
-    chat_scrollbar_color, chat_selection_bg, content_color, help_popup_border_color,
-    help_popup_heading_color, muted_text_color, status_free_segment_color,
-    status_segment_blue_color, status_segment_brown_color, status_segment_cyan_color,
-    status_segment_green_color, status_segment_lime_color, status_segment_magenta_color,
-    status_segment_mint_color, status_segment_orange_color, status_segment_pink_color,
-    status_segment_red_color, status_segment_violet_color, status_segment_yellow_color,
+    chat_scrollbar_color, chat_selection_bg, content_color, muted_text_color, popup_border_color,
+    popup_heading_color, status_free_segment_color, status_segment_blue_color,
+    status_segment_brown_color, status_segment_cyan_color, status_segment_green_color,
+    status_segment_lime_color, status_segment_magenta_color, status_segment_mint_color,
+    status_segment_orange_color, status_segment_pink_color, status_segment_red_color,
+    status_segment_violet_color, status_segment_yellow_color,
 };
 use crate::tui_render_state::TuiState;
 
@@ -69,7 +69,7 @@ fn heading(text: &str) -> Line<'static> {
     Line::styled(
         text.to_string(),
         Style::default()
-            .fg(help_popup_heading_color())
+            .fg(popup_heading_color())
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -215,7 +215,7 @@ fn table_row(
 
 fn table_header(width: usize) -> Line<'static> {
     let style = Style::default()
-        .fg(help_popup_heading_color())
+        .fg(popup_heading_color())
         .add_modifier(Modifier::BOLD);
     table_row(
         Span::raw(" ".repeat(LEGEND_MARKER.chars().count())),
@@ -591,8 +591,8 @@ pub(super) fn draw_status_popup(frame: &mut Frame, state: &mut TuiState) {
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(help_popup_border_color()))
-        .title(" Status")
+        .border_style(Style::default().fg(popup_border_color()))
+        .title(" Status ")
         .title_alignment(Alignment::Left)
         .padding(Padding::uniform(1));
     let inner = block.inner(popup);

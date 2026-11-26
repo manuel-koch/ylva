@@ -38,6 +38,10 @@ struct HeadlessRun {
 impl HeadlessRun {
     fn spawn(provider_base_url: &str, extra_arguments: &[&str]) -> Self {
         let home = TempDir::new().expect("tempdir");
+        Self::spawn_with_home(home, provider_base_url, extra_arguments)
+    }
+
+    fn spawn_with_home(home: TempDir, provider_base_url: &str, extra_arguments: &[&str]) -> Self {
         let stdout_path = home.path().join("stdout.txt");
         let stderr_path = home.path().join("stderr.txt");
         let child = Command::new(env!("CARGO_BIN_EXE_ylva"))
@@ -107,7 +111,13 @@ impl HeadlessRun {
     }
 
     /// Wait for the process and return its exit code plus captured output.
-    async fn finish(mut self) -> (Option<i32>, String, String) {
+    async fn finish(self) -> (Option<i32>, String, String) {
+        let (code, stdout, stderr, _) = self.finish_with_log().await;
+        (code, stdout, stderr)
+    }
+
+    async fn finish_with_log(mut self) -> (Option<i32>, String, String, String) {
+        let log_path = self._home.path().join("approval.jsonl");
         let stdout_path = self.stdout_path.clone();
         let stderr_path = self.stderr_path.clone();
         let status = tokio::task::spawn_blocking(move || self.child.wait())
@@ -118,12 +128,33 @@ impl HeadlessRun {
             status.code(),
             read_file(&stdout_path),
             read_file(&stderr_path),
+            read_file(&log_path),
         )
     }
 }
 
 fn read_file(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
+}
+
+const APPROVAL_LOG_ARGUMENTS: &[&str] = &[
+    "--log-file",
+    "approval.jsonl",
+    "--log-format",
+    "json",
+    "--log-level",
+    "info",
+];
+
+fn approval_records(log: &str) -> Vec<serde_json::Value> {
+    log.lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("log is JSONL"))
+        .filter(|record| record["fields"]["message"] == "tool approval trail")
+        .map(|record| {
+            assert_eq!(record["level"], "INFO");
+            record["fields"].clone()
+        })
+        .collect()
 }
 
 /// Start a mock provider that streams `frames` for each connection in order.
@@ -200,8 +231,8 @@ async fn denied_approval_exits_with_approval_denied_and_run_continues() {
     )
     .await;
 
-    let run = HeadlessRun::spawn(&server.base_url(), &[]);
-    let (code, stdout, stderr) = run.finish().await;
+    let run = HeadlessRun::spawn(&server.base_url(), APPROVAL_LOG_ARGUMENTS);
+    let (code, stdout, stderr, log) = run.finish_with_log().await;
 
     assert_eq!(
         code,
@@ -216,6 +247,117 @@ async fn denied_approval_exits_with_approval_denied_and_run_continues() {
         stdout.contains("understood"),
         "the run must continue after a denial: {stdout}"
     );
+    let records = approval_records(&log);
+    let [pending, recheck, disposition] = records.as_slice() else {
+        panic!("expected admission, recheck and disposition: {records:?}");
+    };
+    assert_eq!(pending["outcome"], "user_approval_required");
+    assert_eq!(pending["phase"], "admission");
+    assert_eq!(recheck["phase"], "cli_recheck");
+    assert_eq!(recheck["parent_id"], pending["record_id"]);
+    assert_eq!(disposition["outcome"], "cli_unable_to_ask");
+    assert_eq!(disposition["decision_maker"], "cli");
+    assert_eq!(disposition["parent_id"], recheck["record_id"]);
+    assert_eq!(disposition["tool_call_id"], pending["tool_call_id"]);
+    assert!(!format!("{records:?}").contains("denied-by-approval.txt"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn debug_text_log_quotes_and_escapes_bash_commands() {
+    let server = mock_provider(
+        MockLlmConfig {
+            frames: vec![content_frame("understood")],
+            end_after_frames: true,
+            ..MockLlmConfig::default()
+        },
+        vec![vec![tool_call_frame(
+            0,
+            "bash",
+            r#"{"command":"echo \"first\nsecond\""}"#,
+        )]],
+    )
+    .await;
+
+    let run = HeadlessRun::spawn(
+        &server.base_url(),
+        &["--log-file", "approval.jsonl", "--log-level", "debug"],
+    );
+    let (_, _, _, log) = run.finish_with_log().await;
+    let check = log
+        .lines()
+        .find(|line| line.contains("sandbox check_command"))
+        .expect("Bash sandbox check logged");
+
+    assert!(
+        check.contains(r#"command="echo \"first\nsecond\"" sandbox_verdict="abstain""#),
+        "{check}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn info_log_names_the_winning_configured_rule_or_cli_override_without_inputs() {
+    for (flag, expected_locator, expected_verdict) in [
+        (None, "ylva_home:tools.bash.rules[1]", "auto_denied"),
+        (
+            Some("--auto-approve-bash"),
+            "cli:--auto-approve-bash",
+            "auto_approved",
+        ),
+    ] {
+        let server = mock_provider(
+            MockLlmConfig {
+                frames: vec![content_frame("understood")],
+                end_after_frames: true,
+                ..MockLlmConfig::default()
+            },
+            vec![vec![tool_call_frame(
+                0,
+                "bash",
+                r#"{"command":"echo INPUT_SECRET"}"#,
+            )]],
+        )
+        .await;
+        let home = TempDir::new().unwrap();
+        let profile = home.path().join("profiles/default");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("config.toml"),
+            r#"
+[tools.bash]
+rules = [
+  { command = ["printf", "RULE_SECRET"], verdict = "auto_approved" },
+  { command = ["echo", "**"], verdict = "auto_denied", reason = "DENIAL_SECRET" },
+]
+"#,
+        )
+        .unwrap();
+        let mut arguments = APPROVAL_LOG_ARGUMENTS.to_vec();
+        arguments.extend(flag);
+        let run = HeadlessRun::spawn_with_home(home, &server.base_url(), &arguments);
+        let (code, stdout, stderr, log) = run.finish_with_log().await;
+        assert_eq!(
+            code,
+            Some(i32::from(u8::from(ExitCode::Success))),
+            "{stdout}\n{stderr}"
+        );
+        let records = approval_records(&log);
+        let [record] = records.as_slice() else {
+            panic!("expected only the winning check: {records:?}\n{log}");
+        };
+        assert_eq!(record["rule_locator"], expected_locator);
+        assert_eq!(record["outcome"], expected_verdict);
+        assert_eq!(record["phase"], "admission");
+        assert!(record.get("parent_id").is_none());
+        assert!(!format!("{record:?}").contains("_SECRET"));
+        assert!(
+            stdout.contains(if flag.is_some() {
+                "INPUT_SECRET"
+            } else {
+                "DENIAL_SECRET"
+            }),
+            "{stdout}"
+        );
+    }
 }
 
 #[cfg(unix)]

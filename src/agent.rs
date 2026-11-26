@@ -32,6 +32,7 @@ mod context;
 mod finished_status;
 pub(crate) use finished_status::tool_call_counts;
 pub use finished_status::FinishedStatusRegistry;
+mod approval_trail;
 mod message;
 mod protocol;
 mod request;
@@ -62,9 +63,10 @@ pub use message::{
     AssistantStatus, Message, ToolAttachment, ToolCallRequest, ToolResult, UserMessageKind,
 };
 use protocol::log_agent_command;
+pub(crate) use protocol::CLI_APPROVAL_UNAVAILABLE_REASON;
 pub use protocol::{
-    AgentCommand, AgentEvent, AgentMode, ContextUsageSource, DeltaChunk, StatusSnapshot,
-    StreamEvent, UiUpdate,
+    AgentCommand, AgentEvent, AgentMode, ContextUsageSource, DeltaChunk, GrantPreview,
+    StatusSnapshot, StreamEvent, UiUpdate,
 };
 pub use status_timeline::StatusTimelineEntry;
 

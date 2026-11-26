@@ -21,13 +21,13 @@ use crate::highlight::{
     active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line,
 };
 use crate::markdown::render_markdown;
+use crate::terminal_text::terminal_display_width;
 use crate::theme::{
     content_color, diff_added_color, diff_context_color, diff_removed_color, muted_text_color,
 };
 use crate::tui_reducer_state::ToolCallState;
 
 use super::super::bubbles::BubbleStyle;
-use super::super::chat::terminal_display_width;
 use super::diff::parse_hunk_header;
 use super::title::summary_pairs;
 use super::ToolBubbleArgs;

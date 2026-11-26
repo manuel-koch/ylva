@@ -45,7 +45,7 @@ use super::backends::web_search::{
 };
 use super::{title_case_tool_name, Tool, ToolCall};
 use crate::config::WebSearchConfig;
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 
 /// Seconds added to the configured internal HTTP timeout to derive the
 /// tool's outer timeout, so the outer safety net always fires *after* the
@@ -129,6 +129,7 @@ pub struct WebSearchTool {
 
 impl WebSearchTool {
     pub const NAME: &'static str = "web_search";
+    const DEFAULT_APPROVAL_RULE: &'static str = "web_search.default";
 
     /// Build the tool from the profile's `[web_search]` section plus the
     /// sandbox context `default_registry` resolved for it (configured
@@ -206,7 +207,16 @@ impl Tool for WebSearchTool {
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
         self.sandbox_context
             .check_network_request(&self.backend.network_target())
-            .unwrap_or(ApprovalCheck::UserApprovalRequired)
+            .unwrap_or_else(|| {
+                ApprovalCheck::tool(
+                    ApprovalVerdict::UserApprovalRequired,
+                    Self::DEFAULT_APPROVAL_RULE,
+                )
+            })
+    }
+
+    fn grant_subjects(&self, _arguments: &Value) -> crate::grants::GrantSubjects {
+        crate::grants::GrantSubjects::Single(crate::grants::GrantSubject::Unconditional)
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {

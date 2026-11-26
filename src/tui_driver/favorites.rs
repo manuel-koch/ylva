@@ -202,6 +202,32 @@ pub(super) enum SaveCompletion {
 }
 
 impl SaveCompletion {
+    /// Line printed to stderr after the TUI closed. Problems start with
+    /// `warning:` so they stay greppable when piped.
+    pub(super) fn shutdown_report(&self, profile_name: &str) -> String {
+        let (report, is_problem) = match self {
+            Self::Favorite(completion) => (
+                completion_notice(completion, profile_name),
+                completion
+                    .result
+                    .as_ref()
+                    .map_or(true, |outcome| outcome.publication_uncertain),
+            ),
+            Self::Engine(completion) => (
+                engine_completion_notice(completion, profile_name),
+                completion
+                    .result
+                    .as_ref()
+                    .map_or(true, |outcome| outcome.publication_uncertain),
+            ),
+        };
+        if is_problem {
+            format!("warning: {report}")
+        } else {
+            report
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn favorite(self) -> FavoriteSaveCompletion {
         match self {

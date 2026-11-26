@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use super::{ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError};
 use crate::prompt::{format_prompt_block, PromptBlockKind};
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 use crate::skills::policy::CallableSkills;
 use crate::skills::Skill;
 
@@ -120,6 +120,8 @@ pub struct LoadSkillTool {
 
 impl LoadSkillTool {
     pub const NAME: &'static str = "load_skill";
+    const DEFAULT_APPROVAL_RULE: &'static str = "load_skill.default";
+    const SELECTION_RULE: &'static str = "load_skill.selection";
 
     pub fn new(catalog: Arc<CallableSkills>, context: SandboxContext) -> Self {
         Self { catalog, context }
@@ -156,10 +158,24 @@ impl Tool for LoadSkillTool {
             Ok(skill) => self
                 .context
                 .check_snapshot_path(&skill.source.canonical_path)
-                .unwrap_or(ApprovalCheck::AutoApproved),
-            Err(reason) => ApprovalCheck::AutoDenied { reason },
+                .unwrap_or_else(|| {
+                    ApprovalCheck::tool(ApprovalVerdict::AutoApproved, Self::DEFAULT_APPROVAL_RULE)
+                }),
+            Err(reason) => {
+                ApprovalCheck::tool(ApprovalVerdict::AutoDenied { reason }, Self::SELECTION_RULE)
+            }
         }
     }
+    fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {
+        match self.selected_skill(arguments) {
+            Ok(skill) => crate::grants::GrantSubjects::Single(crate::grants::GrantSubject::Skill {
+                name: skill.name.clone(),
+                source: skill.source.canonical_path.clone(),
+            }),
+            Err(_) => crate::grants::GrantSubjects::NotGrantable,
+        }
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         arguments
             .as_object()
@@ -213,8 +229,15 @@ impl ToolCall for LoadSkillCall {
                 .tool
                 .selected_skill(&self.arguments)
                 .map_err(|error| ToolError::failed(self.name(), error))?;
-            if let ApprovalCheck::AutoDenied { reason } = self.tool.needs_approval(&self.arguments)
-            {
+            let check = self.tool.needs_approval(&self.arguments);
+            crate::agent::approval_trail::check(
+                self.name(),
+                self.id,
+                &check,
+                crate::agent::approval_trail::Phase::SkillRecheck,
+                None,
+            );
+            if let ApprovalVerdict::AutoDenied { reason } = check.verdict {
                 return Err(ToolError::failed(self.name(), reason));
             }
             Ok(Box::new(LoadSkillResult { skill }) as Box<dyn ToolCallResult>)

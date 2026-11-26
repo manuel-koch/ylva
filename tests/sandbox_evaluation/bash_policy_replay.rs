@@ -23,7 +23,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ylva::config::ToolConfig;
-use ylva::{ApprovalCheck, Sandbox, SandboxContext};
+use ylva::{ApprovalVerdict, Sandbox, SandboxContext};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -148,10 +148,15 @@ fn replay(corpus: Corpus, context: &SandboxContext) -> Result<Report> {
     };
     let mut results = Vec::with_capacity(corpus.commands.len());
     for case in corpus.commands {
-        let (sandbox_verdict, denial_reason) = match context.check_command(&case.command) {
-            Some(ApprovalCheck::AutoApproved) => (Some(Verdict::AutoApproved), None),
-            Some(ApprovalCheck::AutoDenied { reason }) => (Some(Verdict::AutoDenied), Some(reason)),
-            Some(ApprovalCheck::UserApprovalRequired) => {
+        let (sandbox_verdict, denial_reason) = match context
+            .check_command(&case.command)
+            .map(|check| check.verdict)
+        {
+            Some(ApprovalVerdict::AutoApproved) => (Some(Verdict::AutoApproved), None),
+            Some(ApprovalVerdict::AutoDenied { reason }) => {
+                (Some(Verdict::AutoDenied), Some(reason))
+            }
+            Some(ApprovalVerdict::UserApprovalRequired) => {
                 (Some(Verdict::UserApprovalRequired), None)
             }
             None => (None, None),
@@ -359,8 +364,10 @@ rules = [{rule = "outside_workspace", verdict = "auto_approved"}]"#,
         ))
         .unwrap();
         assert_eq!(
-            context.check_command("git status"),
-            Some(ApprovalCheck::AutoApproved)
+            context
+                .check_command("git status")
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved)
         );
     }
 

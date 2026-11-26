@@ -1191,6 +1191,52 @@ async fn run_cli_bash_denial_prints_label_and_command_sections() {
 }
 
 #[tokio::test]
+async fn run_cli_runs_a_bash_call_covered_by_a_grant() {
+    use ylva::grants::{Grant, GrantMatcher, GrantState, GrantTool};
+
+    let provider = Arc::new(MockProviderWithScript {
+        phase_one: vec![tool_call(
+            "bash",
+            serde_json::json!({ "command": "echo granted-run" }),
+        )],
+        phase_two: vec![MockEvent::Text("ok".into())],
+        interval: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let grant_state = Arc::new(GrantState::new(std::env::temp_dir()));
+    grant_state.add_temporary(Grant {
+        tool: GrantTool::Bash,
+        matcher: GrantMatcher::Command(
+            ylva::grants::CommandRule::parse("echo granted-run").expect("valid rule"),
+        ),
+    });
+    let registry = Arc::new(
+        default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            ToolRegistryConfig::default(),
+        )
+        .expect("valid sandbox fixture")
+        .with_grant_state(Some(grant_state)),
+    );
+    let mut output = Vec::new();
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        "run a command".to_string(),
+        &mut output,
+    )
+    .await
+    .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+
+    assert!(output.contains("granted-run"), "output: {output}");
+    assert!(!output.contains("denied"), "output: {output}");
+}
+
+#[tokio::test]
 async fn run_cli_waits_for_spawned_subagent_before_ending_conversation() {
     use tokio_util::sync::CancellationToken;
     use ylva::subagent_manager::SpawnFn;
@@ -1427,6 +1473,161 @@ async fn console_app_reacts_to_subagent_finish_through_real_agent_factory_and_ru
     assert!(
         output.contains("auto-reply-4"),
         "expected the root's post-finish reprompt reply to be printed, output: {output}"
+    );
+}
+
+/// Root and subagent share one engine. The root spawns a subagent; the
+/// subagent (recognised by its `agent_finish` tool) runs two Bash commands
+/// once, then answers in text.
+struct GrantedSubagentProvider {
+    granted_command: String,
+    other_command: String,
+}
+
+impl Provider for GrantedSubagentProvider {
+    fn chat<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        let is_subagent = tools.iter().any(|tool| tool.name == "agent_finish");
+        let has_tool_outcome = messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::ToolResult { .. } | Message::ToolError { .. }
+            )
+        });
+        let delta = |index: usize, name: &str, arguments: serde_json::Value| {
+            StreamEvent::Delta(DeltaChunk {
+                tool_call_index: index,
+                tool_call_id: None,
+                function_name: Some(name.to_string()),
+                arguments_fragment: Some(arguments.to_string()),
+            })
+        };
+        let events = if has_tool_outcome {
+            vec![StreamEvent::Text("done".to_string())]
+        } else if is_subagent {
+            vec![
+                delta(
+                    0,
+                    "bash",
+                    serde_json::json!({ "command": self.granted_command }),
+                ),
+                delta(
+                    1,
+                    "bash",
+                    serde_json::json!({ "command": self.other_command }),
+                ),
+            ]
+        } else {
+            vec![delta(
+                0,
+                "spawn_subagent",
+                serde_json::json!({ "label": "Do it", "task": "do it" }),
+            )]
+        };
+        Box::pin(async move {
+            let (tx, rx) = mpsc::channel(16);
+            tokio::spawn(async move {
+                for event in events {
+                    let _ = tx.send(event).await;
+                }
+                let _ = tx.send(StreamEvent::Done).await;
+            });
+            Ok(rx)
+        })
+    }
+
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ylva::ModelInfo>>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+}
+
+#[tokio::test]
+async fn a_grant_shared_by_the_factory_covers_bash_calls_of_a_subagent() {
+    use ylva::grants::{CommandRule, Grant, GrantMatcher, GrantState, GrantTool};
+
+    let scratch = TempDir::new().expect("scratch dir");
+    let granted_marker = scratch.path().join("granted");
+    let other_marker = scratch.path().join("other");
+    let granted_command = format!("touch {}", granted_marker.display());
+    let other_command = format!("touch {}", other_marker.display());
+
+    let provider: Arc<dyn Provider> = Arc::new(GrantedSubagentProvider {
+        granted_command: granted_command.clone(),
+        other_command,
+    });
+    let engine: Arc<dyn ylva::Engine> =
+        Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let profile = ylva::ProfileConfig {
+        default_engine: "default".to_string(),
+        agents: std::collections::HashMap::from([(
+            "default".to_string(),
+            ylva::AgentConfig {
+                engine: None,
+                compaction: None,
+                description: None,
+                allowed_tools: None,
+                allowed_skills: None,
+                timeout_secs: None,
+                max_tool_iterations: None,
+                persona: None,
+                can_spawn: true,
+                tools: std::collections::HashMap::new(),
+            },
+        )]),
+        ..ylva::ProfileConfig::default()
+    };
+    let grant_state = Arc::new(GrantState::new(scratch.path().to_path_buf()));
+    grant_state.add_temporary(Grant {
+        tool: GrantTool::Bash,
+        matcher: GrantMatcher::Command(CommandRule::parse(&granted_command).expect("valid rule")),
+    });
+    let factory = ylva::AgentFactory::new(std::collections::HashMap::from([(
+        "default".to_string(),
+        engine,
+    )]))
+    .with_auto_approve(AutoApproveTool::Spawn)
+    .with_grant_state(grant_state);
+    let (agent, ui_rx) = factory
+        .create(&profile, "default", ylva::Role::Root)
+        .expect("factory creates root agent");
+    let registry = Arc::new(
+        default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            ToolRegistryConfig::default(),
+        )
+        .expect("valid sandbox fixture"),
+    );
+
+    let mut output = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        run_cli_to(
+            agent,
+            ui_rx,
+            registry,
+            "delegate it".to_string(),
+            &mut output,
+        ),
+    )
+    .await
+    .expect("headless run finishes")
+    .expect("headless run succeeds");
+
+    assert!(
+        granted_marker.exists(),
+        "the granted call must run in the subagent"
+    );
+    assert!(
+        !other_marker.exists(),
+        "an ungranted call must stay denied in the subagent"
     );
 }
 

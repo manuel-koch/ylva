@@ -17,7 +17,8 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::text::{terminal_display_width, wrap_table_words, TableWord, Word};
+use super::text::{wrap_table_words, TableWord, Word};
+use crate::terminal_text::terminal_display_width;
 use crate::theme::markdown_dim_fg;
 
 /// Distributes `total` units across `weights.len()` buckets proportionally

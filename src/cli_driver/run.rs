@@ -28,11 +28,11 @@ use super::title_driver::TitleDriver;
 use crate::agent::tools::clarify::ClarifyTool;
 use crate::agent::tools::spawn_subagent::SpawnSubagentTool;
 use crate::agent::tools::Tool;
-use crate::agent::{AgentCommand, AgentLoop, UiUpdate};
+use crate::agent::{AgentCommand, AgentLoop, UiUpdate, CLI_APPROVAL_UNAVAILABLE_REASON};
 use crate::llm::engine::{EngineConfig, EngineImpl};
 use crate::llm::Provider;
 use crate::run_outcome::RunOutcome;
-use crate::sandbox::ApprovalCheck;
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict};
 use crate::stop_signal::StopSignals;
 use crate::theme::{
     assistant_stream_border_color, error_color, interrupted_color, notice_color,
@@ -362,18 +362,15 @@ pub(super) async fn run_cli_to_with_title(
                 let approval_check = registry
                     .get(&name)
                     .map(|tool| tool.needs_approval(&arguments))
-                    .unwrap_or(ApprovalCheck::UserApprovalRequired);
-                match approval_check {
-                    ApprovalCheck::AutoApproved => {
+                    .unwrap_or_else(ApprovalCheck::missing_tool);
+                match &approval_check.verdict {
+                    ApprovalVerdict::AutoApproved => {
                         unannounced_tools.entry(id).or_insert((
                             tokio::time::Instant::now() + output_options.slow_tool_notice_delay(),
                             run_id,
                         ));
-                        agent
-                            .send_command(route_command(run_id, AgentCommand::ApproveTool { id }))
-                            .await;
                     }
-                    ApprovalCheck::AutoDenied { reason } => {
+                    ApprovalVerdict::AutoDenied { reason } => {
                         let denied_invocation = render_denied_invocation(&title, &title_arguments);
                         write_cli_styled_line(
                             out,
@@ -386,16 +383,10 @@ pub(super) async fn run_cli_to_with_title(
                         )?;
                         render_content_sections(out, &content_sections)?;
                         denied_tool_ids.insert(id);
-                        agent
-                            .send_command(route_command(
-                                run_id,
-                                AgentCommand::DenyTool { id, reason },
-                            ))
-                            .await;
                     }
-                    ApprovalCheck::UserApprovalRequired => {
+                    ApprovalVerdict::UserApprovalRequired => {
                         outcome.record_approval_denied();
-                        let reason = "tool requires approval, not supported in CLI mode";
+                        let reason = CLI_APPROVAL_UNAVAILABLE_REASON;
                         let denied_invocation = render_denied_invocation(&title, &title_arguments);
                         write_cli_styled_line(
                             out,
@@ -406,17 +397,17 @@ pub(super) async fn run_cli_to_with_title(
                         )?;
                         render_content_sections(out, &content_sections)?;
                         denied_tool_ids.insert(id);
-                        agent
-                            .send_command(route_command(
-                                run_id,
-                                AgentCommand::DenyTool {
-                                    id,
-                                    reason: reason.into(),
-                                },
-                            ))
-                            .await;
                     }
                 }
+                agent
+                    .send_command(route_command(
+                        run_id,
+                        AgentCommand::ResolveCliTool {
+                            id,
+                            check: approval_check,
+                        },
+                    ))
+                    .await;
             }
             Some(UiUpdate::ClarifyPending {
                 id,
@@ -599,7 +590,9 @@ pub(super) async fn run_cli_to_with_title(
             }
             Some(UiUpdate::SteerQueued { .. })
             | Some(UiUpdate::SteerApplied { .. })
-            | Some(UiUpdate::ModelChangeApplied) => {}
+            | Some(UiUpdate::ModelChangeApplied)
+            | Some(UiUpdate::GrantPreview { .. })
+            | Some(UiUpdate::GrantFailed { .. }) => {}
             // Headless output has no footer for the model-view readout.
             Some(UiUpdate::ContextUsage { .. } | UiUpdate::SubagentContextUsage { .. }) => {}
             // Headless output renders messages inline as they stream, so a

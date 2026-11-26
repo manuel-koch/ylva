@@ -214,7 +214,11 @@ impl tools::Tool for GatedReadTool {
         tools::Tool::input_schema(&self.inner)
     }
     fn needs_approval(&self, _: &serde_json::Value) -> crate::sandbox::ApprovalCheck {
-        crate::sandbox::ApprovalCheck::AutoApproved
+        crate::ApprovalCheck::new(
+            crate::ApprovalVerdict::AutoApproved,
+            crate::DecisionMaker::Tool,
+            crate::RuleOrigin::Programmatic,
+        )
     }
     fn timeout_secs(&self) -> u64 {
         10

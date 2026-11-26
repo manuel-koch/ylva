@@ -20,9 +20,8 @@ use ratatui::text::{Line, Span};
 use crate::highlight::{
     active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line, HighlightedLine,
 };
+use crate::terminal_text::terminal_display_width;
 use crate::theme::markdown_dim_fg;
-
-use super::terminal_display_width;
 
 const CODE_TAB_WIDTH: usize = 4;
 

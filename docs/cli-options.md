@@ -13,6 +13,7 @@ provides read-only catalog discovery.
 | `--help` | none | — | — | Print usage (all flags and subcommands) to stdout and exit with code `0`. |
 | `init [--workspace] [--force]` | subcommand | `--workspace`, `--force` | — | Write configuration starters and exit before provider/session startup. Without `--workspace`, writes `SOUL.md`, `profiles/default/config.toml`, and an annotated `profiles/default/.env` under `YLVA_HOME` (or `${HOME}/.ylva`); `--workspace` writes the default profile config and `.env` starters plus `.gitignore` under the discovered workspace root's `.ylva/`; both modes write-if-missing unless `--force` is supplied. The workspace `.gitignore` lists `.env`, `.envrc`, and `chats/`; an existing one keeps its lines and only the missing entries are appended. Agent-type files are not seeded. |
 | `--no-tui` | none | — | — | Force headless (CLI) mode even when stdout is a terminal. Useful for scripting or debugging without the TUI. |
+| `--no-workspace-grants` | none | — | — | Do not load or save the workspace profile's `grants.toml`. Temporary grants stay available in the TUI; the grant dialog reports that persistent grants are unavailable. See [tool-approval grants](configuration.md#tool-approval-grants). |
 | `--color=<mode>` | enum | `auto`, `no`, `yes` | `auto` | Select CLI color behavior: detect terminal support, force no colors, or force colors. Has no effect on TUI rendering. |
 | `--prompt <text>` | string | any text | *none* | Initial user turn sent to the agent. Resolved with the precedence described below. |
 | `--profile <name>` | string | a profile name: 1–64 ASCII characters, starting with a letter or digit, then letters, digits, `_`, or `-` | `default` | An invalid name is a usage error (exit code `2`). Resolve `<workspace-root>/.ylva/profiles/<name>/config.toml`, then `~/.ylva/profiles/<name>/config.toml`. When `--profile` is given explicitly, a missing file at both disk layers is a hard error (exit code `2`) naming the profile. With no `--profile` flag, the implicit `default` profile uses `ProfileConfig::default()` when no disk file exists. A malformed or unreadable file at the winning layer is always an error. See `docs/configuration.md`. |
@@ -54,6 +55,8 @@ command dispatch or side effects, even when placed before the subcommand.
 `ylva --profile work models` lists all connections in that profile.
 The `init` subcommand also exits with code `2` when its target root cannot be
 resolved or a seeded file cannot be written.
+
+See [Reading Ylva logs](./logging.md) for event fields and an approval trail example.
 
 When the CLI writes to a terminal, its section headers and tool status lines
 use the same semantic colors as the TUI. Colors are disabled automatically for
@@ -206,8 +209,8 @@ Counts use the TUI footer's compact decimal notation: `~950`, `~1.2K`,
 or `~1.2M`. These are tokens, not bytes.
 
 `ylva skill list --color=auto|yes|no` uses the global CLI color policy, with
-`auto` as the default. Supported terminal output renders skill names in bold
-and labels underlined; redirected output, `TERM=dumb`, and `NO_COLOR` remain
+`auto` as the default. Supported terminal output renders skill names in bold;
+redirected output, `TERM=dumb`, and `NO_COLOR` remain
 plain in auto mode. `yes` forces ANSI styling, and `no` disables it.
 The flag may also precede `skill`.
 
@@ -535,6 +538,9 @@ For locking, archive recovery and platform constraints, see
 [persistence](persistence.md#manual-maintenance-and-archive-recovery).
 
 ## Profile commands
+
+A profile directory holding only `grants.toml` is listed with `(grants only)`;
+`profile delete` and its dry run mention that `grants.toml` is removed too.
 
 `ylva profile` manages profile directories. Like `init` and `session`, it runs
 before any profile is loaded and never starts a session. Without `--workspace`
@@ -878,3 +884,12 @@ extensions. Unknown buffered types use `.bin`. Buffered responses are written
 as their original bytes rather than JSON-encoded strings. Transport failures
 without response headers use `.jsonl` and are recorded as `[transport] ...`
 markers.
+
+A request that is dropped before its response completes (an outer timeout or a
+cancellation) appends `[failure] abandoned after N ms ...` to the same response
+file and logs a `warn` with the redacted URL, operation and `dump_id`; the warning
+is also logged when dumps are disabled. The Copilot sign-in requests (device code,
+access token, session-token exchange) are dumped with their response bodies
+omitted (`[redacted] HTTP <status> response body omitted`), and the device code
+in the access-token request body is replaced by `[redacted]`. The release check
+is dumped like any other request.

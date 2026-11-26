@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::agent::tool_queue::evaluate_call_approval;
 
 #[test]
 fn unknown_only_batch_counts_once_and_respects_iteration_cap() {
@@ -341,8 +342,8 @@ async fn advance_tool_queue_emits_clarify_pending_for_clarify_tool() {
     registry.register(Arc::new(ClarifyTool));
     let registry = Arc::new(registry);
     let call_id = Uuid::new_v4();
-    let mut pending_tools = VecDeque::from([PendingTool {
-        call: registry
+    let mut pending_tools = VecDeque::from([PendingTool::new(
+        registry
             .create_call(
                 "clarify",
                 call_id,
@@ -352,7 +353,7 @@ async fn advance_tool_queue_emits_clarify_pending_for_clarify_tool() {
                 }),
             )
             .expect("clarify tool registered"),
-    }]);
+    )]);
     let (ui_tx, mut ui_rx) = mpsc::channel(4);
     let (agent_tx, _agent_rx) = mpsc::channel(1);
     let mut context = Context::new();
@@ -411,8 +412,8 @@ async fn advance_tool_queue_emits_tool_pending_for_non_clarify_tool() {
     registry.register(Arc::new(WriteTool::new(SandboxContext::new(sandbox))));
     let registry = Arc::new(registry);
     let call_id = Uuid::new_v4();
-    let mut pending_tools = VecDeque::from([PendingTool {
-        call: registry
+    let mut pending_tools = VecDeque::from([PendingTool::new(
+        registry
             .create_call(
                 "write",
                 call_id,
@@ -422,7 +423,7 @@ async fn advance_tool_queue_emits_tool_pending_for_non_clarify_tool() {
                 }),
             )
             .expect("write tool registered"),
-    }]);
+    )]);
     let (ui_tx, mut ui_rx) = mpsc::channel(4);
     let (agent_tx, _agent_rx) = mpsc::channel(1);
     let mut context = Context::new();
@@ -560,11 +561,11 @@ async fn a_budgeted_call_without_a_useful_allowance_is_skipped_not_executed() {
             .expect("valid sandbox fixture"),
     );
     let call_id = Uuid::new_v4();
-    let mut pending_tools = VecDeque::from([PendingTool {
-        call: registry
+    let mut pending_tools = VecDeque::from([PendingTool::new(
+        registry
             .create_call("read", call_id, serde_json::json!({ "path": "Cargo.toml" }))
             .expect("read tool registered"),
-    }]);
+    )]);
     let (ui_tx, mut ui_rx) = mpsc::channel(8);
     let (agent_tx, _agent_rx) = mpsc::channel(8);
     let mut context = Context::new();
@@ -817,4 +818,285 @@ fn only_the_first_six_calls_of_a_response_are_executed() {
         drop(agent_loop);
         handle.abort();
     });
+}
+
+fn write_call_registry(
+    grant_state: Option<crate::grants::SharedGrantState>,
+) -> (Arc<ToolRegistry>, Box<dyn tools::ToolCall>) {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool::new(
+        SandboxContext::new(test_sandbox()),
+    )));
+    registry.register(Arc::new(tools::clarify::ClarifyTool));
+    let registry = Arc::new(registry.with_grant_state(grant_state));
+    let call = registry
+        .create_call(
+            "write",
+            Uuid::new_v4(),
+            serde_json::json!({"path": "Cargo.toml", "content": "ignored"}),
+        )
+        .expect("write tool registered");
+    (registry, call)
+}
+
+fn grant_state_for_current_directory() -> crate::grants::SharedGrantState {
+    Arc::new(crate::grants::GrantState::new(
+        std::fs::canonicalize(std::env::current_dir().expect("cwd")).expect("canonical cwd"),
+    ))
+}
+
+#[test]
+fn grant_covers_only_the_matching_call_without_rewriting_policy() {
+    let grant_state = grant_state_for_current_directory();
+    let (registry, call) = write_call_registry(Some(Arc::clone(&grant_state)));
+    assert!(matches!(
+        evaluate_call_approval(&registry, call.as_ref())
+            .check
+            .verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
+    ));
+
+    let other = crate::grants::Grant::from_stored(
+        crate::grants::GrantTool::Write,
+        None,
+        Some("./README.md"),
+    )
+    .expect("valid grant");
+    grant_state.add_temporary(other);
+    assert!(matches!(
+        evaluate_call_approval(&registry, call.as_ref())
+            .check
+            .verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
+    ));
+
+    let matching = crate::grants::Grant::from_stored(
+        crate::grants::GrantTool::Write,
+        None,
+        Some("./Cargo.toml"),
+    )
+    .expect("valid grant");
+    grant_state.add_temporary(matching);
+    let evaluation = evaluate_call_approval(&registry, call.as_ref());
+    assert_eq!(
+        evaluation.check.verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
+    );
+    let grants = evaluation.grants.expect("matching grant covers the call");
+    assert_eq!(grants.len(), 1);
+    assert!(grants[0].as_str().starts_with("temporary:"));
+}
+
+#[test]
+fn grants_never_cover_clarify_or_apply_without_grant_state() {
+    let grant_state = grant_state_for_current_directory();
+    grant_state.add_temporary(
+        crate::grants::Grant::from_stored(
+            crate::grants::GrantTool::Write,
+            None,
+            Some("./Cargo.toml"),
+        )
+        .expect("valid grant"),
+    );
+    let (registry, call) = write_call_registry(None);
+    assert!(matches!(
+        evaluate_call_approval(&registry, call.as_ref())
+            .check
+            .verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
+    ));
+
+    let (registry, _) = write_call_registry(Some(grant_state));
+    let clarify = registry
+        .create_call(
+            "clarify",
+            Uuid::new_v4(),
+            serde_json::json!({"question": "?"}),
+        )
+        .expect("clarify registered");
+    assert!(matches!(
+        evaluate_call_approval(&registry, clarify.as_ref())
+            .check
+            .verdict,
+        crate::sandbox::ApprovalVerdict::UserApprovalRequired
+    ));
+}
+
+#[test]
+fn granting_a_pending_bash_call_runs_it_and_covers_the_next_identical_call() {
+    let log =
+        crate::test_support::capture_logs_with_format(crate::logging::LogFormat::Json, async {
+            approval_trail::prime_trail_capture();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let request_received = Arc::new(tokio::sync::Notify::new());
+            let release_read = Arc::new(tokio::sync::Notify::new());
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(ToolResultTrackingProvider {
+                    requests: Arc::clone(&requests),
+                    request_received: Arc::clone(&request_received),
+                    reproduce_unknown_tool_overlap: true,
+                }),
+                EngineConfig {
+                    provider_connection: "tool-result-tracking".to_string(),
+                    model: "test-model".to_string(),
+                    max_output_tokens: None,
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                    compact_target_ratio: 0.4,
+                    soft_compaction_threshold: 0.5,
+                    hard_compaction_threshold: 0.8,
+                },
+            ));
+            let mut registry =
+                tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default())
+                    .expect("valid sandbox fixture");
+            registry.register(Arc::new(GatedReadTool {
+                inner: tools::read::ReadTool::new(SandboxContext::new(test_sandbox())),
+                release: Arc::clone(&release_read),
+            }));
+            let registry = registry.with_grant_state(Some(grant_state_for_current_directory()));
+            let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, Arc::new(registry));
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt("Run the tools.".to_string()))
+                .await;
+            request_received.notified().await;
+            let mut premature_follow_up = false;
+            let bash_id = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match ui_rx.recv().await.expect("agent channel stays open") {
+                        UiUpdate::ToolStart { name, .. } if name == "read" => {
+                            premature_follow_up = tokio::time::timeout(
+                                Duration::from_millis(100),
+                                request_received.notified(),
+                            )
+                            .await
+                            .is_ok();
+                            if !premature_follow_up {
+                                release_read.notify_one();
+                            }
+                        }
+                        UiUpdate::ToolPending { id, name, .. } if name == "bash" => break id,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("bash approval arrives");
+            if premature_follow_up {
+                release_read.notify_one();
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !matches!(ui_rx.recv().await, Some(UiUpdate::StreamDone)) {}
+                })
+                .await
+                .expect("premature stream finishes while bash awaits approval");
+            }
+            agent_loop
+                .send_command(AgentCommand::RequestGrantPreview { id: bash_id })
+                .await;
+            let preview = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Some(UiUpdate::GrantPreview { preview, .. }) = ui_rx.recv().await {
+                        break preview;
+                    }
+                }
+            })
+            .await
+            .expect("preview arrives");
+            assert_eq!(preview.id, bash_id);
+            assert_eq!(preview.refusal, None);
+            assert_eq!(preview.rows.len(), 1);
+            assert_eq!(preview.rows[0].tool, crate::grants::GrantTool::Bash);
+            assert!(
+                preview.rows[0]
+                    .rule
+                    .as_deref()
+                    .is_some_and(|rule| rule.starts_with("printf")),
+                "{:?}",
+                preview.rows
+            );
+            let unrelated = crate::grants::GrantRequest {
+                draft: crate::grants::GrantDraft {
+                    tool: crate::grants::GrantTool::Bash,
+                    name: None,
+                    rule: Some("cargo build".to_string()),
+                },
+                scope: crate::grants::GrantScope::Temporary,
+            };
+            agent_loop
+                .send_command(AgentCommand::GrantAndApprove {
+                    id: bash_id,
+                    requests: vec![unrelated],
+                    reload_snapshot: false,
+                })
+                .await;
+            let failure = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Some(UiUpdate::GrantFailed { id, reason, .. }) = ui_rx.recv().await {
+                        break (id, reason);
+                    }
+                }
+            })
+            .await
+            .expect("a rule that does not match the call is refused");
+            assert_eq!(failure.0, bash_id);
+            assert!(failure.1.contains("does not match"), "{}", failure.1);
+            agent_loop
+                .send_command(AgentCommand::GrantAndApprove {
+                    id: bash_id,
+                    requests: vec![crate::grants::GrantRequest {
+                        draft: preview.rows[0].clone(),
+                        scope: crate::grants::GrantScope::Temporary,
+                    }],
+                    reload_snapshot: false,
+                })
+                .await;
+            let mut notice = None;
+            let completed = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    match ui_rx.recv().await {
+                        Some(UiUpdate::Notice { text, .. }) => notice = Some(text),
+                        Some(UiUpdate::ToolDone { id, .. }) if id == bash_id => break,
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+            })
+            .await
+            .is_ok();
+            drop(agent_loop);
+            let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+            assert!(completed, "a granted bash call must execute");
+            let notice = notice.expect("the grant is announced");
+            assert!(
+                notice.contains("printf regression-approved"),
+                "unexpected notice: {notice}"
+            );
+            let _ = requests;
+        });
+    let bash_records: Vec<serde_json::Value> = log
+        .lines()
+        .filter(|line| approval_trail::captured_trail_line(line))
+        .map(|line| serde_json::from_str(line).expect("JSON log record"))
+        .filter(|record: &serde_json::Value| record["fields"]["tool"] == "bash")
+        .collect();
+    let [check, disposition] = bash_records.as_slice() else {
+        panic!("preview and failed grant must not produce records: {bash_records:?}");
+    };
+    assert_eq!(check["level"], "INFO");
+    assert_eq!(disposition["level"], "INFO");
+    assert_eq!(check["fields"]["outcome"], "user_approval_required");
+    assert_eq!(disposition["fields"]["outcome"], "grant_and_approve");
+    assert_eq!(
+        disposition["fields"]["parent_id"],
+        check["fields"]["record_id"]
+    );
+    assert!(disposition["fields"]["grants"]
+        .as_str()
+        .unwrap()
+        .starts_with("temporary:bash:"));
+    assert!(!format!("{bash_records:?}").contains("regression-approved"));
 }

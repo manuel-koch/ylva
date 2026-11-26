@@ -329,6 +329,10 @@ pub struct TuiState {
     pub help_popup: HelpPopupState,
     pub agents_popup: AgentsPopupRenderState,
     pub status_popup: StatusPopupRenderState,
+    /// The grant dialog drawn over the approval prompt, if open. Its geometry
+    /// is written back by `draw` into `grant_dialog_layout`.
+    pub grant_dialog: Option<crate::tui_reducer_state::GrantDialogState>,
+    pub grant_dialog_layout: crate::tui_reducer_state::GrantDialogLayout,
 
     // ── clarify banner ───────────────────────────────────────────────────────
     pub clarify_banner_state: ClarifyBannerState,
@@ -395,6 +399,8 @@ impl TuiState {
             },
             agents_popup: AgentsPopupRenderState::default(),
             status_popup: StatusPopupRenderState::default(),
+            grant_dialog: None,
+            grant_dialog_layout: Default::default(),
             clarify_banner_state: ClarifyBannerState {
                 pending_clarify: None,
                 clarify_scroll_offset: 0,

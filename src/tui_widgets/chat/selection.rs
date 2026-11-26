@@ -74,10 +74,6 @@ pub(in crate::tui_widgets) fn apply_selection_highlight_to_line(
     line.spans = new_spans;
 }
 
-pub(in crate::tui_widgets) fn terminal_display_width(text: &str) -> usize {
-    Line::from(text).width()
-}
-
 pub(in crate::tui_widgets) fn line_alignment_offset(line: &Line<'_>, area_width: u16) -> usize {
     let line_width = line.width();
     match line.alignment.unwrap_or(Alignment::Left) {

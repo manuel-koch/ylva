@@ -294,36 +294,78 @@ impl WebFetchBackend for HttpFetchBackend {
     ) -> BoxFuture<'a, Result<WebFetchResponse, WebFetchError>> {
         Box::pin(async move {
             let dump_context = crate::http::RequestDumpContext::new(&self.dump_source);
-            let response = self
-                .send_following_redirects(url, policy, &dump_context)
-                .await?;
-            let status = response.status();
-            let final_url = response.url().to_string();
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let content_length = response.content_length();
-            let response_dump_path =
-                dump_context.response_path_for_content_type(content_type.as_deref(), "bin");
-            if !status.is_success() {
-                return Err(WebFetchError::Status {
-                    url: final_url,
-                    status: status.as_u16(),
-                });
+            let guard = dump_context.drop_guard("web fetch", url);
+            let result = self.fetch_dumped(url, policy, &dump_context).await;
+            guard.finish();
+            result
+        })
+    }
+}
+
+impl HttpFetchBackend {
+    /// Fetch `url`, dumping the request and response through `dump_context`.
+    async fn fetch_dumped(
+        &self,
+        url: &str,
+        policy: HopPolicy<'_>,
+        dump_context: &crate::http::RequestDumpContext,
+    ) -> Result<WebFetchResponse, WebFetchError> {
+        let response = self
+            .send_following_redirects(url, policy, dump_context)
+            .await?;
+        let status = response.status();
+        let final_url = response.url().to_string();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let content_length = response.content_length();
+        let response_dump_path =
+            dump_context.response_path_for_content_type(content_type.as_deref(), "bin");
+        if !status.is_success() {
+            return Err(WebFetchError::Status {
+                url: final_url,
+                status: status.as_u16(),
+            });
+        }
+
+        let limit = READ_MEDIA_MAX_BYTES;
+        let content_length_over_limit = content_length.is_some_and(|length| length > limit as u64);
+        let mut raw_body = BoundedBuffer::new(limit);
+        let mut stream = response.bytes_stream();
+
+        // Decide the body kind from a small prefix (magic numbers first)
+        // so the size policy can differ by kind: a known-oversize media
+        // body fails before it is downloaded, text is read up to `limit`.
+        let mut sniffed_media = false;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                crate::http::dump_response_transport_error(&response_dump_path, &error);
+                WebFetchError::Request {
+                    detail: error.to_string(),
+                }
+            })?;
+            raw_body.push(&chunk);
+            if supported_media_type(raw_body.as_slice()).is_some() {
+                sniffed_media = true;
+                break;
             }
+            if raw_body.len() >= SNIFF_PREFIX_BYTES || raw_body.overflowed() {
+                break;
+            }
+        }
+        if sniffed_media && (content_length_over_limit || raw_body.overflowed()) {
+            return Err(WebFetchError::TooLarge {
+                size: saturating_usize(content_length.unwrap_or_default()),
+                limit,
+            });
+        }
 
-            let limit = READ_MEDIA_MAX_BYTES;
-            let content_length_over_limit =
-                content_length.is_some_and(|length| length > limit as u64);
-            let mut raw_body = BoundedBuffer::new(limit);
-            let mut stream = response.bytes_stream();
-
-            // Decide the body kind from a small prefix (magic numbers first)
-            // so the size policy can differ by kind: a known-oversize media
-            // body fails before it is downloaded, text is read up to `limit`.
-            let mut sniffed_media = false;
+        let mut truncated_raw = content_length_over_limit;
+        if sniffed_media {
+            // Media must arrive complete: a partial image or PDF is
+            // unusable (mirrors `read`'s whole-file media policy).
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|error| {
                     crate::http::dump_response_transport_error(&response_dump_path, &error);
@@ -331,95 +373,66 @@ impl WebFetchBackend for HttpFetchBackend {
                         detail: error.to_string(),
                     }
                 })?;
-                raw_body.push(&chunk);
-                if supported_media_type(raw_body.as_slice()).is_some() {
-                    sniffed_media = true;
-                    break;
-                }
-                if raw_body.len() >= SNIFF_PREFIX_BYTES || raw_body.overflowed() {
-                    break;
-                }
-            }
-            if sniffed_media && (content_length_over_limit || raw_body.overflowed()) {
-                return Err(WebFetchError::TooLarge {
-                    size: saturating_usize(content_length.unwrap_or_default()),
-                    limit,
-                });
-            }
-
-            let mut truncated_raw = content_length_over_limit;
-            if sniffed_media {
-                // Media must arrive complete: a partial image or PDF is
-                // unusable (mirrors `read`'s whole-file media policy).
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|error| {
-                        crate::http::dump_response_transport_error(&response_dump_path, &error);
-                        WebFetchError::Request {
-                            detail: error.to_string(),
-                        }
-                    })?;
-                    let received = raw_body.len() + chunk.len();
-                    if !raw_body.push(&chunk) {
-                        return Err(WebFetchError::TooLarge {
-                            size: saturating_usize(content_length.unwrap_or(received as u64)),
-                            limit,
-                        });
-                    }
-                }
-            } else {
-                // Text is read to at most `limit` bytes; over the limit the
-                // partial body is classified and converted, flagged truncated.
-                while !raw_body.overflowed() {
-                    match stream.next().await {
-                        None => break,
-                        Some(Err(error)) => {
-                            crate::http::dump_response_transport_error(&response_dump_path, &error);
-                            return Err(WebFetchError::Request {
-                                detail: error.to_string(),
-                            });
-                        }
-                        Some(Ok(chunk)) => {
-                            raw_body.push(&chunk);
-                        }
-                    }
-                }
-                truncated_raw |= raw_body.overflowed();
-                if truncated_raw {
-                    // Cut on a UTF-8 character boundary so the partial text
-                    // body stays convertible.
-                    raw_body.trim_incomplete_utf8_suffix();
-                }
-            }
-            let raw_body = raw_body.into_bytes();
-            crate::http::dump_buffered_response(&raw_body, response_dump_path.as_deref());
-
-            let body = convert_body_to_result(content_type.as_deref(), &raw_body)?;
-            let detected_content_type =
-                detect_missing_content_type(content_type.as_deref(), &raw_body);
-            let (body, truncated) = match body {
-                WebFetchBody::Media { .. } if truncated_raw => {
+                let received = raw_body.len() + chunk.len();
+                if !raw_body.push(&chunk) {
                     return Err(WebFetchError::TooLarge {
-                        size: saturating_usize(content_length.unwrap_or(raw_body.len() as u64)),
+                        size: saturating_usize(content_length.unwrap_or(received as u64)),
                         limit,
                     });
                 }
-                media @ WebFetchBody::Media { .. } => (media, false),
-                WebFetchBody::Text { text } => {
-                    let (text, output_truncated) = truncate_text_output(&text);
-                    (
-                        WebFetchBody::Text { text },
-                        truncated_raw || output_truncated,
-                    )
+            }
+        } else {
+            // Text is read to at most `limit` bytes; over the limit the
+            // partial body is classified and converted, flagged truncated.
+            while !raw_body.overflowed() {
+                match stream.next().await {
+                    None => break,
+                    Some(Err(error)) => {
+                        crate::http::dump_response_transport_error(&response_dump_path, &error);
+                        return Err(WebFetchError::Request {
+                            detail: error.to_string(),
+                        });
+                    }
+                    Some(Ok(chunk)) => {
+                        raw_body.push(&chunk);
+                    }
                 }
-            };
-            Ok(WebFetchResponse {
-                final_url,
-                status: status.as_u16(),
-                content_type,
-                detected_content_type,
-                body,
-                truncated,
-            })
+            }
+            truncated_raw |= raw_body.overflowed();
+            if truncated_raw {
+                // Cut on a UTF-8 character boundary so the partial text
+                // body stays convertible.
+                raw_body.trim_incomplete_utf8_suffix();
+            }
+        }
+        let raw_body = raw_body.into_bytes();
+        crate::http::dump_buffered_response(&raw_body, response_dump_path.as_deref());
+
+        let body = convert_body_to_result(content_type.as_deref(), &raw_body)?;
+        let detected_content_type = detect_missing_content_type(content_type.as_deref(), &raw_body);
+        let (body, truncated) = match body {
+            WebFetchBody::Media { .. } if truncated_raw => {
+                return Err(WebFetchError::TooLarge {
+                    size: saturating_usize(content_length.unwrap_or(raw_body.len() as u64)),
+                    limit,
+                });
+            }
+            media @ WebFetchBody::Media { .. } => (media, false),
+            WebFetchBody::Text { text } => {
+                let (text, output_truncated) = truncate_text_output(&text);
+                (
+                    WebFetchBody::Text { text },
+                    truncated_raw || output_truncated,
+                )
+            }
+        };
+        Ok(WebFetchResponse {
+            final_url,
+            status: status.as_u16(),
+            content_type,
+            detected_content_type,
+            body,
+            truncated,
         })
     }
 }

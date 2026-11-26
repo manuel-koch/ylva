@@ -15,10 +15,11 @@
 //! Pure mouse event handling.
 
 use super::TextareaContext;
-use crate::markdown::{render_markdown, slice_by_display_columns};
+use crate::markdown::render_markdown;
+use crate::terminal_text::slice_by_display_columns;
 use crate::tui_reducer_state::{
     model_picker_row_entries, slash_overlay_text_rows, AppState, ChatEntry, ChatSelection, Effect,
-    Focus, PickerRow, SlashOverlay, TuiMode,
+    EngineSaveFocus, Focus, PickerRow, SlashOverlay, TuiMode,
 };
 use crossterm::event::MouseEventKind;
 
@@ -248,6 +249,10 @@ pub(super) fn route_mouse(
             let hb = state.layout.header_bubble;
             let in_header_bubble =
                 column >= hb.x && column < hb.x + hb.width && row >= hb.y && row < hb.y + hb.height;
+            if state.visible_grant_dialog().is_some() {
+                state.scroll_grant_dialog(if scroll_up { -1 } else { 1 });
+                return vec![];
+            }
             if matches!(state.focus, Focus::HelpPopup) {
                 if scroll_up {
                     state.help_scroll_up(1);
@@ -306,6 +311,9 @@ pub(super) fn route_mouse(
         }
 
         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            if state.visible_grant_dialog().is_some() {
+                return click_grant_dialog(state, column, row);
+            }
             if matches!(state.focus, Focus::StatusPopup) {
                 if !state.layout.status_popup.hit(column, row) {
                     state.close_status_popup();
@@ -419,7 +427,7 @@ pub(super) fn route_mouse(
                             .engine_save_control_at(column, row)
                         {
                             state.focus_engine_save_control(focus);
-                            if focus.is_button() {
+                            if focus.is_button() || focus == EngineSaveFocus::Mode {
                                 return state.activate_engine_save_focus();
                             }
                             return vec![];
@@ -576,6 +584,9 @@ pub(super) fn route_mouse(
                         Effect::ApproveTool { id: tool_id },
                         Effect::RestoreSlashOverlay,
                     ];
+                }
+                if state.layout.grant_button.contains((column, row).into()) {
+                    return vec![Effect::RequestGrantPreview { id: tool_id }];
                 }
                 if in_deny {
                     state.focus = Focus::MainInput;
@@ -925,4 +936,28 @@ pub(super) fn route_mouse(
 
         _ => vec![],
     }
+}
+
+/// A click inside the grant dialog; the prompt beneath it is unreachable until
+/// the dialog closes, and a click outside the dialog goes back.
+fn click_grant_dialog(state: &mut AppState, column: u16, row: u16) -> Vec<Effect> {
+    let position = (column, row).into();
+    let layout = state.layout.grant_dialog.clone();
+    if layout.confirm_button.contains(position) {
+        return state.confirm_grant_dialog();
+    }
+    if layout.back_button.contains(position) || !layout.rect.contains(position) {
+        state.close_grant_dialog();
+    } else if let Some(index) = layout
+        .rules
+        .iter()
+        .position(|areas| areas.iter().any(|area| area.contains(position)))
+    {
+        state.click_grant_rule(index);
+    } else if let Some(index) = layout.rows.iter().position(|area| area.contains(position)) {
+        state.end_grant_edit(true);
+        state.focus_grant_row(index);
+        state.cycle_grant_row(index, true);
+    }
+    vec![]
 }

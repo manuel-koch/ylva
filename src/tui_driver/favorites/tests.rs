@@ -461,6 +461,34 @@ fn workspace_saves_warn_that_the_next_launch_needs_trust() {
 }
 
 #[test]
+fn shutdown_report_prefixes_only_problems_with_warning() {
+    let favorite = |result| {
+        SaveCompletion::Favorite(FavoriteSaveCompletion {
+            connection: "stub".to_string(),
+            model_id: "m".to_string(),
+            desired: true,
+            result,
+        })
+    };
+
+    let saved = favorite(Ok(saved_outcome(FavoriteSourceLayer::Home, true)));
+    assert!(!saved.shutdown_report("default").starts_with("warning:"));
+
+    let mut uncertain_outcome = saved_outcome(FavoriteSourceLayer::Home, true);
+    uncertain_outcome.publication_uncertain = true;
+    let uncertain = favorite(Ok(uncertain_outcome));
+    assert!(uncertain
+        .shutdown_report("default")
+        .starts_with("warning: "));
+
+    let failed = favorite(Err(FavoriteSaveError::Unsupported {
+        reason: "odd shape".to_string(),
+    }));
+    let report = failed.shutdown_report("default");
+    assert!(report.starts_with("warning: Could not mark"), "{report}");
+}
+
+#[test]
 fn setup_covers_only_connections_with_a_backing_table() {
     let profile: ProfileConfig = toml::from_str(
         r#"

@@ -260,6 +260,124 @@ impl RequestDumpContext {
     }
 }
 
+impl RequestDumpContext {
+    /// Start watching a request that is in flight. Dropping the guard before
+    /// [`RequestDropGuard::finish`] means the caller gave up (an outer timeout
+    /// or cancellation) without any response or error having been observed.
+    pub(crate) fn drop_guard(&self, operation: &str, url: &str) -> RequestDropGuard {
+        RequestDropGuard {
+            context: self.clone(),
+            operation: operation.to_owned(),
+            url: redacted_url_for_display(url),
+            started_at: std::time::Instant::now(),
+            finished: false,
+        }
+    }
+}
+
+/// Reports a request that was abandoned mid-flight, which otherwise leaves a
+/// request dump without a response and no log line.
+pub(crate) struct RequestDropGuard {
+    context: RequestDumpContext,
+    operation: String,
+    url: String,
+    started_at: std::time::Instant,
+    finished: bool,
+}
+
+impl RequestDropGuard {
+    /// The request ended with a response or an error that the caller handles.
+    pub(crate) fn finish(mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for RequestDropGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let elapsed_ms = self.started_at.elapsed().as_millis() as u64;
+        tracing::warn!(
+            operation = %self.operation,
+            url = %self.url,
+            dump_id = %self.context.dump_id(),
+            elapsed_ms,
+            "request abandoned before a response completed (cancelled or timed out)"
+        );
+        self.context.dump_failure_response(&format!(
+            "abandoned after {elapsed_ms} ms before the response completed (cancelled or timed out)"
+        ));
+    }
+}
+
+/// Send one request without retries, dump it and its response, and return the
+/// status with the complete body.
+///
+/// `request_body` is the already-redacted body for the request dump.
+/// `redact_response` keeps the response body out of the dump (for responses
+/// that carry credentials); only its status is recorded then.
+pub(crate) async fn send_dumped_once(
+    client: &reqwest::Client,
+    request: reqwest::RequestBuilder,
+    operation: &str,
+    request_body: &serde_json::Value,
+    redact_response: bool,
+    dump_source: &RequestDumpSource,
+) -> anyhow::Result<(reqwest::StatusCode, Vec<u8>)> {
+    let request = request.build()?;
+    let url = request.url().to_string();
+    let dump_context = RequestDumpContext::new(dump_source);
+    if let Some(path) = dump_context.request_path() {
+        dump_request(
+            &url,
+            &redacted_headers_json(request.headers()),
+            request_body,
+            &path,
+        );
+    }
+    let guard = dump_context.drop_guard(operation, &url);
+    let response = client.execute(request).await.map_err(|error| {
+        let response_dump_path = dump_context.response_path_for_content_type(None, "jsonl");
+        dump_response_transport_error(&response_dump_path, &error);
+        error.without_url()
+    });
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            guard.finish();
+            return Err(error.into());
+        }
+    };
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let response_dump_path = dump_context.response_path_for_content_type(content_type, "bin");
+    let body = response.bytes().await;
+    guard.finish();
+    match body {
+        Ok(body) => {
+            if redact_response {
+                if let Some(path) = &response_dump_path {
+                    append_response_dump_line(
+                        &format!("[redacted] HTTP {status} response body omitted"),
+                        path,
+                    );
+                }
+            } else {
+                dump_buffered_response(&body, response_dump_path.as_deref());
+            }
+            Ok((status, body.to_vec()))
+        }
+        Err(error) => {
+            dump_response_transport_error(&response_dump_path, &error);
+            Err(error.without_url().into())
+        }
+    }
+}
+
 /// Perform a JSON `GET` request with optional bearer authentication.
 pub(crate) async fn get_json(
     client: &reqwest::Client,
@@ -313,16 +431,21 @@ pub(crate) async fn get_json_with_headers(
             path,
         );
     }
-    let response = send_with_retry(
-        url,
-        operation,
-        &CancellationToken::new(),
-        &RetryCooldown::default(),
-        || client.get(url).headers(headers.clone()),
-    )
-    .await?;
-    let body = read_buffered_response(response, &dump_context).await?;
-    Ok(serde_json::from_slice(&body)?)
+    let guard = dump_context.drop_guard(operation, url);
+    let result = async {
+        let response = send_with_retry(
+            url,
+            operation,
+            &CancellationToken::new(),
+            &RetryCooldown::default(),
+            || client.get(url).headers(headers.clone()),
+        )
+        .await?;
+        read_buffered_response(response, &dump_context).await
+    }
+    .await;
+    guard.finish();
+    Ok(serde_json::from_slice(&result?)?)
 }
 
 /// Perform a JSON `POST` request with optional bearer authentication.
@@ -358,16 +481,21 @@ pub(crate) async fn post_json_with_dump_source(
     if let Some(path) = &request_dump_path {
         dump_request(url, &redacted_headers_json(&headers), body, path);
     }
-    let response = send_with_retry(
-        url,
-        operation,
-        &CancellationToken::new(),
-        &RetryCooldown::default(),
-        || client.post(url).headers(headers.clone()).json(body),
-    )
-    .await?;
-    let response_body = read_buffered_response(response, &dump_context).await?;
-    Ok(serde_json::from_slice(&response_body)?)
+    let guard = dump_context.drop_guard(operation, url);
+    let result = async {
+        let response = send_with_retry(
+            url,
+            operation,
+            &CancellationToken::new(),
+            &RetryCooldown::default(),
+            || client.post(url).headers(headers.clone()).json(body),
+        )
+        .await?;
+        read_buffered_response(response, &dump_context).await
+    }
+    .await;
+    guard.finish();
+    Ok(serde_json::from_slice(&result?)?)
 }
 
 fn bearer_headers(api_key: Option<&str>) -> anyhow::Result<reqwest::header::HeaderMap> {

@@ -418,6 +418,17 @@ async fn interrupted_model_list_discovery_resumes_after_the_pause() {
                 && text.contains("Available catalog choices are retained.")
     )));
 
+    let timed_out = ModelListResult::PartialFailure {
+        models: Vec::new(),
+        failures: vec!["example-provider: timed out after 10 s".to_string()],
+    };
+    apply_model_list_result(&mut state, None, timed_out, &engine);
+    assert!(state.chat_entries.iter().any(|entry| matches!(
+        entry,
+        crate::tui_reducer_state::ChatEntry::Notice { text }
+            if text.contains("Some provider connections could not list models: example-provider: timed out after 10 s.")
+    )));
+
     let no_models_but_engine = ModelListResult::PartialFailure {
         models: Vec::new(),
         failures: vec!["offline: unavailable".to_string()],

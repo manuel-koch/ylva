@@ -102,7 +102,7 @@ fn default_sandbox_context() -> SandboxContext {
 /// is given: `sandbox_context_for` appends this catch-all rule last.
 fn auto_approve_catch_all_context() -> SandboxContext {
     default_sandbox_context().with_rule(SandboxRule {
-        verdict: ApprovalCheck::AutoApproved,
+        verdict: ApprovalVerdict::AutoApproved,
         pattern: glob::Pattern::new("**").expect("`**` is a valid glob"),
     })
 }
@@ -323,8 +323,8 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
         Duration::from_secs(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
     );
     assert!(matches!(
-        default_tool.needs_approval(&arguments),
-        ApprovalCheck::UserApprovalRequired
+        default_tool.needs_approval(&arguments).verdict,
+        ApprovalVerdict::UserApprovalRequired
     ));
 
     // A configured `network_request` rule is the per-profile approval switch.
@@ -343,8 +343,8 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
         Duration::from_secs(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
     );
     assert!(matches!(
-        configured_tool.needs_approval(&arguments),
-        ApprovalCheck::AutoApproved
+        configured_tool.needs_approval(&arguments).verdict,
+        ApprovalVerdict::AutoApproved
     ));
 
     // `--auto-approve-web-search` appends the catch-all, which wins over
@@ -356,8 +356,8 @@ fn approval_requires_the_user_until_a_rule_or_flag_states_a_verdict() {
         Duration::from_secs(crate::config::DEFAULT_WEB_SEARCH_TIMEOUT_SECS),
     );
     assert!(matches!(
-        flagged_tool.needs_approval(&arguments),
-        ApprovalCheck::AutoApproved
+        flagged_tool.needs_approval(&arguments).verdict,
+        ApprovalVerdict::AutoApproved
     ));
 }
 

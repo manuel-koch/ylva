@@ -28,7 +28,7 @@
 //! unconditional built-in floor: `outside_workspace` → `UserApprovalRequired`
 //! and `dot_path` → `UserApprovalRequired`.
 
-mod bash_command_extractor;
+pub(crate) mod bash_command_extractor;
 pub(crate) mod network_target_pattern;
 
 use std::path::PathBuf;
@@ -40,12 +40,17 @@ mod network;
 mod path;
 mod rules;
 
-pub use path::{expand_path_tokens, to_relative_path};
+pub(crate) use command::StatementAnalysis;
+pub use path::to_relative_path;
+pub(crate) use rules::path_glob_matches;
 #[cfg(test)]
 pub(crate) use rules::ApprovalVerdictConfig;
 use rules::ResolvedRule;
 pub use rules::ResolvedRuleError as SandboxRuleError;
-pub use rules::{ApprovalCheck, NamedSandboxRule, SandboxRule, SandboxRuleConfig};
+pub use rules::{
+    ApprovalCheck, ApprovalVerdict, DecisionMaker, NamedSandboxRule, RuleListSource, RuleOrigin,
+    SandboxRule, SandboxRuleConfig, ToolRuleList,
+};
 
 /// Shared sandbox. Holds the launch-directory anchor used to resolve relative
 /// paths and discover the workspace boundary.
@@ -102,7 +107,7 @@ pub struct SandboxContext {
     /// `configured_rules` or the built-in default floor — this is what
     /// `--auto-approve-write`/`--auto-approve-edit`'s catch-all rule uses so
     /// it wins regardless of any `[tools.<name>]` config.
-    rules: Vec<SandboxRule>,
+    rules: Vec<(SandboxRule, RuleOrigin)>,
     /// When `Some`, fully replaces the built-in default floor (the two
     /// hardcoded `outside_workspace`/`dot_path` checks) for this tool: only
     /// this list's entries are evaluated in list order (last match wins)
@@ -110,7 +115,7 @@ pub struct SandboxContext {
     /// tool" — the default floor applies instead. Populated from a
     /// profile's `[tools.<name>]` table via
     /// [`SandboxContext::with_configured_rules`].
-    configured_rules: Option<Vec<ResolvedRule>>,
+    configured_rules: Option<Vec<(ResolvedRule, RuleOrigin)>>,
     skill_sources: Arc<Vec<PathBuf>>,
 }
 
@@ -140,10 +145,26 @@ impl SandboxContext {
         tool_name: &str,
         rules: Vec<SandboxRuleConfig>,
     ) -> Result<Self, SandboxRuleError> {
-        for rule in &rules {
+        self.with_tool_rule_list(tool_name, rules.into())
+    }
+
+    pub(crate) fn with_tool_rule_list(
+        self,
+        tool_name: &str,
+        list: ToolRuleList,
+    ) -> Result<Self, SandboxRuleError> {
+        for rule in &list.rules {
             rule.validate_for_tool(tool_name)?;
         }
-        self.with_configured_rules(rules)
+        let source = list.source.map(Arc::new);
+        self.compile_rules(list.rules, |index| match &source {
+            Some(source) => RuleOrigin::Configured {
+                source: Arc::clone(source),
+                tool: tool_name.to_string(),
+                index,
+            },
+            None => RuleOrigin::ProgrammaticRule(index),
+        })
     }
 
     /// Build a context with an empty rule list and no `[tools.<name>]`
@@ -164,8 +185,12 @@ impl SandboxContext {
     /// overrides any earlier verdict for every path. Always evaluated after
     /// `configured_rules`/the default floor, so this continues to win
     /// regardless of `[tools.<name>]` config.
-    pub fn with_rule(mut self, rule: SandboxRule) -> Self {
-        self.rules.push(rule);
+    pub fn with_rule(self, rule: SandboxRule) -> Self {
+        self.with_rule_origin(rule, RuleOrigin::Programmatic)
+    }
+
+    pub(crate) fn with_rule_origin(mut self, rule: SandboxRule, origin: RuleOrigin) -> Self {
+        self.rules.push((rule, origin));
         self
     }
 
@@ -178,12 +203,21 @@ impl SandboxContext {
     /// Invalid entries reject construction of the whole policy, so a malformed
     /// restriction cannot leave an earlier approval effective.
     pub fn with_configured_rules(
+        self,
+        rules: Vec<SandboxRuleConfig>,
+    ) -> Result<Self, SandboxRuleError> {
+        self.compile_rules(rules, RuleOrigin::ProgrammaticRule)
+    }
+
+    fn compile_rules(
         mut self,
         rules: Vec<SandboxRuleConfig>,
+        origin: impl Fn(usize) -> RuleOrigin,
     ) -> Result<Self, SandboxRuleError> {
         let resolved = rules
             .into_iter()
-            .map(ResolvedRule::from_config)
+            .enumerate()
+            .map(|(index, rule)| ResolvedRule::from_config(rule).map(|rule| (rule, origin(index))))
             .collect::<Result<_, _>>()?;
         self.configured_rules = Some(resolved);
         Ok(self)

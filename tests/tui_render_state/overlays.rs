@@ -19,7 +19,7 @@ fn session_picker_renders_actions_timestamps_and_elided_titles_on_small_terminal
     use ylva::tui_reducer_state::{
         SessionAction, SessionChoice, SessionPicker, SessionPickerPhase, SlashOverlay,
     };
-    for (width, height) in [(120, 40), (60, 15), (30, 9), (10, 6)] {
+    for (width, height) in [(120, 40), (60, 15), (32, 9), (10, 6)] {
         let mut state = ylva::AppState::new();
         let mut picker = SessionPicker::loading();
         picker.phase = SessionPickerPhase::Ready;
@@ -32,15 +32,21 @@ fn session_picker_renders_actions_timestamps_and_elided_titles_on_small_terminal
         state.slash_overlay = SlashOverlay::SessionPicker(picker);
         let buffer = render_offline(&mut state, width, height);
         let text = rendered_text(&buffer);
-        if width >= 30 {
+        if width >= 32 {
             assert_eq!(text.matches("Resume").count(), 1, "{text}");
             assert_eq!(text.matches("Clone").count(), 1, "{text}");
             assert!(!text.contains("[x]"), "{text}");
             assert!(!text.contains("[ ]"), "{text}");
             assert!(text.contains("2026-01-01"), "{text}");
             let layout = state.layout.slash_overlay;
-            assert_eq!(layout.resume_action.width, " [ Resume ] ".len() as u16);
-            assert_eq!(layout.clone_action.width, " [ Clone ] ".len() as u16);
+            assert_eq!(
+                layout.resume_action.width,
+                " [ ✓ Resume ] ".chars().count() as u16
+            );
+            assert_eq!(
+                layout.clone_action.width,
+                " [ ✓ Clone ] ".chars().count() as u16
+            );
             assert_ne!(
                 buffer[(layout.resume_action.x, layout.resume_action.y)].bg,
                 buffer[(layout.clone_action.x, layout.clone_action.y)].bg

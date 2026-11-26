@@ -43,6 +43,7 @@ use serde::Deserialize;
 
 use super::{WebSearchBackend, WebSearchError, WebSearchHit, WEB_SEARCH_MAX_RESULT_LIMIT};
 use crate::http::OUTBOUND_USER_AGENT;
+use crate::text_normalization::collapse_whitespace;
 
 /// Name of the authentication header carrying the Brave subscription token.
 const SUBSCRIPTION_TOKEN_HEADER: &str = "X-Subscription-Token";
@@ -175,24 +176,32 @@ impl WebSearchBackend for BraveBackend {
                     path,
                 );
             }
+            let guard = dump_context.drop_guard("web search", &request_url);
             // No retry: every failure is terminal (see the module docs).
-            let response = self.client.execute(request).await.map_err(|error| {
-                let response_dump_path = dump_context.response_path_for_content_type(None, "jsonl");
-                crate::http::dump_response_transport_error(&response_dump_path, &error);
-                WebSearchError::Request(error.to_string())
-            })?;
-            let status = response.status();
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok());
-            let response_dump_path =
-                dump_context.response_path_for_content_type(content_type, "bin");
-            let body = response.bytes().await.map_err(|error| {
-                crate::http::dump_response_transport_error(&response_dump_path, &error);
-                WebSearchError::Request(error.to_string())
-            })?;
-            crate::http::dump_buffered_response(&body, response_dump_path.as_deref());
+            let outcome = async {
+                let response = self.client.execute(request).await.map_err(|error| {
+                    let response_dump_path =
+                        dump_context.response_path_for_content_type(None, "jsonl");
+                    crate::http::dump_response_transport_error(&response_dump_path, &error);
+                    WebSearchError::Request(error.to_string())
+                })?;
+                let status = response.status();
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok());
+                let response_dump_path =
+                    dump_context.response_path_for_content_type(content_type, "bin");
+                let body = response.bytes().await.map_err(|error| {
+                    crate::http::dump_response_transport_error(&response_dump_path, &error);
+                    WebSearchError::Request(error.to_string())
+                })?;
+                crate::http::dump_buffered_response(&body, response_dump_path.as_deref());
+                Ok::<_, WebSearchError>((status, body))
+            }
+            .await;
+            guard.finish();
+            let (status, body) = outcome?;
             if !status.is_success() {
                 return Err(status_error(status.as_u16(), &body));
             }
@@ -270,12 +279,12 @@ fn parse_brave_results(body: &[u8], limit: usize) -> Result<Vec<WebSearchHit>, W
     let hits = results
         .iter()
         .filter_map(|result| {
-            let title = normalize_whitespace(&result.title);
+            let title = collapse_whitespace(&result.title);
             let url = result.url.trim();
             if title.is_empty() || url.is_empty() {
                 return None;
             }
-            let snippet = normalize_whitespace(result.description.as_deref().unwrap_or_default());
+            let snippet = collapse_whitespace(result.description.as_deref().unwrap_or_default());
             Some(WebSearchHit {
                 title,
                 url: url.to_string(),
@@ -311,13 +320,6 @@ fn status_error(status: u16, body: &[u8]) -> WebSearchError {
 /// blank.
 fn non_blank(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-/// Collapse every run of whitespace into a single space and trim the ends, so
-/// Brave-provided text (titles, descriptions) is single-line and
-/// comparison-stable.
-fn normalize_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

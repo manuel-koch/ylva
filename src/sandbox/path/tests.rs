@@ -37,8 +37,10 @@ fn dot_path_matches_hidden_components_independently_of_location() {
         "/.hidden/workspace/config",
     ] {
         assert_eq!(
-            context.check_path(Path::new(path)),
-            Some(ApprovalCheck::AutoDenied {
+            context
+                .check_path(Path::new(path))
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoDenied {
                 reason: "hidden path".into(),
             }),
             "{path}"
@@ -46,8 +48,10 @@ fn dot_path_matches_hidden_components_independently_of_location() {
         let normalized =
             SandboxContext::normalize(Path::new("/workspace/service"), Path::new(path));
         assert_eq!(
-            context.check_snapshot_path(&normalized),
-            Some(ApprovalCheck::AutoDenied {
+            context
+                .check_snapshot_path(&normalized)
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoDenied {
                 reason: "hidden path".into(),
             })
         );
@@ -71,8 +75,10 @@ fn dot_path_matches_hidden_components_independently_of_location() {
 fn dot_path_default_floor_protects_hidden_launch_ancestors() {
     let context = SandboxContext::new(make_sandbox(Path::new("/workspace/.hidden/service")));
     assert_eq!(
-        context.check_path(Path::new("config")),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_path(Path::new("config"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
     assert_eq!(
         context.check_path_allowing_dot_paths(Path::new("config")),
@@ -115,23 +121,31 @@ fn outside_workspace_uses_discovered_workspace_without_rebasing_other_checks() {
         }
         assert_eq!(context.check_path(Path::new("../README.md")), None);
         assert_eq!(
-            context.check_path(Path::new("../../outside.txt")),
-            Some(ApprovalCheck::UserApprovalRequired)
+            context
+                .check_path(Path::new("../../outside.txt"))
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::UserApprovalRequired)
         );
         assert_eq!(
-            configured_context.check_path(Path::new("../../outside.txt")),
-            Some(ApprovalCheck::AutoDenied {
+            configured_context
+                .check_path(Path::new("../../outside.txt"))
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoDenied {
                 reason: "outside workspace".into(),
             })
         );
         assert_eq!(
-            context.check_path(Path::new(".env")),
-            Some(ApprovalCheck::UserApprovalRequired),
+            context
+                .check_path(Path::new(".env"))
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::UserApprovalRequired),
             "hidden files inside the launch directory require approval"
         );
         assert_eq!(
-            context.check_path(Path::new("../.env")),
-            Some(ApprovalCheck::UserApprovalRequired),
+            context
+                .check_path(Path::new("../.env"))
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::UserApprovalRequired),
             "hidden files elsewhere in the workspace require approval"
         );
         let launch_directory = sandbox.read().expect("sandbox lock").sandbox_root.clone();
@@ -155,8 +169,10 @@ fn outside_workspace_prefers_nearest_marker_and_falls_back_to_launch_directory()
     let context = SandboxContext::new(make_sandbox(&launch_directory));
     assert_eq!(context.check_path(Path::new("../README.md")), None);
     assert_eq!(
-        context.check_path(Path::new("../../README.md")),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context
+            .check_path(Path::new("../../README.md"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "a nearer git marker must win over an outer configuration marker"
     );
 
@@ -169,8 +185,10 @@ fn outside_workspace_prefers_nearest_marker_and_falls_back_to_launch_directory()
     let context = SandboxContext::new(make_sandbox(&unmarked_launch));
     assert_eq!(context.check_path(Path::new("README.md")), None);
     assert_eq!(
-        context.check_path(Path::new("../README.md")),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context
+            .check_path(Path::new("../README.md"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
 }
 
@@ -192,8 +210,10 @@ fn outside_workspace_resolves_symlinks_against_discovered_boundary() {
     let context = SandboxContext::new(make_sandbox(&launch_directory));
     assert_eq!(context.check_path(Path::new("inside")), None);
     assert_eq!(
-        context.check_path(Path::new("outside/new.txt")),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context
+            .check_path(Path::new("outside/new.txt"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "missing targets beneath an escaping symlink must remain outside"
     );
 }
@@ -206,8 +226,8 @@ fn check_path_outside_workspace_requires_user_approval() {
     let context = SandboxContext::new(Arc::clone(&sandbox));
     let outside = temporary_dir.path().join("other/file.rs");
     assert_eq!(
-        context.check_path(&outside),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context.check_path(&outside).map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "path outside workspace should be Some(UserApprovalRequired)"
     );
 }
@@ -220,14 +240,14 @@ fn check_path_dot_path_requires_user_approval() {
     let context = SandboxContext::new(Arc::clone(&sandbox));
     let dot_path = workspace.join(".env");
     assert_eq!(
-        context.check_path(&dot_path),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context.check_path(&dot_path).map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "dot-path relative to workspace should be Some(UserApprovalRequired)"
     );
     let dot_dir_path = workspace.join(crate::GIT_ENTRY_NAME).join("config");
     assert_eq!(
-        context.check_path(&dot_dir_path),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context.check_path(&dot_dir_path).map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "dot-directory relative to workspace should be Some(UserApprovalRequired)"
     );
 }
@@ -301,17 +321,16 @@ fn check_path_glob_rule_overrides_to_explicit_verdict() {
         canonical_sandbox_root.to_string_lossy()
     ))
     .unwrap();
-    let mut context = SandboxContext::new(Arc::clone(&sandbox));
-    context.rules.push(SandboxRule {
-        verdict: ApprovalCheck::AutoApproved,
+    let context = SandboxContext::new(Arc::clone(&sandbox)).with_rule(SandboxRule {
+        verdict: ApprovalVerdict::AutoApproved,
         pattern: allow_pattern,
     });
 
     // Glob rule fires → Some(AutoApproved).
     let allowed_path = workspace.join("allowed/file.txt");
     assert_eq!(
-        context.check_path(&allowed_path),
-        Some(ApprovalCheck::AutoApproved),
+        context.check_path(&allowed_path).map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "glob rule should produce Some(AutoApproved)"
     );
 
@@ -340,8 +359,8 @@ fn symlink_escaping_workspace_requires_user_approval() {
     let sandbox = make_sandbox(&workspace);
     let context = SandboxContext::new(Arc::clone(&sandbox));
     assert_eq!(
-        context.check_path(&link),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context.check_path(&link).map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "symlink escaping the workspace must require user approval"
     );
 }
@@ -361,8 +380,8 @@ fn symlink_to_dot_file_inside_workspace_requires_user_approval() {
     let sandbox = make_sandbox(&workspace);
     let context = SandboxContext::new(Arc::clone(&sandbox));
     assert_eq!(
-        context.check_path(&link),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context.check_path(&link).map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "symlink whose real target is a dot-file must require user approval"
     );
 }
@@ -383,8 +402,10 @@ fn symlink_parent_traversal_out_of_workspace_requires_user_approval() {
     // Existing and not-yet-existing targets resolve `link/..` physically.
     for name in ["id_rsa", "new_file"] {
         assert_eq!(
-            context.check_path(Path::new(&format!("link/../{name}"))),
-            Some(ApprovalCheck::UserApprovalRequired),
+            context
+                .check_path(Path::new(&format!("link/../{name}")))
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::UserApprovalRequired),
             "link/../{name} opens outside the workspace"
         );
     }
@@ -403,8 +424,10 @@ fn symlink_parent_traversal_into_dot_directory_requires_user_approval() {
 
     let context = SandboxContext::new(make_sandbox(&workspace));
     assert_eq!(
-        context.check_path(Path::new("link/../token")),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context
+            .check_path(Path::new("link/../token"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "link/../token opens inside a dot directory"
     );
 }
@@ -457,96 +480,6 @@ fn to_relative_path_returns_none_for_base_itself() {
     assert_eq!(to_relative_path(base.to_str().unwrap(), &base), None);
 }
 
-fn lookup_from<'a>(values: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-    move |name: &str| {
-        values
-            .iter()
-            .find(|(variable_name, _)| *variable_name == name)
-            .map(|(_, value)| (*value).to_string())
-    }
-}
-
-#[test]
-fn expand_path_tokens_replaces_defined_variables() {
-    let lookup = lookup_from(&[("YLVA_HOME", "/home/user/.ylva")]);
-
-    assert_eq!(
-        expand_path_tokens("$YLVA_HOME/AGENTS.md", &lookup),
-        "/home/user/.ylva/AGENTS.md"
-    );
-    assert_eq!(
-        expand_path_tokens("${YLVA_HOME}/AGENTS.md", &lookup),
-        "/home/user/.ylva/AGENTS.md"
-    );
-    assert_eq!(
-        expand_path_tokens("pre$YLVA_HOME_post", &lookup),
-        "pre$YLVA_HOME_post",
-        "an underscore is part of the variable name, not a delimiter"
-    );
-}
-
-#[test]
-fn expand_path_tokens_leaves_undefined_or_malformed_tokens_literal() {
-    let lookup = lookup_from(&[]);
-
-    for value in [
-        "$UNDEFINED/file.md",
-        "${UNDEFINED}/file.md",
-        "${unterminated",
-        "${}",
-        "$1/file.md",
-        "cost$5/file.md",
-        "$",
-        "src/main.rs",
-    ] {
-        assert_eq!(expand_path_tokens(value, &lookup), value, "for {value:?}");
-    }
-}
-
-#[test]
-fn expand_path_tokens_substitutes_once_without_rescanning() {
-    let lookup = lookup_from(&[("FIRST", "$SECOND"), ("SECOND", "resolved")]);
-
-    assert_eq!(
-        expand_path_tokens("$FIRST", &lookup),
-        "$SECOND",
-        "a substituted value is never rescanned for further tokens"
-    );
-}
-
-#[test]
-fn expand_path_tokens_expands_only_a_leading_tilde() {
-    let lookup = lookup_from(&[("HOME", "/home/user")]);
-
-    assert_eq!(expand_path_tokens("~", &lookup), "/home/user");
-    assert_eq!(
-        expand_path_tokens("~/notes.md", &lookup),
-        "/home/user/notes.md"
-    );
-    assert_eq!(
-        expand_path_tokens("~user/notes.md", &lookup),
-        "~user/notes.md",
-        "`~user` expansion is deliberately unsupported"
-    );
-    assert_eq!(
-        expand_path_tokens("docs/~template.md", &lookup),
-        "docs/~template.md",
-        "only a leading tilde is expanded"
-    );
-}
-
-#[test]
-fn expand_path_tokens_without_any_lookup_returns_the_value_unchanged() {
-    let lookup = lookup_from(&[]);
-
-    assert_eq!(expand_path_tokens("src/main.rs", &lookup), "src/main.rs");
-    assert_eq!(expand_path_tokens("~/notes.md", &lookup), "~/notes.md");
-    assert_eq!(
-        expand_path_tokens("$YLVA_HOME/AGENTS.md", &lookup),
-        "$YLVA_HOME/AGENTS.md"
-    );
-}
-
 #[test]
 fn configured_named_rule_overrides_default_dot_path_verdict() {
     // A `[tools.read]`-style config changing `dot_path`'s verdict to
@@ -568,8 +501,8 @@ fn configured_named_rule_overrides_default_dot_path_verdict() {
 
     let dot_path = workspace.join(".env");
     assert_eq!(
-        context.check_path(&dot_path),
-        Some(ApprovalCheck::AutoApproved),
+        context.check_path(&dot_path).map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "configured dot_path rule should override the default floor's \
          user-approval verdict"
     );
@@ -594,13 +527,13 @@ fn unconfigured_tool_falls_back_to_default_floor() {
 
     let dot_path = workspace.join(".env");
     assert_eq!(
-        context.check_path(&dot_path),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context.check_path(&dot_path).map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
     let outside = temporary_dir.path().join("other/file.rs");
     assert_eq!(
-        context.check_path(&outside),
-        Some(ApprovalCheck::UserApprovalRequired)
+        context.check_path(&outside).map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
 }
 
@@ -643,24 +576,27 @@ fn configured_rules_mix_named_and_glob_last_match_wins() {
     // Regular dot-path still denied (only the named rule matches it).
     let dot_path = workspace.join(".env");
     assert!(matches!(
-        context.check_path(&dot_path),
-        Some(ApprovalCheck::AutoDenied { .. })
+        context.check_path(&dot_path).map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
 
     // Dot-path under .allowed_dot: named dot_path rule matches (deny),
     // then the later glob rule also matches and overrides to approved —
     // proving last-match-wins across Named and Glob in one list.
     let allowed_dot_path = workspace.join(".allowed_dot/file.txt");
+    let winner = context.check_path(&allowed_dot_path).unwrap();
+    assert_eq!(winner.verdict, ApprovalVerdict::AutoApproved);
     assert_eq!(
-        context.check_path(&allowed_dot_path),
-        Some(ApprovalCheck::AutoApproved)
+        winner.rule_origin,
+        super::super::RuleOrigin::ProgrammaticRule(2)
     );
+    assert!(winner.parent.is_none());
 
     // Non-dot path under allowed/: only the glob rule matches.
     let allowed_path = workspace.join("allowed/file.txt");
     assert_eq!(
-        context.check_path(&allowed_path),
-        Some(ApprovalCheck::AutoApproved)
+        context.check_path(&allowed_path).map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
 }
 
@@ -681,14 +617,14 @@ fn auto_approve_catch_all_wins_over_configured_deny_rule() {
         }])
         .expect("valid sandbox fixture")
         .with_rule(SandboxRule {
-            verdict: ApprovalCheck::AutoApproved,
+            verdict: ApprovalVerdict::AutoApproved,
             pattern: glob::Pattern::new("**").unwrap(),
         });
 
     let dot_path = workspace.join(".env");
     assert_eq!(
-        context.check_path(&dot_path),
-        Some(ApprovalCheck::AutoApproved),
+        context.check_path(&dot_path).map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "catch-all auto-approve rule must win over a configured deny rule"
     );
 }
@@ -802,8 +738,10 @@ fn check_path_cross_filesystem_matches_path_on_a_different_device() {
         None,
     );
     assert_eq!(
-        context.check_path(Path::new("/dev/null")),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context
+            .check_path(Path::new("/dev/null"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "a path on a different device than the sandbox root must match, \
          even though the configured list replaced the default floor \
          (the floor's outside_workspace check never runs)"
@@ -823,8 +761,10 @@ fn check_path_cross_filesystem_matches_missing_target_via_cross_device_ancestor(
     );
 
     assert_eq!(
-        context.check_path(Path::new("/dev/ylva-cross-fs-missing/deep/file.txt")),
-        Some(ApprovalCheck::UserApprovalRequired),
+        context
+            .check_path(Path::new("/dev/ylva-cross-fs-missing/deep/file.txt"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "a nonexistent target whose deepest existing ancestor is /dev (a \
          different device) must match via the ancestor anchor"
     );
@@ -841,15 +781,19 @@ fn check_path_cross_filesystem_honors_each_verdict() {
     let approved =
         cross_filesystem_configured_context(&sandbox, ApprovalVerdictConfig::AutoApproved, None);
     assert_eq!(
-        approved.check_path(cross_device_path),
-        Some(ApprovalCheck::AutoApproved)
+        approved
+            .check_path(cross_device_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved)
     );
 
     let denied =
         cross_filesystem_configured_context(&sandbox, ApprovalVerdictConfig::AutoDenied, None);
     assert_eq!(
-        denied.check_path(cross_device_path),
-        Some(ApprovalCheck::AutoDenied {
+        denied
+            .check_path(cross_device_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied {
             reason: CROSS_FILESYSTEM_REASON.to_string(),
         }),
         "auto_denied without a custom reason falls back to CROSS_FILESYSTEM_REASON"
@@ -861,8 +805,10 @@ fn check_path_cross_filesystem_honors_each_verdict() {
         Some("cross-device reads are blocked".to_string()),
     );
     assert_eq!(
-        custom_denied.check_path(cross_device_path),
-        Some(ApprovalCheck::AutoDenied {
+        custom_denied
+            .check_path(cross_device_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied {
             reason: "cross-device reads are blocked".to_string(),
         }),
         "a custom reason overrides the default denial reason"
@@ -874,8 +820,10 @@ fn check_path_cross_filesystem_honors_each_verdict() {
         None,
     );
     assert_eq!(
-        approval_required.check_path(cross_device_path),
-        Some(ApprovalCheck::UserApprovalRequired)
+        approval_required
+            .check_path(cross_device_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired)
     );
 }
 
@@ -904,8 +852,10 @@ fn check_path_cross_filesystem_last_match_wins_against_outside_workspace() {
         ])
         .expect("valid sandbox fixture");
     assert_eq!(
-        cross_filesystem_last.check_path(cross_device_path),
-        Some(ApprovalCheck::UserApprovalRequired),
+        cross_filesystem_last
+            .check_path(cross_device_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::UserApprovalRequired),
         "both rules match a cross-device path outside the workspace; the \
          later cross_filesystem rule wins"
     );
@@ -927,8 +877,10 @@ fn check_path_cross_filesystem_last_match_wins_against_outside_workspace() {
         ])
         .expect("valid sandbox fixture");
     assert!(matches!(
-        outside_workspace_last.check_path(cross_device_path),
-        Some(ApprovalCheck::AutoDenied { .. })
+        outside_workspace_last
+            .check_path(cross_device_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
 }
 
@@ -956,8 +908,10 @@ fn check_path_cross_filesystem_last_match_wins_against_path_glob() {
         ])
         .expect("valid sandbox fixture");
     assert_eq!(
-        glob_last.check_path(cross_device_path),
-        Some(ApprovalCheck::AutoApproved),
+        glob_last
+            .check_path(cross_device_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "the later path glob re-approves the cross-device path"
     );
 
@@ -977,8 +931,10 @@ fn check_path_cross_filesystem_last_match_wins_against_path_glob() {
         ])
         .expect("valid sandbox fixture");
     assert!(matches!(
-        cross_filesystem_last.check_path(cross_device_path),
-        Some(ApprovalCheck::AutoDenied { .. })
+        cross_filesystem_last
+            .check_path(cross_device_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
 }
 
@@ -1009,8 +965,10 @@ fn check_path_dot_path_ordering_unaffected_by_cross_filesystem_on_same_device() 
         ])
         .expect("valid sandbox fixture");
     assert!(matches!(
-        dot_path_last.check_path(&dot_path),
-        Some(ApprovalCheck::AutoDenied { .. })
+        dot_path_last
+            .check_path(&dot_path)
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
 
     let cross_filesystem_last = SandboxContext::new(Arc::clone(&sandbox))
@@ -1031,8 +989,10 @@ fn check_path_dot_path_ordering_unaffected_by_cross_filesystem_on_same_device() 
         .expect("valid sandbox fixture");
     assert!(
         matches!(
-            cross_filesystem_last.check_path(&dot_path),
-            Some(ApprovalCheck::AutoDenied { .. })
+            cross_filesystem_last
+                .check_path(&dot_path)
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoDenied { .. })
         ),
         "cross_filesystem does not match a same-device path, so the later \
          rule cannot override the earlier dot_path verdict"
@@ -1080,13 +1040,15 @@ fn auto_approve_catch_all_wins_over_configured_cross_filesystem_rule() {
     let context =
         cross_filesystem_configured_context(&sandbox, ApprovalVerdictConfig::AutoDenied, None)
             .with_rule(SandboxRule {
-                verdict: ApprovalCheck::AutoApproved,
+                verdict: ApprovalVerdict::AutoApproved,
                 pattern: glob::Pattern::new("**").unwrap(),
             });
 
     assert_eq!(
-        context.check_path(Path::new("/dev/null")),
-        Some(ApprovalCheck::AutoApproved),
+        context
+            .check_path(Path::new("/dev/null"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoApproved),
         "the catch-all rule must win over a configured cross_filesystem deny"
     );
 }
@@ -1152,7 +1114,7 @@ fn explicit_leading_dot_matches_hidden_components() {
 fn catch_all_rule_still_matches_hidden_paths() {
     let context =
         SandboxContext::new(make_sandbox(Path::new("/workspace"))).with_rule(SandboxRule {
-            verdict: ApprovalCheck::AutoApproved,
+            verdict: ApprovalVerdict::AutoApproved,
             pattern: glob::Pattern::new("**").unwrap(),
         });
     for path in [
@@ -1161,8 +1123,10 @@ fn catch_all_rule_still_matches_hidden_paths() {
         "/workspace/.d/.e/f",
     ] {
         assert_eq!(
-            context.check_path(Path::new(path)),
-            Some(ApprovalCheck::AutoApproved),
+            context
+                .check_path(Path::new(path))
+                .map(|check| check.verdict),
+            Some(ApprovalVerdict::AutoApproved),
             "{path}"
         );
     }
@@ -1172,8 +1136,10 @@ fn catch_all_rule_still_matches_hidden_paths() {
 fn wildcard_deny_globs_follow_the_same_matching_as_other_globs() {
     let context = glob_rule_context("/workspace/*.secret", ApprovalVerdictConfig::AutoDenied);
     assert!(matches!(
-        context.check_path(Path::new("/workspace/a.secret")),
-        Some(ApprovalCheck::AutoDenied { .. })
+        context
+            .check_path(Path::new("/workspace/a.secret"))
+            .map(|check| check.verdict),
+        Some(ApprovalVerdict::AutoDenied { .. })
     ));
     for path in ["/workspace/sub/a.secret", "/workspace/.a.secret"] {
         assert_eq!(context.check_path(Path::new(path)), None, "{path}");

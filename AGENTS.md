@@ -8,6 +8,7 @@ A Rust-based terminal UI that implements an agent-harness.
    - [README](./README.md) (project intro and quickstart)
    - [CONTEXT](./CONTEXT.md) (Ylva's ubiquitous language and domain terms)
    - [features](./docs/features.md) (implemented feature reference)
+   - [logging](./docs/logging.md) (how to read diagnostics and trace tool approvals)
    - [implementation-notes](./docs/implementation-notes.md) (cross-module
      interactions, constraints/workarounds and design rationale only; no module
      inventories, constants or field lists, read the source)
@@ -15,6 +16,8 @@ A Rust-based terminal UI that implements an agent-harness.
      decisions)
    - [configuration](./docs/configuration.md) (how to configure Ylva profiles and engines)
    - [keybindings](./docs/keybindings.md) (keybindings implemented in the TUI)
+   - [styleguide](./docs/styleguide.md) (authoritative UX/UI of TUI elements and, where
+     applicable, the CLI: colors, glyphs, focus, keys, dialog layout, wording)
    - [provider-notes](./docs/provider-notes.md) (what each model provider reports or lacks, e.g.
      usage and costs)
    - [persistence](./docs/persistence.md) (on-disk session layout, storage behavior and resume
@@ -99,6 +102,9 @@ Maintain configured test coverage threshold as noted in
 
 ## Coding Conventions
 
+**TUI/CLI UX/UI.** [styleguide](./docs/styleguide.md) is authoritative. New or changed
+TUI elements follow it; a deviation needs a styleguide update in the same commit.
+
 **License headers.** Every project-authored source file must carry a valid
 copyright and Apache-2.0 license header. Follow
 [License headers](./docs/development-workflow.md#license-headers), including its
@@ -138,6 +144,6 @@ Structure your work and thinking to follow those principles:
 - Five Whys by Ohno — find root cause before fixing
 - CoT (Chain of Thought)
 - Occam's Razor
-- TDD (Test Driven Development)
+- TDD (Test Driven Development, RED before GREEN)
 - Test Double: Mock / Spy / Stub by Meszaros
 - Testing Pyramid by Cohn, Testing Trophy by Dodds

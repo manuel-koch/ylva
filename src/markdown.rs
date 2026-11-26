@@ -35,9 +35,9 @@ mod text;
 
 use code_block::push_highlighted_code_block;
 use table::flush_table;
-pub(crate) use text::slice_by_display_columns;
-use text::{push_words, terminal_display_width, wrap_words, InlineStyle, Word};
+use text::{push_words, wrap_words, InlineStyle, Word};
 
+use crate::terminal_text::terminal_display_width;
 use crate::theme::markdown_dim_fg;
 
 /// Tracks the counter for an in-progress list so nested items number/bullet

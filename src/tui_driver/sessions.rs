@@ -28,6 +28,7 @@ use crate::agent::{AgentCommand, AgentLoop, UiUpdate};
 use crate::agent_factory::{select_root_agent_type, AgentFactory};
 use crate::config::ProfileConfig;
 use crate::store::{SessionState, Store, SubagentRunRecord};
+use crate::text_normalization::single_line_display;
 use crate::tui_reducer_state::{
     AppState, SessionAction, SessionChoice, SessionPicker, SessionPickerPhase, SlashOverlay,
 };
@@ -298,7 +299,7 @@ pub(super) fn list_candidates(
                 && session.has_messages
         })
         .map(|session| {
-            let title = crate::app::single_line(&session.title).trim().to_string();
+            let title = single_line_display(&session.title).trim().to_string();
             let last_used_at = OffsetDateTime::parse(&session.last_used_at, &Rfc3339)?;
             let local_offset = UtcOffset::local_offset_at(last_used_at)?;
             let last_used_at = last_used_at.to_offset(local_offset).format(format_description!(

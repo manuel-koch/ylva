@@ -17,6 +17,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::text_normalization::sanitize_inline_title;
 use crate::theme::{content_color, error_color, tool_bubble_border_color};
 use crate::tui_reducer_state::ToolCallState;
 
@@ -173,15 +174,6 @@ pub(super) fn append_tool_chrome(
     // breaking its layout. Replace them with a visible placeholder so the
     // title stays single-line, and stash the untouched value as its own
     // expandable content section so the full text remains readable.
-    let sanitize_inline = |s: &str| -> String {
-        s.chars()
-            .map(|c| match c {
-                '\n' | '\r' => '↵',
-                '\t' => ' ',
-                c => c,
-            })
-            .collect()
-    };
     let mut extra_content_sections: Vec<crate::agent::tools::Section> = vec![];
     let mut multiline_section = |key: &str, value: &str| {
         extra_content_sections.push(crate::agent::tools::Section::Content(
@@ -202,7 +194,7 @@ pub(super) fn append_tool_chrome(
                     let s = display_value(k, s);
                     if s.contains('\n') {
                         multiline_section(k, &s);
-                        sanitize_inline(&s)
+                        sanitize_inline_title(&s)
                     } else {
                         s
                     }
@@ -214,7 +206,7 @@ pub(super) fn append_tool_chrome(
                 let value = display_value(k, value);
                 let display_value = if value.contains('\n') {
                     multiline_section(k, &value);
-                    sanitize_inline(&value)
+                    sanitize_inline_title(&value)
                 } else {
                     value
                 };
@@ -275,7 +267,7 @@ pub(super) fn append_tool_chrome(
         .skip(usize::from(primary_text.is_some()))
         .find(|(key, _)| key == "label")
         .and_then(|(_, value)| scalar_prop_value(value))
-        .map(|value| sanitize_inline(&value))
+        .map(|value| sanitize_inline_title(&value))
         .filter(|value| !value.is_empty());
 
     let has_args =
@@ -405,15 +397,7 @@ pub(super) fn append_tool_chrome(
             collapsed_args.push(' ');
             collapsed_args.push_str(label);
         }
-        let sanitized_args: String = collapsed_args
-            .chars()
-            .map(|c| match c {
-                '\n' => '↵',
-                '\r' => '↵',
-                '\t' => ' ',
-                c => c,
-            })
-            .collect();
+        let sanitized_args = sanitize_inline_title(&collapsed_args);
         let sanitized_args_chars: Vec<char> = sanitized_args.chars().collect();
 
         // Reserve space (plus one gap column) for the right-aligned time.

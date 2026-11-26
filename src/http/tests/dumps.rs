@@ -390,3 +390,87 @@ fn append_response_dump_line_creates_parent_dir_and_appends_lines() {
     let contents = std::fs::read_to_string(&file_path).expect("read file");
     assert_eq!(contents, "data: {\"a\":1}\ndata: [DONE]\n");
 }
+
+#[tokio::test]
+async fn abandoned_json_request_records_a_failure_in_its_response_dump() {
+    use tokio::net::TcpListener;
+
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let dump_source = RequestDumpSource::from_template(temp_dir.path().join("requests.jsonl"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+    let address = listener.local_addr().expect("server address");
+    // Accepts the connection but never answers.
+    let _silent_server = tokio::spawn(async move {
+        let _connection = listener.accept().await;
+        std::future::pending::<()>().await;
+    });
+
+    let client = reqwest::Client::new();
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(200),
+        get_json_with_dump_source(
+            &client,
+            &format!("http://{address}/models"),
+            None,
+            "model listing",
+            &dump_source,
+        ),
+    )
+    .await;
+    assert!(outcome.is_err(), "the silent server must hit the timeout");
+
+    let response_paths = dump_paths(temp_dir.path(), "_response.jsonl");
+    assert_eq!(response_paths.len(), 1);
+    let contents = std::fs::read_to_string(&response_paths[0]).expect("response dump");
+    assert!(contents.contains("[failure] abandoned after"), "{contents}");
+}
+
+#[tokio::test]
+async fn dumped_once_request_omits_redacted_response_bodies() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let dump_source = RequestDumpSource::from_template(temp_dir.path().join("requests.jsonl"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+    let address = listener.local_addr().expect("server address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let mut request_head = [0_u8; 4096];
+        let _ = stream.read(&mut request_head).await.expect("read request");
+        let body = "{\"token\":\"session-secret\"}";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("respond");
+    });
+
+    let client = reqwest::Client::new();
+    let (status, body) = send_dumped_once(
+        &client,
+        client
+            .get(format!("http://{address}/exchange"))
+            .header("authorization", "token secret"),
+        "token exchange",
+        &serde_json::Value::Null,
+        true,
+        &dump_source,
+    )
+    .await
+    .expect("response");
+    server.await.expect("server task");
+
+    assert!(status.is_success());
+    assert!(String::from_utf8_lossy(&body).contains("session-secret"));
+    let mut dumped = String::new();
+    for path in std::fs::read_dir(temp_dir.path()).expect("dump dir") {
+        dumped.push_str(&std::fs::read_to_string(path.expect("entry").path()).expect("dump file"));
+    }
+    assert!(!dumped.contains("session-secret"), "{dumped}");
+    assert!(!dumped.contains("token secret"), "{dumped}");
+    assert!(dumped.contains("[redacted] HTTP 200 OK response body omitted"));
+}

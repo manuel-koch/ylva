@@ -42,6 +42,9 @@ pub(super) fn route_keyboard(
         Focus::HelpPopup => keyboard_help(state, event),
         Focus::AgentsPopup => keyboard_agents_popup(state, event),
         Focus::StatusPopup => keyboard_status_popup(state, event),
+        Focus::ToolApproval { .. } if state.visible_grant_dialog().is_some() => {
+            keyboard_grant_dialog(state, event)
+        }
         Focus::ToolApproval { .. } => keyboard_approval(state, event, textarea),
         Focus::MainInput => keyboard_main(state, event, textarea),
     }
@@ -206,6 +209,84 @@ fn is_focus_cycle_key(key_event: &crossterm::event::KeyEvent) -> Option<bool> {
     }
 }
 
+/// Keys of the grant dialog. While a rule is edited, typing edits it, ←/→/Home/End
+/// move the caret, Enter keeps it and Esc restores it. Otherwise ↑/↓ move the focus over the rows,
+/// Tab cycles the first row and the buttons, ←/→ or Space change the focused
+/// row's selection, Enter edits the focused rule,
+/// Enter on a button activates it and Esc goes back.
+fn keyboard_grant_dialog(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
+    let editing = state
+        .grant_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.editing.is_some());
+    if editing {
+        match event {
+            InputEvent::Escape | InputEvent::CtrlC => state.end_grant_edit(false),
+            InputEvent::StopSignal => return handle_stop_signal(state),
+            InputEvent::KeyInput(key_event) => match key_event.code {
+                KeyCode::Enter => state.end_grant_edit(true),
+                KeyCode::Backspace => state.delete_grant_edit(false),
+                KeyCode::Delete => state.delete_grant_edit_forward(),
+                KeyCode::Left => state.move_grant_edit_cursor(NameCursorMove::Left),
+                KeyCode::Right => state.move_grant_edit_cursor(NameCursorMove::Right),
+                KeyCode::Home => state.move_grant_edit_cursor(NameCursorMove::Start),
+                KeyCode::End => state.move_grant_edit_cursor(NameCursorMove::End),
+                KeyCode::Char('u') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    state.delete_grant_edit(true)
+                }
+                KeyCode::Char(character)
+                    if !key_event
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    state.type_grant_edit(&character.to_string())
+                }
+                _ => {}
+            },
+            InputEvent::Paste(text) => state.type_grant_edit(&text),
+            _ => {}
+        }
+        return vec![];
+    }
+    match event {
+        InputEvent::Escape | InputEvent::CtrlC => {
+            state.close_grant_dialog();
+            vec![]
+        }
+        InputEvent::StopSignal => handle_stop_signal(state),
+        InputEvent::KeyInput(key_event) if is_focus_cycle_key(&key_event).is_some() => {
+            state.cycle_grant_focus(is_focus_cycle_key(&key_event) == Some(true));
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if is_activation_key(&key_event) => {
+            state.activate_grant_dialog_focus()
+        }
+        InputEvent::KeyInput(key_event) => {
+            match key_event.code {
+                KeyCode::Up => state.move_grant_row_focus(true),
+                KeyCode::Down => state.move_grant_row_focus(false),
+                KeyCode::Left => state.cycle_grant_focused(false),
+                KeyCode::Right => state.cycle_grant_focused(true),
+                KeyCode::Char(' ') => state.toggle_grant_focused(),
+                KeyCode::PageUp | KeyCode::PageDown => {
+                    let page =
+                        state.layout.grant_dialog.body_rows.saturating_sub(1).max(1) as isize;
+                    state.scroll_grant_dialog(if key_event.code == KeyCode::PageUp {
+                        -page
+                    } else {
+                        page
+                    });
+                }
+                KeyCode::Home => state.scroll_grant_dialog(isize::MIN),
+                KeyCode::End => state.scroll_grant_dialog(isize::MAX),
+                _ => {}
+            }
+            vec![]
+        }
+        _ => vec![],
+    }
+}
+
 fn keyboard_approval(
     state: &mut AppState,
     event: InputEvent,
@@ -247,6 +328,7 @@ fn keyboard_approval(
                         Effect::RestoreSlashOverlay,
                     ]
                 }
+                Some(PromptButton::Grant) => vec![Effect::RequestGrantPreview { id: tool_id }],
                 Some(PromptButton::Deny) => {
                     state.focus = Focus::MainInput;
                     vec![
@@ -800,6 +882,8 @@ fn handle_engine_save_key(
     match key_event.code {
         KeyCode::Tab => state.cycle_engine_save_focus(false),
         KeyCode::BackTab => state.cycle_engine_save_focus(true),
+        KeyCode::Up => state.move_engine_save_row_focus(true),
+        KeyCode::Down => state.move_engine_save_row_focus(false),
         KeyCode::Left | KeyCode::Right
             if state
                 .engine_save_form()

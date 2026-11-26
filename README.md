@@ -115,10 +115,12 @@ secrets, and Markdown can contain active HTML, links, or remote images.
 - [Provider notes](docs/provider-notes.md): what each provider reports, such as
   usage and costs.
 - [Features](docs/features.md): implemented behavior.
+- [Logging](docs/logging.md): how to read diagnostics and trace tool approvals.
 
 ## Contribution
 
 - [Domain language](CONTEXT.md): canonical project terminology.
+- [Styleguide](docs/styleguide.md): UX/UI rules for TUI elements and the CLI.
 - [Development workflow](docs/development-workflow.md): build, install, and test targets,
   [git hooks and commit/branch conventions](docs/development-workflow.md#git-hooks-and-conventions)
   (run `make install-git-hooks`); [implementation notes](docs/implementation-notes.md) explain

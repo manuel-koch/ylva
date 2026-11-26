@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Path expansion, canonicalization, device checks and path approval.
+//! Path normalization, canonicalization, device checks and path approval.
 
 use super::rules::{path_glob_matches, ResolvedRule};
-use super::{ApprovalCheck, NamedSandboxRule, SandboxContext};
+use super::{ApprovalCheck, ApprovalVerdict, DecisionMaker, NamedSandboxRule, SandboxContext};
 use std::path::{Path, PathBuf};
+
+const OUTSIDE_WORKSPACE_RULE: &str = "outside_workspace";
+const DOT_PATH_RULE: &str = "dot_path";
 
 /// Collapse `path` to a form relative to `base` when `path` is absolute and
 /// falls inside `base`'s directory tree; returns `None` otherwise (`path` is
@@ -51,133 +54,6 @@ pub fn to_relative_path(path: &str, base: &Path) -> Option<String> {
         return None;
     }
     Some(relative.to_string_lossy().replace('\\', "/"))
-}
-
-/// Expand the path tokens a model may quote verbatim in a path-like tool
-/// argument: `$NAME`/`${NAME}` environment variables and a leading `~`.
-///
-/// This is plain string substitution performed in Rust — never a shell — and
-/// it runs **before** [`to_relative_path`] and before any sandbox approval
-/// check, so the sandbox sees only the expanded, canonicalized path. It never
-/// bypasses approval: an expanded path outside the workspace still hits the
-/// `outside_workspace` approval floor.
-///
-/// Rules:
-///
-/// - `$NAME` and `${NAME}` tokens (`NAME` = `[A-Za-z_][A-Za-z0-9_]*`) are
-///   replaced by `lookup(NAME)` when it is defined, and left literal when it
-///   is not — a literal `$` in a file name survives.
-/// - Substitution runs once: substituted values are never rescanned for
-///   further tokens.
-/// - After environment substitution, a leading `~` or `~/` expands through
-///   `lookup("HOME")`. `~user/…` is deliberately unsupported and stays
-///   untouched.
-/// - The `lookup` parameter keeps this helper free of process-environment
-///   access, so unit tests never mutate the process environment.
-pub fn expand_path_tokens(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
-    expand_leading_tilde(&substitute_environment_variables(value, lookup), lookup)
-}
-
-/// Replace every well-formed `$NAME`/`${NAME}` token in `value` exactly once.
-///
-/// The output is built only from untouched input characters and resolved
-/// values, so a replacement value containing `$OTHER` is emitted verbatim.
-fn substitute_environment_variables(
-    value: &str,
-    lookup: &dyn Fn(&str) -> Option<String>,
-) -> String {
-    let bytes = value.as_bytes();
-    let mut expanded = String::with_capacity(value.len());
-    let mut position = 0;
-    while position < bytes.len() {
-        if bytes[position] != b'$' {
-            let character = value[position..]
-                .chars()
-                .next()
-                .expect("every position starts a character");
-            expanded.push(character);
-            position += character.len_utf8();
-            continue;
-        }
-        match read_variable_reference(bytes, position) {
-            Some((name, length)) => {
-                match lookup(name) {
-                    Some(replacement) => expanded.push_str(&replacement),
-                    None => expanded.push_str(&value[position..position + length]),
-                }
-                position += length;
-            }
-            None => {
-                expanded.push('$');
-                position += 1;
-            }
-        }
-    }
-    expanded
-}
-
-/// Read a `$NAME` or `${NAME}` reference starting at `position` (the index
-/// of the `$`), returning the variable name and the number of bytes the
-/// reference occupies from `position`.
-///
-/// Returns `None` when no valid reference starts there — an empty name, a
-/// name that does not start with `[A-Za-z_]`, an unterminated `${…`, or a
-/// bare `$` — so the caller leaves that `$` literal.
-fn read_variable_reference(bytes: &[u8], position: usize) -> Option<(&str, usize)> {
-    let (name_start, name_end, consumed_end) = if bytes.get(position + 1) == Some(&b'{') {
-        let name_start = position + 2;
-        let mut name_end = name_start;
-        while name_end < bytes.len() && is_variable_name_byte(bytes[name_end]) {
-            name_end += 1;
-        }
-        if name_end == name_start
-            || !is_variable_name_start(bytes[name_start])
-            || bytes.get(name_end) != Some(&b'}')
-        {
-            return None;
-        }
-        (name_start, name_end, name_end + 1)
-    } else {
-        let name_start = position + 1;
-        if name_start >= bytes.len() || !is_variable_name_start(bytes[name_start]) {
-            return None;
-        }
-        let mut name_end = name_start;
-        while name_end < bytes.len() && is_variable_name_byte(bytes[name_end]) {
-            name_end += 1;
-        }
-        (name_start, name_end, name_end)
-    };
-    let name = std::str::from_utf8(&bytes[name_start..name_end]).ok()?;
-    Some((name, consumed_end - position))
-}
-
-/// First byte of a variable name: `[A-Za-z_]`.
-fn is_variable_name_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || byte == b'_'
-}
-
-/// Any byte of a variable name: `[A-Za-z0-9_]`.
-fn is_variable_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-/// Expand a leading `~` or `~/` prefix through `lookup("HOME")`.
-///
-/// `~user/…` is deliberately unsupported: expanding it would require parsing
-/// the operating system's user database for no benefit, so the value stays
-/// untouched.
-fn expand_leading_tilde(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
-    let Some(rest) = value.strip_prefix('~') else {
-        return value.to_string();
-    };
-    if !(rest.is_empty() || rest.starts_with('/')) {
-        return value.to_string();
-    }
-    match lookup("HOME") {
-        Some(home) => format!("{home}{rest}"),
-        None => value.to_string(),
-    }
 }
 
 /// Resolve the filesystem device ID of `path` by stat-ing it (following
@@ -356,6 +232,36 @@ impl SandboxContext {
         self.check_path_with_dot_path_access(path, false)
     }
 
+    /// The absolute path the policy judges for `path`: relative paths are
+    /// anchored at the sandbox root and symlinks are resolved physically.
+    /// Grants match on this value so they judge exactly what the sandbox did.
+    pub fn resolve_path(&self, path: &Path) -> PathBuf {
+        let sandbox_root = self.canonical_sandbox_root();
+        let requested = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            sandbox_root.join(path)
+        };
+        Self::canonicalize_best_effort(&std::path::absolute(&requested).unwrap_or(requested))
+    }
+
+    /// The workspace root the `outside_workspace` rule compares against: the
+    /// workspace discovered from the sandbox root, else the sandbox root.
+    pub fn workspace_root(&self) -> PathBuf {
+        let sandbox_root = self.canonical_sandbox_root();
+        crate::config::layered::discover_workspace_root(&sandbox_root).unwrap_or(sandbox_root)
+    }
+
+    fn canonical_sandbox_root(&self) -> PathBuf {
+        let sandbox_root = self
+            .sandbox
+            .read()
+            .expect("sandbox lock poisoned")
+            .sandbox_root
+            .clone();
+        std::fs::canonicalize(&sandbox_root).unwrap_or(sandbox_root)
+    }
+
     /// Evaluate an already-canonical snapshot identity without reopening or
     /// following a source path that may have changed since discovery.
     pub fn check_snapshot_path(&self, path: &Path) -> Option<ApprovalCheck> {
@@ -484,7 +390,7 @@ impl SandboxContext {
             Some(configured) => {
                 // `[tools.<name>]` config fully replaces the default floor:
                 // evaluate exactly this list, in order, last match wins.
-                for rule in configured {
+                for (rule, origin) in configured {
                     match rule {
                         ResolvedRule::Named {
                             rule: named,
@@ -499,7 +405,11 @@ impl SandboxContext {
                                     allow_dot_paths,
                                 )
                             {
-                                verdict = Some(rule_verdict.clone());
+                                verdict = Some(ApprovalCheck::new(
+                                    rule_verdict.clone(),
+                                    DecisionMaker::PathSandbox,
+                                    origin.clone(),
+                                ));
                             }
                         }
                         ResolvedRule::PathGlob {
@@ -507,7 +417,11 @@ impl SandboxContext {
                             verdict: rule_verdict,
                         } => {
                             if path_glob_matches(pattern, &path_str) {
-                                verdict = Some(rule_verdict.clone());
+                                verdict = Some(ApprovalCheck::new(
+                                    rule_verdict.clone(),
+                                    DecisionMaker::PathSandbox,
+                                    origin.clone(),
+                                ));
                             }
                         }
                         // A `bash`-only `CommandGlob` rule under a path tool
@@ -530,7 +444,11 @@ impl SandboxContext {
                     &effective,
                     allow_dot_paths,
                 ) {
-                    verdict = Some(ApprovalCheck::UserApprovalRequired);
+                    verdict = Some(ApprovalCheck::builtin(
+                        ApprovalVerdict::UserApprovalRequired,
+                        DecisionMaker::PathSandbox,
+                        OUTSIDE_WORKSPACE_RULE,
+                    ));
                 }
                 if self.evaluate_named_rule(
                     NamedSandboxRule::DotPath,
@@ -538,7 +456,11 @@ impl SandboxContext {
                     &effective,
                     allow_dot_paths,
                 ) {
-                    verdict = Some(ApprovalCheck::UserApprovalRequired);
+                    verdict = Some(ApprovalCheck::builtin(
+                        ApprovalVerdict::UserApprovalRequired,
+                        DecisionMaker::PathSandbox,
+                        DOT_PATH_RULE,
+                    ));
                 }
             }
         }
@@ -547,19 +469,23 @@ impl SandboxContext {
         // --auto-approve-write/--auto-approve-edit's catch-all). Always
         // evaluated last so they win regardless of configured_rules/the
         // default floor.
-        for rule in &self.rules {
+        for (rule, origin) in &self.rules {
             if path_glob_matches(&rule.pattern, &path_str) {
-                verdict = Some(rule.verdict.clone());
+                verdict = Some(ApprovalCheck::new(
+                    rule.verdict.clone(),
+                    DecisionMaker::PathSandbox,
+                    origin.clone(),
+                ));
             }
         }
 
         tracing::debug!(
             path = %effective.display(),
-            sandbox_verdict = match &verdict {
+            sandbox_verdict = match verdict.as_ref().map(|check| &check.verdict) {
                 None => "abstain".to_string(),
-                Some(ApprovalCheck::AutoApproved) => "auto-approved".to_string(),
-                Some(ApprovalCheck::AutoDenied { reason }) => format!("auto-denied: {reason}"),
-                Some(ApprovalCheck::UserApprovalRequired) => "user-approval-required".to_string(),
+                Some(ApprovalVerdict::AutoApproved) => "auto-approved".to_string(),
+                Some(ApprovalVerdict::AutoDenied { reason }) => format!("auto-denied: {reason}"),
+                Some(ApprovalVerdict::UserApprovalRequired) => "user-approval-required".to_string(),
             },
             "sandbox check_path"
         );

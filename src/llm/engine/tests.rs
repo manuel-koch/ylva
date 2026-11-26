@@ -46,6 +46,7 @@ struct CatalogEngine {
     config: RwLock<EngineConfig>,
     models: Vec<ModelInfo>,
     model_list_error: Option<String>,
+    model_list_hangs: bool,
     model_list_calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -81,8 +82,15 @@ impl CatalogEngine {
                 })
                 .collect(),
             model_list_error: None,
+            model_list_hangs: false,
             model_list_calls: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn hanging(provider: &str) -> Self {
+        let mut engine = Self::new(provider, "unavailable", &[]);
+        engine.model_list_hangs = true;
+        engine
     }
 
     fn failing(provider: &str, message: &str) -> Self {
@@ -113,7 +121,11 @@ impl Engine for CatalogEngine {
         self.model_list_calls.fetch_add(1, Ordering::SeqCst);
         let models = self.models.clone();
         let error = self.model_list_error.clone();
+        let hangs = self.model_list_hangs;
         Box::pin(async move {
+            if hangs {
+                return std::future::pending().await;
+            }
             match error {
                 Some(error) => anyhow::bail!(error),
                 None => Ok(models),

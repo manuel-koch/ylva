@@ -16,6 +16,10 @@ use super::{AssembledToolCall, ToolAttachment};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+pub(crate) const CLI_APPROVAL_UNAVAILABLE_REASON: &str =
+    "tool requires approval, not supported in CLI mode";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
     Idle,
@@ -87,6 +91,28 @@ pub enum AgentCommand {
         id: Uuid,
         reason: String,
     },
+    /// Resolve a request headlessly using the CLI's actual registry recheck.
+    ResolveCliTool {
+        id: Uuid,
+        check: crate::ApprovalCheck,
+    },
+    /// Create reusable grants covering the pending call `id`, then approve it
+    /// like `ApproveTool`. When the call cannot be granted or saving fails,
+    /// the agent publishes a notice and the call stays pending.
+    GrantAndApprove {
+        id: Uuid,
+        /// The rows the user selected, possibly edited; the agent validates
+        /// each against the pending call.
+        requests: Vec<crate::grants::GrantRequest>,
+        /// Accept the current content of `grants.toml` as the base to save
+        /// into, after an external edit was reviewed.
+        reload_snapshot: bool,
+    },
+    /// Ask what a grant for the pending call `id` would contain; answered
+    /// with `UiUpdate::GrantPreview`. Nothing is created.
+    RequestGrantPreview {
+        id: Uuid,
+    },
     AnswerClarify(String),
     /// Abort the pending clarify call without an answer.
     /// The agent records a tool error and continues, so the LLM can react.
@@ -141,6 +167,9 @@ pub(super) fn agent_command_name(command: &AgentCommand) -> &'static str {
         AgentCommand::Stop { .. } => "stop",
         AgentCommand::ApproveTool { .. } => "approve_tool",
         AgentCommand::DenyTool { .. } => "deny_tool",
+        AgentCommand::ResolveCliTool { .. } => "resolve_cli_tool",
+        AgentCommand::GrantAndApprove { .. } => "grant_and_approve",
+        AgentCommand::RequestGrantPreview { .. } => "request_grant_preview",
         AgentCommand::AnswerClarify(_) => "answer_clarify",
         AgentCommand::AbortClarify => "abort_clarify",
         AgentCommand::ForSubagent { .. } => "for_subagent",
@@ -177,13 +206,39 @@ pub(super) fn log_agent_command(
                 "agent command received"
             );
         }
-        AgentCommand::ApproveTool { id } => {
+        AgentCommand::ApproveTool { id } | AgentCommand::ResolveCliTool { id, .. } => {
             tracing::debug!(
                 command = command_name,
                 ?mode,
                 has_stream,
                 has_tool,
                 tool_call_id = %id,
+                "agent command received"
+            );
+        }
+        AgentCommand::RequestGrantPreview { id } => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                tool_call_id = %id,
+                "agent command received"
+            );
+        }
+        AgentCommand::GrantAndApprove {
+            id,
+            requests,
+            reload_snapshot,
+        } => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                tool_call_id = %id,
+                requests = requests.len(),
+                reload_snapshot,
                 "agent command received"
             );
         }
@@ -292,6 +347,27 @@ pub enum AgentEvent {
         id: Uuid,
         name: String,
     },
+}
+
+/// What a grant for one pending tool call would contain, for the grant dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantPreview {
+    pub id: Uuid,
+    /// One proposed grant per dialog row.
+    pub rows: Vec<crate::grants::GrantDraft>,
+    /// Bash commands already allowed by policy or an existing grant.
+    pub already_allowed: usize,
+    /// Parts of the call that can only be approved once.
+    pub other_parts: bool,
+    /// Why nothing can be granted; the call can only be approved once.
+    pub refusal: Option<String>,
+    /// Why a persistent grant cannot be saved, if it cannot.
+    pub persistent_unavailable: Option<String>,
+    /// The `.ylva` directory a persistent save would create.
+    pub marker_to_create: Option<std::path::PathBuf>,
+    /// The call as the grant evaluator sees it, to validate edited rows.
+    pub subjects: crate::grants::GrantSubjects,
+    pub workspace_root: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,6 +498,20 @@ pub enum UiUpdate {
     /// `AgentCommand::RecordModelChanged` took effect: the next request is the
     /// first the switched engine serves. Root loop only.
     ModelChangeApplied,
+    /// `AgentCommand::GrantAndApprove` created nothing; the call stays pending.
+    GrantFailed {
+        id: Uuid,
+        reason: String,
+        /// The grants file changed on disk; saving again after reviewing it
+        /// is possible with `reload_snapshot`.
+        reloadable: bool,
+        run_id: Option<Uuid>,
+    },
+    /// Answer to `AgentCommand::RequestGrantPreview`.
+    GrantPreview {
+        preview: GrantPreview,
+        run_id: Option<Uuid>,
+    },
     /// All previously queued steers have been injected into the LLM context.
     SteerApplied {
         /// See `UiUpdate::SteerQueued::run_id`.

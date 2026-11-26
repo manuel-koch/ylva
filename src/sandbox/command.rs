@@ -16,8 +16,31 @@
 
 use super::rules::{ResolvedRule, BACKGROUNDED_REASON};
 use super::{
-    bash_command_extractor, command_arguments, ApprovalCheck, NamedSandboxRule, SandboxContext,
+    bash_command_extractor, command_arguments, ApprovalCheck, ApprovalVerdict, DecisionMaker,
+    NamedSandboxRule, SandboxContext,
 };
+
+const UNANALYSABLE_STATEMENT_RULE: &str = "unanalysable_statement";
+const UNMATCHED_STATEMENT_RULE: &str = "unmatched_statement";
+const ALL_STATEMENTS_APPROVED_RULE: &str = "all_statements_approved";
+const WORST_STATEMENT_RULE: &str = "worst_statement";
+const BACKGROUNDED_RULE: &str = "backgrounded";
+const VARIABLE_ASSIGNMENT_PREFIX_RULE: &str = "variable_assignment_prefix";
+const UNQUOTED_GLOB_RULE: &str = "unquoted_glob";
+const UNQUOTED_BRACE_EXPANSION_RULE: &str = "unquoted_brace_expansion";
+
+fn builtin(verdict: ApprovalVerdict, rule: &'static str) -> ApprovalCheck {
+    ApprovalCheck::builtin(verdict, DecisionMaker::BashSandbox, rule)
+}
+
+/// One statement of a `bash` call with its own policy verdict.
+pub(crate) enum StatementAnalysis {
+    Command {
+        extracted: bash_command_extractor::ExtractedCommand,
+        verdict: Option<ApprovalCheck>,
+    },
+    Unanalysable,
+}
 
 impl SandboxContext {
     /// Check whether `command` is allowed by the sandbox.
@@ -74,17 +97,35 @@ impl SandboxContext {
                             has_unmatched_command |= verdict.is_none();
                             verdict
                         }
-                        bash_command_extractor::ExtractedStatement::Unanalysable => {
-                            Some(ApprovalCheck::UserApprovalRequired)
-                        }
+                        bash_command_extractor::ExtractedStatement::Unanalysable => Some(builtin(
+                            ApprovalVerdict::UserApprovalRequired,
+                            UNANALYSABLE_STATEMENT_RULE,
+                        )),
                     };
                     aggregate = Self::worse_verdict(aggregate, contribution);
                 }
-                if has_unmatched_command && aggregate == Some(ApprovalCheck::AutoApproved) {
-                    Some(ApprovalCheck::UserApprovalRequired)
-                } else {
-                    aggregate
-                }
+                aggregate.map(|winner| match winner.verdict {
+                    ApprovalVerdict::AutoApproved if has_unmatched_command => builtin(
+                        ApprovalVerdict::UserApprovalRequired,
+                        UNMATCHED_STATEMENT_RULE,
+                    ),
+                    ApprovalVerdict::AutoApproved if statements.len() > 1 => {
+                        builtin(ApprovalVerdict::AutoApproved, ALL_STATEMENTS_APPROVED_RULE)
+                    }
+                    ApprovalVerdict::AutoDenied { .. } | ApprovalVerdict::UserApprovalRequired
+                        if statements.len() > 1
+                            && winner.rule_origin
+                                != super::RuleOrigin::BuiltIn(UNANALYSABLE_STATEMENT_RULE) =>
+                    {
+                        ApprovalCheck {
+                            verdict: winner.verdict.clone(),
+                            decision_maker: DecisionMaker::BashSandbox,
+                            rule_origin: super::RuleOrigin::BuiltIn(WORST_STATEMENT_RULE),
+                            parent: Some(Box::new(winner)),
+                        }
+                    }
+                    _ => winner,
+                })
             }
         };
 
@@ -92,19 +133,23 @@ impl SandboxContext {
         // evaluated last, matched against the raw command string, so it wins
         // regardless of the structural verdict above.
         let mut verdict = structural_verdict;
-        for rule in &self.rules {
+        for (rule, origin) in &self.rules {
             if rule.pattern.matches(command) {
-                verdict = Some(rule.verdict.clone());
+                verdict = Some(ApprovalCheck::new(
+                    rule.verdict.clone(),
+                    DecisionMaker::BashSandbox,
+                    origin.clone(),
+                ));
             }
         }
 
         tracing::debug!(
-            command = %command,
-            sandbox_verdict = match &verdict {
+            command,
+            sandbox_verdict = match verdict.as_ref().map(|check| &check.verdict) {
                 None => "abstain".to_string(),
-                Some(ApprovalCheck::AutoApproved) => "auto-approved".to_string(),
-                Some(ApprovalCheck::AutoDenied { reason }) => format!("auto-denied: {reason}"),
-                Some(ApprovalCheck::UserApprovalRequired) => "user-approval-required".to_string(),
+                Some(ApprovalVerdict::AutoApproved) => "auto-approved".to_string(),
+                Some(ApprovalVerdict::AutoDenied { reason }) => format!("auto-denied: {reason}"),
+                Some(ApprovalVerdict::UserApprovalRequired) => "user-approval-required".to_string(),
             },
             "sandbox check_command"
         );
@@ -112,13 +157,39 @@ impl SandboxContext {
         verdict
     }
 
+    /// Judge every top-level statement of `command` separately, for grant
+    /// evaluation. `None` when the script does not parse. A command the
+    /// policy has no opinion on is reported with `None` (it needs approval).
+    pub(crate) fn analyse_command_statements(
+        &self,
+        command: &str,
+    ) -> Option<Vec<StatementAnalysis>> {
+        match bash_command_extractor::extract(command) {
+            bash_command_extractor::ExtractionResult::ParseFailed => None,
+            bash_command_extractor::ExtractionResult::Statements(statements) => Some(
+                statements
+                    .into_iter()
+                    .map(|statement| match statement {
+                        bash_command_extractor::ExtractedStatement::Command(extracted) => {
+                            let verdict = self.evaluate_command(&extracted);
+                            StatementAnalysis::Command { extracted, verdict }
+                        }
+                        bash_command_extractor::ExtractedStatement::Unanalysable => {
+                            StatementAnalysis::Unanalysable
+                        }
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
     /// Rank an [`ApprovalCheck`] for worst-case combination:
     /// `AutoDenied` > `UserApprovalRequired` > `AutoApproved`.
     fn approval_check_rank(check: &ApprovalCheck) -> u8 {
-        match check {
-            ApprovalCheck::AutoDenied { .. } => 2,
-            ApprovalCheck::UserApprovalRequired => 1,
-            ApprovalCheck::AutoApproved => 0,
+        match check.verdict {
+            ApprovalVerdict::AutoDenied { .. } => 2,
+            ApprovalVerdict::UserApprovalRequired => 1,
+            ApprovalVerdict::AutoApproved => 0,
         }
     }
 
@@ -150,7 +221,7 @@ impl SandboxContext {
             Some(configured) => {
                 let mut verdict = None;
                 let mut argument_analysis = None;
-                for rule in configured {
+                for (rule, origin) in configured {
                     match rule {
                         ResolvedRule::Named {
                             rule: named,
@@ -158,7 +229,11 @@ impl SandboxContext {
                             target: _,
                         } => {
                             if Self::evaluate_command_named_rule(*named, command) {
-                                verdict = Some(rule_verdict.clone());
+                                verdict = Some(ApprovalCheck::new(
+                                    rule_verdict.clone(),
+                                    DecisionMaker::BashSandbox,
+                                    origin.clone(),
+                                ));
                             }
                         }
                         ResolvedRule::CommandGlob {
@@ -177,7 +252,11 @@ impl SandboxContext {
                                         continue;
                                     }
                                 }
-                                verdict = Some(rule_verdict.clone());
+                                verdict = Some(ApprovalCheck::new(
+                                    rule_verdict.clone(),
+                                    DecisionMaker::BashSandbox,
+                                    origin.clone(),
+                                ));
                             }
                         }
                         // A path `PathGlob` rule under `[tools.bash]` is
@@ -233,27 +312,48 @@ impl SandboxContext {
         if command.backgrounded {
             verdict = Self::worse_verdict(
                 verdict,
-                Some(ApprovalCheck::AutoDenied {
-                    reason: BACKGROUNDED_REASON.to_string(),
-                }),
+                Some(builtin(
+                    ApprovalVerdict::AutoDenied {
+                        reason: BACKGROUNDED_REASON.to_string(),
+                    },
+                    BACKGROUNDED_RULE,
+                )),
             );
         }
         if command.has_variable_assignment_prefix {
-            verdict = Self::worse_verdict(verdict, Some(ApprovalCheck::UserApprovalRequired));
+            verdict = Self::worse_verdict(
+                verdict,
+                Some(builtin(
+                    ApprovalVerdict::UserApprovalRequired,
+                    VARIABLE_ASSIGNMENT_PREFIX_RULE,
+                )),
+            );
         }
         if command
             .argv
             .iter()
             .any(bash_command_extractor::token_has_unquoted_glob)
         {
-            verdict = Self::worse_verdict(verdict, Some(ApprovalCheck::UserApprovalRequired));
+            verdict = Self::worse_verdict(
+                verdict,
+                Some(builtin(
+                    ApprovalVerdict::UserApprovalRequired,
+                    UNQUOTED_GLOB_RULE,
+                )),
+            );
         }
         if command
             .argv
             .iter()
             .any(bash_command_extractor::token_has_unquoted_brace_expansion)
         {
-            verdict = Self::worse_verdict(verdict, Some(ApprovalCheck::UserApprovalRequired));
+            verdict = Self::worse_verdict(
+                verdict,
+                Some(builtin(
+                    ApprovalVerdict::UserApprovalRequired,
+                    UNQUOTED_BRACE_EXPANSION_RULE,
+                )),
+            );
         }
         verdict
     }

@@ -400,6 +400,20 @@ pub enum Effect {
     ApproveTool {
         id: Uuid,
     },
+    /// Send `AgentCommand::RequestGrantPreview { id }`; the answer opens the
+    /// grant dialog.
+    RequestGrantPreview {
+        id: Uuid,
+    },
+    /// Send `AgentCommand::GrantAndApprove`: the agent validates the selected
+    /// rows, saves grants for similar calls and approves the call. The prompt
+    /// stays until the agent starts the call, so a refused grant leaves it
+    /// pending.
+    GrantTool {
+        id: Uuid,
+        requests: Vec<crate::grants::GrantRequest>,
+        reload_snapshot: bool,
+    },
     /// Send `AgentCommand::DenyTool { id, reason }` to the agent.
     /// `reason` is the user-typed denial text; empty when no reason was given.
     DenyTool {

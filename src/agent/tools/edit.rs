@@ -31,7 +31,7 @@ use serde_json::Value;
 use super::validate_args_with_schema;
 
 use super::{Tool, ToolCall, DEFAULT_TOOL_TIMEOUT_SECS};
-use crate::sandbox::{ApprovalCheck, SandboxContext};
+use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 
 /// Number of unchanged context lines shown above and below each changed hunk in the diff preview.
 const DIFF_CONTEXT_LINES: usize = 3;
@@ -79,6 +79,9 @@ pub struct EditTool {
 
 impl EditTool {
     pub const NAME: &'static str = "edit";
+    const DEFAULT_APPROVAL_RULE: &'static str = "edit.default";
+    const EMPTY_PATH_RULE: &'static str = "edit.empty_path";
+    const PATH_TYPE_RULE: &'static str = "edit.path_type";
 
     pub fn new(sandbox_context: SandboxContext) -> Self {
         EditTool {
@@ -166,34 +169,52 @@ impl Tool for EditTool {
         let path_str = match arguments.get("path").and_then(|v| v.as_str()) {
             Some(value) if !value.is_empty() => value,
             Some(_) => {
-                return ApprovalCheck::AutoDenied {
-                    reason: "Required argument 'path' must not be empty".to_string(),
-                }
+                return ApprovalCheck::tool(
+                    ApprovalVerdict::AutoDenied {
+                        reason: "Required argument 'path' must not be empty".to_string(),
+                    },
+                    Self::EMPTY_PATH_RULE,
+                )
             }
             None => {
-                return ApprovalCheck::AutoDenied {
-                    reason: "Required argument 'path' is missing or not a string".to_string(),
-                }
+                return ApprovalCheck::tool(
+                    ApprovalVerdict::AutoDenied {
+                        reason: "Required argument 'path' is missing or not a string".to_string(),
+                    },
+                    Self::PATH_TYPE_RULE,
+                )
             }
         };
         let sandbox_verdict = self
             .sandbox_context
             .check_path(std::path::Path::new(path_str));
         let approval = match sandbox_verdict {
-            None => ApprovalCheck::UserApprovalRequired,
+            None => ApprovalCheck::tool(
+                ApprovalVerdict::UserApprovalRequired,
+                Self::DEFAULT_APPROVAL_RULE,
+            ),
             Some(verdict) => verdict,
         };
         tracing::debug!(
             tool = "edit",
             path = path_str,
-            decision = match &approval {
-                ApprovalCheck::AutoApproved => "auto-approved",
-                ApprovalCheck::AutoDenied { .. } => "auto-denied",
-                ApprovalCheck::UserApprovalRequired => "sandbox-abstain→user-approval-required",
+            decision = match &approval.verdict {
+                ApprovalVerdict::AutoApproved => "auto-approved",
+                ApprovalVerdict::AutoDenied { .. } => "auto-denied",
+                ApprovalVerdict::UserApprovalRequired => "sandbox-abstain→user-approval-required",
             },
             "tool approval decision"
         );
         approval
+    }
+
+    fn grant_subjects(&self, arguments: &Value) -> crate::grants::GrantSubjects {
+        match arguments.get("path").and_then(|value| value.as_str()) {
+            Some(path) if !path.is_empty() => {
+                super::path_grant_subjects(&self.sandbox_context, path)
+            }
+            _ => crate::grants::GrantSubjects::NotGrantable,
+        }
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {

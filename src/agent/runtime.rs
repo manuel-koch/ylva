@@ -424,6 +424,10 @@ impl AgentLoop {
                 execution_span: parent_span.clone(),
             };
 
+            let mut grant_changes = state
+                .registry
+                .grant_state()
+                .map(|grants| grants.subscribe());
             loop {
                 if state.mode == AgentMode::Idle
                     && state.current_cancel.is_none()
@@ -438,6 +442,19 @@ impl AgentLoop {
                     .unwrap_or_else(|| parent_span.clone());
                 tokio::select! {
                 biased;
+                _ = async {
+                    match grant_changes.as_mut() {
+                        Some(changes) => {
+                            if changes.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if state.mode == AgentMode::ToolPending => {
+                    state.approve_pending_front_if_granted().instrument(session_span.clone()).await;
+                    continue;
+                }
                 _ = &mut startup_checks, if !state.startup_checks_finished => {
                                             state.startup_checks_finished = true;
                                             if std::mem::take(&mut state.request_waiting_for_startup_checks) {

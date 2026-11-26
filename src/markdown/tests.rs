@@ -15,19 +15,6 @@
 use super::*;
 use crate::theme::inline_code_fg;
 
-#[test]
-fn display_column_slices_respect_wide_and_zero_width_characters() {
-    assert_eq!(slice_by_display_columns("abcdef", 1, 4), "bcd");
-    assert_eq!(slice_by_display_columns("日本語", 0, 2), "日");
-    assert_eq!(slice_by_display_columns("日本語", 2, 6), "本語");
-    assert_eq!(slice_by_display_columns("a日b", 1, 3), "日");
-    assert_eq!(slice_by_display_columns("e\u{301}x", 0, 1), "e\u{301}");
-    assert_eq!(slice_by_display_columns("e\u{301}x", 1, 2), "x");
-    assert_eq!(slice_by_display_columns("a😀b", 1, 3), "😀");
-    assert_eq!(slice_by_display_columns("abc", 2, usize::MAX), "c");
-    assert_eq!(slice_by_display_columns("abc", 5, 9), "");
-}
-
 fn plain_text(line: &Line<'static>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }

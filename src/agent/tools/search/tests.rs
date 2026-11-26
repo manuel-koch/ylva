@@ -25,8 +25,8 @@ fn search_tool_no_path_is_auto_approved() {
     let tool = SearchTool::default();
     let args = serde_json::json!({ "pattern": "foo" });
     assert!(matches!(
-        tool.needs_approval(&args),
-        ApprovalCheck::AutoApproved
+        tool.needs_approval(&args).verdict,
+        ApprovalVerdict::AutoApproved
     ));
 }
 
@@ -36,8 +36,8 @@ fn search_tool_workspace_path_is_auto_approved() {
     // cwd in tests is the workspace root; src/ is inside the workspace.
     let args = serde_json::json!({ "pattern": "fn main", "path": "src" });
     assert!(matches!(
-        tool.needs_approval(&args),
-        ApprovalCheck::AutoApproved
+        tool.needs_approval(&args).verdict,
+        ApprovalVerdict::AutoApproved
     ));
 }
 
@@ -46,8 +46,8 @@ fn search_tool_outside_workspace_path_requires_user_approval() {
     let tool = SearchTool::default();
     let args = serde_json::json!({ "pattern": "secret", "path": "/etc" });
     assert!(matches!(
-        tool.needs_approval(&args),
-        ApprovalCheck::UserApprovalRequired
+        tool.needs_approval(&args).verdict,
+        ApprovalVerdict::UserApprovalRequired
     ));
 }
 
@@ -65,8 +65,8 @@ fn search_tool_symlink_parent_traversal_requires_user_approval() {
     let tool = SearchTool::new(context);
 
     assert_eq!(
-        tool.needs_approval(&serde_json::json!({ "pattern": "x", "path": workspace.path().join("link/..").display().to_string() })),
-        ApprovalCheck::UserApprovalRequired,
+        tool.needs_approval(&serde_json::json!({ "pattern": "x", "path": workspace.path().join("link/..").display().to_string() })).verdict,
+        ApprovalVerdict::UserApprovalRequired,
         "`link/..` leaves the workspace and must not be judged lexically"
     );
 }
