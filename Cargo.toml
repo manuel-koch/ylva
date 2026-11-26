@@ -56,7 +56,7 @@ tree-sitter-bash = "0.25"
 clap = { version = "4", features = ["derive"] }
 scraper = "0.29.0"
 tiktoken-rs = "0.12"
-htmd = "0.5"
+htmd = "0.6"
 httpdate = "1"
 flate2 = "1"
 libc = "0.2"
