@@ -138,6 +138,7 @@ async fn incomplete_or_invalid_finish_calls_do_not_make_subagent_titles_ready() 
             id: value.id,
             name: value.name.clone(),
             error: "Finish execution failed.".into(),
+            display_error: None,
             duration: std::time::Duration::ZERO,
             content_sections: Vec::new(),
         };

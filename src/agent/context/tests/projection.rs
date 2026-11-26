@@ -153,6 +153,7 @@ fn invalid_projections_and_late_summaries_cannot_resurrect_or_break_tool_groups(
                 id: Uuid::new_v4(),
                 name: "read".to_string(),
                 error: "wrong correlation".to_string(),
+                display_error: None,
                 duration: Duration::ZERO,
                 content_sections: Vec::new(),
             },

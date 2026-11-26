@@ -186,6 +186,12 @@ transcript. Lines written before this field existed have an empty timestamp.
 Ylva does not store the two system prompts that start every conversation. The
 running Ylva rebuilds them on every start, and a stored copy would go stale.
 
+A `tool_error` message's `error` is the text the model sees. For a failed tool
+that produced output (e.g. `bash`), it ends with `Output:` and that output.
+`display_error` then holds the bare error header, which resumed sessions show
+so a failed call looks the same as in the live conversation. Lines without
+`display_error` (older builds, or errors without output) display `error`.
+
 ### `agent_type_changed`
 
 Ylva writes it when you resume a session with `--agent <type>` and that type

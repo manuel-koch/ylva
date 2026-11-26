@@ -117,7 +117,6 @@ pub enum UserMessageKind {
 ///
 /// The tool-result variant intentionally stays inline so the persisted
 /// `#[serde(flatten)]` shape and the single-writer context API remain direct.
-#[expect(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
@@ -142,7 +141,13 @@ pub enum Message {
     ToolError {
         id: Uuid,
         name: String,
+        /// Model-facing error text; may carry the failed tool's output.
         error: String,
+        /// UI-facing error header without the appended tool output. `None`
+        /// when `error` carries no output (and in sessions written by older
+        /// builds), in which case `error` is displayed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_error: Option<String>,
         #[serde(default)]
         duration: std::time::Duration,
         /// Structured content produced before the tool failed.

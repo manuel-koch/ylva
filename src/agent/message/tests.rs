@@ -45,6 +45,7 @@ fn constructs_message_variants() {
         id: Uuid::new_v4(),
         name: "tool".into(),
         error: "err".into(),
+        display_error: None,
         duration: std::time::Duration::ZERO,
         content_sections: vec![],
     };
@@ -125,6 +126,7 @@ fn tool_messages_round_trip_replay_metadata_and_legacy_defaults() {
         id,
         name: "write".to_string(),
         error: "denied".to_string(),
+        display_error: None,
         duration: std::time::Duration::from_millis(11),
         content_sections: vec![content_section],
     };
@@ -189,6 +191,7 @@ fn tool_messages_round_trip_replay_metadata_and_legacy_defaults() {
             id,
             name: "write".to_string(),
             error: "old error".to_string(),
+            display_error: None,
             duration: std::time::Duration::new(1, 2),
             content_sections: vec![],
         }

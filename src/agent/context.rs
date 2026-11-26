@@ -429,6 +429,7 @@ impl Context {
                     id,
                     name,
                     error: "Tool call did not complete before the session ended.".to_string(),
+                    display_error: None,
                     duration: std::time::Duration::ZERO,
                     content_sections: vec![],
                 });
@@ -531,17 +532,19 @@ impl Context {
         duration: std::time::Duration,
         content_sections: Vec<crate::agent::tools::Section>,
     ) {
-        let llm_error = match output.filter(|s| !s.is_empty()) {
-            Some(output) if is_output_truncated => {
-                format!("{error}\n\nOutput (truncated):\n{output}")
-            }
-            Some(output) => format!("{error}\n\nOutput:\n{output}"),
-            None => error,
+        let (llm_error, display_error) = match output.filter(|s| !s.is_empty()) {
+            Some(output) if is_output_truncated => (
+                format!("{error}\n\nOutput (truncated):\n{output}"),
+                Some(error),
+            ),
+            Some(output) => (format!("{error}\n\nOutput:\n{output}"), Some(error)),
+            None => (error, None),
         };
         self.commit(Message::ToolError {
             id,
             name,
             error: llm_error,
+            display_error,
             duration,
             content_sections,
         });

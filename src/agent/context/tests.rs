@@ -190,10 +190,31 @@ fn push_tool_result_and_error_append_messages() {
             id,
             name: "write".into(),
             error: "denied".into(),
+            display_error: None,
             duration: std::time::Duration::ZERO,
             content_sections: vec![],
         }
     );
+}
+
+#[test]
+fn push_tool_error_keeps_output_for_model_and_header_for_display() {
+    let id = Uuid::new_v4();
+    let mut context = Context::new();
+    context.push_tool_error(
+        id,
+        "bash".into(),
+        "failed".into(),
+        Some("boom"),
+        false,
+        std::time::Duration::ZERO,
+        vec![],
+    );
+    assert!(matches!(
+        context.messages().last(),
+        Some(Message::ToolError { error, display_error: Some(header), .. })
+            if error == "failed\n\nOutput:\nboom" && header == "failed"
+    ));
 }
 
 #[test]
@@ -225,7 +246,7 @@ fn hydrate_appends_after_system_prompts_and_synthesizes_orphaned_tool_error() {
     ));
     assert!(matches!(
         context.messages().last(),
-        Some(Message::ToolError { id: error_id, name, error, duration, content_sections })
+        Some(Message::ToolError { id: error_id, name, error, display_error: None, duration, content_sections })
             if *error_id == id
                 && name == "read"
                 && error == "Tool call did not complete before the session ended."

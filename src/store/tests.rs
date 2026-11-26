@@ -96,6 +96,7 @@ async fn read_subagent_runs_recovers_tool_call_counts_from_run_transcripts() {
         id: Uuid::new_v4(),
         name: "grep".to_string(),
         error: "boom".to_string(),
+        display_error: None,
         duration: std::time::Duration::ZERO,
         content_sections: vec![],
     });

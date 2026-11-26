@@ -202,6 +202,7 @@ pub(in crate::tui_reducer_state) fn project_messages_with_subagent_runs(
                 id,
                 name,
                 error,
+                display_error,
                 duration,
                 content_sections,
             } => {
@@ -216,7 +217,7 @@ pub(in crate::tui_reducer_state) fn project_messages_with_subagent_runs(
                     *id,
                     name,
                     ToolCallState::Error {
-                        error: error.clone(),
+                        error: display_error.as_ref().unwrap_or(error).clone(),
                         title_arguments,
                         duration: *duration,
                         content_sections: content_sections.clone(),

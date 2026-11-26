@@ -101,6 +101,7 @@ fn an_orphaned_tool_call_only_allows_a_boundary_after_its_synthetic_result() {
             id: orphan,
             name: "read".to_string(),
             error: "Tool call did not complete before the session ended.".to_string(),
+            display_error: None,
             duration: Duration::ZERO,
             content_sections: vec![],
         },

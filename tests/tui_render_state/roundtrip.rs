@@ -217,6 +217,7 @@ fn assert_tool_error_bubble_roundtrip(case: ToolErrorBubbleRoundtripCase) {
             id: case.tool_id,
             name: case.tool_name,
             error: case.error,
+            display_error: None,
             duration: case.duration,
             content_sections: case.content_sections,
         },
@@ -739,4 +740,40 @@ fn live_spawn_subagent_tool_bubble_matches_serialized_and_replayed_bubble() {
             tool_call_count: None,
         }],
     );
+}
+
+#[test]
+fn resumed_failed_tool_bubble_shows_header_without_persisted_output() {
+    let tool_id = Uuid::new_v4();
+    let header = "Tool 'bash' failed: command exited with code 1";
+    let messages = [
+        Message::Assistant {
+            content: String::new(),
+            status: AssistantStatus::Complete,
+            tool_calls: vec![ToolCallRequest {
+                id: tool_id,
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": "false"}),
+                persisted_title_arguments: vec![],
+            }],
+        },
+        Message::ToolError {
+            id: tool_id,
+            name: "bash".into(),
+            error: format!("{header}\n\nOutput:\nsome output"),
+            display_error: Some(header.into()),
+            duration: Duration::ZERO,
+            content_sections: vec![],
+        },
+    ];
+    let mut state = AppState::new();
+    state.replay_messages(&messages, &[], None, &[]);
+    let shown_error = state.chat_entries.iter().find_map(|entry| match entry {
+        ylva::ChatEntry::ToolBubble { state, .. } => match state.as_ref() {
+            ylva::ToolCallState::Error { error, .. } => Some(error.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(shown_error.as_deref(), Some(header));
 }
