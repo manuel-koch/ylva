@@ -1,0 +1,7 @@
+[[grants]]
+tool = "read"
+rule = "./.github/**/*"
+
+[[grants]]
+tool = "read"
+rule = ".rumdl.toml"
