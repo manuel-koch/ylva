@@ -98,8 +98,10 @@ Rules:
 
 ## Dialogs and pages
 
-- Dialogs are centred, framed with a full single-line border in `popup_border_color` and
-  titled with a short noun phrase padded by one space (` Grant similar calls `).
+- Dialogs are framed with a full single-line border in `popup_border_color` and
+  titled with a short noun phrase padded by one space (` Grant similar calls `). The grant
+  dialog, like the slash-command panel, spans the input's width and its bottom edge sits
+  directly above it; only the space above the input is available to it.
 - Padding: one blank column between the border and the content on the left and on the right; the
   right one carries the scroll indicator. No blank rows inside the frame except between sections
   and items.

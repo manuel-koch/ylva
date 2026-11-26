@@ -35,7 +35,6 @@ use crate::tui_render_state::TuiState;
 use super::chat::render_chat_scrollbar;
 use super::footer::button_style;
 
-const MAXIMUM_DIALOG_WIDTH: u16 = 76;
 const CONFIRM_LABEL: &str = " [ ✓ Grant ] ";
 const RELOAD_LABEL: &str = " [ ⟳ Reload ] ";
 const BACK_LABEL: &str = " [ ← Back ] ";
@@ -57,10 +56,6 @@ fn heading(text: &str) -> Line<'static> {
 
 fn muted(text: String) -> Line<'static> {
     Line::styled(text, Style::default().fg(muted_text_color()))
-}
-
-fn dialog_width(frame_width: u16) -> u16 {
-    frame_width.saturating_sub(2).clamp(1, MAXIMUM_DIALOG_WIDTH)
 }
 
 /// The sections of the dialog body. `row_offsets` are the indices within
@@ -340,22 +335,25 @@ pub(super) fn grant_dialog_required_height() -> u16 {
     MINIMUM_DIALOG_HEIGHT
 }
 
-/// Draws the dialog and records its geometry in `state.grant_dialog_layout`.
+/// Draws the dialog above `input_area` and records its geometry in `state.grant_dialog_layout`.
 /// The body scrolls; the button row stays pinned below it.
 pub(super) fn draw_grant_dialog(
     frame: &mut Frame,
     state: &mut TuiState,
+    input_area: Rect,
     mouse_pos: Option<(u16, u16)>,
 ) {
     let Some(dialog) = state.grant_dialog.clone() else {
         return;
     };
-    let area = frame.area();
+    // Like the slash-command panel: left-aligned with the input, bottom edge
+    // directly above it, so only the space above the input is available.
+    let area = Rect::new(input_area.x, 0, input_area.width, input_area.y);
     if grant_dialog_required_height() > area.height {
         state.grant_dialog_layout = GrantDialogLayout::default();
         return;
     }
-    let width = dialog_width(area.width);
+    let width = area.width.max(1);
     // One column each side for padding; the right one carries the scrollbar.
     let text_width = usize::from(width.saturating_sub(4)).max(1);
 
@@ -390,8 +388,8 @@ pub(super) fn draw_grant_dialog(
     let maximum_scroll = body.len().saturating_sub(body_rows);
     let scroll = dialog.scroll_offset.min(maximum_scroll);
     let rect = Rect::new(
-        area.x + (area.width.saturating_sub(width)) / 2,
-        area.y + (area.height.saturating_sub(height)) / 2,
+        area.x,
+        area.bottom() - height,
         width.min(area.width),
         height,
     );
@@ -636,7 +634,9 @@ mod tests {
         state.grant_dialog = Some(dialog);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
-            .draw(|frame| draw_grant_dialog(frame, &mut state, None))
+            .draw(|frame| {
+                draw_grant_dialog(frame, &mut state, Rect::new(0, height - 3, width, 3), None)
+            })
             .expect("draw");
         let buffer = terminal.backend().buffer();
         let text = (0..height)
@@ -710,7 +710,7 @@ mod tests {
         state.grant_dialog = Some(editing);
         let mut terminal = Terminal::new(TestBackend::new(90, 40)).expect("terminal");
         terminal
-            .draw(|frame| draw_grant_dialog(frame, &mut state, None))
+            .draw(|frame| draw_grant_dialog(frame, &mut state, Rect::new(0, 37, 90, 3), None))
             .expect("draw");
         let cursor = terminal.get_cursor_position().expect("cursor");
         let buffer = terminal.backend().buffer();
@@ -738,7 +738,7 @@ mod tests {
         state.grant_dialog = Some(editing);
         let mut terminal = Terminal::new(TestBackend::new(40, 40)).expect("terminal");
         terminal
-            .draw(|frame| draw_grant_dialog(frame, &mut state, None))
+            .draw(|frame| draw_grant_dialog(frame, &mut state, Rect::new(0, 37, 40, 3), None))
             .expect("draw");
         let cursor = terminal.get_cursor_position().expect("cursor");
         let layout = &state.grant_dialog_layout;
@@ -828,11 +828,11 @@ mod tests {
     #[test]
     fn a_short_terminal_scrolls_the_body_and_keeps_the_buttons() {
         let mut long = dialog(6, Some("no profile directory"), None);
-        let (text, layout) = render(40, 9, long.clone());
+        let (text, layout) = render(40, 12, long.clone());
         assert!(!layout.confirm_button.is_empty(), "{text}");
         assert!(layout.maximum_scroll > 0, "{text}");
         long.scroll_offset = usize::MAX;
-        let (text, layout) = render(40, 9, long);
+        let (text, layout) = render(40, 12, long);
         assert!(!layout.confirm_button.is_empty(), "{text}");
         assert!(
             text.contains("Persistent unavailable") || text.contains("Notes"),
@@ -841,7 +841,7 @@ mod tests {
         assert!(layout.rows.iter().all(|row| row.is_empty()));
         let (_, layout) = render(
             40,
-            grant_dialog_required_height() - 1,
+            grant_dialog_required_height() + 2,
             dialog(1, None, None),
         );
         assert_eq!(layout, GrantDialogLayout::default());

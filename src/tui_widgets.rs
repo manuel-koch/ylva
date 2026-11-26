@@ -708,7 +708,7 @@ fn draw_internal(
         .as_ref()
         .map(|conversation| conversation.source);
     let grant_dialog_too_small =
-        state.grant_dialog.is_some() && grant_dialog::grant_dialog_required_height() > area.height;
+        state.grant_dialog.is_some() && grant_dialog::grant_dialog_required_height() > input_area.y;
     let footer_hints = if grant_dialog_too_small {
         std::borrow::Cow::Borrowed(grant_dialog_too_small_footer_hints())
     } else if state.status_popup.snapshot.is_some() {
@@ -754,7 +754,7 @@ fn draw_internal(
         draw_status_popup(frame, state);
     }
     if state.grant_dialog.is_some() {
-        draw_grant_dialog(frame, state, mouse_pos);
+        draw_grant_dialog(frame, state, input_area, mouse_pos);
     }
 
     // Dismiss any toast whose display window has elapsed, then render it.
