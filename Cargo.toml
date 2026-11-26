@@ -77,4 +77,4 @@ tokio = { version = "1", features = ["test-util"] }
 icu_casemap = "2"
 icu_normalizer = "2"
 nix = { version = "0.32", features = ["signal", "process", "fs", "dir"] }
-signal-hook = "0.3"
+signal-hook = "0.4"
