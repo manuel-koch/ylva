@@ -12,21 +12,21 @@ provider_connection = "openrouter"
 model = "openai/gpt-6-luna"
 
 [agents.default]
-allowed_tools = ["write", "edit", "bash"]
+allowed_tools = ["write", "edit", "bash", "spawn_subagent"]
 
 # Last match wins: only `release-notes.md` inside the workspace may be written or edited.
 [tools.write]
 rules = [
-  { pattern = "**", verdict = "auto_denied", reason = "Only release-notes.md may be changed." },
-  { pattern = "**/release-notes.md", verdict = "auto_approved" },
-  { rule = "outside_workspace", verdict = "auto_denied" },
+    { pattern = "**", verdict = "auto_denied", reason = "Only release-notes.md may be changed." },
+    { pattern = "**/release-notes.md", verdict = "auto_approved" },
+    { rule = "outside_workspace", verdict = "auto_denied" },
 ]
 
 [tools.edit]
 rules = [
-  { pattern = "**", verdict = "auto_denied", reason = "Only release-notes.md may be changed." },
-  { pattern = "**/release-notes.md", verdict = "auto_approved" },
-  { rule = "outside_workspace", verdict = "auto_denied" },
+    { pattern = "**", verdict = "auto_denied", reason = "Only release-notes.md may be changed." },
+    { pattern = "**/release-notes.md", verdict = "auto_approved" },
+    { rule = "outside_workspace", verdict = "auto_denied" },
 ]
 
 # Only read-only history queries; other commands have no rule, so they fall back to approval, which headless mode denies.

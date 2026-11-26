@@ -39,6 +39,7 @@ git log --no-merges -E --grep='^[a-z]+(\(.*\))?!:' --grep='^BREAKING[ -]CHANGE' 
   printf '(this overrides the output path above); that is the only file you may write.\n'
   printf '\n### Allowed tools\n\n'
   printf -- '- `write` and `edit`: only `release-notes.md` in the working directory; prefer `edit` for small changes.\n'
+  printf -- '- `spawn_subagent`: Delegate research tasks to subagents.\n'
   printf -- '- `bash`: only read-only `git log`, `git show` and `git diff` (also `git --no-pager ...`),\n'
   printf -- '  optionally piped into `head -n <N>`. Options for sizing output are fine, e.g.\n'
   printf -- '  `git show --stat <hash>`, `git show --format= <hash> -- <path>`, `git log -1 --format=%%B <hash>`.\n'
@@ -61,7 +62,7 @@ mkdir -p "${YLVA_HOME}/profiles/release-notes"
 cp .github/workflows/release-notes.config.toml "${YLVA_HOME}/profiles/release-notes/config.toml"
 
 rm -f release-notes.md
-"${ylva_binary}" --profile release-notes --strict-config --no-tui < "${scratch_dir}/prompt.md"
+"${ylva_binary}" --profile release-notes --strict-config --no-tui --auto-approve-spawn < "${scratch_dir}/prompt.md"
 test -s release-notes.md
 
 if [ -n "${repository}" ]; then

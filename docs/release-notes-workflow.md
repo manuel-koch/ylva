@@ -28,9 +28,12 @@ commit message do not explain the change, and then limit it to the relevant path
 Avoid `git show --format= <hash>` without a path; it prints the whole diff
 (often tens of kilobytes). Use the commit body (`git log -1 --format=%B <hash>`)
 for the intent of a change.
+If the commit message provides too few information, then use a subagent to
+extract more details from the commit change set.
 
-Write the release notes to `docs/release-notes-<FROM>-to-<TO>.md`,
-e.g. `docs/release-notes-v0.2-to-v0.3.md` (overwrite if it already exists).
+If output path for release-notes is unspecified, write the release notes to
+`docs/release-notes-<FROM>-to-<TO>.md`, e.g. `docs/release-notes-v0.2-to-v0.3.md`
+(overwrite if it already exists).
 Do not print the content to the conversation — only confirm the file was written.
 
 Prefix the release notes with a one-sentence title naming the most important
@@ -56,7 +59,7 @@ A breaking commit is included even if it looks like a refactor.
 ```markdown
 **{change title}**
 
-{Brief topic ( using 1-2 sentences max ) of feature or bugfix change}
+{Brief topic ( using 2-5 sentences max ) of feature or bugfix change}
 ```
 
 ## Release Notes Example
