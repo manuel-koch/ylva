@@ -20,7 +20,7 @@ LOG_FORMAT=text
 PREFIX=$(basename $0 .zsh)
 
 cd ${ROOT_DIR}
-
+[[ -d "${LOG_DIR}" ]] || mkdir -p "${LOG_DIR}"
 make build-debug
 
 function ylva() {
