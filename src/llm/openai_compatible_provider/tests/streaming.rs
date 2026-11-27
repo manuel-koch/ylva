@@ -14,6 +14,15 @@
 
 use super::*;
 
+fn parse_single_sse_event(data: &str) -> Option<StreamEvent> {
+    let mut events = parse_sse_payload(data);
+    assert!(
+        events.len() <= 1,
+        "expected at most one event, got {events:?}"
+    );
+    events.pop()
+}
+
 macro_rules! fixture {
     ($name:literal) => {
         include_str!(concat!(
@@ -27,14 +36,14 @@ macro_rules! fixture {
 #[test]
 fn parse_done_sentinel() {
     assert!(matches!(
-        parse_sse_payload("[DONE]"),
+        parse_single_sse_event("[DONE]"),
         Some(StreamEvent::Done)
     ));
 }
 
 #[test]
 fn parse_provider_error_frame_as_a_stream_error() {
-    let event = parse_sse_payload(
+    let event = parse_single_sse_event(
         r#"{"error":{"code":502,"message":"Upstream unavailable","metadata":{"error_type":"provider_unavailable"}}}"#,
     );
     assert!(matches!(event, Some(StreamEvent::Error(error))
@@ -57,24 +66,24 @@ fn parses_reported_prompt_and_input_usage_from_usage_only_chunks() {
 
 #[test]
 fn parse_empty_data_is_skipped() {
-    assert!(parse_sse_payload("").is_none());
+    assert!(parse_single_sse_event("").is_none());
 }
 
 #[test]
 fn parse_content_delta_emits_text() {
-    let event = parse_sse_payload(r#"{"choices":[{"delta":{"content":"hello"}}]}"#);
+    let event = parse_single_sse_event(r#"{"choices":[{"delta":{"content":"hello"}}]}"#);
     assert!(matches!(event, Some(StreamEvent::Text(text)) if text == "hello"));
 }
 
 #[test]
 fn parse_delta_without_content_is_skipped() {
     // `role`-only first chunk.
-    assert!(parse_sse_payload(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#).is_none());
+    assert!(parse_single_sse_event(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#).is_none());
 }
 
 #[test]
 fn parse_anthropic_style_thinking_delta_emits_thinking() {
-    let event = parse_sse_payload(
+    let event = parse_single_sse_event(
         r#"{"choices":[{"delta":{"type":"thinking_delta","thinking":"pondering..."}}]}"#,
     );
     assert!(matches!(event, Some(StreamEvent::Thinking(text)) if text == "pondering..."));
@@ -82,7 +91,7 @@ fn parse_anthropic_style_thinking_delta_emits_thinking() {
 
 #[test]
 fn parse_empty_anthropic_thinking_delta_is_skipped() {
-    assert!(parse_sse_payload(
+    assert!(parse_single_sse_event(
         r#"{"choices":[{"delta":{"type":"thinking_delta","thinking":""}}]}"#
     )
     .is_none());
@@ -90,32 +99,35 @@ fn parse_empty_anthropic_thinking_delta_is_skipped() {
 
 #[test]
 fn parse_reasoning_content_delta_emits_thinking() {
-    let event = parse_sse_payload(r#"{"choices":[{"delta":{"reasoning_content":"because..."}}]}"#);
+    let event =
+        parse_single_sse_event(r#"{"choices":[{"delta":{"reasoning_content":"because..."}}]}"#);
     assert!(matches!(event, Some(StreamEvent::Thinking(text)) if text == "because..."));
 }
 
 #[test]
 fn parse_empty_reasoning_content_delta_is_skipped() {
-    assert!(parse_sse_payload(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#).is_none());
+    assert!(
+        parse_single_sse_event(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#).is_none()
+    );
 }
 
 #[test]
 fn parse_bare_reasoning_delta_emits_thinking() {
     // Ollama's and vLLM's OpenAI-compatible endpoints use bare `reasoning`
     // (no `_content` suffix) for the same purpose as `reasoning_content`.
-    let event = parse_sse_payload(r#"{"choices":[{"delta":{"reasoning":"thinking..."}}]}"#);
+    let event = parse_single_sse_event(r#"{"choices":[{"delta":{"reasoning":"thinking..."}}]}"#);
     assert!(matches!(event, Some(StreamEvent::Thinking(text)) if text == "thinking..."));
 }
 
 #[test]
 fn parse_empty_bare_reasoning_delta_is_skipped() {
-    assert!(parse_sse_payload(r#"{"choices":[{"delta":{"reasoning":""}}]}"#).is_none());
+    assert!(parse_single_sse_event(r#"{"choices":[{"delta":{"reasoning":""}}]}"#).is_none());
 }
 
 #[test]
 fn parse_content_prefers_over_reasoning_content() {
     // If a delta somehow carries both, user-facing content wins.
-    let event = parse_sse_payload(
+    let event = parse_single_sse_event(
         r#"{"choices":[{"delta":{"content":"hi","reasoning_content":"because..."}}]}"#,
     );
     assert!(matches!(event, Some(StreamEvent::Text(text)) if text == "hi"));
@@ -123,11 +135,12 @@ fn parse_content_prefers_over_reasoning_content() {
 
 #[test]
 fn parse_tool_call_chunk_emits_delta() {
-    let event = parse_sse_payload(
+    let events = parse_openai_compatible_sse_payload(
         r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":""}}]}}]}"#,
     );
-    match event {
-        Some(StreamEvent::Delta(delta)) => {
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        StreamEvent::Delta(delta) => {
             assert_eq!(delta.tool_call_index, 0);
             assert_eq!(delta.tool_call_id.as_deref(), Some("call_1"));
             assert_eq!(delta.function_name.as_deref(), Some("read"));
@@ -135,6 +148,41 @@ fn parse_tool_call_chunk_emits_delta() {
         }
         other => panic!("expected Delta, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_multiple_tool_calls_in_one_frame() {
+    let payload = serde_json::json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [
+                    {"index": 2, "id": "call_read", "type": "function", "function": {"name": "read", "arguments": r#"{"path":"#}},
+                    {"index": 5, "id": "call_write", "type": "function", "function": {"name": "write", "arguments": r#"{"path":"out.txt"}"#}}
+                ]
+            }
+        }]
+    })
+    .to_string();
+    let events = parse_openai_compatible_sse_payload(&payload);
+    assert_eq!(events.len(), 2);
+    let deltas: Vec<_> = events
+        .iter()
+        .map(|event| match event {
+            StreamEvent::Delta(delta) => delta,
+            other => panic!("expected Delta, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(deltas[0].tool_call_index, 2);
+    assert_eq!(deltas[0].tool_call_id.as_deref(), Some("call_read"));
+    assert_eq!(deltas[0].function_name.as_deref(), Some("read"));
+    assert_eq!(deltas[0].arguments_fragment.as_deref(), Some(r#"{"path":"#));
+    assert_eq!(deltas[1].tool_call_index, 5);
+    assert_eq!(deltas[1].tool_call_id.as_deref(), Some("call_write"));
+    assert_eq!(deltas[1].function_name.as_deref(), Some("write"));
+    assert_eq!(
+        deltas[1].arguments_fragment.as_deref(),
+        Some(r#"{"path":"out.txt"}"#)
+    );
 }
 
 #[test]
@@ -147,7 +195,7 @@ fn parse_arguments_fragment_delta_has_no_name_or_id() {
         }]
     })
     .to_string();
-    let event = parse_sse_payload(&payload);
+    let event = parse_single_sse_event(&payload);
     match event {
         Some(StreamEvent::Delta(delta)) => {
             assert_eq!(delta.tool_call_index, 0);
@@ -161,13 +209,13 @@ fn parse_arguments_fragment_delta_has_no_name_or_id() {
 
 #[test]
 fn parse_empty_content_is_skipped() {
-    assert!(parse_sse_payload(r#"{"choices":[{"delta":{"content":""}}]}"#).is_none());
+    assert!(parse_single_sse_event(r#"{"choices":[{"delta":{"content":""}}]}"#).is_none());
 }
 
 #[test]
 fn parse_malformed_json_is_error() {
     assert!(matches!(
-        parse_sse_payload("{not json"),
+        parse_single_sse_event("{not json"),
         Some(StreamEvent::Error(_))
     ));
 }
@@ -178,7 +226,7 @@ fn plain_stream_fixture_produces_text_in_order() {
     let texts: Vec<String> = data
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
-        .filter_map(parse_sse_payload)
+        .flat_map(parse_sse_payload)
         .filter_map(|event| match event {
             StreamEvent::Text(text) => Some(text),
             _ => None,
@@ -194,7 +242,7 @@ fn comment_stream_fixture_tolerates_comment_lines() {
     let mut done = false;
     for line in data.lines() {
         if let Some(payload) = line.strip_prefix("data: ") {
-            match parse_sse_payload(payload) {
+            match parse_single_sse_event(payload) {
                 Some(StreamEvent::Text(text)) => texts.push(text),
                 Some(StreamEvent::Done) => done = true,
                 Some(StreamEvent::Error(_)) => panic!("comment fixture must not error"),
@@ -217,7 +265,7 @@ fn reasoning_fixture_skips_reasoning_only_delta() {
     let mut done = false;
     for line in data.lines() {
         if let Some(payload) = line.strip_prefix("data: ") {
-            match parse_sse_payload(payload) {
+            match parse_single_sse_event(payload) {
                 Some(StreamEvent::Text(text)) => texts.push(text),
                 Some(StreamEvent::Done) => done = true,
                 Some(StreamEvent::Error(_)) => panic!("reasoning fixture must not error"),

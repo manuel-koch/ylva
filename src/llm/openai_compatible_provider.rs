@@ -39,7 +39,7 @@ pub(crate) type UsageCostParser = fn(&str) -> Option<RequestCost>;
 pub(crate) type StreamPayloadParser = fn(&str) -> Vec<StreamEvent>;
 
 fn parse_openai_compatible_sse_payload(data: &str) -> Vec<StreamEvent> {
-    parse_sse_payload(data).into_iter().collect()
+    parse_sse_payload(data)
 }
 
 type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig, Option<uuid::Uuid>);
@@ -1198,16 +1198,15 @@ fn parse_reported_input_tokens(data: &str) -> Option<(usize, &'static str)> {
     None
 }
 
-/// Parse one SSE `data:` payload into an optional [`StreamEvent`].
+/// Parse one SSE `data:` payload into zero or more stream events.
 ///
-/// Returns [`None`] for frames that must be silently skipped — comment lines
-/// (already dropped by the SSE parser, but blank `data:` frames can still
-/// arrive) and deltas with no user-facing `content`, no thinking/reasoning
-/// fragment, and no `tool_calls` (the `role`-only first chunk). These must
-/// never be emitted as `StreamEvent::Text`. A `delta.tool_calls` chunk
-/// becomes a [`StreamEvent::Delta`] (raw fragment; assembly is the agent's
-/// task). A chunk with both `content` and `tool_calls` prefers `content`
-/// (the text is user-facing). Malformed JSON yields [`StreamEvent::Error`].
+/// An empty frame, or a delta with no user-facing `content`, no
+/// thinking/reasoning fragment, and no usable `tool_calls`, produces an empty
+/// vector. A chunk with both text/reasoning and `tool_calls` preserves the
+/// existing text/reasoning precedence. Every usable entry in
+/// `delta.tool_calls` becomes a [`StreamEvent::Delta`] in array order (raw
+/// fragments; assembly is the agent's task). Malformed JSON yields one
+/// [`StreamEvent::Error`].
 ///
 /// Extended-thinking / reasoning-token fragments become
 /// [`StreamEvent::Thinking`] — this is a model capability, not
@@ -1217,19 +1216,19 @@ fn parse_reported_input_tokens(data: &str) -> Option<(usize, &'static str)> {
 /// `delta.reasoning_content` string fragments (e.g. DeepSeek, OpenRouter
 /// passthrough), and bare `delta.reasoning` string fragments (e.g. Ollama's
 /// and vLLM's OpenAI-compatible chat-completions endpoints).
-pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
+pub(crate) fn parse_sse_payload(data: &str) -> Vec<StreamEvent> {
     if data.is_empty() {
-        return None;
+        return Vec::new();
     }
     if data == "[DONE]" {
-        return Some(StreamEvent::Done);
+        return vec![StreamEvent::Done];
     }
     let value: serde_json::Value = match serde_json::from_str(data) {
         Ok(value) => value,
         Err(error) => {
-            return Some(StreamEvent::Error(anyhow::anyhow!(
+            return vec![StreamEvent::Error(anyhow::anyhow!(
                 "malformed SSE payload: {error}"
-            )));
+            ))];
         }
     };
     if let Some(error) = value.get("error") {
@@ -1247,10 +1246,10 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
             Some(error_type) => format!("{message} ({error_type})"),
             None => message,
         };
-        return Some(StreamEvent::Error(match code {
+        return vec![StreamEvent::Error(match code {
             Some(code) => anyhow::anyhow!("provider returned HTTP {code}: {message}"),
             None => anyhow::anyhow!("provider stream error: {message}"),
-        }));
+        })];
     }
     let delta = value
         .get("choices")
@@ -1262,7 +1261,7 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
     if is_anthropic_thinking_delta {
         if let Some(serde_json::Value::String(thinking)) = delta.and_then(|d| d.get("thinking")) {
             if !thinking.is_empty() {
-                return Some(StreamEvent::Thinking(thinking.clone()));
+                return vec![StreamEvent::Thinking(thinking.clone())];
             }
         }
     }
@@ -1271,7 +1270,7 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
     // somehow carries both, matching the tests' documented convention.
     if let Some(serde_json::Value::String(content)) = delta.and_then(|d| d.get("content")) {
         if !content.is_empty() {
-            return Some(StreamEvent::Text(content.clone()));
+            return vec![StreamEvent::Text(content.clone())];
         }
     }
 
@@ -1279,7 +1278,7 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
         delta.and_then(|d| d.get("reasoning_content"))
     {
         if !reasoning.is_empty() {
-            return Some(StreamEvent::Thinking(reasoning.clone()));
+            return vec![StreamEvent::Thinking(reasoning.clone())];
         }
     }
 
@@ -1287,36 +1286,45 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
     // OpenAI-compatible endpoints use this field name for the same purpose.
     if let Some(serde_json::Value::String(reasoning)) = delta.and_then(|d| d.get("reasoning")) {
         if !reasoning.is_empty() {
-            return Some(StreamEvent::Thinking(reasoning.clone()));
+            return vec![StreamEvent::Thinking(reasoning.clone())];
         }
     }
 
-    if let Some(call) = delta
+    delta
         .and_then(|d| d.get("tool_calls"))
-        .and_then(|calls| calls.as_array())
-        .and_then(|calls| calls.first())
-    {
-        let tool_call_index = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-        let tool_call_id = call.get("id").and_then(|id| id.as_str()).map(String::from);
-        let function_name = call
-            .pointer("/function/name")
-            .and_then(|name| name.as_str())
-            .map(String::from);
-        let arguments_fragment = call
-            .pointer("/function/arguments")
-            .and_then(|arguments| arguments.as_str())
-            .map(String::from);
-        if tool_call_id.is_some() || function_name.is_some() || arguments_fragment.is_some() {
-            return Some(StreamEvent::Delta(DeltaChunk {
-                tool_call_index,
-                tool_call_id,
-                function_name,
-                arguments_fragment,
-            }));
-        }
-    }
-
-    None
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|call| {
+            let tool_call_index = call
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .unwrap_or(0);
+            let tool_call_id = call
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from);
+            let function_name = call
+                .pointer("/function/name")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from);
+            let arguments_fragment = call
+                .pointer("/function/arguments")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from);
+            if tool_call_id.is_some() || function_name.is_some() || arguments_fragment.is_some() {
+                Some(StreamEvent::Delta(DeltaChunk {
+                    tool_call_index,
+                    tool_call_id,
+                    function_name,
+                    arguments_fragment,
+                }))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

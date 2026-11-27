@@ -33,8 +33,8 @@ const USAGE_TAGS: &str = concat!("app=ylva,version=", env!("CARGO_PKG_VERSION"))
 /// is sent to the existing thinking UI path. Encrypted content is never read.
 pub(crate) fn parse_edenai_sse_payload(data: &str) -> Vec<StreamEvent> {
     let standard_events = super::openai_compatible_provider::parse_sse_payload(data);
-    if standard_events.is_some() {
-        return standard_events.into_iter().collect();
+    if !standard_events.is_empty() {
+        return standard_events;
     }
 
     let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
