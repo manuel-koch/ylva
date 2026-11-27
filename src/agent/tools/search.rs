@@ -28,8 +28,11 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Tool, ToolCall, DEFAULT_TOOL_TIMEOUT_SECS};
+use super::{Tool, ToolCall};
 use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
+
+/// Default execution timeout for search tool.
+pub const SEARCH_DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum number of whole output lines in the combined search output. Lines
 /// beyond this cap are discarded; the result's `metadata()` will carry
@@ -178,7 +181,7 @@ impl Tool for SearchTool {
 
     fn timeout_secs(&self) -> u64 {
         if self.timeout_secs == 0 {
-            DEFAULT_TOOL_TIMEOUT_SECS
+            SEARCH_DEFAULT_TOOL_TIMEOUT_SECS
         } else {
             self.timeout_secs
         }
