@@ -27,6 +27,10 @@ Open a new shell after updating the file. If you also have `rustup` installed,
 check that `command -v cargo` and `command -v rustc` select Homebrew's toolchain
 before running the targets below.
 
+To assist AI discovering content and relations of Ylva sourcecode we use `graphify`.
+Install it via `uv tool install graphifyy`.
+See make targets `graphify-update` and `graphify-watch`.
+
 ## Workflow
 
 After implementing new functionality or fixing bugs, run `make format lint` and the
