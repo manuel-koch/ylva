@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0](https://github.com/manuel-koch/ylva/compare/v0.38.0...v0.39.0) - 2026-11-27
+
+### Added
+
+- Refactor grant-dialog layout
+
+### Documentation
+
+- *(setup)* Add note for graphify tool
+- *(setup)* Describe required cargo tooling for developer setup
+- *(release-notes)* Allow using subagent to get more info from commit
+
+### Fixed
+
+- *(search)* Bump tool timeout for long running searches
+- *(llm)* Preserve all tool-call stream deltas
+- Improve rendering of tool errors from a resumed session
+- Improve rendering of markdown paragraphs in lists
+- Refactor grant-dialog to explicitly reload grant.toml after
+
 ## [0.38.0](https://github.com/manuel-koch/ylva/compare/v0.37.0...v0.38.0) - 2026-11-26
 
 ### Added
