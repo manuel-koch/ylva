@@ -1,5 +1,34 @@
 # Development workflow
 
+## macOS developer setup (Homebrew)
+
+Ylva's supported development platform is macOS. A Homebrew-managed Rust setup
+needs the compiler, the coverage runner and LLVM tools, and the dependency
+security auditor:
+
+```shell
+brew install rust cargo-llvm-cov llvm cargo-audit
+```
+
+- `cargo-llvm-cov` runs the coverage gate
+- `llvm` provides the matching `llvm-cov` and `llvm-profdata` tools
+- `cargo-audit` is needed for `make audit`
+
+No `rustup` installation is required for this setup. Add these lines to your
+shell startup file (for example, `~/.zshrc`) so coverage can find Homebrew's
+LLVM tools when running `make test-coverage`:
+
+```shell
+export LLVM_COV="$(brew --prefix llvm)/bin/llvm-cov"
+export LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata"
+```
+
+Open a new shell after updating the file. If you also have `rustup` installed,
+check that `command -v cargo` and `command -v rustc` select Homebrew's toolchain
+before running the targets below.
+
+## Workflow
+
 After implementing new functionality or fixing bugs, run `make format lint` and the
 single mandatory test gate, `make test-coverage`.
 
