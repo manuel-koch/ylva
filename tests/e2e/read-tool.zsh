@@ -21,6 +21,7 @@ PREFIX=$(basename $0 .zsh)
 
 cd ${ROOT_DIR}
 [[ -d "${LOG_DIR}" ]] || mkdir -p "${LOG_DIR}"
+[[ -f "${LOG_DIR}/.gitignore" ]] || echo "**" > "${LOG_DIR}/.gitignore"
 make build-debug
 
 function ylva() {
