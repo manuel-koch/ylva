@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.1](https://github.com/manuel-koch/ylva/compare/v0.39.0...v0.39.1) - 2026-11-28
+
+### Added
+
+- status slash-command shows accumulated tool call count too
+- Show canonical path for read/write/edit/search/glob tool argument
+
+### Fixed
+
+- *(llm)* Preserve tool calls in mixed SSE deltas
+- Improve glob tool handling of symlinks
+
 ## [0.39.0](https://github.com/manuel-koch/ylva/compare/v0.38.0...v0.39.0) - 2026-11-27
 
 ### Added
