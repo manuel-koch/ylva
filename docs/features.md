@@ -767,7 +767,14 @@ Optional `git_ignore` (default `true`) skips paths matched by `.gitignore` rules
 exclude the `.git` directory or other dot-prefixed paths. Set `dot_ignore` to `true` to exclude
 them. Set `git_ignore` to `false` to use plain glob matching without gitignore rules. Optional
 `only_files` / `only_dirs` filters restrict results to files or directories only (mutually
-exclusive; both `true` returns an error). Optional `limit` caps the result count; omit it for
+exclusive; both `true` returns an error). A symlink counts as its **target's** type: a symlinked
+file is counted and filtered as a file, and a symlinked directory as a directory — yet traversal
+never follows symlinks, so a symlinked directory is listed but its target's children never appear
+(except beneath an explicitly pattern-rooted symlink, whose spelling the caller supplied). A
+dangling symlink (missing or unreadable target) is counted as a file in unfiltered results but
+passes no type filter. Every result line whose match is a symlink is annotated `path -> target`
+with its canonical target, or the raw `read_link` spelling when the link is dangling; non-symlink
+lines stay bare. Optional `limit` caps the result count; omit it for
 no result-count limit rather than using an arbitrary large value.
 Result metadata contains flat `files`, `directories`, and `total` counts, where `total` is the
 sum of the other two fields, plus a boolean `truncated`. `truncated` is `false` when all
@@ -776,7 +783,9 @@ an omission count. Optional `only_count` returns no paths and exposes the same c
 text retains the matching total.
 Returned paths obey the call's `limit`; source truncation is reported in metadata.
 The common agent path separately bounds the model-only body without reducing
-canonical paths or structured counts, using advisory `cl100k_base` estimates.
+canonical paths or structured counts, using advisory `cl100k_base` estimates; the
+token budget truncates whole result lines, so the tail of an annotated
+`path -> target` line may be cut.
 CLI/TUI summaries use a tool-provided display projection: `glob` omits zero-valued `files` and
 `directories` and `truncated=false`. It omits `total` when either type count is zero, because
 the total is then inferable, except that an empty result displays `total=0`; the complete

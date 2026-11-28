@@ -14,7 +14,7 @@
 
 //! Match counting, ordering and rendering of `glob` results.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -51,23 +51,91 @@ pub(super) enum GlobPathKind {
     Directory,
 }
 
+/// How a matched path presents for counting and type filtering: a symlink
+/// presents as its target's type, any other entry as its own type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TargetPathKind {
+    File,
+    Directory,
+    /// A symlink whose target is missing or is neither file nor directory;
+    /// counted as a `File`, but rejected by every type filter.
+    Dangling,
+}
+
+impl TargetPathKind {
+    /// Stats with `symlink_metadata` and, only when the entry is a symlink,
+    /// re-stats the target with `metadata` to learn the target's type.
+    /// Non-symlink entries keep the single-stat path; a failed stat falls
+    /// back to [`TargetPathKind::File`].
+    pub(super) fn for_path(path: &Path) -> Self {
+        match std::fs::symlink_metadata(path) {
+            Err(_) => Self::File,
+            Ok(metadata) if !metadata.file_type().is_symlink() => {
+                if metadata.is_dir() {
+                    Self::Directory
+                } else {
+                    Self::File
+                }
+            }
+            Ok(_) => match std::fs::metadata(path) {
+                Ok(target_metadata) if target_metadata.is_dir() => Self::Directory,
+                Ok(target_metadata) if target_metadata.is_file() => Self::File,
+                _ => Self::Dangling,
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct GlobCandidate {
     pub(super) path: PathBuf,
     pub(super) path_kind: GlobPathKind,
+    annotation: Option<String>,
 }
 
 impl GlobCandidate {
     pub(super) fn from_path(path: PathBuf) -> Self {
-        let path_kind = if std::fs::symlink_metadata(&path)
-            .map(|metadata| metadata.file_type().is_dir())
-            .unwrap_or(false)
-        {
+        let target_kind = TargetPathKind::for_path(&path);
+        let path_kind = if target_kind == TargetPathKind::Directory {
             GlobPathKind::Directory
         } else {
             GlobPathKind::File
         };
-        Self { path, path_kind }
+        let annotation = symlink_target_annotation(&path);
+        Self {
+            path,
+            path_kind,
+            annotation,
+        }
+    }
+
+    /// The rendered match line: `path -> target` for a symlink, the plain
+    /// path otherwise.
+    pub(super) fn matched_line(&self) -> String {
+        self.annotation
+            .clone()
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+}
+
+/// Inline target disclosure for a symlinked match: the canonical target when
+/// it resolves, otherwise the raw `read_link` spelling of a dangling link.
+fn symlink_target_annotation(path: &Path) -> Option<String> {
+    let is_symlink = std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_symlink {
+        return None;
+    }
+    match std::fs::canonicalize(path) {
+        Ok(canonical_target) => Some(format!(
+            "{} -> {}",
+            path.display(),
+            canonical_target.display()
+        )),
+        Err(_) => std::fs::read_link(path)
+            .ok()
+            .map(|raw_target| format!("{} -> {}", path.display(), raw_target.display())),
     }
 }
 

@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use super::super::ToolError;
-use super::result::{GlobCandidate, GlobMatchCounts, GlobResult};
+use super::result::{GlobCandidate, GlobMatchCounts, GlobResult, TargetPathKind};
 use super::GlobInputArgs;
 
 pub(super) fn pattern_root(pattern: &str) -> String {
@@ -48,21 +48,33 @@ pub(super) fn normalize_glob_match_path(path: &Path) -> String {
 }
 
 pub(super) fn path_matches_type_filter(path: &Path, args: &GlobInputArgs) -> bool {
-    let file_type = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata.file_type(),
-        Err(_) => return false,
-    };
-    if args.only_files {
-        return file_type.is_file();
+    if !args.only_files && !args.only_dirs {
+        return true;
     }
-    if args.only_dirs {
-        return file_type.is_dir();
+    match TargetPathKind::for_path(path) {
+        TargetPathKind::File => args.only_files,
+        TargetPathKind::Directory => args.only_dirs,
+        // A dangling link is neither file nor directory: any type filter rejects it.
+        TargetPathKind::Dangling => false,
     }
-    true
 }
 
 pub(super) fn is_search_root(path: &Path, root: &str) -> bool {
     normalize_glob_match_path(path) == normalize_glob_match_path(Path::new(root))
+}
+
+/// Every proper ancestor directory component of a matched path, ordered from
+/// the outermost parent (just above the pattern root) down to the direct
+/// parent.
+pub(super) fn ancestor_components(path: &Path) -> Vec<PathBuf> {
+    let mut ancestors = Vec::new();
+    let mut current = path.parent();
+    while let Some(ancestor) = current {
+        ancestors.push(ancestor.to_path_buf());
+        current = ancestor.parent();
+    }
+    ancestors.reverse();
+    ancestors
 }
 
 /// Reject glob patterns that contain constructs the `glob` crate silently
@@ -117,12 +129,14 @@ pub(super) async fn glob_files(args: &GlobInputArgs) -> Result<GlobResult, ToolE
             require_literal_separator: true,
             require_literal_leading_dot: args.dot_ignore,
         };
-        let mut collected_paths: Vec<PathBuf> = Vec::new();
+        // Symlinked directories are listed but never descended into: matches
+        // below a symlinked directory component are pruned afterwards.
         let walker = ignore::WalkBuilder::new(&root)
             .git_ignore(true)
             .require_git(false)
             .hidden(args.dot_ignore)
             .build();
+        let mut collected_paths: Vec<PathBuf> = Vec::new();
         for entry in walker {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -162,6 +176,26 @@ pub(super) async fn glob_files(args: &GlobInputArgs) -> Result<GlobResult, ToolE
         .collect();
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
 
+    // Never follow a symlinked directory component during traversal: a path
+    // below a symlinked directory describes the link's target content and is
+    // dropped (the symlinked directory itself remains a listed match). Only
+    // ancestors strictly beneath the pattern root are examined: the root
+    // spelling comes from the approved pattern, so a symlinked pattern root
+    // legitimately reveals its target.
+    let pattern_root_path = PathBuf::from(&root);
+    candidates.retain(|candidate| {
+        let ancestors_within_root: Vec<PathBuf> = ancestor_components(&candidate.path)
+            .into_iter()
+            .skip_while(|ancestor| ancestor != &pattern_root_path)
+            .skip(1)
+            .collect();
+        !ancestors_within_root.iter().any(|ancestor| {
+            std::fs::symlink_metadata(ancestor)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+        })
+    });
+
     let mut selected_candidates = Vec::new();
     for candidate in candidates {
         if path_matches_type_filter(&candidate.path, args) {
@@ -182,7 +216,7 @@ pub(super) async fn glob_files(args: &GlobInputArgs) -> Result<GlobResult, ToolE
     let mut matched_path_kinds = Vec::with_capacity(selected_candidates.len());
     for candidate in selected_candidates {
         matches.add_path_kind(candidate.path_kind);
-        matched_paths.push(candidate.path.display().to_string());
+        matched_paths.push(candidate.matched_line());
         matched_path_kinds.push(candidate.path_kind);
     }
 

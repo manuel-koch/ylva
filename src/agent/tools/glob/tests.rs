@@ -856,3 +856,532 @@ fn glob_call_omits_canonical_path_for_the_default_pattern_root() {
         "a cwd-rooted pattern must not gain the disclosure prop"
     );
 }
+
+#[cfg(unix)]
+struct SymlinkFixture {
+    _directories: Vec<TempDir>,
+    search_root: std::path::PathBuf,
+    content_link: std::path::PathBuf,
+    content_target: std::path::PathBuf,
+    directory_link: std::path::PathBuf,
+    real_directory: std::path::PathBuf,
+    dangling_link: std::path::PathBuf,
+    plain_file: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl SymlinkFixture {
+    /// A search root holding a symlinked file (`content_link` →
+    /// `content_target`), a symlinked directory (`directory_link` →
+    /// `real_directory`, which contains `real_child.txt`), a dangling
+    /// symlink, and one plain file.
+    fn new() -> Self {
+        let search_directory = TempDir::new().expect("tempdir");
+        let target_directory = TempDir::new().expect("target tempdir");
+        let content_target = target_directory.path().join("content");
+        std::fs::write(&content_target, "content").expect("write content");
+        let content_link = search_directory.path().join("content.txt");
+        std::os::unix::fs::symlink(&content_target, &content_link).expect("symlink file");
+        let real_directory = target_directory.path().join("real_dir");
+        std::fs::create_dir(&real_directory).expect("mkdir");
+        std::fs::write(real_directory.join("real_child.txt"), "child").expect("write child");
+        let directory_link = search_directory.path().join("dir_link");
+        std::os::unix::fs::symlink(&real_directory, &directory_link).expect("symlink dir");
+        let dangling_link = search_directory.path().join("missing.txt");
+        std::os::unix::fs::symlink(target_directory.path().join("gone.txt"), &dangling_link)
+            .expect("symlink dangling");
+        let plain_file = search_directory.path().join("plain.txt");
+        std::fs::write(&plain_file, "plain").expect("write plain file");
+        let search_root = search_directory.path().to_path_buf();
+        Self {
+            _directories: vec![search_directory, target_directory],
+            search_root,
+            content_link,
+            content_target,
+            directory_link,
+            real_directory,
+            dangling_link,
+            plain_file,
+        }
+    }
+}
+
+#[test]
+fn glob_only_files_matches_symlink_to_file_by_target_type() {
+    crate::test_support::run_locked(async {
+        #[cfg(unix)]
+        {
+            let fixture = SymlinkFixture::new();
+            for git_ignore in [false, true] {
+                let result = glob_files(&GlobInputArgs {
+                    pattern: format!("{}/**/content.txt", fixture.search_root.display()),
+                    git_ignore,
+                    only_files: true,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                assert_eq!(
+                    result.matches,
+                    path_counts(1, 0),
+                    "symlinked file must count as file, git_ignore={git_ignore}"
+                );
+                let canonical_content_target =
+                    std::fs::canonicalize(&fixture.content_target).expect("canonicalize target");
+                assert_eq!(
+                    result.matched_paths,
+                    vec![format!(
+                        "{} -> {}",
+                        fixture.content_link.display(),
+                        canonical_content_target.display()
+                    )],
+                    "git_ignore={git_ignore}"
+                );
+                assert!(!result.truncated, "git_ignore={git_ignore}");
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-unix targets have no symlinks: a regular file keeps matching.
+            let directory = TempDir::new().expect("tempdir");
+            let file = directory.path().join("content.txt");
+            std::fs::write(&file, "x").expect("write");
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/**/content.txt", directory.path().display()),
+                git_ignore: false,
+                only_files: true,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            assert_eq!(result.matches, path_counts(1, 0));
+            assert_eq!(result.matched_paths, vec![file.display().to_string()]);
+        }
+    });
+}
+
+#[test]
+fn glob_only_files_excludes_symlink_to_directory() {
+    crate::test_support::run_locked(async {
+        #[cfg(unix)]
+        {
+            let fixture = SymlinkFixture::new();
+            for git_ignore in [false, true] {
+                let result = glob_files(&GlobInputArgs {
+                    pattern: format!("{}/**/*", fixture.search_root.display()),
+                    git_ignore,
+                    only_files: true,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                let canonical_content_target =
+                    std::fs::canonicalize(&fixture.content_target).expect("canonicalize target");
+                assert_eq!(
+                    result.matched_paths,
+                    vec![
+                        format!(
+                            "{} -> {}",
+                            fixture.content_link.display(),
+                            canonical_content_target.display()
+                        ),
+                        fixture.plain_file.display().to_string(),
+                    ],
+                    "the symlink-to-directory and the dangling link must be excluded, git_ignore={git_ignore}"
+                );
+                assert_eq!(result.matches, path_counts(2, 0), "git_ignore={git_ignore}");
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-unix targets have no symlinks: a real directory is still excluded.
+            let directory = TempDir::new().expect("tempdir");
+            std::fs::create_dir(directory.path().join("sub")).expect("mkdir");
+            let file = directory.path().join("a.txt");
+            std::fs::write(&file, "a").expect("write");
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/**/*", directory.path().display()),
+                git_ignore: false,
+                only_files: true,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            assert_eq!(result.matched_paths, vec![file.display().to_string()]);
+        }
+    });
+}
+
+#[test]
+fn glob_only_dirs_matches_symlink_to_directory_by_target_type() {
+    crate::test_support::run_locked(async {
+        #[cfg(unix)]
+        {
+            let fixture = SymlinkFixture::new();
+            for git_ignore in [false, true] {
+                let result = glob_files(&GlobInputArgs {
+                    pattern: format!("{}/**/*", fixture.search_root.display()),
+                    git_ignore,
+                    only_dirs: true,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                let canonical_real_directory = std::fs::canonicalize(&fixture.real_directory)
+                    .expect("canonicalize real directory");
+                assert_eq!(
+                    result.matched_paths,
+                    vec![format!(
+                        "{} -> {}",
+                        fixture.directory_link.display(),
+                        canonical_real_directory.display()
+                    )],
+                    "only the symlink-to-directory must match, git_ignore={git_ignore}"
+                );
+                assert_eq!(result.matches, path_counts(0, 1), "git_ignore={git_ignore}");
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-unix targets have no symlinks: a real directory is still matched.
+            let directory = TempDir::new().expect("tempdir");
+            let subdirectory = directory.path().join("sub");
+            std::fs::create_dir(&subdirectory).expect("mkdir");
+            std::fs::write(directory.path().join("a.txt"), "a").expect("write");
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/**/*", directory.path().display()),
+                git_ignore: false,
+                only_dirs: true,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            assert_eq!(
+                result.matched_paths,
+                vec![subdirectory.display().to_string()]
+            );
+        }
+    });
+}
+
+#[test]
+fn glob_unfiltered_counts_symlinks_by_target_type() {
+    crate::test_support::run_locked(async {
+        #[cfg(unix)]
+        {
+            let fixture = SymlinkFixture::new();
+            for git_ignore in [false, true] {
+                let result = glob_files(&GlobInputArgs {
+                    pattern: format!("{}/**/*", fixture.search_root.display()),
+                    git_ignore,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                assert_eq!(
+                    result.matches,
+                    path_counts(3, 1),
+                    "symlink-to-dir counts as directory, symlink-to-file and dangling as files, git_ignore={git_ignore}"
+                );
+                let canonical_content_target =
+                    std::fs::canonicalize(&fixture.content_target).expect("canonicalize target");
+                let canonical_real_directory = std::fs::canonicalize(&fixture.real_directory)
+                    .expect("canonicalize real directory");
+                let raw_dangling_target =
+                    std::fs::read_link(&fixture.dangling_link).expect("read dangling link");
+                assert_eq!(
+                    result.matched_paths,
+                    vec![
+                        format!(
+                            "{} -> {}",
+                            fixture.content_link.display(),
+                            canonical_content_target.display()
+                        ),
+                        format!(
+                            "{} -> {}",
+                            fixture.directory_link.display(),
+                            canonical_real_directory.display()
+                        ),
+                        format!(
+                            "{} -> {}",
+                            fixture.dangling_link.display(),
+                            raw_dangling_target.display()
+                        ),
+                        fixture.plain_file.display().to_string(),
+                    ],
+                    "git_ignore={git_ignore}"
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-unix targets have no symlinks: plain types are unchanged.
+            let directory = TempDir::new().expect("tempdir");
+            std::fs::create_dir(directory.path().join("sub")).expect("mkdir");
+            std::fs::write(directory.path().join("a.txt"), "a").expect("write");
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/**/*", directory.path().display()),
+                git_ignore: false,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            assert_eq!(result.matches, path_counts(1, 1));
+        }
+    });
+}
+
+#[test]
+fn glob_dangling_symlink_counts_as_file_but_matches_no_type_filter() {
+    crate::test_support::run_locked(async {
+        #[cfg(unix)]
+        {
+            let directory = TempDir::new().expect("tempdir");
+            let dangling_link = directory.path().join("missing.txt");
+            std::os::unix::fs::symlink(directory.path().join("gone.txt"), &dangling_link)
+                .expect("symlink dangling");
+            let pattern = format!("{}/**/*.txt", directory.path().display());
+
+            for git_ignore in [false, true] {
+                let unfiltered = glob_files(&GlobInputArgs {
+                    pattern: pattern.clone(),
+                    git_ignore,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                assert_eq!(
+                    unfiltered.matches,
+                    path_counts(1, 0),
+                    "dangling link must count as file unfiltered, git_ignore={git_ignore}"
+                );
+                let raw_target = std::fs::read_link(&dangling_link).expect("read dangling link");
+                assert_eq!(
+                    unfiltered.matched_paths,
+                    vec![format!(
+                        "{} -> {}",
+                        dangling_link.display(),
+                        raw_target.display()
+                    )],
+                    "dangling link discloses its raw read_link target, git_ignore={git_ignore}"
+                );
+
+                let files_only = glob_files(&GlobInputArgs {
+                    pattern: pattern.clone(),
+                    git_ignore,
+                    only_files: true,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                assert_eq!(
+                    files_only.matches,
+                    path_counts(0, 0),
+                    "dangling link must be rejected by only_files, git_ignore={git_ignore}"
+                );
+
+                let dirs_only = glob_files(&GlobInputArgs {
+                    pattern: pattern.clone(),
+                    git_ignore,
+                    only_dirs: true,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                assert_eq!(
+                    dirs_only.matches,
+                    path_counts(0, 0),
+                    "dangling link must be rejected by only_dirs, git_ignore={git_ignore}"
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-unix targets have no symlinks: a regular file keeps matching.
+            let directory = TempDir::new().expect("tempdir");
+            std::fs::write(directory.path().join("a.txt"), "a").expect("write");
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/**/*.txt", directory.path().display()),
+                git_ignore: false,
+                only_files: true,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            assert_eq!(result.matches, path_counts(1, 0));
+        }
+    });
+}
+
+#[test]
+fn glob_traversal_does_not_descend_into_symlinked_directory() {
+    crate::test_support::run_locked(async {
+        #[cfg(unix)]
+        {
+            let fixture = SymlinkFixture::new();
+            for git_ignore in [false, true] {
+                // Enumerating beneath the search root, the symlinked
+                // directory appears but its target's children do not.
+                let result = glob_files(&GlobInputArgs {
+                    pattern: format!("{}/**", fixture.search_root.display()),
+                    git_ignore,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                assert!(
+                    !result
+                        .matched_paths
+                        .iter()
+                        .any(|path| path.contains("real_child")),
+                    "the target's children must not be enumerated, git_ignore={git_ignore}: {:?}",
+                    result.matched_paths
+                );
+                assert!(
+                    result
+                        .matched_paths
+                        .iter()
+                        .any(|path| path.starts_with(&fixture.directory_link.display().to_string())),
+                    "the symlinked directory itself must be listed, git_ignore={git_ignore}: {:?}",
+                    result.matched_paths
+                );
+
+                // A pattern rooted at the symlinked directory lists its
+                // target's own children, mirroring an explicit pattern root.
+                let rooted = glob_files(&GlobInputArgs {
+                    pattern: format!("{}/**/*", fixture.directory_link.display()),
+                    git_ignore,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                assert!(
+                    rooted
+                        .matched_paths
+                        .iter()
+                        .any(|path| path.contains("real_child")),
+                    "the pattern-rooted symlink directory shows its target, git_ignore={git_ignore}: {:?}",
+                    rooted.matched_paths
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-unix targets have no symlinks: real directories are still descended into.
+            let directory = TempDir::new().expect("tempdir");
+            std::fs::create_dir(directory.path().join("sub")).expect("mkdir");
+            std::fs::write(directory.path().join("sub/child.txt"), "child").expect("write");
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/**/*", directory.path().display()),
+                git_ignore: false,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            assert!(
+                result
+                    .matched_paths
+                    .iter()
+                    .any(|path| path.contains("child")),
+                "real directories must still be traversed"
+            );
+        }
+    });
+}
+
+#[test]
+fn glob_output_annotates_symlinked_matches_with_their_target() {
+    crate::test_support::run_locked(async {
+        #[cfg(unix)]
+        {
+            let fixture = SymlinkFixture::new();
+            for git_ignore in [false, true] {
+                let result = glob_files(&GlobInputArgs {
+                    pattern: format!("{}/**/*", fixture.search_root.display()),
+                    git_ignore,
+                    ..glob_args("")
+                })
+                .await
+                .expect("glob ok");
+                let lines: Vec<String> = result.text().lines().map(str::to_string).collect();
+                let canonical_content_target =
+                    std::fs::canonicalize(&fixture.content_target).expect("canonicalize target");
+                let canonical_real_directory = std::fs::canonicalize(&fixture.real_directory)
+                    .expect("canonicalize real directory");
+                // Exact strings: symlinked lines are annotated `path -> target`
+                // (canonical target when resolvable, raw link spelling when
+                // dangling) while non-symlink lines stay bare.
+                assert_eq!(
+                    lines,
+                    vec![
+                        format!(
+                            "{} -> {}",
+                            fixture.content_link.display(),
+                            canonical_content_target.display()
+                        ),
+                        format!(
+                            "{} -> {}",
+                            fixture.directory_link.display(),
+                            canonical_real_directory.display()
+                        ),
+                        format!(
+                            "{} -> {}",
+                            fixture.dangling_link.display(),
+                            std::fs::read_link(&fixture.dangling_link)
+                                .expect("read dangling link")
+                                .display()
+                        ),
+                        fixture.plain_file.display().to_string(),
+                    ],
+                    "git_ignore={git_ignore}"
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-unix targets have no symlinks: every line stays bare.
+            let directory = TempDir::new().expect("tempdir");
+            std::fs::write(directory.path().join("plain.txt"), "plain").expect("write");
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/**/*.txt", directory.path().display()),
+                git_ignore: false,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            assert_eq!(
+                result
+                    .text()
+                    .lines()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+                vec![directory.path().join("plain.txt").display().to_string()]
+            );
+        }
+    });
+}
+
+#[test]
+fn glob_descriptions_define_symlink_target_classification() {
+    let tool = GlobTool::default();
+    assert!(
+        tool.description().contains("path -> target"),
+        "description must disclose the symlink annotation format: {}",
+        tool.description()
+    );
+    assert!(tool.description().contains("target's type"));
+    let schema = serde_json::to_value(tool.input_schema()).expect("serialize glob schema");
+    for key in ["only_files", "only_dirs"] {
+        let description = schema["properties"][key]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} description"));
+        assert!(
+            description.contains("target's type"),
+            "{key} must classify symlinks by target type: {description}"
+        );
+        assert!(
+            description.contains("dangling"),
+            "{key} must state that dangling links pass no type filter: {description}"
+        );
+    }
+}

@@ -82,12 +82,18 @@ pub struct GlobInputArgs {
     /// structured result metadata.
     #[serde(default)]
     pub only_count: bool,
-    /// Restrict to regular files (excludes dirs/symlinks). Mutually exclusive
-    /// with `only_dirs` — both `true` is an error. Omit both for all path types.
+    /// Restrict to regular files (excludes dirs/symlinks). A symlink counts
+    /// as its target's type: a symlink to a regular file matches, a symlink
+    /// to a directory and a dangling link (missing or unreadable target) do
+    /// not. Mutually exclusive with `only_dirs` — both `true` is an error.
+    /// Omit both for all path types.
     #[serde(default)]
     pub only_files: bool,
-    /// Restrict to directories (excludes files/symlinks). Mutually exclusive
-    /// with `only_files` — both `true` is an error. Omit both for all path types.
+    /// Restrict to directories (excludes files/symlinks). A symlink counts
+    /// as its target's type: a symlink to a directory matches, a symlink to
+    /// a regular file and a dangling link (missing or unreadable target) do
+    /// not. Mutually exclusive with `only_files` — both `true` is an error.
+    /// Omit both for all path types.
     #[serde(default)]
     pub only_dirs: bool,
     /// Max paths to return. Omit this argument for no result-count limit; do
@@ -154,7 +160,12 @@ impl Tool for GlobTool {
         `dot_ignore` (default `false`) excludes dot-prefixed paths. `git_ignore` (default `true`) \
         skips paths matched by `.gitignore` rules; it does not exclude the `.git` directory or \
         other dot-prefixed paths. Set `dot_ignore=true` to exclude them. `only_files`/`only_dirs` \
-        are mutually exclusive type filters; both `true` is an error. Omit the optional `limit` \
+        are mutually exclusive type filters; both `true` is an error. A symlink counts as its \
+        target's type — a symlinked file is a file and a symlinked directory is a directory, and \
+        symlinked matches are annotated `path -> target` in the output — while a dangling link \
+        counts as a file unfiltered but passes no type filter. Traversal never follows symlinks: \
+        a symlinked directory is listed but not descended into, except that a symlinked pattern \
+        root legitimately reveals its target. Omit the optional `limit` \
         argument for no result-count limit; do not use an arbitrary large value to request \
         unlimited results. Bare `**` matches directories; use `**/*` to match files and \
         directories recursively. Result metadata contains \
