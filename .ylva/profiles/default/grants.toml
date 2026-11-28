@@ -9,3 +9,15 @@ rule = "./.rumdl.toml"
 [[grants]]
 tool = "bash"
 rule = "make test-coverage"
+
+[[grants]]
+tool = "bash"
+rule = "make format"
+
+[[grants]]
+tool = "bash"
+rule = "make lint"
+
+[[grants]]
+tool = "bash"
+rule = "make format lint"
