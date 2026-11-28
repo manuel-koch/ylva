@@ -173,6 +173,52 @@ fn an_overshooting_estimate_leaves_no_free_cells() {
 }
 
 #[test]
+fn tools_label_shows_all_requested_calls_for_the_viewed_agent() {
+    let mut status = snapshot(vec![], 1000);
+    status.tool_call_counts = [
+        ("read".into(), 9),
+        ("write".into(), 5),
+        ("unknown".into(), 1),
+    ]
+    .into_iter()
+    .collect();
+
+    let lines = texts(&status, 80);
+    let tools = lines.iter().find(|line| line.starts_with("Tools")).unwrap();
+    assert_eq!(tools, "Tools (15)      read (9), write (5)");
+}
+
+#[test]
+fn tools_label_shows_zero_when_no_calls_have_been_requested() {
+    let lines = texts(&snapshot(vec![], 1000), 80);
+    assert!(lines
+        .iter()
+        .any(|line| line == "Tools (0)       read, write"));
+}
+
+#[test]
+fn tools_label_retains_total_when_allowed_tools_are_unknown() {
+    let mut status = snapshot(vec![], 1000);
+    status.allowed_tools.clear();
+    status.tool_call_counts.insert("read".into(), 2);
+    let lines = texts(&status, 80);
+    assert!(lines.iter().any(|line| line == "Tools (2)       none"));
+}
+
+#[test]
+fn large_tool_totals_keep_wrapped_values_aligned() {
+    let mut status = snapshot(vec![], 1000);
+    status.tool_call_counts.insert("read".into(), 1_000_000_000);
+    let lines = texts(&status, 40);
+    let first = lines
+        .iter()
+        .position(|line| line.starts_with("Tools"))
+        .unwrap();
+    assert_eq!(lines[first], "Tools (1000000000) read (1000000000),");
+    assert_eq!(lines[first + 1], "                   write");
+}
+
+#[test]
 fn long_tool_lists_wrap_within_the_value_column() {
     let mut long = snapshot(vec![], 1000);
     long.allowed_tools = (0..12)

@@ -75,9 +75,13 @@ fn heading(text: &str) -> Line<'static> {
 }
 
 fn field(label: &str, value: impl Into<String>) -> Line<'static> {
+    field_with_width(label, value, LABEL_WIDTH)
+}
+
+fn field_with_width(label: &str, value: impl Into<String>, label_width: usize) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("{label:<LABEL_WIDTH$}"),
+            format!("{label:<label_width$}"),
             Style::default().fg(muted_text_color()),
         ),
         Span::styled(value.into(), Style::default().fg(content_color())),
@@ -297,13 +301,20 @@ pub(super) fn status_lines(snapshot: &StatusSnapshot, width: usize) -> Vec<Line<
             format_token_estimate(breakdown.context_length())
         ),
     ));
+    let total_calls: usize = snapshot.tool_call_counts.values().sum();
+    let tools_heading = format!("Tools ({total_calls})");
+    let label_width = LABEL_WIDTH.max(tools_heading.len() + 1);
     let tool_labels = tool_labels(snapshot);
-    let tool_names = wrap_comma_separated(&tool_labels, width.saturating_sub(LABEL_WIDTH).max(1));
+    let tool_names = wrap_comma_separated(&tool_labels, width.saturating_sub(label_width).max(1));
     for (index, tool_line) in tool_names.into_iter().enumerate() {
-        lines.push(field(if index == 0 { "Tools" } else { "" }, tool_line));
+        lines.push(field_with_width(
+            if index == 0 { &tools_heading } else { "" },
+            tool_line,
+            label_width,
+        ));
     }
     if tool_labels.is_empty() {
-        lines.push(field("Tools", "none"));
+        lines.push(field_with_width(&tools_heading, "none", label_width));
     }
 
     append_timeline(&mut lines, snapshot, width);

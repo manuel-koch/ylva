@@ -1071,8 +1071,9 @@ are not persisted, so those segments are dropped and the popup adds a note
 the subagent's own view.
 
 `StatusSnapshot::tool_call_counts` counts every assistant tool call by name over the whole
-transcript (`tool_call_counts`, `agent/finished_status.rs`); the popup appends `(n)` to used tools
-to allowed tools only; calls to tools that are not allowed (unknown tools) are not listed.
+transcript (`tool_call_counts`, `agent/finished_status.rs`). The popup sums all counts for its
+Tools label, even when a call's name is absent from the allowed-tools list; per-tool counts are
+shown only for allowed tools.
 
 `StatusSnapshot::timeline` (`agent/status_timeline.rs`) merges `model_changed` and `compaction`
 events in file order; identical consecutive model entries (every process start records one) are

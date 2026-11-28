@@ -194,7 +194,20 @@ mod tests {
             Message::Assistant {
                 content: "answer".to_string(),
                 status: AssistantStatus::Complete,
-                tool_calls: Vec::new(),
+                tool_calls: vec![
+                    crate::agent::ToolCallRequest {
+                        id: Uuid::new_v4(),
+                        name: "read".to_string(),
+                        arguments: serde_json::json!({}),
+                        persisted_title_arguments: Vec::new(),
+                    },
+                    crate::agent::ToolCallRequest {
+                        id: Uuid::new_v4(),
+                        name: "unknown".to_string(),
+                        arguments: serde_json::json!({}),
+                        persisted_title_arguments: Vec::new(),
+                    },
+                ],
             },
         ];
         store
@@ -226,6 +239,8 @@ mod tests {
         assert_eq!(snapshot.engine_name, "main");
         assert_eq!(snapshot.agent_type.as_deref(), Some("research"));
         assert_eq!(snapshot.allowed_tools, ["read", "write"]);
+        assert_eq!(snapshot.tool_call_counts.get("read"), Some(&1));
+        assert_eq!(snapshot.tool_call_counts.get("unknown"), Some(&1));
         assert_eq!(snapshot.max_output_tokens, Some(512));
         assert_eq!(snapshot.breakdown.context_length(), 1000);
         assert!(snapshot.timeline.iter().any(|entry| matches!(

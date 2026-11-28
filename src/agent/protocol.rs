@@ -637,13 +637,13 @@ pub struct StatusSnapshot {
     pub agent_type: Option<String>,
     /// Tool names the agent can call.
     pub allowed_tools: Vec<String>,
-    /// How often each tool was called in the conversation; unused tools are absent.
+    /// Requested calls per tool across this agent's transcript; unused tools are absent.
     pub tool_call_counts: std::collections::BTreeMap<String, usize>,
     pub breakdown: crate::context_breakdown::ContextBreakdown,
     /// Model changes and compactions, oldest first.
     pub timeline: Vec<crate::agent::StatusTimelineEntry>,
-    /// Derived from the transcript of a finished subagent: its system prompt,
-    /// tool schemas and allowed tools are not recorded, so they are absent.
+    /// Derived from a finished subagent transcript: its system prompt and tool
+    /// schemas are not recorded; older transcripts also lack allowed tools.
     pub finished_subagent: bool,
 }
 
