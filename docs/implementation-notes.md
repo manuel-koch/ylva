@@ -173,6 +173,9 @@ See [configuration](./configuration.md),
   without a changed-effort retry. EdenAI's stream adapter also projects readable
   `reasoning_items[].summary[].text` fragments into `StreamEvent::Thinking`; it ignores encrypted
   payloads and empty summaries. The shared Chat Completions parser remains provider-neutral.
+  A single SSE delta can carry display and tool data simultaneously; the transport
+  forwards both so the agent can assemble complete tool arguments. EdenAI only
+  projects reasoning summaries when the shared parser returns no standard events.
 - Unverified notice state belongs to a live engine, not the shared connection. The agent's
   pre-dispatch callback forwards notices with acknowledgment before chat I/O; failed chat
   also drains pending notices. Default resets deduplication. Independent runtime handles

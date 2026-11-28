@@ -1202,8 +1202,8 @@ fn parse_reported_input_tokens(data: &str) -> Option<(usize, &'static str)> {
 ///
 /// An empty frame, or a delta with no user-facing `content`, no
 /// thinking/reasoning fragment, and no usable `tool_calls`, produces an empty
-/// vector. A chunk with both text/reasoning and `tool_calls` preserves the
-/// existing text/reasoning precedence. Every usable entry in
+/// vector. A chunk with both text/reasoning and `tool_calls` emits the selected
+/// display event first, then the tool calls. Every usable entry in
 /// `delta.tool_calls` becomes a [`StreamEvent::Delta`] in array order (raw
 /// fragments; assembly is the agent's task). Malformed JSON yields one
 /// [`StreamEvent::Error`].
@@ -1256,75 +1256,59 @@ pub(crate) fn parse_sse_payload(data: &str) -> Vec<StreamEvent> {
         .and_then(|choices| choices.get(0))
         .and_then(|choice| choice.get("delta"));
 
-    let is_anthropic_thinking_delta =
-        delta.and_then(|d| d.get("type")).and_then(|t| t.as_str()) == Some("thinking_delta");
-    if is_anthropic_thinking_delta {
-        if let Some(serde_json::Value::String(thinking)) = delta.and_then(|d| d.get("thinking")) {
-            if !thinking.is_empty() {
-                return vec![StreamEvent::Thinking(thinking.clone())];
-            }
-        }
-    }
-
-    // `content` wins over `reasoning_content`/`reasoning` when a delta
-    // somehow carries both, matching the tests' documented convention.
-    if let Some(serde_json::Value::String(content)) = delta.and_then(|d| d.get("content")) {
-        if !content.is_empty() {
-            return vec![StreamEvent::Text(content.clone())];
-        }
-    }
-
-    if let Some(serde_json::Value::String(reasoning)) =
-        delta.and_then(|d| d.get("reasoning_content"))
-    {
-        if !reasoning.is_empty() {
-            return vec![StreamEvent::Thinking(reasoning.clone())];
-        }
-    }
-
-    // Bare `reasoning` (no `_content` suffix) — Ollama's and vLLM's
-    // OpenAI-compatible endpoints use this field name for the same purpose.
-    if let Some(serde_json::Value::String(reasoning)) = delta.and_then(|d| d.get("reasoning")) {
-        if !reasoning.is_empty() {
-            return vec![StreamEvent::Thinking(reasoning.clone())];
-        }
-    }
-
-    delta
-        .and_then(|d| d.get("tool_calls"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|call| {
-            let tool_call_index = call
-                .get("index")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|index| usize::try_from(index).ok())
-                .unwrap_or(0);
-            let tool_call_id = call
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(String::from);
-            let function_name = call
-                .pointer("/function/name")
-                .and_then(serde_json::Value::as_str)
-                .map(String::from);
-            let arguments_fragment = call
-                .pointer("/function/arguments")
-                .and_then(serde_json::Value::as_str)
-                .map(String::from);
-            if tool_call_id.is_some() || function_name.is_some() || arguments_fragment.is_some() {
-                Some(StreamEvent::Delta(DeltaChunk {
-                    tool_call_index,
-                    tool_call_id,
-                    function_name,
-                    arguments_fragment,
-                }))
-            } else {
-                None
-            }
-        })
-        .collect()
+    let field = |name| {
+        delta
+            .and_then(|delta| delta.get(name))
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+    };
+    let thinking = (field("type") == Some("thinking_delta"))
+        .then(|| field("thinking"))
+        .flatten();
+    let display = thinking
+        .map(|text| StreamEvent::Thinking(text.to_owned()))
+        .or_else(|| field("content").map(|text| StreamEvent::Text(text.to_owned())))
+        .or_else(|| field("reasoning_content").map(|text| StreamEvent::Thinking(text.to_owned())))
+        .or_else(|| field("reasoning").map(|text| StreamEvent::Thinking(text.to_owned())));
+    let mut events: Vec<_> = display.into_iter().collect();
+    events.extend(
+        delta
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|call| {
+                let tool_call_index = call
+                    .get("index")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|index| usize::try_from(index).ok())
+                    .unwrap_or(0);
+                let tool_call_id = call
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(String::from);
+                let function_name = call
+                    .pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(String::from);
+                let arguments_fragment = call
+                    .pointer("/function/arguments")
+                    .and_then(serde_json::Value::as_str)
+                    .map(String::from);
+                if tool_call_id.is_some() || function_name.is_some() || arguments_fragment.is_some()
+                {
+                    Some(StreamEvent::Delta(DeltaChunk {
+                        tool_call_index,
+                        tool_call_id,
+                        function_name,
+                        arguments_fragment,
+                    }))
+                } else {
+                    None
+                }
+            }),
+    );
+    events
 }
 
 #[cfg(test)]

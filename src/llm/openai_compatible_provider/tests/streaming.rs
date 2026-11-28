@@ -34,6 +34,75 @@ macro_rules! fixture {
 }
 
 #[test]
+fn mixed_display_and_tool_calls_preserve_precedence_and_order() {
+    let cases = [
+        (
+            serde_json::json!({"content":"answer", "reasoning_content":"hidden", "reasoning":"hidden"}),
+            "answer",
+            false,
+        ),
+        (
+            serde_json::json!({"content":"", "reasoning_content":"reason", "reasoning":"hidden"}),
+            "reason",
+            true,
+        ),
+        (
+            serde_json::json!({"reasoning_content":"", "reasoning":"bare"}),
+            "bare",
+            true,
+        ),
+        (
+            serde_json::json!({"type":"thinking_delta", "thinking":"thought", "content":"hidden", "reasoning":"hidden"}),
+            "thought",
+            true,
+        ),
+        (
+            serde_json::json!({"type":"thinking_delta", "thinking":"", "content":"fallback"}),
+            "fallback",
+            false,
+        ),
+    ];
+    for (mut delta, expected, thinking) in cases {
+        delta["tool_calls"] = serde_json::json!([
+            {"index": 2, "id": "first", "function": {"name": "read", "arguments": "prefix"}},
+            {"index": 7, "id": "second", "function": {"name": "write", "arguments": "fragment"}}
+        ]);
+        let payload = serde_json::json!({"choices": [{"delta": delta}]}).to_string();
+        let events = parse_sse_payload(&payload);
+        assert_eq!(events.len(), 3);
+        assert!(match &events[0] {
+            StreamEvent::Thinking(text) => thinking && text == expected,
+            StreamEvent::Text(text) => !thinking && text == expected,
+            _ => false,
+        });
+        for (event, index, id, name, fragment) in [
+            (&events[1], 2, "first", "read", "prefix"),
+            (&events[2], 7, "second", "write", "fragment"),
+        ] {
+            match event {
+                StreamEvent::Delta(delta) => {
+                    assert_eq!(delta.tool_call_index, index);
+                    assert_eq!(delta.tool_call_id.as_deref(), Some(id));
+                    assert_eq!(delta.function_name.as_deref(), Some(name));
+                    assert_eq!(delta.arguments_fragment.as_deref(), Some(fragment));
+                }
+                other => panic!("expected delta: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_empty_display_and_argument_only_continuation() {
+    let payload = serde_json::json!({"choices":[{"delta": {"content":"", "reasoning_content":"", "reasoning":"", "tool_calls":[{"index":3, "function":{"arguments":"tail"}}]}}]}).to_string();
+    let events = parse_sse_payload(&payload);
+    assert_eq!(events.len(), 1);
+    assert!(
+        matches!(&events[0], StreamEvent::Delta(delta) if delta.tool_call_index == 3 && delta.tool_call_id.is_none() && delta.function_name.is_none() && delta.arguments_fragment.as_deref() == Some("tail"))
+    );
+}
+
+#[test]
 fn parse_done_sentinel() {
     assert!(matches!(
         parse_single_sse_event("[DONE]"),

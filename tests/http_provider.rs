@@ -33,6 +33,9 @@ use common::mock_llm_server::{
     content_frame, tool_call_frame, MockLlmConfig, MockLlmServer, OllamaThinking,
 };
 
+#[path = "http_provider/mixed_sse.rs"]
+mod mixed_sse;
+
 /// A provider (`Provider` trait object) pointed at a running [`MockLlmServer`]
 /// with a fixed model. Trait-typed so consumers are decoupled from the concrete
 /// HTTP provider. Use [`openai_compatible_provider_for`] when calling `.chat()` directly —

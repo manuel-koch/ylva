@@ -19,6 +19,14 @@ Keep these three things apart:
   OpenRouter worked well; small local Ollama models worked with lower-quality
   results.
 
+## Chat Completions streaming
+
+A delta can contain both display text or reasoning and tool-call fragments.
+Ylva emits the selected display fragment first and preserves every usable tool
+fragment in wire order. Alternative display fields retain their existing
+precedence; EdenAI's reasoning-item summaries remain a fallback when no
+standard event is present.
+
 ## Output limit support
 
 | Provider | Request field | Catalog maximum source |
