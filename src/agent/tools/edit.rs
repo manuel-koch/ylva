@@ -125,7 +125,7 @@ impl Tool for EditTool {
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {
-        &["path"]
+        &["path", crate::agent::tools::CANONICAL_PATH_ARGUMENT]
     }
 
     fn validate_args(&self, arguments: &Value) -> Result<(), String> {

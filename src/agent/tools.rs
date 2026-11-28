@@ -20,6 +20,7 @@
 //! changing the agent loop.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use schemars::generate::SchemaSettings;
@@ -37,6 +38,11 @@ use crate::sandbox::{ApprovalCheck, ApprovalVerdict, RuleOrigin, ToolRuleList};
 use crate::text_normalization::sanitize_inline_title;
 
 pub(crate) use base64::engine::general_purpose::STANDARD as STANDARD_BASE64;
+
+/// Title-argument key that discloses where a supplied path argument actually
+/// resolves. Present in `title_arguments` only when resolution changed the
+/// path (see [`canonical_path_title_arguments`]).
+pub(crate) const CANONICAL_PATH_ARGUMENT: &str = "canonical_path";
 
 pub(crate) fn utf8_text_preview(bytes: &[u8]) -> Option<String> {
     std::str::from_utf8(bytes).ok().map(str::to_owned)
@@ -338,7 +344,18 @@ pub trait ToolCall: Send + Sync {
 
     /// Non-content-section, non-null arguments supported by the tool schema,
     /// sorted by schema-defined rank. Unknown input keys are not displayed.
+    ///
+    /// Callers that override `title_arguments` but need the standard
+    /// projection (including the body/default-argument filtering and the
+    /// schema-rank ordering) can reuse this default through a fully
+    /// qualified `<Self as ToolCall>::default_title_arguments(self)` call.
     fn title_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        Self::default_title_arguments(self)
+    }
+
+    /// The standard `title_arguments` projection, callable in full from an
+    /// overriding `title_arguments` implementation.
+    fn default_title_arguments(&self) -> Vec<(String, serde_json::Value)> {
         let mut args: Vec<(String, serde_json::Value)> = self
             .arguments()
             .as_object()
@@ -609,6 +626,82 @@ pub(crate) fn path_grant_subjects(
     GrantSubjects::Single(crate::grants::GrantSubject::Path(
         sandbox_context.resolve_path(std::path::Path::new(path)),
     ))
+}
+
+/// `true` when the lexically normalized `supplied` path describes the same
+/// location as the physical `resolved` path. Lexical normalization folds
+/// `.`/`..` components without touching the filesystem, and macOS resolves
+/// the root-level `/var`, `/tmp` and `/etc` aliases through `/private` when
+/// an existing ancestor is canonicalized; both rewrites rename a file without
+/// changing where the policy judges it, so neither counts as a
+/// disclosure-worthy mismatch. A symlink the supplied path itself contains
+/// does change the spelling in a way lexical rules cannot express, and keeps
+/// counting as a difference.
+fn supplied_path_describes_resolution(supplied: &str, resolved: &Path) -> bool {
+    let Ok(absolute) = std::path::absolute(supplied) else {
+        return false;
+    };
+    let mut components: Vec<std::path::Component<'_>> = Vec::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::ParentDir => match components.last() {
+                Some(std::path::Component::Normal(_)) => {
+                    components.pop();
+                }
+                _ => components.push(component),
+            },
+            std::path::Component::CurDir => {}
+            other => components.push(other),
+        }
+    }
+    let normalized = components.iter().collect::<PathBuf>();
+    let normalized = normalized.to_string_lossy();
+    let resolved = resolved.to_string_lossy();
+    normalized == resolved.as_ref()
+}
+
+/// Same as [`supplied_path_describes_resolution`], additionally accepting the
+/// macOS `/private` ancestor alias: the canonical resolver swaps a root-level
+/// `/var`, `/tmp` or `/etc` prefix for `/private/…` without changing the
+/// judged location.
+fn supplied_path_describes_resolution_with_alias(supplied: &str, resolved: &Path) -> bool {
+    if supplied_path_describes_resolution(supplied, resolved) {
+        return true;
+    }
+    let resolved = resolved.to_string_lossy();
+    let Some(mac_alias_free) = resolved.strip_prefix("/private/") else {
+        return false;
+    };
+    supplied_path_describes_resolution(supplied, Path::new("/").join(mac_alias_free).as_path())
+}
+
+/// Title arguments of a call extended with the resolved (`canonical`) path of
+/// its supplied path argument.
+///
+/// Appends `(CANONICAL_PATH_ARGUMENT, resolved)` when `supplied` is non-empty
+/// and resolves somewhere else in the filesystem (e.g. it is a symlink into
+/// another tree). The path policy and grants judge the resolved path, so the
+/// approval conversation must be able to name it. Nothing is appended when
+/// the argument is missing/empty, `resolved` is empty, or both spellings
+/// describe the same location (see
+/// [`supplied_path_describes_resolution`]). The prop sorts after the call's
+/// own arguments.
+pub(crate) fn canonical_path_title_arguments(
+    mut title_arguments: Vec<(String, serde_json::Value)>,
+    supplied: &str,
+    resolved: &Path,
+) -> Vec<(String, serde_json::Value)> {
+    if supplied.is_empty() || resolved.as_os_str().is_empty() {
+        return title_arguments;
+    }
+    if supplied_path_describes_resolution_with_alias(supplied, resolved) {
+        return title_arguments;
+    }
+    title_arguments.push((
+        CANONICAL_PATH_ARGUMENT.to_string(),
+        serde_json::Value::String(resolved.to_string_lossy().into_owned()),
+    ));
+    title_arguments
 }
 
 /// Central store of every tool the agent may invoke.

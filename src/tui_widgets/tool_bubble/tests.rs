@@ -1194,3 +1194,69 @@ fn expanded_arguments_render_under_arguments_section() {
     assert!(rows[4].ends_with("mode=lines"), "{rows:?}");
     assert!(rows[5].ends_with("offset=926"), "{rows:?}");
 }
+
+#[test]
+fn canonical_path_prop_is_abbreviated_like_other_path_arguments() {
+    // The disclosure prop carries an absolute resolved path; when the tool
+    // declares it path-like, the title renders it home-relative just like
+    // `path` values — visible in the collapsed line and in the expanded
+    // `Arguments:` props.
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::tui_reducer_state::ToolCallState;
+
+    let home_relative = crate::home_relative_path::display_path(std::path::Path::new(
+        "/some/absolute/resolved/target.rs",
+    ));
+    let state = ToolCallState::Pending {
+        arguments: serde_json::json!({"path": "link.sh"}),
+        content_sections: vec![],
+        title_arguments: vec![
+            ("path".to_string(), serde_json::json!("link.sh")),
+            (
+                "canonical_path".to_string(),
+                serde_json::json!("/some/absolute/resolved/target.rs"),
+            ),
+        ],
+    };
+    let render = |collapsed: bool| {
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "edit",
+                state: &state,
+                collapsed,
+                spinner_frame: 0,
+                elapsed_seconds: None,
+                display_title_override: None,
+                subtype_argument: None,
+                path_like_arguments: &["path", "canonical_path"],
+            },
+            &mut bubble_title_rows,
+            120,
+        );
+        lines
+    };
+    let text_of = |lines: &[Line<'static>]| -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+    let rendered = text_of(&render(false));
+    assert!(
+        rendered.contains(&format!("canonical_path={home_relative}")),
+        "the disclosure prop must render home-abbreviated in the expanded args: \
+         {rendered:?}"
+    );
+    // The collapsed line intentionally shows only the primary argument (the
+    // path the model supplied); the resolved location appears on expand.
+    let collapsed = text_of(&render(true));
+    assert!(
+        !collapsed.contains("canonical_path="),
+        "the collapsed line keeps the supplied path only: {collapsed:?}"
+    );
+}

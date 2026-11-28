@@ -148,7 +148,7 @@ impl Tool for SearchTool {
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {
-        &["path"]
+        &["path", crate::agent::tools::CANONICAL_PATH_ARGUMENT]
     }
 
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
@@ -204,11 +204,24 @@ impl Tool for SearchTool {
     }
 
     fn create_call(&self, id: uuid::Uuid, arguments: Value) -> Box<dyn ToolCall> {
+        // Disclose a resolved path the same way `needs_approval` and grants
+        // judge the optional `path` argument (absent/empty means cwd, which
+        // needs no disclosure).
+        let resolved_path = arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                self.sandbox_context
+                    .resolve_path(std::path::Path::new(path))
+            })
+            .unwrap_or_default();
         Box::new(SearchCall {
             id,
             raw_arguments: arguments,
             timeout_secs: self.timeout_secs(),
             runtime_output_token_limit: None,
+            resolved_path,
         })
     }
 }

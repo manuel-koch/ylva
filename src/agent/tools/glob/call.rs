@@ -16,7 +16,7 @@
 
 use tracing::Instrument;
 
-use super::super::{Tool, ToolCall, ToolCallResult, ToolError};
+use super::super::{canonical_path_title_arguments, Tool, ToolCall, ToolCallResult, ToolError};
 use super::traversal::glob_files;
 use super::{GlobInputArgs, GlobTool};
 
@@ -26,6 +26,12 @@ pub struct GlobCall {
     pub(super) raw_arguments: serde_json::Value,
     pub(super) timeout_secs: u64,
     pub(super) runtime_output_token_limit: Option<usize>,
+    /// The path the policy judges for the pattern's root directory (empty
+    /// when the pattern is absent; see `GlobTool::create_call`).
+    pub(super) resolved_path: std::path::PathBuf,
+    /// The pattern's literal root spelling, the supplied value compared
+    /// against `resolved_path` for the `canonical_path` disclosure.
+    pub(super) supplied_pattern_root: String,
 }
 
 impl ToolCall for GlobCall {
@@ -57,6 +63,15 @@ impl ToolCall for GlobCall {
             .filter(|(key, value)| !tool.is_default_argument(key.as_str(), value))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
+    }
+
+    fn title_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        let title_arguments = self.default_title_arguments();
+        canonical_path_title_arguments(
+            title_arguments,
+            &self.supplied_pattern_root,
+            &self.resolved_path,
+        )
     }
     fn run(
         self: Box<Self>,

@@ -18,7 +18,9 @@ use similar::TextDiff;
 use tracing::Instrument;
 
 use super::super::approved_target::ApprovedTarget;
-use super::super::{DiffSection, Section, Tool, ToolCall, ToolCallResult, ToolError};
+use super::super::{
+    canonical_path_title_arguments, DiffSection, Section, Tool, ToolCall, ToolCallResult, ToolError,
+};
 use super::patch::apply_edit;
 use super::result::{EditApplied, EditResult};
 use super::{EditFileArgs, EditTool, DIFF_CONTEXT_LINES};
@@ -118,6 +120,20 @@ impl ToolCall for EditCall {
     // — they're the only place left to see what was searched for.
     fn is_body_argument(&self, key: &str) -> bool {
         self.error.is_none() && matches!(key, "old_string" | "new_string")
+    }
+
+    fn title_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        let title_arguments = self.default_title_arguments();
+        let supplied_path = self
+            .raw_arguments
+            .get("path")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        canonical_path_title_arguments(
+            title_arguments,
+            supplied_path,
+            self.approved_target.canonical_path(),
+        )
     }
 
     fn timeout_secs(&self) -> u64 {

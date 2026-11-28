@@ -116,6 +116,7 @@ impl Tool for TestTool {
 // `TestTool` does not override `title` or `is_default_argument`, so these
 // tests exercise the default trait method bodies.
 
+mod canonical_path;
 mod registry;
 mod sections;
 mod titles;

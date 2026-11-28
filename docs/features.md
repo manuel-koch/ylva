@@ -630,6 +630,16 @@ sandbox evaluation and never
 bypasses an approval check. See
 [implementation notes](./implementation-notes.md#path-like-argument-normalization).
 
+When a supplied path argument resolves elsewhere in the filesystem
+(typically because the supplied path is a symlink), the policy and grants
+judge the resolved location. The path tools `read`, `write`, `edit`,
+`search` (its `path`) and `glob` (the pattern's root directory) then append
+a `canonical_path=…` entry to the rendered invocation, so the approval
+bubble names the location the call actually touches; for `glob` the value is
+the pattern's root, not an expanded pattern. Entries are omitted when the
+resolved location matches the supplied spelling (including redundant `./`
+or `..` segments and macOS `/private` ancestor aliases).
+
 ### `read`
 
 Read file content from `path` using `mode`/`offset`/`limit` and the

@@ -71,8 +71,8 @@ use tracing::Instrument;
 
 use super::approved_target::ApprovedTarget;
 use super::{
-    validate_args_with_schema, ContentSection, FileEncoding, Section, Tool, ToolAttachment,
-    ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
+    canonical_path_title_arguments, validate_args_with_schema, ContentSection, FileEncoding,
+    Section, Tool, ToolAttachment, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
 use crate::byte_size::{format_kibibytes, format_mebibytes};
 use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
@@ -398,6 +398,19 @@ impl ToolCall for ReadCall {
         let tool = ReadTool::default();
         tool.non_default_redacted_arguments(&self.raw_arguments)
     }
+    fn title_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        let title_arguments = self.default_title_arguments();
+        let supplied_path = self
+            .raw_arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        canonical_path_title_arguments(
+            title_arguments,
+            supplied_path,
+            self.approved_target.canonical_path(),
+        )
+    }
     fn run(
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
@@ -527,7 +540,7 @@ impl Tool for ReadTool {
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {
-        &["path"]
+        &["path", crate::agent::tools::CANONICAL_PATH_ARGUMENT]
     }
 
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {

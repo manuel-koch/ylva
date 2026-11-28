@@ -35,8 +35,8 @@ use tracing::Instrument;
 
 use super::approved_target::ApprovedTarget;
 use super::{
-    utf8_text_preview, ContentSection, FileEncoding, Section, Tool, ToolCall, ToolCallResult,
-    ToolError, DEFAULT_TOOL_TIMEOUT_SECS, STANDARD_BASE64,
+    canonical_path_title_arguments, utf8_text_preview, ContentSection, FileEncoding, Section, Tool,
+    ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS, STANDARD_BASE64,
 };
 use crate::sandbox::{ApprovalCheck, ApprovalVerdict, SandboxContext};
 
@@ -219,6 +219,19 @@ impl ToolCall for WriteCall {
     fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
         WriteTool::default().non_default_redacted_arguments(&self.raw_arguments)
     }
+    fn title_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        let title_arguments = self.default_title_arguments();
+        let supplied_path = self
+            .raw_arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        canonical_path_title_arguments(
+            title_arguments,
+            supplied_path,
+            self.approved_target.canonical_path(),
+        )
+    }
     fn run(
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
@@ -295,7 +308,7 @@ impl Tool for WriteTool {
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {
-        &["path"]
+        &["path", crate::agent::tools::CANONICAL_PATH_ARGUMENT]
     }
 
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
@@ -889,5 +902,60 @@ mod tests {
         }))
         .expect("default encoding");
         assert_eq!(parsed.encoding, FileEncoding::Utf8);
+    }
+}
+
+#[cfg(test)]
+mod canonical_path_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn write_call_discloses_canonical_path_for_an_outside_symlink() {
+        let workspace = tempfile::Builder::new()
+            .prefix("ylva-")
+            .tempdir()
+            .expect("tempdir");
+        let outside = tempfile::TempDir::new().expect("outside tempdir");
+        let target = outside.path().join("hook.sh");
+        std::fs::write(&target, "original\n").expect("seed target");
+        let link = workspace.path().join("hook.sh");
+        std::os::unix::fs::symlink(&target, &link).expect("plant symlink");
+
+        let tool = WriteTool::default();
+        let call = tool.create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({ "path": link.display().to_string(), "content": "new" }),
+        );
+        let canonical = call
+            .title_arguments()
+            .into_iter()
+            .find(|(key, _)| key == "canonical_path")
+            .map(|(_, value)| value.as_str().expect("string value").to_string());
+        assert_eq!(
+            canonical.as_deref(),
+            Some(
+                std::fs::canonicalize(&target)
+                    .expect("canonicalize")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn write_call_omits_canonical_path_for_a_new_plain_file() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("new.txt");
+        let call = WriteTool::default().create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({ "path": path.display().to_string(), "content": "new" }),
+        );
+        assert!(
+            call.title_arguments()
+                .iter()
+                .all(|(key, _)| key != "canonical_path"),
+            "a plain new file must not gain the disclosure prop"
+        );
     }
 }

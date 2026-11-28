@@ -17,7 +17,7 @@
 use serde_json::Value;
 use tracing::Instrument;
 
-use super::super::{Tool, ToolCall, ToolCallResult, ToolError};
+use super::super::{canonical_path_title_arguments, Tool, ToolCall, ToolCallResult, ToolError};
 use super::engine::search_files;
 use super::{SearchInputArgs, SearchTool};
 
@@ -27,6 +27,9 @@ pub struct SearchCall {
     pub(super) raw_arguments: Value,
     pub(super) timeout_secs: u64,
     pub(super) runtime_output_token_limit: Option<usize>,
+    /// The path the policy judges for the supplied `path` argument (empty
+    /// when the argument is absent or empty; see `SearchTool::create_call`).
+    pub(super) resolved_path: std::path::PathBuf,
 }
 
 impl ToolCall for SearchCall {
@@ -60,6 +63,16 @@ impl ToolCall for SearchCall {
             .flat_map(|map| map.iter())
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
+    }
+
+    fn title_arguments(&self) -> Vec<(String, Value)> {
+        let title_arguments = self.default_title_arguments();
+        let supplied_path = self
+            .raw_arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        canonical_path_title_arguments(title_arguments, supplied_path, &self.resolved_path)
     }
 
     fn run(

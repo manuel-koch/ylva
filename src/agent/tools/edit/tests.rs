@@ -589,6 +589,56 @@ fn edit_call_trait_methods() {
     assert!(!redacted.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn edit_call_discloses_canonical_path_for_an_outside_symlink() {
+    let workspace = tempfile::Builder::new()
+        .prefix("ylva-")
+        .tempdir()
+        .expect("tempdir");
+    let outside = tempfile::TempDir::new().expect("outside tempdir");
+    let target = outside.path().join("kdbx-vault-sync.sh");
+    std::fs::write(&target, "hello\n").expect("seed target");
+    let link = workspace.path().join("kdbx-vault-sync.sh");
+    std::os::unix::fs::symlink(&target, &link).expect("plant symlink");
+
+    let args = make_args_search_replace(link.to_str().unwrap(), "hello", "hi");
+    let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TOOL_TIMEOUT_SECS);
+    let canonical = call
+        .title_arguments()
+        .into_iter()
+        .find(|(key, _)| key == "canonical_path")
+        .map(|(_, value)| value.as_str().expect("string value").to_string());
+    assert_eq!(
+        canonical.as_deref(),
+        // The resolved target, not the symlink.
+        Some(
+            std::fs::canonicalize(&target)
+                .expect("canonicalize")
+                .to_str()
+                .unwrap()
+        )
+    );
+    assert!(
+        !matches!(canonical, Some(value) if value == link.to_str().unwrap()),
+        "the symlink spelling must not be disclosed as canonical"
+    );
+}
+
+#[test]
+fn edit_call_omits_canonical_path_for_a_plain_file() {
+    let file = write_temp("hello\n");
+    let path = file.path().to_str().unwrap().to_string();
+    let args = make_args_search_replace(&path, "hello", "hi");
+    let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TOOL_TIMEOUT_SECS);
+    assert!(
+        call.title_arguments()
+            .iter()
+            .all(|(key, _)| key != "canonical_path"),
+        "a plain file must not gain the disclosure prop"
+    );
+}
+
 // ── Line range edge cases ──────────────────────────────────────────────
 
 #[test]

@@ -160,3 +160,23 @@ fn display_title_flattens_a_multiline_subtype_value() {
     assert_eq!(title, "Subagent (one↵two)");
     assert!(remaining.is_empty());
 }
+
+#[test]
+fn path_tools_declare_canonical_path_as_path_like() {
+    // The TUI abbreviates `canonical_path` home-relative exactly when the
+    // tool declares it path-like; a missing declaration would leak long
+    // absolute paths into the pending-approval bubble.
+    for tool_name in ["read", "write", "edit", "search", "glob"] {
+        let registry = default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new())),
+            ToolRegistryConfig::default(),
+        )
+        .expect("valid sandbox fixture");
+        let tool = registry.get(tool_name).expect("registered path tool");
+        assert!(
+            tool.path_like_arguments()
+                .contains(&super::super::CANONICAL_PATH_ARGUMENT),
+            "{tool_name} must declare canonical_path path-like"
+        );
+    }
+}

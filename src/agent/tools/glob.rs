@@ -169,7 +169,7 @@ impl Tool for GlobTool {
     }
 
     fn path_like_arguments(&self) -> &'static [&'static str] {
-        &["pattern"]
+        &["pattern", crate::agent::tools::CANONICAL_PATH_ARGUMENT]
     }
 
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
@@ -241,11 +241,33 @@ impl Tool for GlobTool {
     }
 
     fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall> {
+        // Disclose a resolved path the same way `needs_approval` judges the
+        // pattern's root directory (the enumeration scope). The supplied
+        // spelling compared for a mismatch is the root portion of the
+        // pattern (the literal prefix before the first glob meta character),
+        // because meta characters describe descendants, not the root.
+        let resolved_path = arguments
+            .get("pattern")
+            .and_then(serde_json::Value::as_str)
+            .filter(|pattern| !pattern.is_empty())
+            .map(|pattern| {
+                let root = traversal::pattern_root(pattern);
+                self.sandbox_context
+                    .resolve_path(std::path::Path::new(&root))
+            })
+            .unwrap_or_default();
+        let supplied_pattern_root = arguments
+            .get("pattern")
+            .and_then(serde_json::Value::as_str)
+            .map(traversal::pattern_root)
+            .unwrap_or_default();
         Box::new(GlobCall {
             id,
             raw_arguments: arguments,
             timeout_secs: self.timeout_secs(),
             runtime_output_token_limit: None,
+            resolved_path,
+            supplied_pattern_root,
         })
     }
 }

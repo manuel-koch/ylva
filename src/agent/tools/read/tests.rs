@@ -1738,3 +1738,54 @@ fn read_untruncated_result_omits_truncated_metadata_and_section_label() {
         );
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn read_call_discloses_canonical_path_for_an_outside_symlink() {
+    let workspace = tempfile::Builder::new()
+        .prefix("ylva-")
+        .tempdir()
+        .expect("tempdir");
+    let outside = tempfile::TempDir::new().expect("outside tempdir");
+    let target = outside.path().join("secret.txt");
+    std::fs::write(&target, "content\n").expect("seed target");
+    let link = workspace.path().join("secret.txt");
+    std::os::unix::fs::symlink(&target, &link).expect("plant symlink");
+
+    let tool = ReadTool::default();
+    let call = tool.create_call(
+        uuid::Uuid::new_v4(),
+        serde_json::json!({ "path": link.display().to_string() }),
+    );
+    let canonical = call
+        .title_arguments()
+        .into_iter()
+        .find(|(key, _)| key == "canonical_path")
+        .map(|(_, value)| value.as_str().expect("string value").to_string());
+    assert_eq!(
+        canonical.as_deref(),
+        Some(
+            std::fs::canonicalize(&target)
+                .expect("canonicalize")
+                .to_str()
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn read_call_omits_canonical_path_for_a_plain_file() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("plain.txt");
+    std::fs::write(&path, "content\n").expect("seed");
+    let call = ReadTool::default().create_call(
+        uuid::Uuid::new_v4(),
+        serde_json::json!({ "path": path.display().to_string() }),
+    );
+    assert!(
+        call.title_arguments()
+            .iter()
+            .all(|(key, _)| key != "canonical_path"),
+        "a plain file must not gain the disclosure prop"
+    );
+}

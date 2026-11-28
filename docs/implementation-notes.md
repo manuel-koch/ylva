@@ -331,6 +331,17 @@ so approval checks see the path the tool will use. `startup::run` exports
 the resolved `YLVA_HOME`, so sentinel paths work in path tools and `bash`. See
 [features](./features.md#tools-to-be-used-by-models).
 
+Display does not re-resolve paths at render time. `read`/`write`/`edit`
+project the canonical path from the `ApprovedTarget` they captured at
+call-creation time — the same value their open/write verification uses —
+while `search` (its `path`) and `glob` (the pattern's root) resolve with
+`SandboxContext::resolve_path` the same way their approval checks do. The
+shared `canonical_path_title_arguments` helper appends the
+`canonical_path` prop only when the resolved path differs from the
+supplied spelling, comparing lexically (folding `.`/`..`) and accepting
+the macOS `/private` ancestor alias, so a non-symlink spelling difference
+never produces a duplicate-looking prop.
+
 ## Sandbox policy and the `cross_filesystem` rule
 
 - Configured rules replace the default floor; appended rules still run last;

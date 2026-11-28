@@ -572,3 +572,53 @@ fn description_uses_the_output_byte_limit_constant() {
     let description = tool.description();
     assert!(description.contains(&format!("{} bytes", SEARCH_OUTPUT_LIMIT_BYTES)));
 }
+
+#[cfg(unix)]
+#[test]
+fn search_call_discloses_canonical_path_for_an_outside_symlink() {
+    let workspace = tempfile::Builder::new()
+        .prefix("ylva-")
+        .tempdir()
+        .expect("tempdir");
+    let outside = tempfile::TempDir::new().expect("outside tempdir");
+    let target = outside.path().join("vault");
+    std::fs::create_dir_all(&target).expect("mkdir");
+    std::fs::write(target.join("a.txt"), "needle\n").expect("seed");
+    let link = workspace.path().join("vault");
+    std::os::unix::fs::symlink(&target, &link).expect("plant symlink");
+
+    let tool = SearchTool::default();
+    let call = tool.create_call(
+        uuid::Uuid::new_v4(),
+        serde_json::json!({ "pattern": "needle", "path": link.display().to_string() }),
+    );
+    let canonical = call
+        .title_arguments()
+        .into_iter()
+        .find(|(key, _)| key == "canonical_path")
+        .map(|(_, value)| value.as_str().expect("string value").to_string());
+    assert_eq!(
+        canonical.as_deref(),
+        Some(
+            std::fs::canonicalize(&target)
+                .expect("canonicalize")
+                .to_str()
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn search_call_omits_canonical_path_without_path_argument() {
+    let tool = SearchTool::default();
+    let call = tool.create_call(
+        uuid::Uuid::new_v4(),
+        serde_json::json!({ "pattern": "needle" }),
+    );
+    assert!(
+        call.title_arguments()
+            .iter()
+            .all(|(key, _)| key != "canonical_path"),
+        "an implicit cwd scope must not gain the disclosure prop"
+    );
+}

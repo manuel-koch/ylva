@@ -2022,3 +2022,61 @@ async fn edenai_cli_tool_continuation_does_not_repeat_the_unverified_warning() {
         assert_eq!(request["reasoning_effort"], "medium");
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn run_cli_edit_discloses_canonical_path_on_the_invocation_line() {
+    // The CLI renders `title_arguments` verbatim via
+    // `render_invocation_from_title_arguments`; a symlinked edit call must
+    // name the resolved target in a `canonical_path=` prop (and the CLI need
+    // not abbreviate it — it shows the literal resolved path).
+    let workspace = tempfile::Builder::new()
+        .prefix("ylva-")
+        .tempdir()
+        .expect("tempdir");
+    let outside = tempfile::TempDir::new().expect("outside tempdir");
+    let target = outside.path().join("script.sh");
+    std::fs::write(&target, "alpha\n").expect("seed target");
+    let link = workspace.path().join("script.sh");
+    std::os::unix::fs::symlink(&target, &link).expect("plant symlink");
+
+    let provider = Arc::new(MockProviderWithScript {
+        phase_one: vec![tool_call(
+            "edit",
+            serde_json::json!({
+                "path": link.display().to_string(),
+                "mode": "search_replace",
+                "old_string": "alpha",
+                "new_string": "beta",
+            }),
+        )],
+        phase_two: vec![MockEvent::Text("ok".into())],
+        interval: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let registry = Arc::new(
+        default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            ToolRegistryConfig::default(),
+        )
+        .expect("valid sandbox fixture"),
+    );
+    let mut output = Vec::new();
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        "edit the linked script".to_string(),
+        &mut output,
+    )
+    .await
+    .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+    let resolved = std::fs::canonicalize(&target).expect("canonicalize");
+    assert!(
+        output.contains(&format!("canonical_path={}", resolved.display())),
+        "the CLI line must disclose the resolved path: {output}"
+    );
+}

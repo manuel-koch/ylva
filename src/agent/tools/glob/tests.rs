@@ -805,3 +805,54 @@ fn glob_limit_descriptions_define_omission_as_unlimited() {
     assert!(limit_description.contains("no result-count limit"));
     assert!(limit_description.contains("arbitrary large value"));
 }
+
+#[cfg(unix)]
+#[test]
+fn glob_call_discloses_canonical_path_for_an_outside_symlinked_pattern_root() {
+    let workspace = tempfile::Builder::new()
+        .prefix("ylva-")
+        .tempdir()
+        .expect("tempdir");
+    let outside = tempfile::TempDir::new().expect("outside tempdir");
+    let target = outside.path().join("vault");
+    std::fs::create_dir_all(&target).expect("mkdir");
+    let link = workspace.path().join("vault");
+    std::os::unix::fs::symlink(&target, &link).expect("plant symlink");
+
+    let tool = GlobTool::default();
+    let call = tool.create_call(
+        uuid::Uuid::new_v4(),
+        serde_json::json!({ "pattern": link.join("**/*").display().to_string() }),
+    );
+    let canonical = call
+        .title_arguments()
+        .into_iter()
+        .find(|(key, _)| key == "canonical_path")
+        .map(|(_, value)| value.as_str().expect("string value").to_string());
+    assert_eq!(
+        canonical.as_deref(),
+        Some(
+            std::fs::canonicalize(&target)
+                .expect("canonicalize")
+                .to_str()
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn glob_call_omits_canonical_path_for_the_default_pattern_root() {
+    let tool = GlobTool::default();
+    let call = tool.create_call(
+        uuid::Uuid::new_v4(),
+        serde_json::json!({ "pattern": "**/*" }),
+    );
+    // The default pattern root is cwd, which the registry already renders
+    // relative; no resolved location to disclose.
+    assert!(
+        call.title_arguments()
+            .iter()
+            .all(|(key, _)| key != "canonical_path"),
+        "a cwd-rooted pattern must not gain the disclosure prop"
+    );
+}

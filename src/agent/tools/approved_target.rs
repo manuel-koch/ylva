@@ -41,6 +41,13 @@ impl ApprovedTarget {
         }
     }
 
+    /// Canonicalized path captured by
+    /// [`capture`](ApprovedTarget::capture): the value the read/write
+    /// verification and the open/write calls use.
+    pub(crate) fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
     /// Refuse when `path` no longer resolves to the approved canonical path.
     pub(crate) fn verify_unchanged(&self, tool: &str, path: &str) -> Result<(), ToolError> {
         let current = resolve(Path::new(path));
